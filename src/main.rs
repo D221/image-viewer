@@ -29,6 +29,7 @@ struct MyApp {
     load_time_ms: u64,
     pending_scroll: f32,
     image_cache: ImageCache,
+    needs_fit: bool,
 }
 
 impl MyApp {
@@ -44,6 +45,7 @@ impl MyApp {
             load_time_ms: 0,
             pending_scroll: 0.0,
             image_cache: Arc::new(Mutex::new(HashMap::new())),
+            needs_fit: true,
         };
         app.load_current(&_cc.egui_ctx);
         app.preload_neighbors();
@@ -99,6 +101,7 @@ impl MyApp {
         self.texture = Some(texture);
         self.load_time_ms = start.elapsed().as_millis() as u64;
         self.zoom_pan.reset();
+        self.needs_fit = true;
     }
 
     /// Preload next and previous images in background threads so navigation is instant.
@@ -290,6 +293,17 @@ impl eframe::App for MyApp {
                 let tex_w = tex.size()[0] as f32 * self.zoom_pan.zoom;
                 let tex_h = tex.size()[1] as f32 * self.zoom_pan.zoom;
 
+                // Auto-fit to window on first display
+                if self.needs_fit {
+                    self.zoom_pan.fit_to_window(
+                        tex.size()[0] as f32,
+                        tex.size()[1] as f32,
+                        avail.x,
+                        avail.y,
+                    );
+                    self.needs_fit = false;
+                }
+
                 // Center of available area
                 let center_x = avail.x * 0.5 + self.zoom_pan.pan_x;
                 let center_y = avail.y * 0.5 + self.zoom_pan.pan_y;
@@ -320,6 +334,14 @@ impl eframe::App for MyApp {
                 }
                 if ui.button("Next (→)").clicked() {
                     self.next(ctx);
+                }
+                if ui.button("Fit to Window").clicked() {
+                    if let Some(tex) = &self.texture {
+                        let avail = ui.available_size();
+                        let tex_w = tex.size()[0] as f32;
+                        let tex_h = tex.size()[1] as f32;
+                        self.zoom_pan.fit_to_window(tex_w, tex_h, avail.x, avail.y);
+                    }
                 }
                 ui.label(format!("Zoom: {:.1}x", self.zoom_pan.zoom));
             });
