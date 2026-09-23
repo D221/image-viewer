@@ -32,3 +32,6 @@ desktop.ini
 
 # cargo lock file should be committed
 # Cargo.lock
+
+# test images - large files
+test-images/
