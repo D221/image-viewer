@@ -180,7 +180,7 @@ impl ZoomPan {
 
     /// Apply a scroll delta to zoom, clamped to [0.1, 8.0].
     pub fn zoom_by(&mut self, delta: f32) {
-        self.zoom = (self.zoom + delta * 0.05).clamp(0.1, 8.0);
+        self.zoom = (self.zoom + delta * 0.01).clamp(0.1, 8.0);
     }
 
     /// Reset to fit-to-screen defaults.

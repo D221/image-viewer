@@ -150,13 +150,6 @@ impl eframe::App for MyApp {
 
         // Mouse interaction for zoom/pan
         let pointer = ctx.pointer_hover_pos();
-        if ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
-            if self.drag_start.is_none() {
-                self.drag_start = pointer;
-            }
-        } else {
-            self.drag_start = None;
-        }
 
         // Zoom with scroll (instant, no inertia)
         let scroll = ctx.input(|i| i.raw_scroll_delta.y);
@@ -164,13 +157,18 @@ impl eframe::App for MyApp {
             self.zoom_pan.zoom_by(scroll);
         }
 
-        // Pan drag
-        if let Some(start) = self.drag_start {
+        // Pan drag (firm, incremental)
+        if ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
             if let Some(pos) = pointer {
-                let delta = pos - start;
-                self.zoom_pan.pan_x += delta.x;
-                self.zoom_pan.pan_y += delta.y;
+                if let Some(last) = self.drag_start {
+                    let delta = pos - last;
+                    self.zoom_pan.pan_x += delta.x;
+                    self.zoom_pan.pan_y += delta.y;
+                }
+                self.drag_start = Some(pos); // update for next frame
             }
+        } else {
+            self.drag_start = None;
         }
 
         // Drag-and-drop: handle dropped files

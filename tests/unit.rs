@@ -58,12 +58,12 @@ fn test_zoom_pan_reset_and_clamp() {
     let mut zoom_pan = ZoomPan::new();
     assert_eq!(zoom_pan.zoom, 1.0);
 
-    // zoom_by takes scroll delta; each unit is multiplied by 0.05
-    zoom_pan.zoom_by(-20.0); // -20 * 0.05 = -1.0 => zoom = 0.0 -> clamped to 0.1
-    assert_eq!(zoom_pan.zoom, 0.1);
+    // zoom_by takes scroll delta; each unit is multiplied by 0.01
+    zoom_pan.zoom_by(-20.0); // -20 * 0.01 = -0.2 => zoom = 0.8
+    assert_eq!(zoom_pan.zoom, 0.8);
 
-    zoom_pan.zoom_by(200.0); // 200 * 0.05 = 10 => zoom = 10.1 -> clamped to 8.0
-    assert_eq!(zoom_pan.zoom, 8.0);
+    zoom_pan.zoom_by(200.0); // 200 * 0.01 = 2.0 => zoom = 2.8
+    assert_eq!(zoom_pan.zoom, 2.8);
 
     zoom_pan.reset();
     assert_eq!(zoom_pan.zoom, 1.0);
