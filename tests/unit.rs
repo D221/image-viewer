@@ -32,6 +32,27 @@ fn test_gallery_next_and_prev() {
 }
 
 #[test]
+fn test_load_all_from_folder() {
+    // Create a folder with multiple image files
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.jpg"), b"fake").ok();
+    std::fs::write(tmp.path().join("c.jpg"), b"fake").ok();
+    std::fs::write(tmp.path().join("b.jpg"), b"fake").ok();
+
+    // Gallery::new should sort files alphabetically
+    let mut gallery = Gallery::new(tmp.path());
+    // Files should be sorted by name: a.jpg, b.jpg, c.jpg
+    assert_eq!(gallery.len(), 3);
+    assert_eq!(gallery.current().unwrap(), tmp.path().join("a.jpg"));
+
+    // Reset index
+    gallery.index = 0;
+    // Changing to next should go to b.jpg (next after a)
+    gallery.next();
+    assert_eq!(gallery.current().unwrap(), tmp.path().join("b.jpg"));
+}
+
+#[test]
 fn test_zoom_pan_reset_and_clamp() {
     let mut zoom_pan = ZoomPan::new();
     assert_eq!(zoom_pan.zoom, 1.0);

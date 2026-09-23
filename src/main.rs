@@ -128,6 +128,15 @@ impl MyApp {
         self.gallery = Gallery::from_file(path);
         self.load_current(ctx);
     }
+
+    /// Load all images from the current folder (sorted by name, like Explorer).
+    fn load_all_from_folder(&mut self, ctx: &Context) {
+        self.gallery = Gallery::new(&self.folder);
+        if !self.gallery.is_empty() {
+            self.gallery.index = 0;
+        }
+        self.load_current(ctx);
+    }
 }
 
 impl eframe::App for MyApp {
@@ -192,11 +201,6 @@ impl eframe::App for MyApp {
                 let avail = ui.available_size();
                 let tex_w = tex.size()[0] as f32 * self.zoom_pan.zoom;
                 let tex_h = tex.size()[1] as f32 * self.zoom_pan.zoom;
-                let max_w = avail.x;
-                let max_h = avail.y - 40.0;
-                let scale = (max_w / tex_w).min(max_h / tex_h).min(1.0);
-                let display_w = tex_w * scale;
-                let display_h = tex_h * scale;
 
                 // Center of available area
                 let center_x = avail.x * 0.5 + self.zoom_pan.pan_x;
@@ -204,9 +208,9 @@ impl eframe::App for MyApp {
                 let center = egui::Pos2::new(center_x, center_y);
 
                 let mut image_widget = egui::Image::new(tex);
-                image_widget = image_widget.fit_to_exact_size(egui::Vec2::new(display_w, display_h));
+                image_widget = image_widget.fit_to_exact_size(egui::Vec2::new(tex_w, tex_h));
                 ui.put(
-                    egui::Rect::from_center_size(center, egui::Vec2::new(display_w, display_h)),
+                    egui::Rect::from_center_size(center, egui::Vec2::new(tex_w, tex_h)),
                     image_widget,
                 );
             } else {
@@ -219,6 +223,9 @@ impl eframe::App for MyApp {
                 }
                 if ui.button("Browse File…").clicked() {
                     self.pick_file(ctx);
+                }
+                if ui.button("Load All").clicked() {
+                    self.load_all_from_folder(ctx);
                 }
                 if ui.button("Prev (←)").clicked() {
                     self.prev(ctx);
