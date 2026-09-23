@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 eframe = "0.27"
 egui = "0.27"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "rayon"] }
 thiserror = "1"
 rfd = "0.17.2"
 

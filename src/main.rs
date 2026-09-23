@@ -1,7 +1,9 @@
 use egui::{ColorImage, Context, TextureHandle};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-use image_viewer::{Gallery, ZoomPan, load_image};
+use image_viewer::{Gallery, ZoomPan, load_image, ImageData};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -15,6 +17,9 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Cache of decoded images keyed by file path.
+type ImageCache = Arc<Mutex<HashMap<PathBuf, Arc<ImageData>>>>;
+
 struct MyApp {
     folder: PathBuf,
     gallery: Gallery,
@@ -22,6 +27,8 @@ struct MyApp {
     zoom_pan: ZoomPan,
     drag_start: Option<egui::Pos2>,
     load_time_ms: u64,
+    pending_scroll: f32,
+    image_cache: ImageCache,
 }
 
 impl MyApp {
@@ -35,8 +42,11 @@ impl MyApp {
             zoom_pan: ZoomPan::new(),
             drag_start: None,
             load_time_ms: 0,
+            pending_scroll: 0.0,
+            image_cache: Arc::new(Mutex::new(HashMap::new())),
         };
         app.load_current(&_cc.egui_ctx);
+        app.preload_neighbors();
         app
     }
 
@@ -50,38 +60,85 @@ impl MyApp {
         };
 
         let start = std::time::Instant::now();
-        match load_image(path, 1600) {
-            Ok(data) => {
-                let rgba = data.rgba;
-                let width = data.width as usize;
-                let height = data.height as usize;
-                let texture = ctx.load_texture(
-                    path.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .as_ref(),
-                    ColorImage::from_rgba_unmultiplied([width, height], &rgba),
-                    egui::TextureOptions::LINEAR,
-                );
-                self.texture = Some(texture);
-                self.load_time_ms = start.elapsed().as_millis() as u64;
-                self.zoom_pan.reset();
+
+        // Check cache first — skip decode if already loaded
+        let cached = {
+            let cache = self.image_cache.lock().unwrap();
+            cache.get(path).cloned()
+        };
+
+        let data = if let Some(cached) = cached {
+            cached
+        } else {
+            match load_image(path, 1600) {
+                Ok(data) => {
+                    let arc = Arc::new(data);
+                    let mut cache = self.image_cache.lock().unwrap();
+                    cache.insert(path.to_path_buf(), arc.clone());
+                    arc
+                }
+                Err(e) => {
+                    eprintln!("Failed to load {}: {}", path.display(), e);
+                    self.texture = None;
+                    return;
+                }
             }
-            Err(e) => {
-                eprintln!("Failed to load {}: {}", path.display(), e);
-                self.texture = None;
+        };
+
+        let rgba = data.rgba.clone();
+        let width = data.width as usize;
+        let height = data.height as usize;
+        let texture = ctx.load_texture(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .as_ref(),
+            ColorImage::from_rgba_unmultiplied([width, height], &rgba),
+            egui::TextureOptions::LINEAR,
+        );
+        self.texture = Some(texture);
+        self.load_time_ms = start.elapsed().as_millis() as u64;
+        self.zoom_pan.reset();
+    }
+
+    /// Preload next and previous images in background threads so navigation is instant.
+    fn preload_neighbors(&self) {
+        let cache = self.image_cache.clone();
+        let files = self.gallery.files.clone();
+        let index = self.gallery.index;
+
+        for &neighbor_idx in &[index.saturating_sub(1), (index + 1).min(files.len().saturating_sub(1))] {
+            if neighbor_idx >= files.len() {
+                continue;
             }
+            let path = files[neighbor_idx].clone();
+            let cache = cache.clone();
+            // Skip if already cached
+            {
+                let c = cache.lock().unwrap();
+                if c.contains_key(&path) {
+                    continue;
+                }
+            }
+            std::thread::spawn(move || {
+                if let Ok(data) = load_image(&path, 1600) {
+                    let mut c = cache.lock().unwrap();
+                    c.insert(path, Arc::new(data));
+                }
+            });
         }
     }
 
     fn next(&mut self, ctx: &Context) {
         self.gallery.next();
         self.load_current(ctx);
+        self.preload_neighbors();
     }
 
     fn prev(&mut self, ctx: &Context) {
         self.gallery.prev();
         self.load_current(ctx);
+        self.preload_neighbors();
     }
 
     /// Open a folder picker and load images from the selected directory.
@@ -94,6 +151,7 @@ impl MyApp {
             self.folder = folder.clone();
             self.gallery = Gallery::new(&folder);
             self.load_current(ctx);
+            self.preload_neighbors();
         }
     }
 
@@ -110,6 +168,7 @@ impl MyApp {
                 self.folder = first.parent().unwrap_or(&first).to_path_buf();
                 self.gallery = Gallery::from_file(first.clone());
                 self.load_current(ctx);
+                self.preload_neighbors();
             }
         }
     }
@@ -151,10 +210,10 @@ impl eframe::App for MyApp {
         // Mouse interaction for zoom/pan
         let pointer = ctx.pointer_hover_pos();
 
-        // Zoom with scroll (instant, no inertia)
+        // Capture scroll for later use in panel (where we have access to avail)
         let scroll = ctx.input(|i| i.raw_scroll_delta.y);
         if scroll.abs() > 0.01 {
-            self.zoom_pan.zoom_by(scroll);
+            self.pending_scroll = scroll;
         }
 
         // Pan drag (firm, incremental)
@@ -196,6 +255,38 @@ impl eframe::App for MyApp {
 
             if let Some(tex) = &self.texture {
                 let avail = ui.available_size();
+                let pointer = ctx.pointer_hover_pos();
+
+                // Apply pending scroll with cursor-centering zoom
+                if self.pending_scroll.abs() > 0.01 {
+                    // Store old values
+                    let old_zoom = self.zoom_pan.zoom;
+                    let old_pan_x = self.zoom_pan.pan_x;
+                    let old_pan_y = self.zoom_pan.pan_y;
+
+                    // Apply zoom change
+                    self.zoom_pan.zoom_by(self.pending_scroll);
+
+                    // If we have a pointer position, adjust pan to zoom toward cursor
+                    if let Some(cursor_pos) = pointer {
+                        // Calculate current center of image in screen space
+                        let center_x = avail.x * 0.5 + old_pan_x;
+                        let center_y = avail.y * 0.5 + old_pan_y;
+
+                        // New center so that cursor position stays fixed
+                        // Formula: new_center = cursor - (cursor - old_center) * new_zoom / old_zoom
+                        let new_center_x = cursor_pos.x - (cursor_pos.x - center_x) * self.zoom_pan.zoom / old_zoom;
+                        let new_center_y = cursor_pos.y - (cursor_pos.y - center_y) * self.zoom_pan.zoom / old_zoom;
+
+                        // Update pan to achieve new center
+                        self.zoom_pan.pan_x = new_center_x - avail.x * 0.5;
+                        self.zoom_pan.pan_y = new_center_y - avail.y * 0.5;
+                    }
+
+                    // Clear pending scroll
+                    self.pending_scroll = 0.0;
+                }
+
                 let tex_w = tex.size()[0] as f32 * self.zoom_pan.zoom;
                 let tex_h = tex.size()[1] as f32 * self.zoom_pan.zoom;
 
