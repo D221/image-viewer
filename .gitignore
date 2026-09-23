@@ -1,0 +1,34 @@
+# build artifacts
+target/
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+*.dSYM
+
+# rust build output
+*.rmeta
+*.rlib
+*.rlib.rmeta
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# logs
+*.log
+
+# temp files
+*.tmp
+*.bak
+
+# cargo lock file should be committed
+# Cargo.lock
