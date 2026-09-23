@@ -159,8 +159,8 @@ impl eframe::App for MyApp {
             self.drag_start = None;
         }
 
-        // Zoom with scroll
-        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+        // Zoom with scroll (instant, no inertia)
+        let scroll = ctx.input(|i| i.scroll_delta.y);
         if scroll.abs() > 0.01 {
             self.zoom_pan.zoom_by(scroll);
         }
