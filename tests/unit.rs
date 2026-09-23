@@ -72,16 +72,16 @@ fn test_zoom_pan_reset_and_clamp() {
 #[test]
 fn test_fit_to_window() {
     let mut zoom_pan = ZoomPan::new();
-    // Test with large image (needs downscaling)
-    let result = zoom_pan.fit_to_window(2000.0, 1000.0, 1000.0, 600.0);
-    assert!(result);
+    // Large image: should downscale to fit
+    zoom_pan.fit_to_window(2000.0, 1000.0, 1000.0, 600.0);
     assert!(zoom_pan.zoom < 1.0);
     assert!(zoom_pan.pan_x == 0.0);
     assert!(zoom_pan.pan_y == 0.0);
 
-    // Test with image smaller than window — no fitting needed
+    // Small image: should upscale to fit
     zoom_pan.zoom = 1.0;
-    let result2 = zoom_pan.fit_to_window(50.0, 50.0, 100.0, 100.0);
-    assert!(!result2);
-    assert!(zoom_pan.zoom == 1.0);
+    zoom_pan.fit_to_window(50.0, 50.0, 100.0, 100.0);
+    assert!(zoom_pan.zoom > 1.0);
+    assert!(zoom_pan.pan_x == 0.0);
+    assert!(zoom_pan.pan_y == 0.0);
 }

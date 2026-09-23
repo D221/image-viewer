@@ -191,18 +191,12 @@ impl ZoomPan {
     }
 
     /// Fit the image to the available window area, maintaining aspect ratio.
-    /// Returns true if the image was resized (was larger than the window).
-    pub fn fit_to_window(&mut self, tex_w: f32, tex_h: f32, avail_w: f32, avail_h: f32) -> bool {
+    /// Always applies the fit scale (downscales large images, upscales small ones).
+    pub fn fit_to_window(&mut self, tex_w: f32, tex_h: f32, avail_w: f32, avail_h: f32) {
         let scale_x = avail_w / tex_w;
         let scale_y = avail_h / tex_h;
-        let fit_scale = scale_x.min(scale_y);
-        if fit_scale < 1.0 {
-            self.zoom = fit_scale.clamp(0.1, 8.0);
-            self.pan_x = 0.0;
-            self.pan_y = 0.0;
-            true
-        } else {
-            false
-        }
+        self.zoom = scale_x.min(scale_y).clamp(0.1, 8.0);
+        self.pan_x = 0.0;
+        self.pan_y = 0.0;
     }
 }
