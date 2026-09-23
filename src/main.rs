@@ -131,11 +131,10 @@ impl MyApp {
 
     /// Load all images from the current folder (sorted by name, like Explorer).
     fn load_all_from_folder(&mut self, ctx: &Context) {
-        self.gallery = Gallery::new(&self.folder);
+        self.gallery.load_all_from_folder(&self.folder);
         if !self.gallery.is_empty() {
-            self.gallery.index = 0;
+            self.load_current(ctx);
         }
-        self.load_current(ctx);
     }
 }
 

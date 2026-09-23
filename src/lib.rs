@@ -131,6 +131,34 @@ impl Gallery {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
+
+    /// Load all images from the folder, preserving the current image's position.
+    /// Sorts alphabetically (like Explorer) and maintains the current image index.
+    pub fn load_all_from_folder(&mut self, folder: &Path) {
+        // Remember current image path
+        let current_path = match self.current() {
+            Some(p) => p.to_path_buf(),
+            None => PathBuf::new(),
+        };
+
+        // Scan and sort
+        let mut new_files = scan_folder(folder);
+        new_files.sort();
+
+        // Find position of current image in sorted list
+        let mut new_index = 0;
+        if !current_path.as_os_str().is_empty() && !new_files.is_empty() {
+            for (i, file) in new_files.iter().enumerate() {
+                if file == &current_path {
+                    new_index = i;
+                    break;
+                }
+            }
+        }
+
+        self.files = new_files;
+        self.index = new_index;
+    }
 }
 
 /// Zoom and pan state for the image viewport.

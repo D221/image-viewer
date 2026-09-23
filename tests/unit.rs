@@ -32,23 +32,24 @@ fn test_gallery_next_and_prev() {
 }
 
 #[test]
-fn test_load_all_from_folder() {
-    // Create a folder with multiple image files
+fn test_load_all_from_folder_remembers_current() {
+    // Create folder with multiple images
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("a.jpg"), b"fake").ok();
-    std::fs::write(tmp.path().join("c.jpg"), b"fake").ok();
     std::fs::write(tmp.path().join("b.jpg"), b"fake").ok();
+    std::fs::write(tmp.path().join("c.jpg"), b"fake").ok();
 
-    // Gallery::new should sort files alphabetically
     let mut gallery = Gallery::new(tmp.path());
-    // Files should be sorted by name: a.jpg, b.jpg, c.jpg
-    assert_eq!(gallery.len(), 3);
     assert_eq!(gallery.current().unwrap(), tmp.path().join("a.jpg"));
 
-    // Reset index
-    gallery.index = 0;
-    // Changing to next should go to b.jpg (next after a)
+    // Navigate to second image
     gallery.next();
+    assert_eq!(gallery.current().unwrap(), tmp.path().join("b.jpg"));
+
+    // Call load_all_from_folder with the same folder
+    gallery.load_all_from_folder(tmp.path());
+
+    // Should remember current image (b.jpg) instead of jumping to first
     assert_eq!(gallery.current().unwrap(), tmp.path().join("b.jpg"));
 }
 
