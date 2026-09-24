@@ -1,11 +1,119 @@
 //! Core logic for the image viewer, kept separate from the GUI so it can be
 //! unit-tested, benchmarked, and fuzz-tested.
 
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 // Import GenericImageView to access dimensions() method
-use image::GenericImageView;
+use image::{DynamicImage, GenericImageView, RgbaImage};
+
+// Progressively load images with low-res preview first
+pub fn load_image_preview(path: &Path, preview_max_dim: u32) -> Result<ImageData, LoadError> {
+    let start = std::time::Instant::now();
+    // Read bytes first so format is detected from magic numbers, not file extension.
+    let bytes = std::fs::read(path)?;
+    let img = image::load_from_memory(&bytes)?;
+    let (w, h) = img.dimensions();
+
+    // Calculate preview scale (aggressive downscale for fast first display)
+    let max_side = preview_max_dim.min(256); // Preview at 256px max for speed
+    let scale = (max_side as f32 / w as f32)
+        .min(max_side as f32 / h as f32)
+        .min(1.0);
+    let (resized_w, resized_h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+    let resized = if scale < 1.0 {
+        img.resize(resized_w, resized_h, image::imageops::FilterType::Nearest)
+    } else {
+        img
+    };
+
+    let rgba = resized.to_rgba8();
+    let width = rgba.width();
+    let height = rgba.height();
+    let pixels = rgba.into_raw();
+
+    Ok(ImageData {
+        width,
+        height,
+        rgba: pixels,
+        load_time: start.elapsed(),
+    })
+}
+
+/// Configuration settings for the image viewer.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Config {
+    /// Whether to load all images from the current folder on startup.
+    pub load_all_on_startup: bool,
+
+    /// Whether to show images before applying auto-fit (fit_to_window).
+    pub show_image_before_auto_fit: bool,
+
+    /// Optional folder to load images from on startup.
+    pub folder: Option<String>,
+}
+
+impl Config {
+    /// Load configuration from a JSON file.
+    pub fn load(path: &Path) -> Self {
+        let default = Self {
+            load_all_on_startup: true,
+            show_image_before_auto_fit: true,
+            folder: None,
+        };
+
+        let Ok(data) = std::fs::read_to_string(path) else {
+            return default;
+        };
+
+        match serde_json::from_str::<Self>(&data) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("Failed to load config {}: {}", path.display(), err);
+                default
+            }
+        }
+    }
+
+    /// Save configuration to a JSON file.
+    pub fn save(&self, path: &Path) {
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "Failed to create config directory {}: {}",
+                    parent.display(),
+                    err
+                );
+                return;
+            }
+        }
+
+        let Ok(data) = serde_json::to_string_pretty(self) else {
+            eprintln!("Failed to serialize config");
+            return;
+        };
+
+        if let Err(err) = std::fs::write(path, data) {
+            eprintln!("Failed to save config {}: {}", path.display(), err);
+        }
+    }
+
+    /// Get the default configuration path.
+    pub fn default_path() -> PathBuf {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            PathBuf::from(appdata)
+                .join("image-viewer")
+                .join("config.json")
+        } else if let Some(home) = std::env::var_os("HOME") {
+            PathBuf::from(home)
+                .join(".config")
+                .join("image-viewer")
+                .join("config.json")
+        } else {
+            PathBuf::from("config.json")
+        }
+    }
+}
 
 /// Supported image extensions for gallery scanning.
 pub const SUPPORTED_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
@@ -50,20 +158,27 @@ pub enum LoadError {
     Decode(#[from] image::ImageError),
 }
 
-/// Load and decode a JPEG file.
+/// Load and decode an image file (format detected from content, not extension).
 ///
 /// For very large images, the result is downscaled to `max_dim` on the longest
 /// side to keep memory and GPU upload bounded. The original resolution is
 /// preserved in `width`/`height` only when no downscaling was needed.
 pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
-    let start = Instant::now();
-    let img = image::open(path)?;
+    let start = std::time::Instant::now();
+    // Read bytes first so format is detected from magic numbers, not file extension.
+    let bytes = std::fs::read(path)?;
+    let img = image::load_from_memory(&bytes)?;
     let (w, h) = img.dimensions();
 
-    let scale = (max_dim as f32 / w as f32).max(max_dim as f32 / h as f32).min(1.0);
-    let (new_w, new_h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
+    // Clamp dimensions to GPU texture limit (16384) to prevent memory errors.
+    // Use min (not max) so the larger dimension drives the scale down.
+    let max_side = max_dim.min(16384);
+    let scale = (max_side as f32 / w as f32)
+        .min(max_side as f32 / h as f32)
+        .min(1.0);
+    let (resized_w, resized_h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
     let resized = if scale < 1.0 {
-        img.resize(new_w, new_h, image::imageops::FilterType::Triangle)
+        img.resize(resized_w, resized_h, image::imageops::FilterType::Triangle)
     } else {
         img
     };
@@ -79,6 +194,32 @@ pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
         rgba: pixels,
         load_time: start.elapsed(),
     })
+}
+
+/// Downscale a full ImageData (RGBA) to a smaller preview size quickly.
+pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
+    let img = DynamicImage::ImageRgba8(
+        RgbaImage::from_raw(data.width, data.height, data.rgba.clone()).unwrap(),
+    );
+    let scale = (max_dim as f32 / data.width as f32)
+        .min(max_dim as f32 / data.height as f32)
+        .min(1.0);
+    let (new_w, new_h) = (
+        (data.width as f32 * scale) as u32,
+        (data.height as f32 * scale) as u32,
+    );
+    let resized = if scale < 1.0 {
+        img.resize(new_w, new_h, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let rgba = resized.to_rgba8();
+    ImageData {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+        load_time: data.load_time, // keep original decode time
+    }
 }
 
 /// A simple gallery state: a list of files and a current index.
@@ -167,6 +308,12 @@ pub struct ZoomPan {
     pub zoom: f32,
     pub pan_x: f32,
     pub pan_y: f32,
+}
+
+impl Default for ZoomPan {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ZoomPan {

@@ -1,4 +1,4 @@
-use image_viewer::{Gallery, load_image};
+use image_viewer::{load_image, Gallery};
 use std::path::Path;
 
 const TEST_DIR: &str = r"test-images";

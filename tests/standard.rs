@@ -1,4 +1,4 @@
-use image_viewer::{load_image, Gallery};
+use image_viewer::load_image;
 use std::path::Path;
 
 /// Standardized comparison of load methods.
