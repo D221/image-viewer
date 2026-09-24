@@ -7,37 +7,9 @@ use std::path::{Path, PathBuf};
 // Import GenericImageView to access dimensions() method
 use image::{DynamicImage, GenericImageView, RgbaImage};
 
-// Progressively load images with low-res preview first
+/// Quick low-res preview. With DCT-domain scaling this is a fraction of a full decode.
 pub fn load_image_preview(path: &Path, preview_max_dim: u32) -> Result<ImageData, LoadError> {
-    let start = std::time::Instant::now();
-    // Read bytes first so format is detected from magic numbers, not file extension.
-    let bytes = std::fs::read(path)?;
-    let img = image::load_from_memory(&bytes)?;
-    let (w, h) = img.dimensions();
-
-    // Calculate preview scale (aggressive downscale for fast first display)
-    let max_side = preview_max_dim.min(256); // Preview at 256px max for speed
-    let scale = (max_side as f32 / w as f32)
-        .min(max_side as f32 / h as f32)
-        .min(1.0);
-    let (resized_w, resized_h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
-    let resized = if scale < 1.0 {
-        img.resize(resized_w, resized_h, image::imageops::FilterType::Nearest)
-    } else {
-        img
-    };
-
-    let rgba = resized.to_rgba8();
-    let width = rgba.width();
-    let height = rgba.height();
-    let pixels = rgba.into_raw();
-
-    Ok(ImageData {
-        width,
-        height,
-        rgba: pixels,
-        load_time: start.elapsed(),
-    })
+    load_image(path, preview_max_dim.min(512))
 }
 
 /// Configuration settings for the image viewer.
@@ -156,42 +128,93 @@ pub enum LoadError {
     Io(#[from] std::io::Error),
     #[error("decode error: {0}")]
     Decode(#[from] image::ImageError),
+    #[error("jpeg error: {0}")]
+    Jpeg(String),
+}
+
+/// Hard cap on the long side of any decoded image (GPU texture limit).
+pub const MAX_TEXTURE_DIM: u32 = 16384;
+
+/// Decode a JPEG straight to RGBA at the smallest DCT reduction (1/8, 1/4, 1/2, 1)
+/// whose long side is still >= `max_dim`. The IDCT runs at reduced size, so a
+/// 95 MP file never has to be materialised at full resolution.
+fn decode_jpeg_scaled(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
+    use turbojpeg::{Decompressor, Image, PixelFormat, ScalingFactor};
+    let err = |e: turbojpeg::Error| LoadError::Jpeg(e.to_string());
+
+    let mut dec = Decompressor::new().map_err(err)?;
+    let hdr = dec.read_header(bytes).map_err(err)?;
+    let long = hdr.width.max(hdr.height);
+
+    // Smallest reduction that still gives >= max_dim, but never exceed the GPU texture limit.
+    let limit = MAX_TEXTURE_DIM as usize;
+    let sf = [8usize, 4, 2, 1]
+        .into_iter()
+        .map(|d| ScalingFactor::new(1, d))
+        .find(|sf| sf.scale(long) >= max_dim as usize && sf.scale(long) <= limit)
+        .or_else(|| {
+            [1usize, 2, 4, 8]
+                .into_iter()
+                .map(|d| ScalingFactor::new(1, d))
+                .find(|sf| sf.scale(long) <= limit)
+        })
+        .unwrap_or(ScalingFactor::new(1, 8));
+    dec.set_scaling_factor(sf).map_err(err)?;
+    let scaled = hdr.scaled(sf);
+
+    let mut img = Image {
+        pixels: vec![0u8; scaled.width * scaled.height * 4],
+        width: scaled.width,
+        pitch: scaled.width * 4,
+        height: scaled.height,
+        format: PixelFormat::RGBA,
+    };
+    dec.decompress(bytes, img.as_deref_mut()).map_err(err)?;
+    Ok((scaled.width as u32, scaled.height as u32, img.pixels))
+}
+
+pub fn load_image_full(path: &Path) -> Result<ImageData, LoadError> {
+    load_image(path, MAX_TEXTURE_DIM)
 }
 
 /// Load and decode an image file (format detected from content, not extension).
-///
-/// For very large images, the result is downscaled to `max_dim` on the longest
-/// side to keep memory and GPU upload bounded. The original resolution is
-/// preserved in `width`/`height` only when no downscaling was needed.
 pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
     let start = std::time::Instant::now();
-    // Read bytes first so format is detected from magic numbers, not file extension.
+    let max_dim = max_dim.min(MAX_TEXTURE_DIM);
     let bytes = std::fs::read(path)?;
+
+    // JPEG fast path: decode at smallest DCT reduction that fits within GPU limits
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
+            return Ok(ImageData {
+                width: w,
+                height: h,
+                rgba,
+                load_time: start.elapsed(),
+            });
+        } else {
+            eprintln!("turbojpeg failed, falling back to image crate");
+        }
+    }
+
+    // Fallback: generic image crate decoder for all formats
     let img = image::load_from_memory(&bytes)?;
     let (w, h) = img.dimensions();
-
-    // Clamp dimensions to GPU texture limit (16384) to prevent memory errors.
-    // Use min (not max) so the larger dimension drives the scale down.
-    let max_side = max_dim.min(16384);
-    let scale = (max_side as f32 / w as f32)
-        .min(max_side as f32 / h as f32)
-        .min(1.0);
-    let (resized_w, resized_h) = ((w as f32 * scale) as u32, (h as f32 * scale) as u32);
-    let resized = if scale < 1.0 {
-        img.resize(resized_w, resized_h, image::imageops::FilterType::Triangle)
+    let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+    let img = if scale < 1.0 {
+        let (nw, nh) = (
+            ((w as f32 * scale) as u32).max(1),
+            ((h as f32 * scale) as u32).max(1),
+        );
+        img.resize(nw, nh, image::imageops::FilterType::Triangle)
     } else {
         img
     };
-
-    let rgba = resized.to_rgba8();
-    let width = rgba.width();
-    let height = rgba.height();
-    let pixels = rgba.into_raw();
-
+    let rgba = img.to_rgba8();
     Ok(ImageData {
-        width,
-        height,
-        rgba: pixels,
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
         load_time: start.elapsed(),
     })
 }

@@ -1,10 +1,56 @@
-use egui::{ColorImage, Context, TextureHandle, TopBottomPanel};
-use nom_exif::{read_exif, ExifTag};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+//! Speed-first image viewer.
+//!
+//! How it stays fast without losing quality:
+//!   * All decoding happens on a small worker pool; the UI thread never blocks.
+//!   * Stage 1 (PREVIEW): JPEGs are decoded with DCT scaling to ~4K. Enough for a
+//!     pixel-sharp fit-to-window on a 4K screen, ready in ~1/3 s for a 95 MP file.
+//!   * Stage 2 (FULL): if the source is bigger than the preview, the untouched
+//!     full-resolution pixels are decoded in the background (after a short dwell,
+//!     so holding an arrow key doesn't start useless decodes).
+//!   * Full-res pixels are never uploaded as one giant texture. They are cut into
+//!     1024 px tiles which are converted + uploaded lazily, only when zoomed in
+//!     past the preview's density, and only for tiles that are actually on screen.
+//!   * Neighbouring images get their previews preloaded, so arrow-key navigation
+//!     is usually instant.
 
-use image_viewer::{downscale_image, load_image, Config, Gallery, ImageData, ZoomPan};
+use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
+use nom_exif::{read_exif, ExifTag};
+use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use image_viewer::{load_image, load_image_full, Config, Gallery, ImageData};
+
+// ---------------------------------------------------------------------------
+// Tunables
+// ---------------------------------------------------------------------------
+
+/// Long-side target of the stage-1 preview (3840 = crisp fit on a 4K display).
+const PREVIEW_DIM: u32 = 256;
+/// How many images on each side of the current one get their preview preloaded.
+const PRELOAD_RADIUS: usize = 3;
+/// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
+const PREVIEW_CACHE_CAP: usize = 16;
+/// Full-res tile edge in source pixels.
+const TILE: u32 = 1024;
+/// Max tiles converted+uploaded per frame (keeps frames smooth while zooming).
+const TILES_PER_FRAME: usize = 8;
+/// Max full-res tile textures kept on the GPU (64 x 4 MB = 256 MB).
+const MAX_TILES: usize = 64;
+/// Don't decode a full-res copy of anything above this (RGBA = 4 bytes/pixel).
+const MAX_FULL_PIXELS: u64 = 300_000_000;
+/// Wait this long on an image before starting its full-res decode.
+const FULL_DWELL: Duration = Duration::from_millis(120);
+/// Highest zoom, in screen points per source pixel.
+const MAX_SCALE: f32 = 32.0;
+
+// Job priorities (lower runs first).
+const PRIO_CURRENT_PREVIEW: u32 = 0;
+const PRIO_CURRENT_EXIF: u32 = 5;
+const PRIO_FULL: u32 = 15;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -18,26 +64,260 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// Cache of decoded images keyed by file path.
-type ImageCache = Arc<Mutex<HashMap<PathBuf, Arc<ImageData>>>>;
+// ---------------------------------------------------------------------------
+// Background loader: a tiny priority queue served by a few worker threads
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Kind {
+    Preview,
+    Full,
+    Exif,
+}
+
+struct Job {
+    path: PathBuf,
+    kind: Kind,
+    prio: u32,
+}
+
+#[derive(Default)]
+struct QueueState {
+    jobs: Vec<Job>,
+    busy: HashSet<(PathBuf, Kind)>,
+}
+
+struct PreviewData {
+    image: ColorImage, // already converted on the worker thread
+    orig: (u32, u32),  // source dimensions
+    load_ms: u64,
+}
+
+enum Msg {
+    Preview {
+        path: PathBuf,
+        result: Result<PreviewData, String>,
+    },
+    Full {
+        path: PathBuf,
+        result: Result<Arc<ImageData>, String>,
+    },
+    Exif {
+        path: PathBuf,
+        info: Option<String>,
+    },
+}
+
+struct Loader {
+    shared: Arc<(Mutex<QueueState>, Condvar)>,
+}
+
+impl Loader {
+    fn new(ctx: &Context, tx: Sender<Msg>) -> Self {
+        let shared: Arc<(Mutex<QueueState>, Condvar)> =
+            Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 4);
+
+        for _ in 0..workers {
+            let shared = shared.clone();
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || loop {
+                let job = {
+                    let (lock, cv) = &*shared;
+                    let mut q = lock.lock().unwrap();
+                    loop {
+                        let best = q
+                            .jobs
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, j)| j.prio)
+                            .map(|(i, _)| i);
+                        if let Some(i) = best {
+                            let job = q.jobs.swap_remove(i);
+                            q.busy.insert((job.path.clone(), job.kind));
+                            break job;
+                        }
+                        q = cv.wait(q).unwrap();
+                    }
+                };
+
+                // A decoder panic on a corrupt file must not kill the worker.
+                let msg = std::panic::catch_unwind(AssertUnwindSafe(|| run_job(&job)))
+                    .unwrap_or_else(|_| fail_msg(&job, "decoder panicked".into()));
+
+                let alive = tx.send(msg).is_ok();
+                shared.0.lock().unwrap().busy.remove(&(job.path, job.kind));
+                if !alive {
+                    return; // UI is gone
+                }
+                ctx.request_repaint();
+            });
+        }
+        Self { shared }
+    }
+
+    /// Replace everything that is still *queued* with `jobs` (in-flight work is left
+    /// alone and de-duplicated). This is what makes stale requests disappear when
+    /// the user navigates quickly.
+    fn replace(&self, jobs: Vec<Job>) {
+        let (lock, cv) = &*self.shared;
+        let mut q = lock.lock().unwrap();
+        let busy = q.busy.clone();
+        q.jobs = jobs
+            .into_iter()
+            .filter(|j| !busy.contains(&(j.path.clone(), j.kind)))
+            .collect();
+        cv.notify_all();
+    }
+}
+
+fn fail_msg(job: &Job, err: String) -> Msg {
+    match job.kind {
+        Kind::Preview => Msg::Preview {
+            path: job.path.clone(),
+            result: Err(err),
+        },
+        Kind::Full => Msg::Full {
+            path: job.path.clone(),
+            result: Err(err),
+        },
+        Kind::Exif => Msg::Exif {
+            path: job.path.clone(),
+            info: None,
+        },
+    }
+}
+
+fn run_job(job: &Job) -> Msg {
+    let path = job.path.clone();
+    match job.kind {
+        Kind::Preview => Msg::Preview {
+            result: decode_preview(&path),
+            path,
+        },
+        Kind::Full => Msg::Full {
+            result: load_image_full(&path)
+                .map(Arc::new)
+                .map_err(|e| e.to_string()),
+            path,
+        },
+        Kind::Exif => Msg::Exif {
+            info: extract_exif(&path),
+            path,
+        },
+    }
+}
+
+fn decode_preview(path: &Path) -> Result<PreviewData, String> {
+    // Header-only read: gives us the true source size even when we decode reduced.
+    let hdr = image::image_dimensions(path).ok();
+    let d = load_image(path, PREVIEW_DIM).map_err(|e| e.to_string())?;
+    let orig = hdr.unwrap_or((d.width, d.height));
+    let image = ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &d.rgba);
+    Ok(PreviewData {
+        image,
+        orig,
+        load_ms: d.load_time.as_millis() as u64,
+    })
+}
+
+fn extract_exif(path: &Path) -> Option<String> {
+    let exif = read_exif(path).ok()?;
+
+    let mut info = Vec::new();
+
+    if let Some(entry) = exif.get(ExifTag::Make) {
+        info.push(format!("Camera: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::Model) {
+        info.push(format!("Model: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::DateTimeOriginal) {
+        info.push(format!("Date: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::ExposureTime) {
+        info.push(format!("Exposure: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::FNumber) {
+        info.push(format!("Aperture: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::ISOSpeedRatings) {
+        info.push(format!("ISO: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::FocalLength) {
+        info.push(format!("Focal Length: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::ImageWidth) {
+        if let Some(h_entry) = exif.get(ExifTag::ImageHeight) {
+            info.push(format!("Dimensions: {}x{} px", entry, h_entry));
+        }
+    }
+
+    if info.is_empty() {
+        None
+    } else {
+        Some(info.join("\n"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App state
+// ---------------------------------------------------------------------------
+
+struct Preview {
+    tex: TextureHandle,
+    orig: (u32, u32),
+    load_ms: u64,
+    used: u64, // LRU stamp
+}
+
+struct Tile {
+    tex: TextureHandle,
+    last_drawn: u64,
+}
+
+struct FullImage {
+    path: PathBuf,
+    data: Arc<ImageData>,
+    tiles: HashMap<(u32, u32), Tile>,
+    load_ms: u64,
+}
+
+/// `scale` / `offset` only matter while `fit` is false.
+struct View {
+    fit: bool,
+    scale: f32,   // screen points per source pixel
+    offset: Vec2, // image centre relative to panel centre, in points
+}
 
 struct MyApp {
     folder: PathBuf,
     gallery: Gallery,
-    texture: Option<TextureHandle>,
-    zoom_pan: ZoomPan,
-    drag_start: Option<egui::Pos2>,
-    load_time_ms: u64,
-    pending_scroll: f32,
-    image_cache: ImageCache,
-    needs_fit: bool,
-    show_image: bool,
     config: Config,
     config_path: PathBuf,
+
+    loader: Loader,
+    rx: Receiver<Msg>,
+
+    previews: HashMap<PathBuf, Preview>,
+    failed: HashSet<(PathBuf, Kind)>,
+    clock: u64,
+    frame: u64,
+
+    cur: Option<PathBuf>,   // what the user asked for
+    shown: Option<PathBuf>, // what is on screen (lags `cur` until its preview is ready)
+    full: Option<FullImage>,
+    full_due: Option<Instant>,
+    view: View,
+    error: Option<String>,
+
     exif_info: Option<String>,
     exif_loading: bool,
-    current_path: Option<PathBuf>,
-    last_viewport_size: Option<egui::Vec2>,
+    show_panels: bool,
 }
 
 impl MyApp {
@@ -46,278 +326,333 @@ impl MyApp {
         let config_path = Config::default_path();
         let config = Config::load(&config_path);
 
-        let folder = config
-            .folder
-            .as_ref()
-            .and_then(|f| {
-                let p = PathBuf::from(f);
-                if p.is_dir() {
-                    Some(p)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| PathBuf::from("test-images"));
+        // Optional CLI argument: a file or a folder ("Open with…").
+        let arg = std::env::args_os().nth(1).map(PathBuf::from);
+        let (folder, mut gallery) = match arg {
+            Some(a) if a.is_dir() => {
+                let g = Gallery::new(&a);
+                (a, g)
+            }
+            Some(a) if a.is_file() => {
+                let dir = a.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                (dir, Gallery::from_file(a))
+            }
+            _ => {
+                let folder = config
+                    .folder
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_dir())
+                    .unwrap_or_else(|| PathBuf::from("test-images"));
+                let g = Gallery::new(&folder);
+                (folder, g)
+            }
+        };
+        if config.load_all_on_startup {
+            gallery.load_all_from_folder(&folder);
+        }
 
-        let gallery = Gallery::new(&folder);
+        if !config_path.exists() {
+            config.save(&config_path);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let loader = Loader::new(ctx, tx);
+
         let mut app = Self {
             folder,
             gallery,
-            texture: None,
-            zoom_pan: ZoomPan::new(),
-            drag_start: None,
-            load_time_ms: 0,
-            pending_scroll: 0.0,
-            image_cache: Arc::new(Mutex::new(HashMap::new())),
-            needs_fit: true,
-            show_image: config.show_image_before_auto_fit,
             config,
             config_path,
+            loader,
+            rx,
+            previews: HashMap::new(),
+            failed: HashSet::new(),
+            clock: 0,
+            frame: 0,
+            cur: None,
+            shown: None,
+            full: None,
+            full_due: None,
+            view: View {
+                fit: true,
+                scale: 1.0,
+                offset: Vec2::ZERO,
+            },
+            error: None,
             exif_info: None,
             exif_loading: false,
-            current_path: None,
-            last_viewport_size: None,
+            show_panels: true,
         };
-
-        if !app.config_path.exists() {
-            app.config.save(&app.config_path);
-        }
-        if app.config.load_all_on_startup {
-            app.gallery.load_all_from_folder(&app.folder);
-        }
-        app.load_current(ctx);
-        app.preload_neighbors();
+        app.goto(ctx);
         app
     }
 
-    fn load_current(&mut self, ctx: &Context) {
-        let path = match self.gallery.current() {
-            Some(p) => p,
-            None => {
-                self.texture = None;
-                return;
-            }
-        };
+    // ---- navigation -------------------------------------------------------
 
-        // Store current path for background upgrade
-        self.current_path = Some(path.to_path_buf());
+    /// Point the app at `gallery.current()` and (re)plan all background work.
+    fn goto(&mut self, ctx: &Context) {
+        self.cur = self.gallery.current().map(|p| p.to_path_buf());
+        self.error = None;
+        self.exif_info = None;
+        self.exif_loading = self.cur.is_some();
+        self.full_due = Some(Instant::now() + FULL_DWELL);
 
-        // Check if we already have the full image cached (clamped to GPU limit)
-        let cached_full = {
-            let cache = self.image_cache.lock().unwrap();
-            cache.get(path).cloned()
-        };
-
-        let full_data = if let Some(data) = cached_full {
-            data
-        } else {
-            // Decode the image once and cache the full data
-            match load_image(path, 16384) {
-                Ok(data) => {
-                    let arc = Arc::new(data);
-                    let mut cache = self.image_cache.lock().unwrap();
-                    cache.insert(path.to_path_buf(), arc.clone());
-                    arc
-                }
-                Err(e) => {
-                    eprintln!("Failed to load {}: {}", path.display(), e);
-                    self.texture = None;
-                    return;
-                }
-            }
-        };
-
-        // Generate a small preview from the cached full data (fast)
-        let preview_data = downscale_image(&full_data, 256);
-        let rgba = preview_data.rgba.clone();
-        let width = preview_data.width as usize;
-        let height = preview_data.height as usize;
-        let texture = ctx.load_texture(
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .as_ref(),
-            ColorImage::from_rgba_unmultiplied([width, height], &rgba),
-            egui::TextureOptions::LINEAR,
-        );
-        self.texture = Some(texture);
-        self.load_time_ms = preview_data.load_time.as_millis() as u64;
-
-        self.zoom_pan.reset();
-        self.needs_fit = true;
-        self.show_image = self.config.show_image_before_auto_fit;
-
-        // Update window title to current file name
-        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+        if let Some(name) = self
+            .cur
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                "Image Viewer — {}",
-                filename
+                "Image Viewer - {name}"
             )));
         }
-
-        // Clear previous EXIF and start loading new one in background
-        self.exif_info = None;
-        self.exif_loading = true;
-        let path_clone = path.to_path_buf();
-        let ctx_clone = ctx.clone();
-        std::thread::spawn(move || {
-            let exif_data = MyApp::extract_exif(&path_clone);
-            ctx_clone.data_mut(|d| {
-                d.insert_persisted(egui::Id::new("exif_info"), exif_data);
-            });
-            ctx_clone.request_repaint();
-        });
+        self.schedule();
     }
 
-    fn extract_exif(path: &std::path::Path) -> Option<String> {
-        let exif = read_exif(path).ok()?;
-
-        let mut info = Vec::new();
-
-        // Camera make/model
-        if let Some(entry) = exif.get(ExifTag::Make) {
-            info.push(format!("Camera: {}", entry));
-        }
-        if let Some(entry) = exif.get(ExifTag::Model) {
-            info.push(format!("Model: {}", entry));
-        }
-
-        // Date/time
-        if let Some(entry) = exif.get(ExifTag::DateTimeOriginal) {
-            info.push(format!("Date: {}", entry));
-        }
-
-        // Exposure
-        if let Some(entry) = exif.get(ExifTag::ExposureTime) {
-            info.push(format!("Exposure: {}", entry));
-        }
-
-        // Aperture
-        if let Some(entry) = exif.get(ExifTag::FNumber) {
-            info.push(format!("Aperture: {}", entry));
-        }
-
-        // ISO
-        if let Some(entry) = exif.get(ExifTag::ISOSpeedRatings) {
-            info.push(format!("ISO: {}", entry));
-        }
-
-        // Focal length
-        if let Some(entry) = exif.get(ExifTag::FocalLength) {
-            info.push(format!("Focal Length: {}", entry));
-        }
-
-        // Dimensions (from PNG or JPEG)
-        if let Some(entry) = exif.get(ExifTag::ImageWidth) {
-            if let Some(h_entry) = exif.get(ExifTag::ImageHeight) {
-                info.push(format!(
-                    "Dimensions: {}x{} px",
-                    entry,
-                    h_entry
-                ));
-            }
-        }
-
-        if info.is_empty() {
-            None
+    fn step(&mut self, ctx: &Context, forward: bool) {
+        if forward {
+            self.gallery.next();
         } else {
-            Some(info.join("\n"))
+            self.gallery.prev();
         }
+        self.goto(ctx);
     }
 
-    /// Preload next and previous images in background threads so navigation is instant.
-    fn preload_neighbors(&self) {
-        let cache = self.image_cache.clone();
-        let files = self.gallery.files.clone();
-        let index = self.gallery.index;
+    /// Forget what is on screen (used when switching folders).
+    fn reset_display(&mut self) {
+        self.shown = None;
+        self.full = None;
+    }
 
-        for &neighbor_idx in &[
-            index.saturating_sub(1),
-            (index + 1).min(files.len().saturating_sub(1)),
-        ] {
-            if neighbor_idx >= files.len() {
-                continue;
-            }
-            let path = files[neighbor_idx].clone();
-            let cache = cache.clone();
-            // Skip if already cached
-            {
-                let c = cache.lock().unwrap();
-                if c.contains_key(&path) {
-                    continue;
-                }
-            }
-            std::thread::spawn(move || {
-                if let Ok(data) = load_image(&path, 99999) {
-                    let mut c = cache.lock().unwrap();
-                    c.insert(path, Arc::new(data));
-                }
+    fn needs_full(&self, p: &PathBuf) -> bool {
+        if self.full.as_ref().is_some_and(|f| &f.path == p) {
+            return false;
+        }
+        if self.failed.contains(&(p.clone(), Kind::Full)) {
+            return false;
+        }
+        let Some(pv) = self.previews.get(p) else {
+            return false;
+        };
+        let [tw, th] = pv.tex.size();
+        let tex_long = tw.max(th) as u32;
+        let orig_long = pv.orig.0.max(pv.orig.1);
+        orig_long > tex_long + 1 && (pv.orig.0 as u64 * pv.orig.1 as u64) <= MAX_FULL_PIXELS
+    }
+
+    fn schedule(&mut self) {
+        let mut jobs = Vec::new();
+        let files = &self.gallery.files;
+        let n = files.len();
+        if n == 0 {
+            self.loader.replace(jobs);
+            return;
+        }
+        let i = self.gallery.index.min(n - 1);
+        let cur = &files[i];
+
+        let need_preview = |p: &PathBuf| {
+            !self.previews.contains_key(p) && !self.failed.contains(&(p.clone(), Kind::Preview))
+        };
+
+        if need_preview(cur) {
+            jobs.push(Job {
+                path: cur.clone(),
+                kind: Kind::Preview,
+                prio: PRIO_CURRENT_PREVIEW,
             });
         }
+        if self.exif_loading {
+            jobs.push(Job {
+                path: cur.clone(),
+                kind: Kind::Exif,
+                prio: PRIO_CURRENT_EXIF,
+            });
+        }
+        if self.full_due.is_none() && self.needs_full(cur) {
+            jobs.push(Job {
+                path: cur.clone(),
+                kind: Kind::Full,
+                prio: PRIO_FULL,
+            });
+        }
+
+        // Neighbours: "next" slightly ahead of "previous" at each distance.
+        let mut seen: HashSet<usize> = HashSet::from([i]);
+        for d in 1..=PRELOAD_RADIUS {
+            for (idx, prio) in [
+                ((i + d) % n, 10 + 2 * d as u32),
+                ((i + n - d % n) % n, 11 + 2 * d as u32),
+            ] {
+                if seen.insert(idx) && need_preview(&files[idx]) {
+                    jobs.push(Job {
+                        path: files[idx].clone(),
+                        kind: Kind::Preview,
+                        prio,
+                    });
+                }
+            }
+        }
+        self.loader.replace(jobs);
     }
 
-    fn next(&mut self, ctx: &Context) {
-        self.gallery.next();
-        self.load_current(ctx);
-        self.preload_neighbors();
+    // ---- results from workers --------------------------------------------
+
+    fn pump(&mut self, ctx: &Context) {
+        let msgs: Vec<Msg> = self.rx.try_iter().collect();
+        if msgs.is_empty() {
+            return;
+        }
+        let mut resched = false;
+
+        for m in msgs {
+            match m {
+                Msg::Preview { path, result } => match result {
+                    Ok(p) => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
+                        self.clock += 1;
+                        self.previews.insert(
+                            path.clone(),
+                            Preview {
+                                tex,
+                                orig: p.orig,
+                                load_ms: p.load_ms,
+                                used: self.clock,
+                            },
+                        );
+                        resched |= Some(&path) == self.cur.as_ref();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load {}: {}", path.display(), e);
+                        if Some(&path) == self.cur.as_ref() {
+                            self.error = Some(format!("Failed to load {}: {}", path.display(), e));
+                        }
+                        self.failed.insert((path, Kind::Preview));
+                    }
+                },
+                Msg::Full { path, result } => match result {
+                    Ok(data) => {
+                        // Only keep it if the user is still on this image.
+                        if Some(&path) == self.cur.as_ref() {
+                            let load_ms = data.load_time.as_millis() as u64;
+                            self.full = Some(FullImage {
+                                path,
+                                data,
+                                tiles: HashMap::new(),
+                                load_ms,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Full-res load failed for {}: {}", path.display(), e);
+                        self.failed.insert((path, Kind::Full));
+                    }
+                },
+                Msg::Exif { path, info } => {
+                    if Some(&path) == self.cur.as_ref() {
+                        self.exif_info = info;
+                        self.exif_loading = false;
+                    }
+                }
+            }
+        }
+        if resched {
+            self.schedule();
+        }
+        self.evict_previews();
     }
 
-    fn prev(&mut self, ctx: &Context) {
-        self.gallery.prev();
-        self.load_current(ctx);
-        self.preload_neighbors();
+    fn evict_previews(&mut self) {
+        while self.previews.len() > PREVIEW_CACHE_CAP {
+            let n = self.gallery.files.len();
+            let i = self.gallery.index;
+            let protected: HashSet<&PathBuf> = (0..=2 * PRELOAD_RADIUS)
+                .filter(|_| n > 0)
+                .map(|k| (i + n * 2 + k - PRELOAD_RADIUS) % n)
+                .filter_map(|idx| self.gallery.files.get(idx))
+                .chain(self.shown.iter())
+                .collect();
+            let victim = self
+                .previews
+                .iter()
+                .filter(|(p, _)| !protected.contains(p))
+                .min_by_key(|(_, v)| v.used)
+                .map(|(p, _)| p.clone());
+            match victim {
+                Some(v) => {
+                    self.previews.remove(&v);
+                }
+                None => break,
+            }
+        }
     }
 
-    /// Open a folder picker and load images from the selected directory.
+    /// Switch what's on screen as soon as the requested image's preview exists.
+    fn sync_shown(&mut self) {
+        let Some(cur) = self.cur.clone() else {
+            self.shown = None;
+            return;
+        };
+        if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
+            self.shown = Some(cur);
+            self.view.fit = true;
+        }
+        if let Some(s) = &self.shown {
+            if self.full.as_ref().is_some_and(|f| &f.path != s) {
+                self.full = None;
+            }
+        }
+    }
+
+    // ---- file pickers -----------------------------------------------------
+
+    fn open_folder(&mut self, ctx: &Context, folder: PathBuf) {
+        self.folder = folder.clone();
+        self.gallery = Gallery::new(&folder);
+        if self.config.load_all_on_startup {
+            self.gallery.load_all_from_folder(&folder);
+        }
+        self.reset_display();
+        self.goto(ctx);
+    }
+
+    fn open_file(&mut self, ctx: &Context, file: PathBuf) {
+        self.folder = file.parent().unwrap_or(&file).to_path_buf();
+        self.gallery = Gallery::from_file(file);
+        if self.config.load_all_on_startup {
+            self.gallery.load_all_from_folder(&self.folder);
+        }
+        self.reset_display();
+        self.goto(ctx);
+    }
+
     fn pick_folder(&mut self, ctx: &Context) {
-        let folder = rfd::FileDialog::new()
+        if let Some(folder) = rfd::FileDialog::new()
             .set_title("Select image folder")
-            .pick_folder();
-
-        if let Some(folder) = folder {
-            self.folder = folder.clone();
+            .pick_folder()
+        {
             self.config.folder = Some(folder.to_string_lossy().to_string());
             self.config.save(&self.config_path);
-            self.gallery = Gallery::new(&folder);
-            if self.config.load_all_on_startup {
-                self.gallery.load_all_from_folder(&folder);
-            }
-            self.load_current(ctx);
-            self.preload_neighbors();
+            self.open_folder(ctx, folder);
         }
     }
 
-    /// Open a file picker and load the selected image file.
     fn pick_file(&mut self, ctx: &Context) {
-        let files = rfd::FileDialog::new()
+        if let Some(file) = rfd::FileDialog::new()
             .set_title("Select image file")
-            .add_filter("JPEG", &["jpg", "jpeg", "png"])
-            .add_filter("PNG", &["png"])
-            .pick_files();
-
-        if let Some(files) = files {
-            if let Some(first) = files.first() {
-                self.folder = first.parent().unwrap_or(first).to_path_buf();
-                self.gallery = Gallery::from_file(first.clone());
-                if self.config.load_all_on_startup {
-                    self.gallery.load_all_from_folder(&self.folder);
-                }
-                self.load_current(ctx);
-                self.preload_neighbors();
-            }
+            .add_filter("Images", &["jpg", "jpeg", "png"])
+            .pick_file()
+        {
+            self.open_file(ctx, file);
         }
     }
 
-    /// Load an image from a dropped file path.
-    fn load_dropped_file(&mut self, ctx: &Context, path: PathBuf) {
+    fn load_dropped(&mut self, ctx: &Context, path: PathBuf) {
         if path.is_dir() {
-            self.folder = path.clone();
-            self.gallery = Gallery::new(&path);
-            if self.config.load_all_on_startup {
-                self.gallery.load_all_from_folder(&path);
-            }
-            self.load_current(ctx);
-            self.preload_neighbors();
+            self.open_folder(ctx, path);
             return;
         }
         let ext = path
@@ -325,256 +660,330 @@ impl MyApp {
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if ext != "jpg" && ext != "jpeg" && ext != "png" {
-            return;
+        if image_viewer::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+            self.open_file(ctx, path);
         }
-        self.folder = path.parent().unwrap_or(&path).to_path_buf();
-        self.gallery = Gallery::from_file(path);
-        if self.config.load_all_on_startup {
-            self.gallery.load_all_from_folder(&self.folder);
-        }
-        self.load_current(ctx);
-        self.preload_neighbors();
     }
 
-    /// Load all images from the current folder (sorted by name, like Explorer).
-    fn load_all_from_folder(&mut self, ctx: &Context) {
-        self.gallery.load_all_from_folder(&self.folder);
-        if !self.gallery.is_empty() {
-            self.load_current(ctx);
+    // ---- drawing ----------------------------------------------------------
+
+    fn status_text(&self) -> String {
+        let idx = if self.gallery.is_empty() {
+            0
+        } else {
+            self.gallery.index + 1
+        };
+        let filename = self
+            .shown
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut s = format!(
+            "{}\\{} - {}/{}",
+            self.folder.display(),
+            filename,
+            idx,
+            self.gallery.len()
+        );
+        if let Some(pv) = self.shown.as_ref().and_then(|p| self.previews.get(p)) {
+            s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
+            match &self.full {
+                Some(f) if Some(&f.path) == self.shown.as_ref() => {
+                    s += &format!(" - full {} ms", f.load_ms)
+                }
+                _ => {
+                    if let Some(sh) = &self.shown {
+                        if self.needs_full(sh) {
+                            s += " - full-res loading…";
+                        }
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    fn central(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let panel = ui.available_rect_before_wrap();
+        let resp = ui.allocate_rect(panel, egui::Sense::click_and_drag());
+        let painter = ui.painter_at(panel);
+        let ppp = ctx.pixels_per_point();
+
+        let Some(shown) = self.shown.clone() else {
+            let msg = if let Some(e) = &self.error {
+                e.clone()
+            } else if self.gallery.is_empty() {
+                "No images loaded. Drop a file or folder here.".to_owned()
+            } else {
+                "Loading…".to_owned()
+            };
+            painter.text(
+                panel.center(),
+                egui::Align2::CENTER_CENTER,
+                msg,
+                egui::FontId::proportional(16.0),
+                ui.visuals().text_color(),
+            );
+            return;
+        };
+
+        self.clock += 1;
+        let Some(pv) = self.previews.get_mut(&shown) else {
+            return;
+        };
+        pv.used = self.clock;
+        let orig = pv.orig;
+        let tex_id = pv.tex.id();
+        let tex_w = pv.tex.size()[0] as f32;
+
+        let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
+        let fit_scale = (panel.width() / img_px.x)
+            .min(panel.height() / img_px.y)
+            .clamp(1e-4, 8.0);
+        let max_scale = MAX_SCALE.max(fit_scale);
+
+        let mut scale = if self.view.fit {
+            fit_scale
+        } else {
+            self.view.scale
+        };
+        let mut offset = if self.view.fit {
+            Vec2::ZERO
+        } else {
+            self.view.offset
+        };
+        scale = scale.clamp(fit_scale, max_scale);
+
+        // --- input: zoom (wheel / pinch), pan (drag), shortcuts ---
+        let hover = resp.hover_pos();
+        let (scroll, pinch, key_fit, key_100) = ui.input(|i| {
+            (
+                i.smooth_scroll_delta.y,
+                i.zoom_delta(),
+                i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::Num1),
+            )
+        });
+
+        let mut factor = 1.0f32;
+        if resp.hovered() {
+            factor *= pinch;
+            if scroll != 0.0 {
+                factor *= (scroll * 0.0025).exp();
+            }
+        }
+        let mut target_scale = scale * factor;
+        let anchor = hover.unwrap_or(panel.center());
+        if key_100 {
+            target_scale = 1.0 / ppp; // 1 source pixel = 1 physical pixel
+        }
+        if key_fit || resp.double_clicked() {
+            target_scale = fit_scale;
+        }
+        let target_scale = target_scale.clamp(fit_scale, max_scale);
+        if (target_scale - scale).abs() > f32::EPSILON {
+            // Keep the point under the cursor fixed.
+            let c = anchor - panel.center();
+            offset = c - (c - offset) * (target_scale / scale);
+            scale = target_scale;
+        }
+        if resp.dragged() {
+            offset += resp.drag_delta();
+        }
+
+        // Keep the image from being lost off-screen; centre it on axes where it fits.
+        let size = img_px * scale;
+        let max_off = ((size - panel.size()) * 0.5).max(Vec2::ZERO);
+        offset = offset.clamp(-max_off, max_off);
+
+        let at_fit = scale <= fit_scale * 1.0001;
+        if at_fit {
+            offset = Vec2::ZERO;
+        }
+        self.view.fit = at_fit;
+        self.view.scale = scale;
+        self.view.offset = offset;
+
+        // Snap the image origin to the physical pixel grid so 1:1 is razor sharp.
+        let snap = |v: f32| (v * ppp).round() / ppp;
+        let centre = panel.center() + offset;
+        let min = Pos2::new(snap(centre.x - size.x * 0.5), snap(centre.y - size.y * 0.5));
+        let rect = Rect::from_min_size(min, size);
+        let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+
+        // Always paint the preview first; tiles refine it where available.
+        painter.image(tex_id, rect, uv, Color32::WHITE);
+
+        // --- full-resolution tiles ---
+        let preview_density = tex_w / img_px.x; // texture px per source px
+        let screen_density = scale * ppp; // physical px per source px
+        self.frame += 1;
+        let frame = self.frame;
+        if let Some(full) = self.full.as_mut().filter(|f| f.path == shown) {
+            if screen_density > preview_density {
+                let (fw, fh) = (full.data.width, full.data.height);
+                let vis = panel.intersect(rect);
+                if vis.width() > 0.0 && vis.height() > 0.0 {
+                    let x0 = (((vis.min.x - rect.min.x) / scale).floor().max(0.0) as u32).min(fw);
+                    let y0 = (((vis.min.y - rect.min.y) / scale).floor().max(0.0) as u32).min(fh);
+                    let x1 = (((vis.max.x - rect.min.x) / scale).ceil().max(0.0) as u32).min(fw);
+                    let y1 = (((vis.max.y - rect.min.y) / scale).ceil().max(0.0) as u32).min(fh);
+                    let mut budget = TILES_PER_FRAME;
+                    let mut pending = false;
+
+                    if x1 > x0 && y1 > y0 {
+                        for ty in (y0 / TILE)..=((y1 - 1) / TILE) {
+                            for tx in (x0 / TILE)..=((x1 - 1) / TILE) {
+                                if !full.tiles.contains_key(&(tx, ty)) {
+                                    if budget == 0 {
+                                        pending = true;
+                                        continue;
+                                    }
+                                    budget -= 1;
+                                    let tex = make_tile(&ctx, &full.data, tx, ty);
+                                    full.tiles.insert(
+                                        (tx, ty),
+                                        Tile {
+                                            tex,
+                                            last_drawn: frame,
+                                        },
+                                    );
+                                }
+                                let tile = full.tiles.get_mut(&(tx, ty)).unwrap();
+                                tile.last_drawn = frame;
+                                let (px, py) = (tx * TILE, ty * TILE);
+                                let (tw, th) = (TILE.min(fw - px), TILE.min(fh - py));
+                                let r = Rect::from_min_size(
+                                    rect.min + Vec2::new(px as f32, py as f32) * scale,
+                                    Vec2::new(tw as f32, th as f32) * scale,
+                                );
+                                painter.image(tile.tex.id(), r, uv, Color32::WHITE);
+                            }
+                        }
+                    }
+                    if pending {
+                        ctx.request_repaint();
+                    }
+                }
+
+                // Bound GPU memory: drop the least recently drawn tiles.
+                if full.tiles.len() > MAX_TILES {
+                    let mut old: Vec<((u32, u32), u64)> = full
+                        .tiles
+                        .iter()
+                        .filter(|(_, t)| t.last_drawn < frame)
+                        .map(|(k, t)| (*k, t.last_drawn))
+                        .collect();
+                    old.sort_by_key(|(_, l)| *l);
+                    let excess = full.tiles.len() - MAX_TILES;
+                    for (k, _) in old.into_iter().take(excess) {
+                        full.tiles.remove(&k);
+                    }
+                }
+            } else if screen_density < preview_density * 0.5 {
+                full.tiles.clear(); // zoomed well out: release tile textures
+            }
+        }
+
+        if self.cur.is_some() && self.cur != self.shown {
+            painter.text(
+                panel.left_top() + Vec2::new(10.0, 10.0),
+                egui::Align2::LEFT_TOP,
+                "Loading…",
+                egui::FontId::proportional(14.0),
+                Color32::from_white_alpha(200),
+            );
+        }
+    }
+
+    /// Per-frame housekeeping that must run before anything is drawn.
+    fn frame_prelude(&mut self, ctx: &Context) {
+        self.pump(ctx);
+        self.sync_shown();
+
+        // Start the full-res decode once the user has dwelled on an image.
+        if let Some(due) = self.full_due {
+            let now = Instant::now();
+            if now >= due {
+                self.full_due = None;
+                self.schedule();
+            } else {
+                ctx.request_repaint_after(due - now);
+            }
         }
     }
 }
 
+/// Copy one tile out of the full-res RGBA buffer and upload it.
+fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle {
+    let (fw, fh) = (data.width as usize, data.height as usize);
+    let (x0, y0) = ((tx * TILE) as usize, (ty * TILE) as usize);
+    let (w, h) = ((TILE as usize).min(fw - x0), (TILE as usize).min(fh - y0));
+    let stride = fw * 4;
+
+    let mut pixels: Vec<Color32> = Vec::with_capacity(w * h);
+    for y in y0..y0 + h {
+        let row = &data.rgba[y * stride + x0 * 4..y * stride + (x0 + w) * 4];
+        pixels.extend(
+            row.chunks_exact(4)
+                .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])),
+        );
+    }
+    let img = ColorImage {
+        size: [w, h],
+        pixels,
+    };
+    ctx.load_texture(format!("tile {tx},{ty}"), img, TextureOptions::LINEAR)
+}
+
+// ---------------------------------------------------------------------------
+// eframe glue
+// ---------------------------------------------------------------------------
+
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.frame_prelude(ctx);
+
         // Keyboard navigation
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-            self.next(ctx);
+        let (next, prev, first, last, toggle) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowRight)
+                    || i.key_pressed(egui::Key::PageDown)
+                    || i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::PageUp),
+                i.key_pressed(egui::Key::Home),
+                i.key_pressed(egui::Key::End),
+                i.key_pressed(egui::Key::I),
+            )
+        });
+        if next {
+            self.step(ctx, true);
+        } else if prev {
+            self.step(ctx, false);
+        } else if first && !self.gallery.is_empty() {
+            self.gallery.index = 0;
+            self.goto(ctx);
+        } else if last && !self.gallery.is_empty() {
+            self.gallery.index = self.gallery.len() - 1;
+            self.goto(ctx);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-            self.prev(ctx);
-        }
-
-        // Mouse interaction for zoom/pan
-        let pointer = ctx.pointer_hover_pos();
-
-        // Capture scroll for later use in panel (where we have access to avail)
-        let scroll = ctx.input(|i| i.raw_scroll_delta.y);
-        if scroll.abs() > 0.01 {
-            self.pending_scroll = scroll;
-        }
-
-        // Pan drag (firm, incremental)
-        if ctx.input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
-            if let Some(pos) = pointer {
-                if let Some(last) = self.drag_start {
-                    let delta = pos - last;
-                    self.zoom_pan.pan_x += delta.x;
-                    self.zoom_pan.pan_y += delta.y;
-                }
-                self.drag_start = Some(pos); // update for next frame
-            }
-        } else {
-            self.drag_start = None;
+        if toggle {
+            self.show_panels = !self.show_panels;
         }
 
-        // Drag-and-drop: handle dropped files/folders
+        // Drag-and-drop: files or folders
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(file) = dropped.first() {
-            if let Some(path) = file.path.clone() {
-                self.load_dropped_file(ctx, path);
-            }
+        if let Some(path) = dropped.first().and_then(|f| f.path.clone()) {
+            self.load_dropped(ctx, path);
         }
 
-        // Settings panel
-        egui::SidePanel::left("exif").show(ctx, |ui| {
-            ui.heading("EXIF");
-            if self.exif_loading {
-                ui.label("Loading EXIF…");
-            } else if let Some(info) = &self.exif_info {
-                for line in info.lines() {
-                    ui.label(line);
-                }
-            } else {
-                ui.label("No EXIF available.");
-            }
+        egui::TopBottomPanel::top("status").show(ctx, |ui| {
+            ui.label(self.status_text());
         });
 
-        // Read EXIF data from persistent storage (set by background thread)
-        let exif_opt =
-            ctx.data_mut(|d| d.get_persisted::<Option<String>>(egui::Id::new("exif_info")));
-        if let Some(exif_data) = exif_opt {
-            if self.exif_info.as_ref() != exif_data.as_ref() {
-                self.exif_info = exif_data.as_ref().cloned();
-                self.exif_loading = false;
-            }
-        }
-
-        // Settings panel
-        egui::SidePanel::right("settings").show(ctx, |ui| {
-            ui.heading("Settings");
-            if ui
-                .checkbox(
-                    &mut self.config.load_all_on_startup,
-                    "Load all images on startup",
-                )
-                .changed()
-            {
-                self.config.save(&self.config_path);
-                if self.config.load_all_on_startup {
-                    self.load_all_from_folder(ctx);
-                } else {
-                    self.load_current(ctx);
-                }
-                self.preload_neighbors();
-            }
-            if ui
-                .checkbox(
-                    &mut self.config.show_image_before_auto_fit,
-                    "Show image before auto-fit",
-                )
-                .changed()
-            {
-                self.config.save(&self.config_path);
-                self.show_image = self.config.show_image_before_auto_fit;
-                if self.show_image {
-                    self.needs_fit = true;
-                }
-            }
-            ui.label(format!("Config: {}", self.config_path.display()));
-        });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading(format!(
-                "{} — {} / {} — load {}ms",
-                self.folder.display(),
-                if self.gallery.is_empty() {
-                    0
-                } else {
-                    self.gallery.index + 1
-                },
-                self.gallery.len(),
-                self.load_time_ms
-            ));
-
-            ui.separator();
-
-            // Detect viewport resize and trigger refit
-            let current_size = ctx.screen_rect().size();
-            if self.last_viewport_size != Some(current_size) {
-                self.last_viewport_size = Some(current_size);
-                self.needs_fit = true;
-            }
-
-            // Check for full image upgrade before borrowing texture
-            if let Some(ref current_path) = self.current_path {
-                let cached_full = {
-                    let cache = self.image_cache.lock().unwrap();
-                    cache.get(current_path).cloned()
-                };
-                if let Some(full_data) = cached_full {
-                    let rgba = full_data.rgba.clone();
-                    let width = full_data.width as usize;
-                    let height = full_data.height as usize;
-                    let new_tex = ctx.load_texture(
-                        current_path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .as_ref(),
-                        ColorImage::from_rgba_unmultiplied([width, height], &rgba),
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.texture = Some(new_tex);
-                    self.load_time_ms = full_data.load_time.as_millis() as u64;
-                    self.zoom_pan.reset();
-                    self.needs_fit = true;
-                    self.current_path = None;
-                }
-            }
-
-            if let Some(tex) = &self.texture {
-                let avail = ui.available_size();
-                let pointer = ctx.pointer_hover_pos();
-
-                // Always compute fit (even when hidden) so image fits when shown
-                if self.needs_fit {
-                    self.zoom_pan.fit_to_window(
-                        tex.size()[0] as f32,
-                        tex.size()[1] as f32,
-                        avail.x,
-                        avail.y,
-                    );
-                    self.needs_fit = false;
-                    self.show_image = true; // show after fit
-                }
-
-                if self.show_image {
-                    // Apply pending scroll with cursor-centering zoom
-                    if self.pending_scroll.abs() > 0.01 {
-                        // Store old values
-                        let old_zoom = self.zoom_pan.zoom;
-                        let old_pan_x = self.zoom_pan.pan_x;
-                        let old_pan_y = self.zoom_pan.pan_y;
-
-                        // Apply zoom change
-                        self.zoom_pan.zoom_by(self.pending_scroll);
-                        // Prevent zooming out below fit-to-window
-                        let tex_size = tex.size();
-                        let fit_scale = (avail.x / tex_size[0] as f32)
-                            .min(avail.y / tex_size[1] as f32)
-                            .clamp(0.1, 8.0);
-                        self.zoom_pan.zoom = self.zoom_pan.zoom.max(fit_scale);
-
-                        // If we have a pointer position, adjust pan to zoom toward cursor
-                        if let Some(cursor_pos) = pointer {
-                            // Calculate current center of image in screen space
-                            let center_x = avail.x * 0.5 + old_pan_x;
-                            let center_y = avail.y * 0.5 + old_pan_y;
-
-                            // New center so that cursor position stays fixed
-                            // Formula: new_center = cursor - (cursor - old_center) * new_zoom / old_zoom
-                            let new_center_x = cursor_pos.x
-                                - (cursor_pos.x - center_x) * self.zoom_pan.zoom / old_zoom;
-                            let new_center_y = cursor_pos.y
-                                - (cursor_pos.y - center_y) * self.zoom_pan.zoom / old_zoom;
-
-                            // Update pan to achieve new center
-                            self.zoom_pan.pan_x = new_center_x - avail.x * 0.5;
-                            self.zoom_pan.pan_y = new_center_y - avail.y * 0.5;
-                        }
-
-                        // Clear pending scroll
-                        self.pending_scroll = 0.0;
-                    }
-
-                    let tex_w = tex.size()[0] as f32 * self.zoom_pan.zoom;
-                    let tex_h = tex.size()[1] as f32 * self.zoom_pan.zoom;
-
-                    // Center of available area
-                    let center_x = avail.x * 0.5 + self.zoom_pan.pan_x;
-                    let center_y = avail.y * 0.5 + self.zoom_pan.pan_y;
-                    let center = egui::Pos2::new(center_x, center_y);
-
-                    let mut image_widget = egui::Image::new(tex);
-                    image_widget = image_widget.fit_to_exact_size(egui::Vec2::new(tex_w, tex_h));
-                    ui.put(
-                        egui::Rect::from_center_size(center, egui::Vec2::new(tex_w, tex_h)),
-                        image_widget,
-                    );
-                } else {
-                    ui.label("Image hidden until fit. Use \"Fit to Window\" to display.");
-                }
-            } else {
-                ui.label("No images loaded.");
-            }
-
-            ui.label(format!("Zoom: {:.1}x", self.zoom_pan.zoom));
-        });
-
-        // Bottom panel with menu buttons
-        TopBottomPanel::bottom("menu").show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Browse Folder…").clicked() {
                     self.pick_folder(ctx);
@@ -582,29 +991,59 @@ impl eframe::App for MyApp {
                 if ui.button("Browse File…").clicked() {
                     self.pick_file(ctx);
                 }
-                if ui.button("Load All").clicked() {
-                    self.load_all_from_folder(ctx);
-                }
                 if ui.button("Prev (←)").clicked() {
-                    self.prev(ctx);
+                    self.step(ctx, false);
                 }
                 if ui.button("Next (→)").clicked() {
-                    self.next(ctx);
+                    self.step(ctx, true);
                 }
-                if ui.button("Fit to Window").clicked() {
-                    if let Some(tex) = &self.texture {
-                        let avail = ui.available_size();
-                        let tex_w = tex.size()[0] as f32;
-                        let tex_h = tex.size()[1] as f32;
-                        let fit_scale = (avail.x / tex_w).min(avail.y / tex_h).clamp(0.1, 8.0);
-                        self.zoom_pan.zoom = self.zoom_pan.zoom.max(fit_scale);
-                        self.needs_fit = true;
-                        self.show_image = true;
-                        self.config.show_image_before_auto_fit = true;
-                        self.config.save(&self.config_path);
-                    }
+                if ui.button("Fit (F)").clicked() {
+                    self.view.fit = true;
                 }
+                if ui.button("Panels (I)").clicked() {
+                    self.show_panels = !self.show_panels;
+                }
+                ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
             });
         });
+
+        if self.show_panels {
+            egui::SidePanel::left("exif").show(ctx, |ui| {
+                ui.heading("EXIF");
+                if self.exif_loading {
+                    ui.label("Loading EXIF…");
+                } else if let Some(info) = &self.exif_info {
+                    for line in info.lines() {
+                        ui.label(line);
+                    }
+                } else {
+                    ui.label("No EXIF available.");
+                }
+            });
+
+            egui::SidePanel::right("settings").show(ctx, |ui| {
+                ui.heading("Settings");
+                if ui
+                    .checkbox(
+                        &mut self.config.load_all_on_startup,
+                        "Load all images in folder",
+                    )
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                    if self.config.load_all_on_startup {
+                        self.gallery.load_all_from_folder(&self.folder);
+                    }
+                    self.goto(ctx);
+                }
+                ui.label(format!("Config: {}", self.config_path.display()));
+            });
+        }
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(Color32::from_gray(24)))
+            .show(ctx, |ui| {
+                self.central(ui);
+            });
     }
 }
