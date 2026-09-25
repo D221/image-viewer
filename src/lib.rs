@@ -34,6 +34,10 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub linear_resample: bool,
 
+    /// Downsampling filter for the linear-light path.
+    #[serde(default)]
+    pub downscale_filter: DownscaleFilter,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -52,6 +56,7 @@ impl Config {
             folder: None,
             sort: SortMode::Name,
             linear_resample: true,
+            downscale_filter: DownscaleFilter::Hermite,
             last_by_folder: std::collections::HashMap::new(),
         };
 
@@ -725,6 +730,85 @@ fn linear_resample_enabled() -> bool {
     LINEAR_RESAMPLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Downsampling filter for the linear-light path, selectable at runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DownscaleFilter {
+    /// B=0 C=0 cubic: smallest support (2 px), no negative lobes — softest,
+    /// zero ringing. JPEGView's default for downscaling.
+    #[default]
+    Hermite,
+    /// B=0 C=0.5 cubic: sharp like CatmullRom with milder ringing.
+    Catrom,
+    /// 3-lobe sinc: sharpest, most visible ringing on hard edges.
+    Lanczos3,
+}
+
+static DOWNSCALE_FILTER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Set the downsampling filter at runtime (workers read it per-resize).
+pub fn set_downscale_filter(f: DownscaleFilter) {
+    let v = match f {
+        DownscaleFilter::Hermite => 0,
+        DownscaleFilter::Catrom => 1,
+        DownscaleFilter::Lanczos3 => 2,
+    };
+    DOWNSCALE_FILTER.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn downscale_filter() -> DownscaleFilter {
+    match DOWNSCALE_FILTER.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => DownscaleFilter::Catrom,
+        2 => DownscaleFilter::Lanczos3,
+        _ => DownscaleFilter::Hermite,
+    }
+}
+
+/// Kernel weight and support radius for each filter.
+fn kernel(f: DownscaleFilter) -> (Box<dyn Fn(f32) -> f32>, f32) {
+    match f {
+        DownscaleFilter::Hermite => (
+            Box::new(|x: f32| {
+                // Hermite = cubic B-spline with B=0, C=0 (a.k.a. "smoothstep").
+                let x = x.abs();
+                if x < 1.0 {
+                    1.0 - 2.5 * x * x + 1.5 * x * x * x
+                } else {
+                    0.0
+                }
+            }),
+            1.0,
+        ),
+        DownscaleFilter::Catrom => (
+            Box::new(|x: f32| {
+                // Catmull-Rom = cubic B=0, C=0.5.
+                let x = x.abs();
+                if x < 1.0 {
+                    1.5 * x * x * x - 2.5 * x * x + 1.0
+                } else if x < 2.0 {
+                    -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0
+                } else {
+                    0.0
+                }
+            }),
+            2.0,
+        ),
+        DownscaleFilter::Lanczos3 => (
+            Box::new(|x: f32| {
+                let x = x.abs();
+                if x <= f32::EPSILON {
+                    1.0
+                } else if x < 3.0 {
+                    let pix = std::f32::consts::PI * x;
+                    (pix.sin() / pix) * ((pix / 3.0).sin() / (pix / 3.0))
+                } else {
+                    0.0
+                }
+            }),
+            3.0,
+        ),
+    }
+}
+
 /// sRGB <-> 12-bit-linear LUTs (JPEGView-style): resizing in linear light
 /// avoids darkened edges and moiré on lineart/screentones.
 fn lin_tables() -> (&'static [u16; 256], &'static [u8; 4096]) {
@@ -803,20 +887,86 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
         lin[c * 4 + 2] = to_lin[chunk[2] as usize];
         lin[c * 4 + 3] = (chunk[3] as u16) << 4; // alpha is linear by definition
     }
-    let img =
-        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(data.width, data.height, lin)
-            .unwrap();
-        let resized = image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::CatmullRom);
+
+    // Separable resample in 12-bit linear light with precomputed weights.
+    let (kern, support) = kernel(downscale_filter());
+    let horizontal = contributions(data.width, new_w, &kern, support);
+    let vertical = contributions(data.height, new_h, &kern, support);
+
+    // Horizontal pass: width -> new_w.
+    let mut tmp = vec![0u16; (new_w as usize) * (data.height as usize) * 4];
+    for y in 0..data.height as usize {
+        let row = &lin[y * data.width as usize * 4..(y + 1) * data.width as usize * 4];
+        for (x, con) in horizontal.iter().enumerate() {
+            let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+            for &(si, w) in con {
+                let p = &row[si * 4..si * 4 + 4];
+                r += p[0] as f32 * w;
+                g += p[1] as f32 * w;
+                b += p[2] as f32 * w;
+                a += p[3] as f32 * w;
+            }
+            let o = (y * new_w as usize + x) * 4;
+            tmp[o] = r as u16;
+            tmp[o + 1] = g as u16;
+            tmp[o + 2] = b as u16;
+            tmp[o + 3] = a as u16;
+        }
+    }
+
+    // Vertical pass: height -> new_h, back to sRGB8.
     let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
-    use image::Pixel;
-    for px in resized.pixels() {
-        let c = px.channels();
-        // CatmullRom overshoots on edges and the image crate clamps to the
-        // u16 range, not our 12-bit linear range, so clamp LUT indices.
-        out.push(to_srgb[(c[0] as usize).min(4095)]);
-        out.push(to_srgb[(c[1] as usize).min(4095)]);
-        out.push(to_srgb[(c[2] as usize).min(4095)]);
-        out.push(((c[3].min(4080)) >> 4) as u8);
+    let stride = new_w as usize * 4;
+    for y in 0..new_h as usize {
+        for x in 0..new_w as usize {
+            let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+            for &(si, w) in &vertical[y] {
+                let p = &tmp[si * stride + x * 4..si * stride + x * 4 + 4];
+                r += p[0] as f32 * w;
+                g += p[1] as f32 * w;
+                b += p[2] as f32 * w;
+                a += p[3] as f32 * w;
+            }
+            // Clamp to the 12-bit linear range (filters overshoot on edges).
+            out.push(to_srgb[(r.max(0.0).min(4095.0)) as usize]);
+            out.push(to_srgb[(g.max(0.0).min(4095.0)) as usize]);
+            out.push(to_srgb[(b.max(0.0).min(4095.0)) as usize]);
+            out.push(((a.max(0.0).min(4080.0) / 16.0).round()) as u8);
+        }
+    }
+    out
+}
+
+/// Precomputed (source index, weight) pairs per destination pixel.
+fn contributions(
+    src_len: u32,
+    dst_len: u32,
+    kern: &impl Fn(f32) -> f32,
+    support: f32,
+) -> Vec<Vec<(usize, f32)>> {
+    let mut out = Vec::with_capacity(dst_len as usize);
+    let scale = dst_len as f32 / src_len as f32;
+    // When downscaling, widen the filter by the inverse ratio (anti-aliasing).
+    let filter_scale = if scale < 1.0 { 1.0 / scale } else { 1.0 };
+    let radius = support * filter_scale;
+    for dst in 0..dst_len as usize {
+        let center = (dst as f32 + 0.5) / scale - 0.5;
+        let lo = ((center - radius).floor() as i32).max(0) as usize;
+        let hi = ((center + radius).ceil() as i32).min(src_len as i32 - 1) as usize;
+        let mut con: Vec<(usize, f32)> = Vec::with_capacity((hi - lo + 1) as usize);
+        let mut sum = 0f32;
+        for si in lo..=hi {
+            let w = kern((si as f32 - center) / filter_scale);
+            if w != 0.0 {
+                con.push((si, w));
+                sum += w;
+            }
+        }
+        // Normalize so weights sum to 1 (keeps brightness exact).
+        for c in &mut con {
+            c.1 /= sum;
+        }
+        out.push(con);
     }
     out
 }

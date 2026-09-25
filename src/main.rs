@@ -32,9 +32,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    buffer_has_alpha, load_image_full, load_image_preview_full, set_linear_resample,
-    scan_folder_sorted, Animation, Config, Gallery, ImageData, SortMode, MAX_FULL_PIXELS,
-    PREVIEW_TEXTURE_DIM,
+    buffer_has_alpha, load_image_full, load_image_preview_full, set_downscale_filter,
+    set_linear_resample, scan_folder_sorted, Animation, Config, DownscaleFilter, Gallery,
+    ImageData, SortMode, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -573,6 +573,7 @@ impl MyApp {
         }
 
         set_linear_resample(config.linear_resample);
+        set_downscale_filter(config.downscale_filter);
 
         if !config_path.exists() {
             config.save(&config_path);
@@ -1713,6 +1714,7 @@ impl eframe::App for MyApp {
             });
 
             let mut resort = false;
+            let mut refilter = false;
             egui::SidePanel::right("settings").show(ctx, |ui| {
                 ui.heading("Settings");
                 if ui
@@ -1738,6 +1740,27 @@ impl eframe::App for MyApp {
                 {
                     set_linear_resample(self.config.linear_resample);
                     self.config.save(&self.config_path);
+                }
+                let mut new_filter = self.config.downscale_filter;
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    egui::ComboBox::from_id_source("ds_filter")
+                        .selected_text(format!("{:?}", self.config.downscale_filter))
+                        .show_ui(ui, |ui| {
+                            for f in [
+                                DownscaleFilter::Hermite,
+                                DownscaleFilter::Catrom,
+                                DownscaleFilter::Lanczos3,
+                            ] {
+                                ui.selectable_value(&mut new_filter, f, format!("{f:?}"));
+                            }
+                        });
+                });
+                if new_filter != self.config.downscale_filter {
+                    self.config.downscale_filter = new_filter;
+                    set_downscale_filter(new_filter);
+                    self.config.save(&self.config_path);
+                    refilter = true;
                 }
                 let mut new_sort = self.config.sort;
                 ui.horizontal(|ui| {
@@ -1782,6 +1805,17 @@ impl eframe::App for MyApp {
             });
             if resort {
                 self.rescan(ctx, true);
+            }
+            if refilter {
+                // Realtime filter preview: drop every preview and re-queue at
+                // the current target; old textures remain on screen until the
+                // replacements arrive (no blank flash).
+                self.previews.clear();
+                self.full = None;
+                self.anim = None;
+                self.failed.clear();
+                self.reset_display();
+                self.goto(ctx);
             }
         }
 
