@@ -28,14 +28,13 @@ use std::time::{Duration, Instant};
 use image_viewer::{
     buffer_has_alpha, load_image_full, load_image_preview_full, set_linear_resample,
     scan_folder_sorted, Animation, Config, Gallery, ImageData, SortMode, MAX_FULL_PIXELS,
+    PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
 
-/// Long-side target of the stage-1 preview (3840 = crisp fit on a 4K display).
-const PREVIEW_DIM: u32 = 256;
 /// How many images on each side of the current one get their preview preloaded.
 const PRELOAD_RADIUS: usize = 3;
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
@@ -85,6 +84,8 @@ struct Job {
     path: PathBuf,
     kind: Kind,
     prio: u32,
+    /// Display target long side in physical pixels (preview jobs only).
+    target_dim: u32,
 }
 
 #[derive(Default)]
@@ -104,6 +105,8 @@ struct PreviewData {
     anim: Option<Arc<Animation>>,
     // Any pixel is translucent (draw checkerboard behind it).
     has_alpha: bool,
+    // Texture is below source density (re-decode if display grows).
+    below_target: bool,
 }
 
 enum Msg {
@@ -209,7 +212,7 @@ fn run_job(job: &Job) -> Msg {
     let path = job.path.clone();
     match job.kind {
         Kind::Preview => Msg::Preview {
-            result: decode_preview(&path),
+            result: decode_preview(&path, job.target_dim),
             path,
         },
         Kind::Full => Msg::Full {
@@ -225,11 +228,14 @@ fn run_job(job: &Job) -> Msg {
     }
 }
 
-fn decode_preview(path: &Path) -> Result<PreviewData, String> {
+/// Decode a preview sized for the current display area (in physical pixels).
+/// The result is the full-res image when it fits the target, otherwise a
+/// texture capped at the target long side — always sharp at fit-to-window.
+fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
     // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
     // preview; everything else is fully decoded once and the preview is
     // derived from that, so the full image is already available.
-    let r = load_image_preview_full(path, PREVIEW_DIM).map_err(|e| e.to_string())?;
+    let r = load_image_preview_full(path, target_dim).map_err(|e| e.to_string())?;
     let image = ColorImage::from_rgba_unmultiplied(
         [r.preview.width as usize, r.preview.height as usize],
         &r.preview.rgba,
@@ -242,6 +248,7 @@ fn decode_preview(path: &Path) -> Result<PreviewData, String> {
         full: r.full.map(Arc::new),
         anim: r.anim.map(Arc::new),
         has_alpha: buffer_has_alpha(&r.preview.rgba),
+        below_target: r.below_target,
     })
 }
 
@@ -415,6 +422,8 @@ struct Preview {
     anim: Option<Arc<Animation>>,
     // Any pixel is translucent (draw checkerboard behind it).
     has_alpha: bool,
+    // Texture is below source density (re-decode if display grows).
+    below_target: bool,
 }
 
 /// Playback state for the animation currently on screen.
@@ -473,6 +482,7 @@ struct MyApp {
     show_panels: bool,
     next_scan: Instant, // periodic folder rescan (watcher)
     checker: Option<TextureHandle>, // transparency backdrop
+    display_dim: Option<(u32, u32)>, // central panel size in physical px
 }
 
 impl MyApp {
@@ -554,6 +564,7 @@ impl MyApp {
             show_panels: true,
             next_scan: Instant::now() + RESCAN_INTERVAL,
             checker: Some(make_checker_texture(ctx)),
+            display_dim: None,
         };
                 app.goto(ctx);
         app
@@ -637,11 +648,20 @@ impl MyApp {
             !self.previews.contains_key(p) && !self.failed.contains(&(p.clone(), Kind::Preview))
         };
 
+        // Preview texture target: the display area in physical pixels, so the
+        // texture is exactly as sharp as the screen can show.
+        let target_dim = self
+            .display_dim
+            .map(|(w, h)| w.max(h))
+            .unwrap_or(PREVIEW_TEXTURE_DIM)
+            .clamp(256, PREVIEW_TEXTURE_DIM);
+
         if need_preview(cur) {
             jobs.push(Job {
                 path: cur.clone(),
                 kind: Kind::Preview,
                 prio: PRIO_CURRENT_PREVIEW,
+                target_dim,
             });
         }
         if self.exif_loading {
@@ -649,6 +669,7 @@ impl MyApp {
                 path: cur.clone(),
                 kind: Kind::Exif,
                 prio: PRIO_CURRENT_EXIF,
+                target_dim: 0,
             });
         }
         if self.full_due.is_none() && self.needs_full(cur) {
@@ -656,6 +677,7 @@ impl MyApp {
                 path: cur.clone(),
                 kind: Kind::Full,
                 prio: PRIO_FULL,
+                target_dim: 0,
             });
         }
 
@@ -671,6 +693,7 @@ impl MyApp {
                         path: files[idx].clone(),
                         kind: Kind::Preview,
                         prio,
+                        target_dim,
                     });
                 }
             }
@@ -704,6 +727,7 @@ impl MyApp {
                                 full: p.full,
                                 anim: p.anim,
                                 has_alpha: p.has_alpha,
+                                below_target: p.below_target,
                             },
                         );
                         resched |= Some(&path) == self.cur.as_ref();
@@ -1147,6 +1171,35 @@ impl MyApp {
         let resp = ui.allocate_rect(panel, egui::Sense::click_and_drag());
         let painter = ui.painter_at(panel);
         let ppp = ctx.pixels_per_point();
+
+        // Track the display area in physical pixels; previews are decoded to
+        // match it. If the window grew, below-target textures are dropped so
+        // schedule() re-decodes them at the new, larger target.
+        let panel_px = (
+            (panel.width() * ppp).round() as u32,
+            (panel.height() * ppp).round() as u32,
+        );
+        if self.display_dim != Some(panel_px) {
+            let grew = self
+                .display_dim
+                .map_or(true, |(w, h)| panel_px.0.max(panel_px.1) > w.max(h));
+            self.display_dim = Some(panel_px);
+            if grew {
+                let stale: Vec<PathBuf> = self
+                    .previews
+                    .iter()
+                    .filter(|(_, pv)| pv.below_target)
+                    .map(|(p, _)| p.clone())
+                    .collect();
+                if !stale.is_empty() {
+                    for p in &stale {
+                        self.previews.remove(p);
+                        self.failed.remove(&(p.clone(), Kind::Preview));
+                    }
+                    self.schedule();
+                }
+            }
+        }
 
         let Some(shown) = self.shown.clone() else {
             let msg = if let Some(e) = &self.error {

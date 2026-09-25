@@ -421,7 +421,11 @@ pub struct PreviewAndFull {
     pub anim: Option<Animation>,
     /// True source dimensions from the header, when they could be sniffed.
     pub orig: Option<(u32, u32)>,
+    /// Source is larger than the requested target: the preview texture is
+    /// below source density and should be re-decoded if the display grows.
+    pub below_target: bool,
 }
+
 
 /// True if the bytes look like a GIF (magic bytes).
 fn is_gif_bytes(bytes: &[u8]) -> bool {
@@ -512,7 +516,7 @@ pub fn load_image_preview_full(
     let orig = image_dims_bytes(&bytes)
         .map(|(w, h)| if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
 
-    // Animated GIF: decode the whole loop once; no second full decode, no tiles.
+        // Animated GIF: decode the whole loop once; no second full decode, no tiles.
     if is_gif_bytes(&bytes) {
         if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start) {
             if anim.frames.len() > 1 {
@@ -522,6 +526,7 @@ pub fn load_image_preview_full(
                     full: None,
                     anim: Some(anim),
                     orig: Some(dims),
+                    below_target: false,
                 });
             }
         }
@@ -544,35 +549,45 @@ pub fn load_image_preview_full(
                 full: None,
                 anim: None,
                 orig,
+                // DCT preview never reaches source density for these files.
+                below_target: true,
             });
         }
         eprintln!("turbojpeg failed, falling back to image crate");
     }
 
     // One full decode serves as both the full-res image and the preview.
-    let (preview, full) = match orig {
+    let (preview, full, below_target) = match orig {
         // Too big to keep full-res: decode only a preview-sized copy, like the
         // old preview path did.
         Some((w, h)) if w as u64 * h as u64 > MAX_FULL_PIXELS => {
             let mut preview = decode_bytes(&bytes, max_dim, start)?;
             apply_exif_orientation(&mut preview, tag);
-            (preview, None)
+            (preview, None, false)
         }
         _ => {
             let mut full = decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?;
             apply_exif_orientation(&mut full, tag);
-            // Show the full-res image right away (capped at a 4K-crisp size) —
-            // a tiny preview texture would look blurry at fit-to-window even
-            // though the full data is already in memory.
-            let preview = if full.width.max(full.height) <= PREVIEW_TEXTURE_DIM {
+            // Show the full-res image right away (capped at the display
+            // target) — a tiny preview texture would look blurry at
+            // fit-to-window even though the full data is already in memory.
+            let preview = if full.width.max(full.height) <= max_dim {
                 full.clone()
             } else {
-                downscale_image(&full, PREVIEW_TEXTURE_DIM)
+                downscale_image(&full, max_dim)
             };
-            (preview, Some(full))
+            // Source bigger than the target: texture is below source density.
+            let below = full.width.max(full.height) > max_dim;
+            (preview, Some(full), below)
         }
     };
-    Ok(PreviewAndFull { preview, full, anim: None, orig })
+    Ok(PreviewAndFull {
+        preview,
+        full,
+        anim: None,
+        orig,
+        below_target,
+    })
 }
 
 /// True if the bytes look like a JPEG XL image (naked codestream or container).

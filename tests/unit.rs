@@ -42,13 +42,15 @@ fn test_preview_full_single_decode_small_file() {
     let p = tmp.path().join("wall.jpg");
     std::fs::write(&p, &jpeg).unwrap();
 
-    let r = image_viewer::load_image_preview_full(&p, 256).unwrap();
+    let r = image_viewer::load_image_preview_full(&p, 2560).unwrap();
     assert_eq!(r.orig, Some((2560, 1440)));
     let full = r.full.expect("fast file should come with full image");
     assert_eq!((full.width, full.height), (2560, 1440));
-    // The displayed texture is the full image itself, so fit-to-window is
-    // sharp immediately — no blurry preview stage.
+    // Texture matches the requested target exactly: fit-to-window is sharp on
+    // any display size, no blurry preview stage.
     assert_eq!((r.preview.width, r.preview.height), (2560, 1440));
+    // Source fits the target: texture is at full source density.
+    assert!(!r.below_target);
 }
 
 #[test]
@@ -66,12 +68,35 @@ fn test_preview_full_single_decode_png() {
     let p = tmp.path().join("photo.jpg"); // misnamed on purpose
     std::fs::write(&p, &png).unwrap();
 
-    let r = image_viewer::load_image_preview_full(&p, 256).unwrap();
+    let r = image_viewer::load_image_preview_full(&p, 1024).unwrap();
     assert_eq!(r.orig, Some((1024, 512)));
     let full = r.full.expect("PNG preview pass should include full image");
     assert_eq!((full.width, full.height), (1024, 512));
     // Displayed texture is full-res (single decode, no blurry preview stage).
     assert_eq!((r.preview.width, r.preview.height), (1024, 512));
+    assert!(!r.below_target);
+}
+
+#[test]
+fn test_preview_below_target_flagged() {
+    // Source larger than the requested target: texture is capped at the
+    // target and flagged below_target so a bigger window re-decodes it.
+    let tmp = tempfile::tempdir().unwrap();
+    let img = image::DynamicImage::new_rgba8(2048, 1024);
+    let mut png = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    let p = tmp.path().join("big.png");
+    std::fs::write(&p, &png).unwrap();
+
+    let r = image_viewer::load_image_preview_full(&p, 512).unwrap();
+    let full = r.full.expect("small pixel count keeps full decode");
+    assert_eq!((full.width, full.height), (2048, 1024));
+    assert_eq!((r.preview.width, r.preview.height), (512, 256));
+    assert!(r.below_target);
 }
 
 #[test]
