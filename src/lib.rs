@@ -135,6 +135,9 @@ pub enum LoadError {
 /// Hard cap on the long side of any decoded image (GPU texture limit).
 pub const MAX_TEXTURE_DIM: u32 = 16384;
 
+/// Don't keep a full-res copy of anything above this (RGBA = 4 bytes/pixel).
+pub const MAX_FULL_PIXELS: u64 = 300_000_000;
+
 /// Decode a JPEG straight to RGBA at the smallest DCT reduction (1/8, 1/4, 1/2, 1)
 /// whose long side is still >= `max_dim`. The IDCT runs at reduced size, so a
 /// 95 MP file never has to be materialised at full resolution.
@@ -177,28 +180,116 @@ pub fn load_image_full(path: &Path) -> Result<ImageData, LoadError> {
     load_image(path, MAX_TEXTURE_DIM)
 }
 
-/// Load and decode an image file (format detected from content, not extension).
-pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
-    let start = std::time::Instant::now();
-    let max_dim = max_dim.min(MAX_TEXTURE_DIM);
-    let bytes = std::fs::read(path)?;
+/// True if the bytes look like a JPEG (magic bytes), regardless of file name.
+pub fn is_jpeg_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+}
 
-    // JPEG fast path: decode at smallest DCT reduction that fits within GPU limits
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+/// Image dimensions sniffed from the file content, not the extension.
+/// Cheap: only the header is parsed.
+pub fn image_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// Files at or under this many pixels decode fast enough to skip the cheap
+/// preview stage entirely and go straight to a full decode. ~12 MP covers
+/// 4K screens and typical wallpapers; turbojpeg decodes those in well under
+/// 150 ms, so two stages would only add latency.
+pub const FAST_FULL_MAX_PIXELS: u64 = 12_000_000;
+
+/// Long side of the display texture when the preview pass decoded the full
+/// image. 4096 is crisp fit-to-window on a 4K screen; zooming further refines
+/// with tiles from the full-res data.
+pub const PREVIEW_TEXTURE_DIM: u32 = 4096;
+
+/// Result of a single-pass preview load: the preview to show immediately, plus
+/// the full-res image when it was already decoded in the same pass.
+pub struct PreviewAndFull {
+    pub preview: ImageData,
+    /// Set when the full-res decode already happened (small files and formats
+    /// without a fast preview path, e.g. PNG).
+    pub full: Option<ImageData>,
+    /// True source dimensions from the header, when they could be sniffed.
+    pub orig: Option<(u32, u32)>,
+}
+
+/// Load a preview in one pass, decoding the file only once.
+///
+/// * Large JPEGs get the cheap DCT-scaled preview; the full decode happens
+///   later on dwell, as before.
+/// * Everything else (PNG etc. has no reduced-decode shortcut, so preview and
+///   full cost the same) is decoded once at full resolution: the result is
+///   returned both as the full image and downscaled as the preview.
+pub fn load_image_preview_full(
+    path: &Path,
+    preview_max_dim: u32,
+) -> Result<PreviewAndFull, LoadError> {
+    let start = std::time::Instant::now();
+    let bytes = std::fs::read(path)?;
+    let max_dim = preview_max_dim.min(MAX_TEXTURE_DIM);
+    let orig = image_dims_bytes(&bytes);
+
+    let full_is_cheap = orig.map_or(true, |(w, h)| w as u64 * h as u64 <= FAST_FULL_MAX_PIXELS);
+
+    if is_jpeg_bytes(&bytes) && !full_is_cheap {
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
+            return Ok(PreviewAndFull {
+                preview: ImageData {
+                    width: w,
+                    height: h,
+                    rgba,
+                    load_time: start.elapsed(),
+                },
+                full: None,
+                orig,
+            });
+        }
+        eprintln!("turbojpeg failed, falling back to image crate");
+    }
+
+    // One full decode serves as both the full-res image and the preview.
+    let (preview, full) = match orig {
+        // Too big to keep full-res: decode only a preview-sized copy, like the
+        // old preview path did.
+        Some((w, h)) if w as u64 * h as u64 > MAX_FULL_PIXELS => {
+            (decode_bytes(&bytes, max_dim, start)?, None)
+        }
+        _ => {
+            let full = decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?;
+            // Show the full-res image right away (capped at a 4K-crisp size) —
+            // a tiny preview texture would look blurry at fit-to-window even
+            // though the full data is already in memory.
+            let preview = if full.width.max(full.height) <= PREVIEW_TEXTURE_DIM {
+                full.clone()
+            } else {
+                downscale_image(&full, PREVIEW_TEXTURE_DIM)
+            };
+            (preview, Some(full))
+        }
+    };
+    Ok(PreviewAndFull { preview, full, orig })
+}
+
+/// Decode bytes to RGBA, capped at `max_dim` on the long side. JPEGs use the
+/// turbojpeg DCT-scaling fast path; everything else goes through the `image` crate.
+fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<ImageData, LoadError> {
+    if is_jpeg_bytes(bytes) {
+        if let Ok((w, h, rgba)) = decode_jpeg_scaled(bytes, max_dim) {
             return Ok(ImageData {
                 width: w,
                 height: h,
                 rgba,
                 load_time: start.elapsed(),
             });
-        } else {
-            eprintln!("turbojpeg failed, falling back to image crate");
         }
+        eprintln!("turbojpeg failed, falling back to image crate");
     }
 
-    // Fallback: generic image crate decoder for all formats
-    let img = image::load_from_memory(&bytes)?;
+    let img = image::load_from_memory(bytes)?;
     let (w, h) = img.dimensions();
     let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
     let img = if scale < 1.0 {
@@ -217,6 +308,13 @@ pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
         rgba: rgba.into_raw(),
         load_time: start.elapsed(),
     })
+}
+
+/// Load and decode an image file (format detected from content, not extension).
+pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
+    let start = std::time::Instant::now();
+    let bytes = std::fs::read(path)?;
+    decode_bytes(&bytes, max_dim.min(MAX_TEXTURE_DIM), start)
 }
 
 /// Downscale a full ImageData (RGBA) to a smaller preview size quickly.

@@ -4,6 +4,9 @@
 //!   * All decoding happens on a small worker pool; the UI thread never blocks.
 //!   * Stage 1 (PREVIEW): JPEGs are decoded with DCT scaling to ~4K. Enough for a
 //!     pixel-sharp fit-to-window on a 4K screen, ready in ~1/3 s for a 95 MP file.
+//!     Formats with no reduced-decode shortcut (PNG, ...) and small files are
+//!     fully decoded once instead; the preview is downscaled from that result
+//!     and the full-res image is reused, never decoded twice.
 //!   * Stage 2 (FULL): if the source is bigger than the preview, the untouched
 //!     full-resolution pixels are decoded in the background (after a short dwell,
 //!     so holding an arrow key doesn't start useless decodes).
@@ -22,7 +25,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use image_viewer::{load_image, load_image_full, Config, Gallery, ImageData};
+use image_viewer::{
+    load_image_full, load_image_preview_full, Config, Gallery, ImageData, MAX_FULL_PIXELS,
+};
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -40,8 +45,6 @@ const TILE: u32 = 1024;
 const TILES_PER_FRAME: usize = 8;
 /// Max full-res tile textures kept on the GPU (64 x 4 MB = 256 MB).
 const MAX_TILES: usize = 64;
-/// Don't decode a full-res copy of anything above this (RGBA = 4 bytes/pixel).
-const MAX_FULL_PIXELS: u64 = 300_000_000;
 /// Wait this long on an image before starting its full-res decode.
 const FULL_DWELL: Duration = Duration::from_millis(120);
 /// Highest zoom, in screen points per source pixel.
@@ -91,6 +94,9 @@ struct PreviewData {
     image: ColorImage, // already converted on the worker thread
     orig: (u32, u32),  // source dimensions
     load_ms: u64,
+    // Full-res image when it was already decoded in the same pass
+    // (small files, and formats like PNG with no fast preview path).
+    full: Option<Arc<ImageData>>,
 }
 
 enum Msg {
@@ -213,15 +219,20 @@ fn run_job(job: &Job) -> Msg {
 }
 
 fn decode_preview(path: &Path) -> Result<PreviewData, String> {
-    // Header-only read: gives us the true source size even when we decode reduced.
-    let hdr = image::image_dimensions(path).ok();
-    let d = load_image(path, PREVIEW_DIM).map_err(|e| e.to_string())?;
-    let orig = hdr.unwrap_or((d.width, d.height));
-    let image = ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &d.rgba);
+    // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
+    // preview; everything else is fully decoded once and the preview is
+    // derived from that, so the full image is already available.
+    let r = load_image_preview_full(path, PREVIEW_DIM).map_err(|e| e.to_string())?;
+    let image = ColorImage::from_rgba_unmultiplied(
+        [r.preview.width as usize, r.preview.height as usize],
+        &r.preview.rgba,
+    );
+    let orig = r.orig.unwrap_or((r.preview.width, r.preview.height));
     Ok(PreviewData {
         image,
         orig,
-        load_ms: d.load_time.as_millis() as u64,
+        load_ms: r.preview.load_time.as_millis() as u64,
+        full: r.full.map(Arc::new),
     })
 }
 
@@ -273,6 +284,10 @@ struct Preview {
     orig: (u32, u32),
     load_ms: u64,
     used: u64, // LRU stamp
+    // Full-res image produced by the same decode pass (single-pass files).
+    // Kept on the cached preview so it can be adopted when the user
+    // navigates here, instead of being decoded again.
+    full: Option<Arc<ImageData>>,
 }
 
 struct Tile {
@@ -436,10 +451,13 @@ impl MyApp {
         let Some(pv) = self.previews.get(p) else {
             return false;
         };
-        let [tw, th] = pv.tex.size();
-        let tex_long = tw.max(th) as u32;
-        let orig_long = pv.orig.0.max(pv.orig.1);
-        orig_long > tex_long + 1 && (pv.orig.0 as u64 * pv.orig.1 as u64) <= MAX_FULL_PIXELS
+        // The preview pass already decoded and kept the full image (adopted by
+        // sync_shown) — nothing more to decode.
+        if pv.full.is_some() {
+            return false;
+        }
+        // Otherwise a full decode is wanted unless the source is too big to hold.
+        (pv.orig.0 as u64 * pv.orig.1 as u64) <= MAX_FULL_PIXELS
     }
 
     fn schedule(&mut self) {
@@ -521,6 +539,7 @@ impl MyApp {
                                 orig: p.orig,
                                 load_ms: p.load_ms,
                                 used: self.clock,
+                                full: p.full,
                             },
                         );
                         resched |= Some(&path) == self.cur.as_ref();
@@ -597,8 +616,24 @@ impl MyApp {
             return;
         };
         if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
-            self.shown = Some(cur);
+            self.shown = Some(cur.clone());
             self.view.fit = true;
+        }
+        // Adopt the full image that came with the preview's decode pass
+        // (single-pass files), whether it just arrived or was preloaded
+        // while the user was on a neighbouring image.
+        if let Some(pv) = self.previews.get(&cur) {
+            if let Some(data) = &pv.full {
+                if self.full.as_ref().map_or(true, |f| f.path != cur) {
+                    let load_ms = data.load_time.as_millis() as u64;
+                    self.full = Some(FullImage {
+                        path: cur.clone(),
+                        data: Arc::clone(data),
+                        tiles: HashMap::new(),
+                        load_ms,
+                    });
+                }
+            }
         }
         if let Some(s) = &self.shown {
             if self.full.as_ref().is_some_and(|f| &f.path != s) {

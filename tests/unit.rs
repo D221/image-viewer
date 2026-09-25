@@ -1,4 +1,78 @@
-use image_viewer::{Gallery, ZoomPan};
+use image_viewer::{load_image, Gallery, ZoomPan};
+
+#[test]
+fn test_load_misnamed_png_with_jpg_extension() {
+    // A real PNG saved with a .jpg extension must still decode fully;
+    // format detection is content-based, never extension-based.
+    // Build a valid PNG via the encoder, then load it through a
+    // .jpg-named path.
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = tmp.path().join("misnamed.jpg");
+    let img = image::DynamicImage::new_rgba8(64, 32);
+    let mut real_png = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut real_png),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    std::fs::write(&fake, &real_png).unwrap();
+
+    let data = load_image(&fake, 1600).expect("misnamed PNG should load");
+    assert_eq!((data.width, data.height), (64, 32));
+    assert!(!data.rgba.is_empty());
+
+    // Full-res path (what the viewer uses for tiles) must also work.
+    let full = load_image(&fake, image_viewer::MAX_TEXTURE_DIM).expect("full load");
+    assert_eq!((full.width, full.height), (64, 32));
+}
+
+#[test]
+fn test_preview_full_single_decode_small_file() {
+    // Files small enough to decode fast (e.g. a 2560x1440 wallpaper) must skip
+    // the preview stage: load_image_preview_full returns the full image
+    // directly, no second decode and no dwell wait.
+    let tmp = tempfile::tempdir().unwrap();
+    let img = image::DynamicImage::new_rgba8(2560, 1440);
+    let mut jpeg = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut jpeg),
+        image::ImageFormat::Jpeg,
+    )
+    .unwrap();
+    let p = tmp.path().join("wall.jpg");
+    std::fs::write(&p, &jpeg).unwrap();
+
+    let r = image_viewer::load_image_preview_full(&p, 256).unwrap();
+    assert_eq!(r.orig, Some((2560, 1440)));
+    let full = r.full.expect("fast file should come with full image");
+    assert_eq!((full.width, full.height), (2560, 1440));
+    // The displayed texture is the full image itself, so fit-to-window is
+    // sharp immediately — no blurry preview stage.
+    assert_eq!((r.preview.width, r.preview.height), (2560, 1440));
+}
+
+#[test]
+fn test_preview_full_single_decode_png() {
+    // PNG has no reduced-decode shortcut, so the preview pass must decode once
+    // at full resolution and hand back the full image with the preview.
+    let tmp = tempfile::tempdir().unwrap();
+    let img = image::DynamicImage::new_rgba8(1024, 512);
+    let mut png = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png),
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    let p = tmp.path().join("photo.jpg"); // misnamed on purpose
+    std::fs::write(&p, &png).unwrap();
+
+    let r = image_viewer::load_image_preview_full(&p, 256).unwrap();
+    assert_eq!(r.orig, Some((1024, 512)));
+    let full = r.full.expect("PNG preview pass should include full image");
+    assert_eq!((full.width, full.height), (1024, 512));
+    // Displayed texture is full-res (single decode, no blurry preview stage).
+    assert_eq!((r.preview.width, r.preview.height), (1024, 512));
+}
 
 #[test]
 fn test_scan_folder_returns_files() {
