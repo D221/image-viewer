@@ -290,11 +290,12 @@ fn orientation_swaps_dims(tag: u16) -> bool {
 /// Tags 0 and 1 are no-ops; 2/4 flip, 3 rotates 180°, 6/8 rotate 90/270° CW,
 /// 5/7 are the mirrored diagonals (transpose / transverse).
 pub fn apply_exif_orientation(data: &mut ImageData, tag: u16) {
-    let Some(mut img) = RgbaImage::from_raw(
-        data.width,
-        data.height,
-        std::mem::take(&mut data.rgba),
-    ) else {
+    let buf = std::mem::take(&mut data.rgba);
+    let Some(mut img) = RgbaImage::from_raw(data.width, data.height, buf) else {
+        // Buffer length doesn't match the declared dims — put back whatever
+        // we got instead of leaving an empty buffer (which would trip the
+        // texture-size assert later).
+        data.rgba = Vec::new();
         return;
     };
     let rotated: RgbaImage = match tag {
@@ -487,6 +488,7 @@ fn load_animation(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Resu
         if data.width.max(data.height) > max_dim {
             data = downscale_image(&data, max_dim);
         }
+        let data = normalized(data);
         total += data.rgba.len();
         delays.push(Duration::from(frame.delay()));
         frames.push(data);
@@ -542,12 +544,12 @@ pub fn load_image_preview_full(
 
     if is_jpeg_bytes(&bytes) && !full_is_cheap {
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
-            let mut preview = ImageData {
+            let mut preview = normalized(ImageData {
                 width: w,
                 height: h,
                 rgba,
                 load_time: start.elapsed(),
-            };
+            });
             apply_exif_orientation(&mut preview, tag);
             return Ok(PreviewAndFull {
                 preview,
@@ -566,12 +568,12 @@ pub fn load_image_preview_full(
         // Too big to keep full-res: decode only a preview-sized copy, like the
         // old preview path did.
         Some((w, h)) if w as u64 * h as u64 > MAX_FULL_PIXELS => {
-            let mut preview = decode_bytes(&bytes, max_dim, start)?;
+            let mut preview = normalized(decode_bytes(&bytes, max_dim, start)?);
             apply_exif_orientation(&mut preview, tag);
             (preview, None, false)
         }
         _ => {
-            let mut full = decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?;
+            let mut full = normalized(decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?);
             apply_exif_orientation(&mut full, tag);
             // Show the full-res image right away (capped at the display
             // target) — a tiny preview texture would look blurry at
@@ -710,7 +712,7 @@ fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result
 pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
     let start = std::time::Instant::now();
     let bytes = std::fs::read(path)?;
-    let mut data = decode_bytes(&bytes, max_dim.min(MAX_TEXTURE_DIM), start)?;
+    let mut data = normalized(decode_bytes(&bytes, max_dim.min(MAX_TEXTURE_DIM), start)?);
     if is_jpeg_bytes(&bytes) {
         apply_exif_orientation(&mut data, exif_orientation(path));
     }
@@ -971,10 +973,37 @@ fn contributions(
     out
 }
 
+/// Normalize a decoded ImageData so dims and buffer agree. If the decoder's
+/// buffer length doesn't match the declared dimensions, trust the buffer and
+/// recompute dims when possible, otherwise pad the buffer. This guards
+/// against decoders that mis-report sizes on damaged files.
+pub fn normalized(mut data: ImageData) -> ImageData {
+    let want = data.width as usize * data.height as usize * 4;
+    if data.rgba.len() == want {
+        return data;
+    }
+    let got = data.rgba.len();
+    // If the buffer is self-consistent at some other height (or width), trust
+    // it: that's what a decoder that mis-reported its size looks like.
+    if data.width > 0 && got % (data.width as usize * 4) == 0 && got >= data.width as usize * 4 {
+        data.height = (got / (data.width as usize * 4)) as u32;
+        return data;
+    }
+    if data.height > 0 && got % (data.height as usize * 4) == 0 && got >= data.height as usize * 4 {
+        data.width = (got / (data.height as usize * 4)) as u32;
+        return data;
+    }
+    eprintln!(
+        "image buffer {} bytes does not match {}x{}; padding to size",
+        got, data.width, data.height
+    );
+    data.rgba.resize(want, 0);
+    data
+}
+
 /// True if any pixel has a non-opaque alpha channel (used to decide whether
 /// to draw the transparency checkerboard).
-pub fn buffer_has_alpha(rgba: &[u8]) -> bool {
-    rgba.chunks_exact(4).any(|p| p[3] != 255)
+pub fn buffer_has_alpha(rgba: &[u8]) -> bool {    rgba.chunks_exact(4).any(|p| p[3] != 255)
 }
 
 /// A simple gallery state: a list of files and a current index.

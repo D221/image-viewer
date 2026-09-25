@@ -291,6 +291,47 @@ fn cosy_check(c: &[u8]) {
 }
 
 #[test]
+fn test_normalized_fixes_mismatched_buffer() {
+    use image_viewer::ImageData;
+
+    // A decoder that returns one row fewer than declared (the exact pattern
+    // from the epaint size-assert crash: 621x974 declared, 621x973 buffer).
+    let w = 621u32;
+    let rows = 973usize;
+    let data = ImageData {
+        width: w,
+        height: 974,
+        rgba: vec![7u8; w as usize * rows * 4],
+        load_time: std::time::Duration::ZERO,
+    };
+    let fixed = image_viewer::normalized(data);
+    assert_eq!((fixed.width, fixed.height), (621, 973));
+    assert_eq!(fixed.rgba.len(), 621 * 973 * 4);
+
+    // Buffer shorter in a non-row-aligned way: padded to declared dims.
+    let data = ImageData {
+        width: 10,
+        height: 10,
+        rgba: vec![1u8; 10 * 10 * 4 - 7],
+        load_time: std::time::Duration::ZERO,
+    };
+    let fixed = image_viewer::normalized(data);
+    assert_eq!((fixed.width, fixed.height), (10, 10));
+    assert_eq!(fixed.rgba.len(), 400);
+
+    // Consistent input passes through untouched.
+    let data = ImageData {
+        width: 3,
+        height: 2,
+        rgba: vec![0u8; 3 * 3 * 4 * 4 / 4],
+        load_time: std::time::Duration::ZERO,
+    };
+    let fixed = image_viewer::normalized(data);
+    assert_eq!((fixed.width, fixed.height), (3, 3));
+    assert_eq!(fixed.rgba.len(), 36);
+}
+
+#[test]
 fn test_format_magic_detection() {
     // JXL naked codestream and container both detected.
     assert!(image_viewer::is_jxl_bytes(&[0xFF, 0x0A, 1, 2, 3]));
