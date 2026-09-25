@@ -75,6 +75,222 @@ fn test_preview_full_single_decode_png() {
 }
 
 #[test]
+fn test_apply_exif_orientation() {
+    // 2x1 image, pixels [A, B].
+    let mk = |tag: u16| {
+        let mut d = image_viewer::ImageData {
+            width: 2,
+            height: 1,
+            rgba: vec![10, 0, 0, 255, 20, 0, 0, 255],
+            load_time: std::time::Duration::ZERO,
+        };
+        image_viewer::apply_exif_orientation(&mut d, tag);
+        d
+    };
+
+    // 6 = rotate 90 CW: 2x1 column becomes 1x2, A on top.
+    let d = mk(6);
+    assert_eq!((d.width, d.height), (1, 2));
+    assert_eq!(&d.rgba[0..4], &[10, 0, 0, 255]);
+    assert_eq!(&d.rgba[4..8], &[20, 0, 0, 255]);
+
+    // 8 = rotate 270 CW: B on top.
+    let d = mk(8);
+    assert_eq!((d.width, d.height), (1, 2));
+    assert_eq!(&d.rgba[0..4], &[20, 0, 0, 255]);
+    assert_eq!(&d.rgba[4..8], &[10, 0, 0, 255]);
+
+    // 3 = rotate 180: row stays a row, reversed.
+    let d = mk(3);
+    assert_eq!((d.width, d.height), (2, 1));
+    assert_eq!(&d.rgba[0..4], &[20, 0, 0, 255]);
+
+    // 5 = transpose: same shape as rotate 90 for this input.
+    let d = mk(5);
+    assert_eq!((d.width, d.height), (1, 2));
+    assert_eq!(&d.rgba[0..4], &[10, 0, 0, 255]);
+
+    // 2 = mirror horizontal.
+    let d = mk(2);
+    assert_eq!((d.width, d.height), (2, 1));
+    assert_eq!(&d.rgba[0..4], &[20, 0, 0, 255]);
+
+    // 0/1 are no-ops.
+    let d = mk(1);
+    assert_eq!((d.width, d.height), (2, 1));
+    assert_eq!(&d.rgba[0..4], &[10, 0, 0, 255]);
+}
+
+#[test]
+fn test_scan_folder_webp_and_gif() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.webp"), b"fake_webp").ok();
+    std::fs::write(tmp.path().join("b.gif"), b"fake_gif").ok();
+    std::fs::write(tmp.path().join("c.txt"), b"nope").ok();
+
+    let gallery = image_viewer::Gallery::new(tmp.path());
+    assert_eq!(gallery.len(), 2);
+}
+
+#[test]
+fn test_scan_folder_jxl_avif_heic() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.jxl"), b"fake").ok();
+    std::fs::write(tmp.path().join("b.avif"), b"fake").ok();
+    std::fs::write(tmp.path().join("c.heic"), b"fake").ok();
+    std::fs::write(tmp.path().join("d.heif"), b"fake").ok();
+    std::fs::write(tmp.path().join("e.txt"), b"nope").ok();
+
+    let gallery = image_viewer::Gallery::new(tmp.path());
+    assert_eq!(gallery.len(), 4);
+}
+
+#[test]
+fn test_format_magic_detection() {
+    // JXL naked codestream and container both detected.
+    assert!(image_viewer::is_jxl_bytes(&[0xFF, 0x0A, 1, 2, 3]));
+    let container = vec![0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A];
+    assert!(image_viewer::is_jxl_bytes(&container));
+
+    // ISOBMFF brand detection for the HEIF family.
+    let avif = {
+        let mut b = vec![0, 0, 0, 0x20];
+        b.extend(b"ftypavif");
+        b.extend(vec![0u8; 24]);
+        b
+    };
+    assert!(image_viewer::is_heif_bytes(&avif));
+    assert!(!image_viewer::is_jxl_bytes(&avif));
+
+    let mp4 = {
+        let mut b = vec![0, 0, 0, 0x20];
+        b.extend(b"ftypmp42");
+        b.extend(vec![0u8; 24]);
+        b
+    };
+    assert!(!image_viewer::is_heif_bytes(&mp4));
+}
+
+#[test]
+fn test_load_gif_first_frame() {
+    // Animated/still GIFs decode via the image crate; the first frame is used.
+    let tmp = tempfile::tempdir().unwrap();
+    let img = image::DynamicImage::new_rgba8(48, 24);
+    let mut gif = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut gif),
+        image::ImageFormat::Gif,
+    )
+    .unwrap();
+    let p = tmp.path().join("frame.gif");
+    std::fs::write(&p, &gif).unwrap();
+
+    let data = image_viewer::load_image(&p, 1600).expect("gif should load");
+    assert_eq!((data.width, data.height), (48, 24));
+    assert!(!data.rgba.is_empty());
+}
+
+#[test]
+fn test_animated_gif_decode() {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, RgbaImage};
+
+    // Encode a real 2-frame animated GIF (red, then blue) via the encoder.
+    let mut gif = Vec::new();
+    {
+        let mut enc = GifEncoder::new(std::io::Cursor::new(&mut gif));
+        enc.set_repeat(Repeat::Infinite).unwrap();
+        enc.encode_frame(Frame::from_parts(
+            RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])),
+            0,
+            0,
+            Delay::from_numer_denom_ms(100, 1),
+        ))
+        .unwrap();
+        enc.encode_frame(
+            Frame::from_parts(
+                RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(200, 1),
+            ),
+        )
+        .unwrap();
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("anim.gif");
+    std::fs::write(&p, &gif).unwrap();
+
+    let r = image_viewer::load_image_preview_full(&p, 256).unwrap();
+    let anim = r.anim.expect("animated GIF should carry frames");
+    assert_eq!(anim.frames.len(), 2);
+    assert_eq!((anim.frames[0].width, anim.frames[0].height), (8, 8));
+    assert_eq!(anim.delays[0], std::time::Duration::from_millis(100));
+    assert_eq!(anim.delays[1], std::time::Duration::from_millis(200));
+    assert!(anim.total_duration() >= std::time::Duration::from_millis(300));
+    // Preview is frame 0; no full decode and no tiles for animations.
+    assert_eq!((r.preview.width, r.preview.height), (8, 8));
+    assert!(r.full.is_none());
+}
+
+/// Build a minimal JPEG with an EXIF APP1 segment carrying the given
+/// orientation tag, like a camera would.
+fn make_jpeg_with_orientation(tag: u16) -> Vec<u8> {
+    let img = image::DynamicImage::new_rgb8(3, 2);
+    let mut jpeg = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut jpeg),
+        image::ImageFormat::Jpeg,
+    )
+    .unwrap();
+
+    // TIFF header + IFD0 with a single SHORT entry: Orientation = tag.
+    let mut tiff = Vec::new();
+    tiff.extend(b"II");
+    tiff.extend(42u16.to_le_bytes());
+    tiff.extend(8u32.to_le_bytes()); // IFD0 offset
+    tiff.extend(1u16.to_le_bytes()); // one entry
+    tiff.extend(0x0112u16.to_le_bytes()); // Orientation tag
+    tiff.extend(3u16.to_le_bytes()); // type SHORT
+    tiff.extend(1u32.to_le_bytes()); // count
+    tiff.extend((tag as u16).to_le_bytes()); // inline value
+    tiff.extend(0u16.to_le_bytes()); // value padding
+    tiff.extend(0u32.to_le_bytes()); // no IFD1
+
+    let payload_len = (6 + tiff.len()) as u16;
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend(payload_len.to_be_bytes());
+    app1.extend(b"Exif\0\0");
+    app1.extend(&tiff);
+
+    let mut out = vec![0xFF, 0xD8]; // SOI
+    out.extend(app1);
+    out.extend(&jpeg[2..]); // rest of the JPEG
+    out
+}
+
+#[test]
+fn test_exif_orientation_applied_to_load() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A 3x2 JPEG tagged "rotate 90 CW" must come back 2x3.
+    let p6 = tmp.path().join("rot90.jpg");
+    std::fs::write(&p6, make_jpeg_with_orientation(6)).unwrap();
+    let d = image_viewer::load_image(&p6, 1600).expect("load");
+    assert_eq!((d.width, d.height), (2, 3));
+
+    // Unrotated (tag 1) keeps the encoded dimensions.
+    let p1 = tmp.path().join("normal.jpg");
+    std::fs::write(&p1, make_jpeg_with_orientation(1)).unwrap();
+    let d = image_viewer::load_image(&p1, 1600).expect("load");
+    assert_eq!((d.width, d.height), (3, 2));
+
+    // Preview path reports the rotated source dimensions too.
+    let r = image_viewer::load_image_preview_full(&p6, 256).unwrap();
+    assert_eq!(r.orig, Some((2, 3)));
+}
+
+#[test]
 fn test_scan_folder_returns_files() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("test.jpg"), b"fake_jpg_data").ok();

@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 // Import GenericImageView to access dimensions() method
 use image::{DynamicImage, GenericImageView, RgbaImage};
@@ -88,7 +89,9 @@ impl Config {
 }
 
 /// Supported image extensions for gallery scanning.
-pub const SUPPORTED_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+pub const SUPPORTED_EXTENSIONS: [&str; 9] = [
+    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif",
+];
 
 /// Scan a directory for supported image files, sorted alphabetically.
 pub fn scan_folder(folder: &Path) -> Vec<PathBuf> {
@@ -128,8 +131,68 @@ pub enum LoadError {
     Io(#[from] std::io::Error),
     #[error("decode error: {0}")]
     Decode(#[from] image::ImageError),
+    #[error("decoder error: {0}")]
+    Other(String),
     #[error("jpeg error: {0}")]
     Jpeg(String),
+}
+
+/// EXIF orientation tag (1-8) of a JPEG file, or 0 when absent/unreadable.
+/// Only JPEG carries the tag in practice; callers gate on content sniffing.
+fn exif_orientation(path: &Path) -> u16 {
+    nom_exif::read_exif(path)
+        .ok()
+        .and_then(|exif| exif.get(nom_exif::ExifTag::Orientation).and_then(|v| v.as_u16()))
+        .unwrap_or(0)
+}
+
+/// True if the orientation tag rotates by 90/270, swapping width and height.
+fn orientation_swaps_dims(tag: u16) -> bool {
+    matches!(tag, 5..=8)
+}
+
+/// Apply an EXIF orientation tag (1-8) to decoded RGBA pixels in place.
+/// Tags 0 and 1 are no-ops; 2/4 flip, 3 rotates 180°, 6/8 rotate 90/270° CW,
+/// 5/7 are the mirrored diagonals (transpose / transverse).
+pub fn apply_exif_orientation(data: &mut ImageData, tag: u16) {
+    let Some(mut img) = RgbaImage::from_raw(
+        data.width,
+        data.height,
+        std::mem::take(&mut data.rgba),
+    ) else {
+        return;
+    };
+    let rotated: RgbaImage = match tag {
+        2 => {
+            image::imageops::flip_horizontal_in_place(&mut img);
+            img
+        }
+        3 => image::imageops::rotate180(&img),
+        4 => {
+            image::imageops::flip_vertical_in_place(&mut img);
+            img
+        }
+        5 => {
+            let mut img = image::imageops::rotate90(&img);
+            image::imageops::flip_horizontal_in_place(&mut img);
+            img
+        }
+        6 => image::imageops::rotate90(&img),
+        7 => {
+            let mut img = image::imageops::rotate270(&img);
+            image::imageops::flip_horizontal_in_place(&mut img);
+            img
+        }
+        8 => image::imageops::rotate270(&img),
+        _ => {
+            // Unknown or normal: put the untouched buffer back.
+            data.rgba = img.into_raw();
+            return;
+        }
+    };
+    data.width = rotated.width();
+    data.height = rotated.height();
+    data.rgba = rotated.into_raw();
 }
 
 /// Hard cap on the long side of any decoded image (GPU texture limit).
@@ -188,6 +251,17 @@ pub fn is_jpeg_bytes(bytes: &[u8]) -> bool {
 /// Image dimensions sniffed from the file content, not the extension.
 /// Cheap: only the header is parsed.
 pub fn image_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
+    // Formats the `image` crate can't open get their own header probes.
+    if is_jxl_bytes(bytes) {
+        return jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(bytes))
+            .ok()
+            .map(|dec| image::ImageDecoder::dimensions(&dec));
+    }
+    if is_heif_bytes(bytes) {
+        return heic::ImageInfo::from_bytes(bytes)
+            .ok()
+            .map(|info| (info.width, info.height));
+    }
     image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?
@@ -213,8 +287,78 @@ pub struct PreviewAndFull {
     /// Set when the full-res decode already happened (small files and formats
     /// without a fast preview path, e.g. PNG).
     pub full: Option<ImageData>,
+    /// Fully decoded animation when the file is an animated GIF.
+    pub anim: Option<Animation>,
     /// True source dimensions from the header, when they could be sniffed.
     pub orig: Option<(u32, u32)>,
+}
+
+/// True if the bytes look like a GIF (magic bytes).
+fn is_gif_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF8")
+}
+
+/// Caps for animation decoding: stop when either limit is hit.
+pub const MAX_ANIM_FRAMES: usize = 240;
+pub const MAX_ANIM_BYTES: usize = 256 * 1024 * 1024;
+
+/// A decoded animation: fully composited RGBA frames and their delays.
+#[derive(Debug, Clone)]
+pub struct Animation {
+    pub frames: Vec<ImageData>,
+    pub delays: Vec<Duration>,
+}
+
+impl Animation {
+    /// Total loop duration. Zero-delay frames are floored to 20 ms (50 fps),
+    /// matching how browsers clamp pathological GIF timing.
+    pub fn total_duration(&self) -> Duration {
+        let ms: u64 = self
+            .delays
+            .iter()
+            .map(|d| d.as_millis().max(20) as u64)
+            .sum();
+        Duration::from_millis(ms)
+    }
+}
+
+/// Decode an animated GIF into composited frames, capped at the limits above.
+/// The `image` crate composites partial frames and applies disposal methods.
+fn load_animation(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<Animation, LoadError> {
+    use image::AnimationDecoder;
+    let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+    let mut frames = Vec::new();
+    let mut delays = Vec::new();
+    let mut total = 0usize;
+    for frame in dec.into_frames() {
+        if frames.len() >= MAX_ANIM_FRAMES || total >= MAX_ANIM_BYTES {
+            break;
+        }
+        // Tolerate a truncated trailing frame: keep what we have.
+        let frame = match frame {
+            Ok(f) => f,
+            Err(_) => break,
+        };
+        let mut data = ImageData {
+            width: frame.buffer().width(),
+            height: frame.buffer().height(),
+            rgba: frame.buffer().clone().into_raw(),
+            load_time: start.elapsed(),
+        };
+        if data.width.max(data.height) > max_dim {
+            data = downscale_image(&data, max_dim);
+        }
+        total += data.rgba.len();
+        delays.push(Duration::from(frame.delay()));
+        frames.push(data);
+    }
+    if frames.is_empty() {
+        return Err(LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "no decodable animation frames",
+        )));
+    }
+    Ok(Animation { frames, delays })
 }
 
 /// Load a preview in one pass, decoding the file only once.
@@ -231,20 +375,44 @@ pub fn load_image_preview_full(
     let start = std::time::Instant::now();
     let bytes = std::fs::read(path)?;
     let max_dim = preview_max_dim.min(MAX_TEXTURE_DIM);
-    let orig = image_dims_bytes(&bytes);
+    // EXIF orientation: camera pixels are stored unrotated; the tag says how
+    // to display them. Rotate after decode so preview and full agree, and fix
+    // the reported source dimensions accordingly.
+    let tag = if is_jpeg_bytes(&bytes) { exif_orientation(path) } else { 0 };
+    let orig = image_dims_bytes(&bytes)
+        .map(|(w, h)| if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
+
+    // Animated GIF: decode the whole loop once; no second full decode, no tiles.
+    if is_gif_bytes(&bytes) {
+        if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start) {
+            if anim.frames.len() > 1 {
+                let dims = (anim.frames[0].width, anim.frames[0].height);
+                return Ok(PreviewAndFull {
+                    preview: anim.frames[0].clone(),
+                    full: None,
+                    anim: Some(anim),
+                    orig: Some(dims),
+                });
+            }
+        }
+        // Static or unreadable GIF: fall through to the normal decode path.
+    }
 
     let full_is_cheap = orig.map_or(true, |(w, h)| w as u64 * h as u64 <= FAST_FULL_MAX_PIXELS);
 
     if is_jpeg_bytes(&bytes) && !full_is_cheap {
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
+            let mut preview = ImageData {
+                width: w,
+                height: h,
+                rgba,
+                load_time: start.elapsed(),
+            };
+            apply_exif_orientation(&mut preview, tag);
             return Ok(PreviewAndFull {
-                preview: ImageData {
-                    width: w,
-                    height: h,
-                    rgba,
-                    load_time: start.elapsed(),
-                },
+                preview,
                 full: None,
+                anim: None,
                 orig,
             });
         }
@@ -256,10 +424,13 @@ pub fn load_image_preview_full(
         // Too big to keep full-res: decode only a preview-sized copy, like the
         // old preview path did.
         Some((w, h)) if w as u64 * h as u64 > MAX_FULL_PIXELS => {
-            (decode_bytes(&bytes, max_dim, start)?, None)
+            let mut preview = decode_bytes(&bytes, max_dim, start)?;
+            apply_exif_orientation(&mut preview, tag);
+            (preview, None)
         }
         _ => {
-            let full = decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?;
+            let mut full = decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?;
+            apply_exif_orientation(&mut full, tag);
             // Show the full-res image right away (capped at a 4K-crisp size) —
             // a tiny preview texture would look blurry at fit-to-window even
             // though the full data is already in memory.
@@ -271,11 +442,95 @@ pub fn load_image_preview_full(
             (preview, Some(full))
         }
     };
-    Ok(PreviewAndFull { preview, full, orig })
+    Ok(PreviewAndFull { preview, full, anim: None, orig })
+}
+
+/// True if the bytes look like a JPEG XL image (naked codestream or container).
+pub fn is_jxl_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0x0A])
+        || bytes.starts_with(&[
+            0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A,
+        ])
+}
+
+/// The 4CC brand of an ISOBMFF file (HEIC/HEIF/AVIF family), if any.
+fn isobmff_brand(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        Some(&bytes[8..12])
+    } else {
+        None
+    }
+}
+
+/// True if the bytes look like a HEIF-family file (HEIC/HEIF/AVIF).
+pub fn is_heif_bytes(bytes: &[u8]) -> bool {
+    isobmff_brand(bytes).is_some_and(|brand| {
+        matches!(
+            brand,
+            b"avif" | b"avis" | b"heic" | b"heix" | b"mif1" | b"msf1" | b"heim" | b"heis"
+                | b"hevc" | b"hevx" | b"av01"
+        )
+    })
+}
+
+/// Decode JPEG XL bytes via jxl-oxide (pure Rust), routed through the image crate.
+fn decode_jxl(bytes: &[u8]) -> Result<DynamicImage, LoadError> {
+    use jxl_oxide::integration::JxlDecoder;
+    let dec = JxlDecoder::new(std::io::Cursor::new(bytes))?;
+    Ok(DynamicImage::from_decoder(dec)?)
+}
+
+/// Decode HEIC/HEIF/AVIF bytes via the pure-Rust `heic` crate (AV1 via rav1d
+/// for AVIF files). Container transforms (clap/irot/imir) are applied.
+fn decode_heif(bytes: &[u8]) -> Result<DynamicImage, LoadError> {
+    let mut limits = heic::Limits::default();
+    limits.max_width = Some(MAX_TEXTURE_DIM as u64);
+    limits.max_height = Some(MAX_TEXTURE_DIM as u64);
+    limits.max_pixels = Some(MAX_FULL_PIXELS);
+    let out = heic::DecoderConfig::new()
+        .decode_request(bytes)
+        .with_output_layout(heic::PixelLayout::Rgba8)
+        .with_limits(&limits)
+        .decode()
+        .map_err(|e| LoadError::Other(e.to_string()))?;
+    let img = RgbaImage::from_raw(out.width, out.height, out.data).ok_or_else(|| {
+        LoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HEIF decode returned a mismatched pixel buffer",
+        ))
+    })?;
+    Ok(DynamicImage::ImageRgba8(img))
+}
+
+/// Resize a decoded DynamicImage to `max_dim` and convert to ImageData.
+fn dynamic_to_image_data(
+    img: DynamicImage,
+    max_dim: u32,
+    start: std::time::Instant,
+) -> ImageData {
+    let (w, h) = img.dimensions();
+    let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
+    let img = if scale < 1.0 {
+        let (nw, nh) = (
+            ((w as f32 * scale) as u32).max(1),
+            ((h as f32 * scale) as u32).max(1),
+        );
+        img.resize(nw, nh, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    ImageData {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+        load_time: start.elapsed(),
+    }
 }
 
 /// Decode bytes to RGBA, capped at `max_dim` on the long side. JPEGs use the
-/// turbojpeg DCT-scaling fast path; everything else goes through the `image` crate.
+/// turbojpeg DCT-scaling fast path; everything else goes through the `image` crate
+/// or the dedicated pure-Rust decoders for formats it can't handle.
 fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<ImageData, LoadError> {
     if is_jpeg_bytes(bytes) {
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(bytes, max_dim) {
@@ -289,32 +544,34 @@ fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result
         eprintln!("turbojpeg failed, falling back to image crate");
     }
 
+    if is_jxl_bytes(bytes) {
+        match decode_jxl(bytes) {
+            Ok(img) => return Ok(dynamic_to_image_data(img, max_dim, start)),
+            Err(e) => eprintln!("JXL decode failed: {e}"),
+        }
+    }
+
+    if is_heif_bytes(bytes) {
+        match decode_heif(bytes) {
+            Ok(img) => return Ok(dynamic_to_image_data(img, max_dim, start)),
+            Err(e) => eprintln!("HEIF/AVIF decode failed: {e}"),
+        }
+    }
+
     let img = image::load_from_memory(bytes)?;
-    let (w, h) = img.dimensions();
-    let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
-    let img = if scale < 1.0 {
-        let (nw, nh) = (
-            ((w as f32 * scale) as u32).max(1),
-            ((h as f32 * scale) as u32).max(1),
-        );
-        img.resize(nw, nh, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
-    let rgba = img.to_rgba8();
-    Ok(ImageData {
-        width: rgba.width(),
-        height: rgba.height(),
-        rgba: rgba.into_raw(),
-        load_time: start.elapsed(),
-    })
+    Ok(dynamic_to_image_data(img, max_dim, start))
 }
 
 /// Load and decode an image file (format detected from content, not extension).
+/// JPEGs are rotated according to their EXIF orientation tag.
 pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
     let start = std::time::Instant::now();
     let bytes = std::fs::read(path)?;
-    decode_bytes(&bytes, max_dim.min(MAX_TEXTURE_DIM), start)
+    let mut data = decode_bytes(&bytes, max_dim.min(MAX_TEXTURE_DIM), start)?;
+    if is_jpeg_bytes(&bytes) {
+        apply_exif_orientation(&mut data, exif_orientation(path));
+    }
+    Ok(data)
 }
 
 /// Downscale a full ImageData (RGBA) to a smaller preview size quickly.

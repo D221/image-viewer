@@ -26,7 +26,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    load_image_full, load_image_preview_full, Config, Gallery, ImageData, MAX_FULL_PIXELS,
+    load_image_full, load_image_preview_full, Animation, Config, Gallery, ImageData,
+    MAX_FULL_PIXELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,8 @@ const TILES_PER_FRAME: usize = 8;
 const MAX_TILES: usize = 64;
 /// Wait this long on an image before starting its full-res decode.
 const FULL_DWELL: Duration = Duration::from_millis(120);
+/// Poll the folder for new/deleted files this often (watcher).
+const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Highest zoom, in screen points per source pixel.
 const MAX_SCALE: f32 = 32.0;
 
@@ -97,6 +100,8 @@ struct PreviewData {
     // Full-res image when it was already decoded in the same pass
     // (small files, and formats like PNG with no fast preview path).
     full: Option<Arc<ImageData>>,
+    // Decoded frames when the file is an animated GIF.
+    anim: Option<Arc<Animation>>,
 }
 
 enum Msg {
@@ -233,6 +238,7 @@ fn decode_preview(path: &Path) -> Result<PreviewData, String> {
         orig,
         load_ms: r.preview.load_time.as_millis() as u64,
         full: r.full.map(Arc::new),
+        anim: r.anim.map(Arc::new),
     })
 }
 
@@ -247,20 +253,92 @@ fn extract_exif(path: &Path) -> Option<String> {
     if let Some(entry) = exif.get(ExifTag::Model) {
         info.push(format!("Model: {}", entry));
     }
+    if let Some(entry) = exif.get(ExifTag::LensModel) {
+        info.push(format!("Lens: {}", entry));
+    }
+    if let Some(entry) = exif.get(ExifTag::Software) {
+        info.push(format!("Software: {}", entry));
+    }
     if let Some(entry) = exif.get(ExifTag::DateTimeOriginal) {
         info.push(format!("Date: {}", entry));
     }
-    if let Some(entry) = exif.get(ExifTag::ExposureTime) {
-        info.push(format!("Exposure: {}", entry));
-    }
+
+    // Photo settings, joined on one line like a camera EXIF summary.
+    let mut shot = Vec::new();
     if let Some(entry) = exif.get(ExifTag::FNumber) {
-        info.push(format!("Aperture: {}", entry));
+        if let Some(v) = entry.as_urational().and_then(|r| r.to_f64()) {
+            shot.push(format!("f/{v:.1}"));
+        }
+    }
+    if let Some(entry) = exif.get(ExifTag::ExposureTime) {
+        if let Some(r) = entry.as_urational() {
+            let (n, d) = (r.numerator(), r.denominator());
+            let text = if d == 0 {
+                format!("{n} s")
+            } else if n >= d {
+                format!("{:.1} s", n as f64 / d as f64)
+            } else {
+                format!("1/{} s", (d as f64 / n.max(1) as f64).round() as u64)
+            };
+            shot.push(text);
+        }
     }
     if let Some(entry) = exif.get(ExifTag::ISOSpeedRatings) {
-        info.push(format!("ISO: {}", entry));
+        if let Some(iso) = entry
+            .as_u16()
+            .map(|iso| iso as u32)
+            .or_else(|| entry.as_u32().map(|iso| iso as u32))
+            .map(|iso| iso as u16)
+        {
+            shot.push(format!("ISO {iso}"));
+        }
     }
     if let Some(entry) = exif.get(ExifTag::FocalLength) {
-        info.push(format!("Focal Length: {}", entry));
+        if let Some(v) = entry.as_urational().and_then(|r| r.to_f64()) {
+            shot.push(format!("{v:.0} mm"));
+        }
+    }
+    if let Some(entry) = exif.get(ExifTag::ExposureBiasValue) {
+        if let Some(v) = entry.as_irational().and_then(|r| r.to_f64()) {
+            if v != 0.0 {
+                shot.push(format!("{v:+.1} EV"));
+            }
+        }
+    }
+    if let Some(entry) = exif.get(ExifTag::DigitalZoomRatio) {
+        if let Some(v) = entry.as_urational().and_then(|r| r.to_f64()) {
+            if v > 1.0 {
+                shot.push(format!("zoom x{v:.1}"));
+            }
+        }
+    }
+    if !shot.is_empty() {
+        info.push(format!("Shot: {}", shot.join(" · ")));
+    }
+
+    if let Some(entry) = exif.get(ExifTag::MeteringMode) {
+        if let Some(v) = entry.as_u16() {
+            if v > 0 {
+                info.push(format!("Metering: {}", metering_label(v)));
+            }
+        }
+    }
+    if let Some(entry) = exif.get(ExifTag::Flash) {
+        if let Some(v) = entry.as_u16() {
+            info.push(format!("Flash: {}", flash_label(v)));
+        }
+    }
+    if let Some(entry) = exif.get(ExifTag::ColorSpace) {
+        if let Some(v) = entry.as_u16() {
+            info.push(format!("Color: {}", color_space_label(v)));
+        }
+    }
+    if let Some(entry) = exif.get(ExifTag::Orientation) {
+        if let Some(v) = entry.as_u16() {
+            if v > 1 {
+                info.push(format!("Orientation: {}", orientation_label(v)));
+            }
+        }
     }
     if let Some(entry) = exif.get(ExifTag::ImageWidth) {
         if let Some(h_entry) = exif.get(ExifTag::ImageHeight) {
@@ -272,6 +350,48 @@ fn extract_exif(path: &Path) -> Option<String> {
         None
     } else {
         Some(info.join("\n"))
+    }
+}
+
+fn orientation_label(v: u16) -> &'static str {
+    match v {
+        1 => "Normal",
+        2 => "Mirrored",
+        3 => "Rotated 180°",
+        4 => "Flipped",
+        5 => "Transposed",
+        6 => "Rotated 90° CW",
+        7 => "Transverse",
+        8 => "Rotated 270° CW",
+        _ => "Unknown",
+    }
+}
+
+fn metering_label(v: u16) -> &'static str {
+    match v {
+        1 => "Average",
+        2 => "Center-weighted",
+        3 => "Spot",
+        4 => "Multi-spot",
+        5 => "Multi-segment",
+        6 => "Partial",
+        _ => "Other",
+    }
+}
+
+fn color_space_label(v: u16) -> &'static str {
+    match v {
+        1 => "sRGB",
+        0xFFFF => "Uncalibrated",
+        _ => "Other",
+    }
+}
+
+fn flash_label(v: u16) -> &'static str {
+    if v & 0x1 == 1 {
+        "Fired"
+    } else {
+        "No flash"
     }
 }
 
@@ -288,6 +408,17 @@ struct Preview {
     // Kept on the cached preview so it can be adopted when the user
     // navigates here, instead of being decoded again.
     full: Option<Arc<ImageData>>,
+    // Decoded animation frames when the file is an animated GIF.
+    anim: Option<Arc<Animation>>,
+}
+
+/// Playback state for the animation currently on screen.
+struct AnimView {
+    path: PathBuf,
+    anim: Arc<Animation>,
+    tex: TextureHandle,
+    start: Instant,
+    last_index: usize,
 }
 
 struct Tile {
@@ -329,10 +460,13 @@ struct MyApp {
     full_due: Option<Instant>,
     view: View,
     error: Option<String>,
+    notice: Option<String>, // transient feedback for file actions
+    anim: Option<AnimView>, // playing animation (animated GIF)
 
     exif_info: Option<String>,
     exif_loading: bool,
     show_panels: bool,
+    next_scan: Instant, // periodic folder rescan (watcher)
 }
 
 impl MyApp {
@@ -395,9 +529,12 @@ impl MyApp {
                 offset: Vec2::ZERO,
             },
             error: None,
+            notice: None,
+            anim: None,
             exif_info: None,
             exif_loading: false,
             show_panels: true,
+            next_scan: Instant::now() + RESCAN_INTERVAL,
         };
         app.goto(ctx);
         app
@@ -409,6 +546,7 @@ impl MyApp {
     fn goto(&mut self, ctx: &Context) {
         self.cur = self.gallery.current().map(|p| p.to_path_buf());
         self.error = None;
+        self.notice = None;
         self.exif_info = None;
         self.exif_loading = self.cur.is_some();
         self.full_due = Some(Instant::now() + FULL_DWELL);
@@ -439,6 +577,7 @@ impl MyApp {
     fn reset_display(&mut self) {
         self.shown = None;
         self.full = None;
+        self.anim = None;
     }
 
     fn needs_full(&self, p: &PathBuf) -> bool {
@@ -454,6 +593,10 @@ impl MyApp {
         // The preview pass already decoded and kept the full image (adopted by
         // sync_shown) — nothing more to decode.
         if pv.full.is_some() {
+            return false;
+        }
+        // Playing animations never get tiles: the texture advances over time.
+        if pv.anim.is_some() {
             return false;
         }
         // Otherwise a full decode is wanted unless the source is too big to hold.
@@ -540,6 +683,7 @@ impl MyApp {
                                 load_ms: p.load_ms,
                                 used: self.clock,
                                 full: p.full,
+                                anim: p.anim,
                             },
                         );
                         resched |= Some(&path) == self.cur.as_ref();
@@ -610,11 +754,15 @@ impl MyApp {
     }
 
     /// Switch what's on screen as soon as the requested image's preview exists.
-    fn sync_shown(&mut self) {
+    fn sync_shown(&mut self, ctx: &Context) {
         let Some(cur) = self.cur.clone() else {
             self.shown = None;
+            self.anim = None;
             return;
         };
+        if self.anim.as_ref().is_some_and(|a| &a.path != &cur) {
+            self.anim = None;
+        }
         if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
             self.shown = Some(cur.clone());
             self.view.fit = true;
@@ -631,6 +779,27 @@ impl MyApp {
                         data: Arc::clone(data),
                         tiles: HashMap::new(),
                         load_ms,
+                    });
+                }
+            }
+        }
+        // Adopt the animation that came with the preview's decode pass
+        // (animated GIFs), including preloaded neighbours.
+        if let Some(pv) = self.previews.get(&cur) {
+            if let Some(anim) = &pv.anim {
+                if self.anim.as_ref().map_or(true, |a| &a.path != &cur) {
+                    let f0 = &anim.frames[0];
+                    let image = ColorImage::from_rgba_unmultiplied(
+                        [f0.width as usize, f0.height as usize],
+                        &f0.rgba,
+                    );
+                    let tex = ctx.load_texture("anim", image, TextureOptions::LINEAR);
+                    self.anim = Some(AnimView {
+                        path: cur.clone(),
+                        anim: Arc::clone(anim),
+                        tex,
+                        start: Instant::now(),
+                        last_index: usize::MAX,
                     });
                 }
             }
@@ -678,7 +847,12 @@ impl MyApp {
     fn pick_file(&mut self, ctx: &Context) {
         if let Some(file) = rfd::FileDialog::new()
             .set_title("Select image file")
-            .add_filter("Images", &["jpg", "jpeg", "png"])
+            .add_filter(
+                "Images",
+                &[
+                    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif",
+                ],
+            )
             .pick_file()
         {
             self.open_file(ctx, file);
@@ -697,6 +871,142 @@ impl MyApp {
             .to_lowercase();
         if image_viewer::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
             self.open_file(ctx, path);
+        }
+    }
+
+    // ---- folder watcher ----------------------------------------------------
+
+    /// Poll the folder on a timer so files that appear/disappear while the
+    /// viewer is open (e.g. an active download folder) show up automatically.
+    fn maybe_rescan(&mut self, ctx: &Context) {
+        let now = Instant::now();
+        if now >= self.next_scan {
+            self.next_scan = now + RESCAN_INTERVAL;
+            self.rescan(ctx, false);
+        }
+        ctx.request_repaint_after(self.next_scan.saturating_duration_since(Instant::now()));
+    }
+
+    /// Re-scan the current folder and merge the result, keeping the user's
+    /// position. `force` bypasses the load_all setting (manual reload key).
+    fn rescan(&mut self, ctx: &Context, force: bool) {
+        if !force && !self.config.load_all_on_startup {
+            return;
+        }
+        let files = image_viewer::scan_folder(&self.folder);
+        if files == self.gallery.files {
+            return;
+        }
+        let current = self.gallery.current().map(|p| p.to_path_buf());
+        self.gallery.files = files;
+        self.gallery.index = current
+            .as_ref()
+            .and_then(|p| self.gallery.files.iter().position(|f| f == p))
+            .unwrap_or_else(|| self.gallery.index.min(self.gallery.len().saturating_sub(1)));
+        if self.gallery.current() != current.as_deref() {
+            self.reset_display();
+            self.goto(ctx);
+        } else {
+            self.schedule();
+        }
+    }
+
+    // ---- file triage -------------------------------------------------------
+
+    /// Remove the current file from the gallery (file already gone from disk)
+    /// and advance to the next image.
+    fn remove_current_from_gallery(&mut self, ctx: &Context) {
+        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
+            return;
+        };
+        self.previews.remove(&p);
+        self.failed.remove(&(p.clone(), Kind::Preview));
+        self.failed.remove(&(p.clone(), Kind::Full));
+        if !self.gallery.is_empty() {
+            let i = self.gallery.index.min(self.gallery.len() - 1);
+            self.gallery.files.remove(i);
+            self.gallery.index = i.min(self.gallery.len().saturating_sub(1));
+        }
+        self.reset_display();
+        self.goto(ctx);
+    }
+
+    /// Delete the current file to the recycle bin and advance.
+    fn delete_current(&mut self, ctx: &Context) {
+        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
+            return;
+        };
+        match trash::delete(&p) {
+            Ok(()) => {
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.remove_current_from_gallery(ctx);
+                self.notice = Some(format!("Deleted {name}"));
+            }
+            Err(e) => self.error = Some(format!("Delete failed: {e}")),
+        }
+    }
+
+    /// Copy or move the current file to a folder picked by the user.
+    fn transfer_current(&mut self, ctx: &Context, copy: bool) {
+        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
+            return;
+        };
+        let Some(dest_dir) = rfd::FileDialog::new()
+            .set_title(if copy {
+                "Copy image to…"
+            } else {
+                "Move image to…"
+            })
+            .pick_folder()
+        else {
+            return;
+        };
+        let Some(name) = p.file_name() else {
+            return;
+        };
+        let dest = dest_dir.join(name);
+        if dest.exists() {
+            self.error = Some(format!("Target already exists: {}", dest.display()));
+            return;
+        }
+        let result = if copy {
+            std::fs::copy(&p, &dest).map(|_| ())
+        } else {
+            std::fs::rename(&p, &dest)
+        };
+        match result {
+            Ok(()) => {
+                let verb = if copy { "Copied" } else { "Moved" };
+                if copy {
+                    self.notice = Some(format!("{verb} to {}", dest_dir.display()));
+                } else {
+                    self.remove_current_from_gallery(ctx);
+                    self.notice = Some(format!("{verb} to {}", dest_dir.display()));
+                }
+            }
+            Err(e) => {
+                self.error = Some(format!(
+                    "{} failed: {e}",
+                    if copy { "Copy" } else { "Move" }
+                ))
+            }
+        }
+    }
+
+    /// Show the current file's folder in the system's default file browser
+    /// (respects folder associations, e.g. Directory Opus instead of Explorer).
+    fn explore_current(&mut self) {
+        if let Some(p) = self.gallery.current() {
+            let folder = p
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(|| p.to_path_buf());
+            if let Err(e) = open::that_detached(&folder) {
+                self.error = Some(format!("Open folder failed: {e}"));
+            }
         }
     }
 
@@ -723,18 +1033,27 @@ impl MyApp {
         );
         if let Some(pv) = self.shown.as_ref().and_then(|p| self.previews.get(p)) {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
-            match &self.full {
-                Some(f) if Some(&f.path) == self.shown.as_ref() => {
-                    s += &format!(" - full {} ms", f.load_ms)
-                }
-                _ => {
-                    if let Some(sh) = &self.shown {
-                        if self.needs_full(sh) {
-                            s += " - full-res loading…";
+            if let Some(anim) = &pv.anim {
+                s += &format!(" - anim {} frames", anim.frames.len());
+            } else {
+                match &self.full {
+                    Some(f) if Some(&f.path) == self.shown.as_ref() => {
+                        s += &format!(" - full {} ms", f.load_ms)
+                    }
+                    _ => {
+                        if let Some(sh) = &self.shown {
+                            if self.needs_full(sh) {
+                                s += " - full-res loading…";
+                            }
                         }
                     }
                 }
             }
+        }
+        if let Some(e) = &self.error {
+            s += &format!(" — {e}");
+        } else if let Some(n) = &self.notice {
+            s += &format!(" — {n}");
         }
         s
     }
@@ -765,13 +1084,32 @@ impl MyApp {
         };
 
         self.clock += 1;
-        let Some(pv) = self.previews.get_mut(&shown) else {
-            return;
+        let (orig, tex_id, tex_w) = {
+            let Some(pv) = self.previews.get_mut(&shown) else {
+                return;
+            };
+            pv.used = self.clock;
+            (pv.orig, pv.tex.id(), pv.tex.size()[0] as f32)
         };
-        pv.used = self.clock;
-        let orig = pv.orig;
-        let tex_id = pv.tex.id();
-        let tex_w = pv.tex.size()[0] as f32;
+        let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown) {
+            // Advance to the current frame and repaint at its boundary.
+            let (idx, next_in) = anim_frame_state(&av.anim, av.start.elapsed());
+            if idx != av.last_index {
+                let f = &av.anim.frames[idx];
+                av.tex.set(
+                    ColorImage::from_rgba_unmultiplied(
+                        [f.width as usize, f.height as usize],
+                        &f.rgba,
+                    ),
+                    TextureOptions::LINEAR,
+                );
+                av.last_index = idx;
+            }
+            ctx.request_repaint_after(next_in);
+            (av.tex.id(), av.anim.frames[0].width as f32)
+        } else {
+            (tex_id, tex_w)
+        };
 
         let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
         let fit_scale = (panel.width() / img_px.x)
@@ -936,7 +1274,8 @@ impl MyApp {
     /// Per-frame housekeeping that must run before anything is drawn.
     fn frame_prelude(&mut self, ctx: &Context) {
         self.pump(ctx);
-        self.sync_shown();
+        self.sync_shown(ctx);
+        self.maybe_rescan(ctx);
 
         // Start the full-res decode once the user has dwelled on an image.
         if let Some(due) = self.full_due {
@@ -949,6 +1288,26 @@ impl MyApp {
             }
         }
     }
+}
+
+/// Current frame index and time until the next boundary for a playing
+/// animation, given elapsed playback time. Zero/short delays are floored to
+/// 20 ms so a broken GIF can't spin the render loop.
+fn anim_frame_state(anim: &Animation, elapsed: Duration) -> (usize, Duration) {
+    let total = anim.total_duration().as_millis().max(1);
+    let t = elapsed.as_millis() % total;
+    let mut acc = 0u128;
+    for (i, d) in anim.delays.iter().enumerate() {
+        let dm = d.as_millis().max(20);
+        if t < acc + dm {
+            return (i, Duration::from_millis((acc + dm - t) as u64));
+        }
+        acc += dm;
+    }
+    (
+        anim.frames.len().saturating_sub(1),
+        Duration::from_millis(20),
+    )
 }
 
 /// Copy one tile out of the full-res RGBA buffer and upload it.
@@ -981,7 +1340,7 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frame_prelude(ctx);
 
-        // Keyboard navigation
+        // Keyboard navigation + file triage
         let (next, prev, first, last, toggle) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowRight)
@@ -991,6 +1350,15 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::Home),
                 i.key_pressed(egui::Key::End),
                 i.key_pressed(egui::Key::I),
+            )
+        });
+        let (del, move_f, copy_f, explore, reload) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Delete),
+                i.key_pressed(egui::Key::M),
+                i.key_pressed(egui::Key::C),
+                i.key_pressed(egui::Key::E),
+                i.key_pressed(egui::Key::R),
             )
         });
         if next {
@@ -1006,6 +1374,17 @@ impl eframe::App for MyApp {
         }
         if toggle {
             self.show_panels = !self.show_panels;
+        }
+        if del {
+            self.delete_current(ctx);
+        } else if move_f {
+            self.transfer_current(ctx, false);
+        } else if copy_f {
+            self.transfer_current(ctx, true);
+        } else if explore {
+            self.explore_current();
+        } else if reload {
+            self.rescan(ctx, true);
         }
 
         // Drag-and-drop: files or folders
@@ -1038,6 +1417,21 @@ impl eframe::App for MyApp {
                 if ui.button("Panels (I)").clicked() {
                     self.show_panels = !self.show_panels;
                 }
+                if ui.button("Delete (Del)").clicked() {
+                    self.delete_current(ctx);
+                }
+                if ui.button("Move… (M)").clicked() {
+                    self.transfer_current(ctx, false);
+                }
+                if ui.button("Copy… (C)").clicked() {
+                    self.transfer_current(ctx, true);
+                }
+                if ui.button("Explore (E)").clicked() {
+                    self.explore_current();
+                }
+                if ui.button("Reload (R)").clicked() {
+                    self.rescan(ctx, true);
+                }
                 ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
             });
         });
@@ -1053,6 +1447,15 @@ impl eframe::App for MyApp {
                     }
                 } else {
                     ui.label("No EXIF available.");
+                }
+                if let Some(p) = self.cur.as_ref() {
+                    if let Ok(md) = std::fs::metadata(p) {
+                        ui.separator();
+                        ui.label(format!(
+                            "Size: {:.1} MB",
+                            md.len() as f64 / (1024.0 * 1024.0)
+                        ));
+                    }
                 }
             });
 
