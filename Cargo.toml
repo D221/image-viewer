@@ -17,6 +17,8 @@ trash = "5"
 open = "5"
 jxl-oxide = { version = "0.12", features = ["image"] }
 heic = { version = "0.1.6", features = ["av1", "parallel"] }
+arboard = "3"
+wallpaper = "3"
 
 
 [dev-dependencies]

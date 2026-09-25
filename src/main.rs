@@ -26,8 +26,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    load_image_full, load_image_preview_full, Animation, Config, Gallery, ImageData,
-    MAX_FULL_PIXELS,
+    buffer_has_alpha, load_image_full, load_image_preview_full, set_linear_resample,
+    scan_folder_sorted, Animation, Config, Gallery, ImageData, SortMode, MAX_FULL_PIXELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +102,8 @@ struct PreviewData {
     full: Option<Arc<ImageData>>,
     // Decoded frames when the file is an animated GIF.
     anim: Option<Arc<Animation>>,
+    // Any pixel is translucent (draw checkerboard behind it).
+    has_alpha: bool,
 }
 
 enum Msg {
@@ -239,6 +241,7 @@ fn decode_preview(path: &Path) -> Result<PreviewData, String> {
         load_ms: r.preview.load_time.as_millis() as u64,
         full: r.full.map(Arc::new),
         anim: r.anim.map(Arc::new),
+        has_alpha: buffer_has_alpha(&r.preview.rgba),
     })
 }
 
@@ -410,6 +413,8 @@ struct Preview {
     full: Option<Arc<ImageData>>,
     // Decoded animation frames when the file is an animated GIF.
     anim: Option<Arc<Animation>>,
+    // Any pixel is translucent (draw checkerboard behind it).
+    has_alpha: bool,
 }
 
 /// Playback state for the animation currently on screen.
@@ -467,6 +472,7 @@ struct MyApp {
     exif_loading: bool,
     show_panels: bool,
     next_scan: Instant, // periodic folder rescan (watcher)
+    checker: Option<TextureHandle>, // transparency backdrop
 }
 
 impl MyApp {
@@ -499,7 +505,19 @@ impl MyApp {
         };
         if config.load_all_on_startup {
             gallery.load_all_from_folder(&folder);
+            // Sort per config (natural name order by default) and resume the
+            // last-viewed image for this folder.
+            let files = scan_folder_sorted(&folder, config.sort);
+            if let Some(last) = config.last_by_folder.get(&folder.to_string_lossy().to_string()) {
+                let last = PathBuf::from(last);
+                if let Some(i) = files.iter().position(|f| *f == last) {
+                    gallery.index = i;
+                }
+            }
+            gallery.files = files;
         }
+
+        set_linear_resample(config.linear_resample);
 
         if !config_path.exists() {
             config.save(&config_path);
@@ -535,8 +553,9 @@ impl MyApp {
             exif_loading: false,
             show_panels: true,
             next_scan: Instant::now() + RESCAN_INTERVAL,
+            checker: Some(make_checker_texture(ctx)),
         };
-        app.goto(ctx);
+                app.goto(ctx);
         app
     }
 
@@ -684,6 +703,7 @@ impl MyApp {
                                 used: self.clock,
                                 full: p.full,
                                 anim: p.anim,
+                                has_alpha: p.has_alpha,
                             },
                         );
                         resched |= Some(&path) == self.cur.as_ref();
@@ -893,9 +913,18 @@ impl MyApp {
         if !force && !self.config.load_all_on_startup {
             return;
         }
-        let files = image_viewer::scan_folder(&self.folder);
-        if files == self.gallery.files {
-            return;
+        let mut files = scan_folder_sorted(&self.folder, self.config.sort);
+        // Random must not reshuffle on every poll: keep the user's order,
+        // append new files, drop vanished ones (manual reload reshuffles).
+        if self.config.sort == SortMode::Random && !force && !self.gallery.files.is_empty() {
+            let fresh: HashSet<&PathBuf> = files.iter().collect();
+            self.gallery.files.retain(|p| fresh.contains(p));
+            for f in &files {
+                if !self.gallery.files.contains(f) {
+                    self.gallery.files.push(f.clone());
+                }
+            }
+            files = self.gallery.files.clone();
         }
         let current = self.gallery.current().map(|p| p.to_path_buf());
         self.gallery.files = files;
@@ -1010,6 +1039,60 @@ impl MyApp {
         }
     }
 
+    /// Copy the current image (full-res when in memory) to the clipboard.
+    fn copy_image_to_clipboard(&mut self) {
+        let Some(p) = self.cur.clone() else {
+            return;
+        };
+        // Fast path: full-res pixels already in memory.
+        if let Some(data) = self
+            .full
+            .as_ref()
+            .filter(|f| f.path == p)
+            .map(|f| Arc::clone(&f.data))
+        {
+            match set_clipboard_rgba(&data) {
+                Ok(()) => {
+                    self.notice =
+                        Some(format!("Copied {}x{} image to clipboard", data.width, data.height))
+                }
+                Err(e) => self.error = Some(format!("Clipboard failed: {e}")),
+            }
+            return;
+        }
+        // Animation: copy the frame currently on screen.
+        if let Some(av) = self.anim.as_ref().filter(|a| a.path == p) {
+            let idx = av.last_index.min(av.anim.frames.len().saturating_sub(1));
+            if let Err(e) = set_clipboard_rgba(&av.anim.frames[idx]) {
+                self.error = Some(format!("Clipboard failed: {e}"));
+            } else {
+                self.notice = Some("Copied animation frame to clipboard".into());
+            }
+            return;
+        }
+        // Fallback (large JPEG before the full decode): decode off-thread.
+        std::thread::spawn(move || match image_viewer::load_image_full(&p) {
+            Ok(d) => {
+                if let Err(e) = set_clipboard_rgba(&d) {
+                    eprintln!("clipboard: {e}");
+                }
+            }
+            Err(e) => eprintln!("clipboard decode failed: {e}"),
+        });
+        self.notice = Some("Copying image to clipboard…".into());
+    }
+
+    /// Set the current image as the desktop wallpaper.
+    fn set_wallpaper(&mut self) {
+        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
+            return;
+        };
+        match wallpaper::set_from_path(&p.to_string_lossy()) {
+            Ok(()) => self.notice = Some("Set as wallpaper".into()),
+            Err(e) => self.error = Some(format!("Wallpaper failed: {e}")),
+        }
+    }
+
     // ---- drawing ----------------------------------------------------------
 
     fn status_text(&self) -> String {
@@ -1084,12 +1167,17 @@ impl MyApp {
         };
 
         self.clock += 1;
-        let (orig, tex_id, tex_w) = {
+        let (orig, tex_id, tex_w, pv_has_alpha) = {
             let Some(pv) = self.previews.get_mut(&shown) else {
                 return;
             };
             pv.used = self.clock;
-            (pv.orig, pv.tex.id(), pv.tex.size()[0] as f32)
+            (
+                pv.orig,
+                pv.tex.id(),
+                pv.tex.size()[0] as f32,
+                pv.has_alpha,
+            )
         };
         let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown) {
             // Advance to the current frame and repaint at its boundary.
@@ -1187,6 +1275,16 @@ impl MyApp {
         let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
 
         // Always paint the preview first; tiles refine it where available.
+        // Transparent images get a checkerboard backdrop underneath.
+        if pv_has_alpha {
+            if let Some(checker) = &self.checker {
+                let uv = Rect::from_min_max(
+                    Pos2::ZERO,
+                    Pos2::new(size.x / 32.0, size.y / 32.0),
+                );
+                painter.image(checker.id(), rect, uv, Color32::WHITE);
+            }
+        }
         painter.image(tex_id, rect, uv, Color32::WHITE);
 
         // --- full-resolution tiles ---
@@ -1310,6 +1408,40 @@ fn anim_frame_state(anim: &Animation, elapsed: Duration) -> (usize, Duration) {
     )
 }
 
+/// A small 2x2-square checker texture used as the transparency backdrop.
+/// Painted with repeat-wrapped UVs so it tiles at any image size.
+fn make_checker_texture(ctx: &Context) -> TextureHandle {
+    const N: usize = 64; // texture side in px
+    const SQ: usize = 32; // square side in px
+    let mut pixels = Vec::with_capacity(N * N);
+    for y in 0..N {
+        for x in 0..N {
+            let even = ((x / SQ) + (y / SQ)) % 2 == 0;
+            let g = if even { 82 } else { 118 };
+            pixels.push(Color32::from_rgb(g, g, g));
+        }
+    }
+    ctx.load_texture(
+        "checker",
+        ColorImage {
+            size: [N, N],
+            pixels,
+        },
+        TextureOptions::NEAREST_REPEAT,
+    )
+}
+
+/// Put an RGBA image on the clipboard (any thread).
+fn set_clipboard_rgba(d: &ImageData) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_image(arboard::ImageData {
+        width: d.width as usize,
+        height: d.height as usize,
+        bytes: std::borrow::Cow::Owned(d.rgba.clone()),
+    })
+    .map_err(|e| e.to_string())
+}
+
 /// Copy one tile out of the full-res RGBA buffer and upload it.
 fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle {
     let (fw, fh) = (data.width as usize, data.height as usize);
@@ -1337,6 +1469,17 @@ fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle
 // ---------------------------------------------------------------------------
 
 impl eframe::App for MyApp {
+    /// Persist the last-viewed image per folder on app close.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(cur) = self.gallery.current() {
+            self.config.last_by_folder.insert(
+                self.folder.to_string_lossy().into_owned(),
+                cur.to_string_lossy().into_owned(),
+            );
+        }
+        self.config.save(&self.config_path);
+    }
+
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frame_prelude(ctx);
 
@@ -1352,13 +1495,15 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::I),
             )
         });
-        let (del, move_f, copy_f, explore, reload) = ctx.input(|i| {
+        let (del, move_f, copy_f, explore, reload, clip_img, wall) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
                 i.key_pressed(egui::Key::M),
-                i.key_pressed(egui::Key::C),
+                i.key_pressed(egui::Key::C) && !i.modifiers.ctrl,
                 i.key_pressed(egui::Key::E),
                 i.key_pressed(egui::Key::R),
+                i.key_pressed(egui::Key::C) && i.modifiers.ctrl,
+                i.key_pressed(egui::Key::W) && !i.modifiers.any(),
             )
         });
         if next {
@@ -1385,6 +1530,10 @@ impl eframe::App for MyApp {
             self.explore_current();
         } else if reload {
             self.rescan(ctx, true);
+        } else if clip_img {
+            self.copy_image_to_clipboard();
+        } else if wall {
+            self.set_wallpaper();
         }
 
         // Drag-and-drop: files or folders
@@ -1432,6 +1581,12 @@ impl eframe::App for MyApp {
                 if ui.button("Reload (R)").clicked() {
                     self.rescan(ctx, true);
                 }
+                if ui.button("Copy IMG (Ctrl+C)").clicked() {
+                    self.copy_image_to_clipboard();
+                }
+                if ui.button("Wallpaper (W)").clicked() {
+                    self.set_wallpaper();
+                }
                 ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
             });
         });
@@ -1459,6 +1614,7 @@ impl eframe::App for MyApp {
                 }
             });
 
+            let mut resort = false;
             egui::SidePanel::right("settings").show(ctx, |ui| {
                 ui.heading("Settings");
                 if ui
@@ -1474,8 +1630,43 @@ impl eframe::App for MyApp {
                     }
                     self.goto(ctx);
                 }
+                ui.add_space(6.0);
+                if ui
+                    .checkbox(
+                        &mut self.config.linear_resample,
+                        "Linear-light downsampling",
+                    )
+                    .changed()
+                {
+                    set_linear_resample(self.config.linear_resample);
+                    self.config.save(&self.config_path);
+                }
+                let mut new_sort = self.config.sort;
+                ui.horizontal(|ui| {
+                    ui.label("Sort:");
+                    egui::ComboBox::from_id_source("sort_mode")
+                        .selected_text(format!("{new_sort:?}"))
+                        .show_ui(ui, |ui| {
+                            for m in [
+                                SortMode::Name,
+                                SortMode::Date,
+                                SortMode::Size,
+                                SortMode::Random,
+                            ] {
+                                ui.selectable_value(&mut new_sort, m, format!("{m:?}"));
+                            }
+                        });
+                });
+                if new_sort != self.config.sort {
+                    self.config.sort = new_sort;
+                    self.config.save(&self.config_path);
+                    resort = true;
+                }
                 ui.label(format!("Config: {}", self.config_path.display()));
             });
+            if resort {
+                self.rescan(ctx, true);
+            }
         }
 
         egui::CentralPanel::default()

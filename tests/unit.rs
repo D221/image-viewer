@@ -146,6 +146,91 @@ fn test_scan_folder_jxl_avif_heic() {
 }
 
 #[test]
+fn test_natural_sort() {
+    let mut names = vec![
+        "IMG_10.jpg",
+        "a.jpg",
+        "IMG_2.jpg",
+        "B.jpg",
+        "IMG_1.jpg",
+        "file10.txt",
+        "file9.txt",
+    ];
+    names.sort_by(|a, b| image_viewer::natural_cmp(a, b));
+    assert_eq!(
+        names,
+        vec![
+            "a.jpg",
+            "B.jpg",
+            "file9.txt",
+            "file10.txt",
+            "IMG_1.jpg",
+            "IMG_2.jpg",
+            "IMG_10.jpg",
+        ]
+    );
+
+    // Leading zeros keep grouping stable.
+    let mut names = vec!["a2.jpg", "a01.jpg", "a1.jpg"];
+    names.sort_by(|a, b| image_viewer::natural_cmp(a, b));
+    assert_eq!(names, vec!["a1.jpg", "a01.jpg", "a2.jpg"]);
+}
+
+#[test]
+fn test_scan_folder_sorted_modes() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("big.bin.jpg"), vec![0u8; 4000]).ok();
+    std::fs::write(tmp.path().join("small.jpg"), vec![0u8; 10]).ok();
+
+    // Name mode is natural: "big.bin.jpg" < "small.jpg" here anyway, but the
+    // digits case must hold.
+    let files = image_viewer::scan_folder_sorted(tmp.path(), image_viewer::SortMode::Name);
+    assert_eq!(files.len(), 2);
+
+    // Size mode: largest first.
+    let files = image_viewer::scan_folder_sorted(tmp.path(), image_viewer::SortMode::Size);
+    assert_eq!(files[0].file_name().unwrap(), "big.bin.jpg");
+
+    // Random keeps all files.
+    let files = image_viewer::scan_folder_sorted(tmp.path(), image_viewer::SortMode::Random);
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn test_linear_resize_uniform_color() {
+    // A uniform sRGB color must survive a linear-light downscale unchanged
+    // (same color, smaller size).
+    let mut rgba = Vec::with_capacity(64 * 64 * 4);
+    for _ in 0..64 * 64 {
+        rgba.extend_from_slice(&[200, 100, 50, 255]);
+    }
+    let data = image_viewer::ImageData {
+        width: 64,
+        height: 64,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    };
+    let out = image_viewer::downscale_image(&data, 8);
+    assert_eq!((out.width, out.height), (8, 8));
+    assert!(!out.rgba.is_empty());
+    // All pixels stay (approximately) the original color.
+    for p in out.rgba.chunks_exact(4) {
+        assert!((p[0] as i32 - 200).abs() <= 2, "R drifted: {}", p[0]);
+        assert!((p[1] as i32 - 100).abs() <= 2, "G drifted: {}", p[1]);
+        assert!((p[2] as i32 - 50).abs() <= 2, "B drifted: {}", p[2]);
+        assert_eq!(p[3], 255);
+    }
+}
+
+#[test]
+fn test_buffer_has_alpha() {
+    let opaque = vec![10u8, 20, 30, 255, 40, 50, 60, 255];
+    assert!(!image_viewer::buffer_has_alpha(&opaque));
+    let translucent = vec![10u8, 20, 30, 255, 40, 50, 60, 0];
+    assert!(image_viewer::buffer_has_alpha(&translucent));
+}
+
+#[test]
 fn test_format_magic_detection() {
     // JXL naked codestream and container both detected.
     assert!(image_viewer::is_jxl_bytes(&[0xFF, 0x0A, 1, 2, 3]));

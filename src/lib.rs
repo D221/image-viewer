@@ -24,6 +24,23 @@ pub struct Config {
 
     /// Optional folder to load images from on startup.
     pub folder: Option<String>,
+
+    /// Gallery sort order.
+    #[serde(default)]
+    pub sort: SortMode,
+
+    /// Resize previews in linear light with a CatmullRom filter (better
+    /// edges/moiré on lineart) instead of fast gamma-space Triangle.
+    #[serde(default = "default_true")]
+    pub linear_resample: bool,
+
+    /// Last viewed image per folder, so reopening a folder resumes there.
+    #[serde(default)]
+    pub last_by_folder: std::collections::HashMap<String, String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Config {
@@ -33,6 +50,9 @@ impl Config {
             load_all_on_startup: true,
             show_image_before_auto_fit: true,
             folder: None,
+            sort: SortMode::Name,
+            linear_resample: true,
+            last_by_folder: std::collections::HashMap::new(),
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {
@@ -111,8 +131,118 @@ pub fn scan_folder(folder: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    files.sort();
+    files.sort_by(|a, b| {
+        let an = a.file_name().unwrap_or_default().to_string_lossy();
+        let bn = b.file_name().unwrap_or_default().to_string_lossy();
+        natural_cmp(&an, &bn)
+    });
     files
+}
+
+/// How to order the gallery.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMode {
+    /// Explorer-style natural sort by file name (IMG_2 before IMG_10).
+    #[default]
+    Name,
+    /// Newest file first.
+    Date,
+    /// Largest file first.
+    Size,
+    /// Shuffled once per folder load.
+    Random,
+}
+
+/// Case-insensitive "natural" string comparison: runs of digits compare
+/// numerically, so `IMG_10` sorts after `IMG_2` like Explorer does.
+pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < ab.len() && j < bb.len() {
+        let (ca, cb) = (ab[i].to_ascii_lowercase(), bb[j].to_ascii_lowercase());
+        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+            let sa: Vec<u8> = ab[i..]
+                .iter()
+                .copied()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            i += sa.len();
+            let sb: Vec<u8> = bb[j..]
+                .iter()
+                .copied()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            j += sb.len();
+            // Numeric compare: fewer significant digits first, then by value,
+            // then shorter digit runs (a1 before a01).
+            let na = trim_leading_zeros(&sa);
+            let nb = trim_leading_zeros(&sb);
+            let ord = na
+                .len()
+                .cmp(&nb.len())
+                .then_with(|| na.cmp(nb))
+                .then_with(|| sa.len().cmp(&sb.len()));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else if ca != cb {
+            return ca.cmp(&cb);
+        } else {
+            i += 1;
+            j += 1;
+        }
+    }
+    (ab.len() - i).cmp(&(bb.len() - j))
+}
+
+fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
+    let first = digits.iter().position(|&c| c != b'0').unwrap_or(digits.len());
+    &digits[first..]
+}
+
+/// Scan and sort with the given mode. Date sorts newest-first, Size
+/// largest-first, Random shuffles once per call.
+pub fn scan_folder_sorted(folder: &Path, mode: SortMode) -> Vec<PathBuf> {
+    let mut files = scan_folder(folder);
+    match mode {
+        SortMode::Name => {}
+        SortMode::Date => {
+            files.sort_by_cached_key(|p| {
+                std::fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .map(std::cmp::Reverse)
+                    .ok()
+            });
+        }
+        SortMode::Size => {
+            files.sort_by_cached_key(|p| {
+                std::fs::metadata(p).map(|m| std::cmp::Reverse(m.len())).ok()
+            });
+        }
+        SortMode::Random => shuffle(&mut files),
+    }
+    files
+}
+
+/// Tiny xorshift shuffle (avoids a `rand` dependency).
+fn shuffle(files: &mut [PathBuf]) {
+    if files.len() < 2 {
+        return;
+    }
+    let mut s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 8))
+        .unwrap_or(0x9E37_79B9_7F4A_7C15)
+        | 1;
+    for i in (1..files.len()).rev() {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        let j = (s % (i as u64 + 1)) as usize;
+        files.swap(i, j);
+    }
 }
 
 /// Decoded image data plus load timing metadata.
@@ -509,23 +639,16 @@ fn dynamic_to_image_data(
     start: std::time::Instant,
 ) -> ImageData {
     let (w, h) = img.dimensions();
-    let scale = (max_dim as f32 / w.max(h) as f32).min(1.0);
-    let img = if scale < 1.0 {
-        let (nw, nh) = (
-            ((w as f32 * scale) as u32).max(1),
-            ((h as f32 * scale) as u32).max(1),
-        );
-        img.resize(nw, nh, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
-    let rgba = img.to_rgba8();
-    ImageData {
-        width: rgba.width(),
-        height: rgba.height(),
-        rgba: rgba.into_raw(),
+    let mut data = ImageData {
+        width: w,
+        height: h,
+        rgba: img.to_rgba8().into_raw(),
         load_time: start.elapsed(),
+    };
+    if w.max(h) > max_dim {
+        data = downscale_image(&data, max_dim);
     }
+    data
 }
 
 /// Decode bytes to RGBA, capped at `max_dim` on the long side. JPEGs use the
@@ -574,30 +697,117 @@ pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
     Ok(data)
 }
 
-/// Downscale a full ImageData (RGBA) to a smaller preview size quickly.
+/// Global toggle for linear-light downsampling (set from the config toggle in
+/// main.rs). Workers read it; the UI thread writes it.
+static LINEAR_RESAMPLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Enable/disable linear-light downsampling at runtime.
+pub fn set_linear_resample(on: bool) {
+    LINEAR_RESAMPLE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn linear_resample_enabled() -> bool {
+    LINEAR_RESAMPLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// sRGB <-> 12-bit-linear LUTs (JPEGView-style): resizing in linear light
+/// avoids darkened edges and moiré on lineart/screentones.
+fn lin_tables() -> (&'static [u16; 256], &'static [u8; 4096]) {
+    static TABLES: std::sync::OnceLock<(Box<[u16; 256]>, Box<[u8; 4096]>)> =
+        std::sync::OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        let mut to_lin = Box::new([0u16; 256]);
+        for (i, v) in to_lin.iter_mut().enumerate() {
+            let s = i as f64 / 255.0;
+            let lin = if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            };
+            *v = (lin * 4095.0).round() as u16;
+        }
+        let mut to_srgb = Box::new([0u8; 4096]);
+        for (i, v) in to_srgb.iter_mut().enumerate() {
+            let lin = i as f64 / 4095.0;
+            let s = if lin <= 0.003_130_8 {
+                lin * 12.92
+            } else {
+                1.055 * lin.powf(1.0 / 2.4) - 0.055
+            };
+            *v = ((s * 255.0).round()).clamp(0.0, 255.0) as u8;
+        }
+        (to_lin, to_srgb)
+    });
+    (&tables.0, &tables.1)
+}
+
+/// Downscale a full ImageData (RGBA) to a smaller preview size. When the
+/// linear-light toggle is on, this converts to 12-bit linear light and uses a
+/// CatmullRom filter (sharper, correct edges on lineart); otherwise it uses the
+/// fast gamma-space Triangle filter.
 pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
-    let img = DynamicImage::ImageRgba8(
-        RgbaImage::from_raw(data.width, data.height, data.rgba.clone()).unwrap(),
-    );
     let scale = (max_dim as f32 / data.width as f32)
         .min(max_dim as f32 / data.height as f32)
         .min(1.0);
+    if scale >= 1.0 {
+        return ImageData {
+            width: data.width,
+            height: data.height,
+            rgba: data.rgba.clone(),
+            load_time: data.load_time, // keep original decode time
+        };
+    }
     let (new_w, new_h) = (
         (data.width as f32 * scale) as u32,
         (data.height as f32 * scale) as u32,
     );
-    let resized = if scale < 1.0 {
-        img.resize(new_w, new_h, image::imageops::FilterType::Triangle)
+    let rgba = if linear_resample_enabled() {
+        linear_resize(data, new_w, new_h)
     } else {
-        img
+        let img = DynamicImage::ImageRgba8(
+            RgbaImage::from_raw(data.width, data.height, data.rgba.clone()).unwrap(),
+        );
+        let resized = img.resize(new_w, new_h, image::imageops::FilterType::Triangle);
+        resized.to_rgba8().into_raw()
     };
-    let rgba = resized.to_rgba8();
     ImageData {
-        width: rgba.width(),
-        height: rgba.height(),
-        rgba: rgba.into_raw(),
+        width: new_w,
+        height: new_h,
+        rgba,
         load_time: data.load_time, // keep original decode time
     }
+}
+
+fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
+    let (to_lin, to_srgb) = lin_tables();
+    let px = (data.width as usize) * (data.height as usize);
+    let mut lin = vec![0u16; px * 4];
+    for (c, chunk) in data.rgba.chunks_exact(4).enumerate() {
+        lin[c * 4] = to_lin[chunk[0] as usize];
+        lin[c * 4 + 1] = to_lin[chunk[1] as usize];
+        lin[c * 4 + 2] = to_lin[chunk[2] as usize];
+        lin[c * 4 + 3] = (chunk[3] as u16) << 4; // alpha is linear by definition
+    }
+    let img =
+        image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(data.width, data.height, lin)
+            .unwrap();
+        let resized = image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::CatmullRom);
+    let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
+    use image::Pixel;
+    for px in resized.pixels() {
+        let c = px.channels();
+        out.push(to_srgb[c[0] as usize]);
+        out.push(to_srgb[c[1] as usize]);
+        out.push(to_srgb[c[2] as usize]);
+        out.push((c[3] >> 4) as u8);
+    }
+    out
+}
+
+/// True if any pixel has a non-opaque alpha channel (used to decide whether
+/// to draw the transparency checkerboard).
+pub fn buffer_has_alpha(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|p| p[3] != 255)
 }
 
 /// A simple gallery state: a list of files and a current index.
@@ -652,17 +862,16 @@ impl Gallery {
     }
 
     /// Load all images from the folder, preserving the current image's position.
-    /// Sorts alphabetically (like Explorer) and maintains the current image index.
-    pub fn load_all_from_folder(&mut self, folder: &Path) {
+/// Sorts with the natural (Explorer-like) name order.
+pub fn load_all_from_folder(&mut self, folder: &Path) {
         // Remember current image path
         let current_path = match self.current() {
             Some(p) => p.to_path_buf(),
             None => PathBuf::new(),
         };
 
-        // Scan and sort
-        let mut new_files = scan_folder(folder);
-        new_files.sort();
+        // Scan and sort naturally (scan_folder already does)
+        let new_files = scan_folder(folder);
 
         // Find position of current image in sorted list
         let mut new_index = 0;
