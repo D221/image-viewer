@@ -16,6 +16,10 @@
 //!   * Neighbouring images get their previews preloaded, so arrow-key navigation
 //!     is usually instant.
 
+// No console window in release builds (GUI app). Debug keeps the console so
+// eprintln! diagnostics are visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod fileassoc;
 
 use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
@@ -530,6 +534,7 @@ impl MyApp {
 
         // Optional CLI argument: a file or a folder ("Open with…").
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
+        let explicit_file = arg.as_ref().is_some_and(|a| a.is_file());
         let (folder, mut gallery) = match arg {
             Some(a) if a.is_dir() => {
                 let g = Gallery::new(&a);
@@ -553,12 +558,15 @@ impl MyApp {
         if config.load_all_on_startup {
             gallery.load_all_from_folder(&folder);
             // Sort per config (natural name order by default) and resume the
-            // last-viewed image for this folder.
+            // last-viewed image for this folder — but only when the user
+            // didn't explicitly open a file; an explicit file wins.
             let files = scan_folder_sorted(&folder, config.sort);
-            if let Some(last) = config.last_by_folder.get(&folder.to_string_lossy().to_string()) {
-                let last = PathBuf::from(last);
-                if let Some(i) = files.iter().position(|f| *f == last) {
-                    gallery.index = i;
+            if !explicit_file {
+                if let Some(last) = config.last_by_folder.get(&folder.to_string_lossy().to_string()) {
+                    let last = PathBuf::from(last);
+                    if let Some(i) = files.iter().position(|f| *f == last) {
+                        gallery.index = i;
+                    }
                 }
             }
             gallery.files = files;
