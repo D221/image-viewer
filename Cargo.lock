@@ -2308,6 +2308,7 @@ dependencies = [
  "trash",
  "turbojpeg",
  "wallpaper",
+ "winreg 0.52.0",
 ]
 
 [[package]]
@@ -4909,7 +4910,7 @@ dependencies = [
  "enquote",
  "rust-ini",
  "winapi",
- "winreg",
+ "winreg 0.9.0",
 ]
 
 [[package]]
@@ -5876,6 +5877,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "16cdb3898397cf7f624c294948669beafaeebc5577d5ec53d0afb76633593597"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "winreg"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a277a57398d4bfa075df44f501a17cfdf8542d224f0d36095a2adc7aee4ef0a5"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

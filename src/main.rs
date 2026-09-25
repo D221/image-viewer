@@ -16,6 +16,8 @@
 //!   * Neighbouring images get their previews preloaded, so arrow-key navigation
 //!     is usually instant.
 
+mod fileassoc;
+
 use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use nom_exif::{read_exif, ExifTag};
 use std::collections::{HashMap, HashSet};
@@ -58,6 +60,41 @@ const PRIO_CURRENT_EXIF: u32 = 5;
 const PRIO_FULL: u32 = 15;
 
 fn main() -> eframe::Result<()> {
+    // CLI: `--register` / `--unregister` manage file associations and exit;
+    // any other argument is a file or folder to open.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(|s| s.as_str()) {
+        Some("--register") => {
+            return match fileassoc::register() {
+                Ok(id) => {
+                    println!("Registered as '{id}'. Use Explorer's 'Open with > Choose another app' to set it as default.");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("Registration failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+        Some("--unregister") => {
+            return match fileassoc::unregister() {
+                Ok(true) => {
+                    println!("Unregistered.");
+                    Ok(())
+                }
+                Ok(false) => {
+                    println!("Was not registered.");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("Unregistration failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+        }
+        _ => {}
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
         ..Default::default()
@@ -1715,6 +1752,24 @@ impl eframe::App for MyApp {
                     self.config.save(&self.config_path);
                     resort = true;
                 }
+                ui.add_space(6.0);
+                ui.heading("File associations");
+                let registered = fileassoc::is_registered();
+                if registered {
+                    ui.label(format!("Registered as '{}'", fileassoc::progid()));
+                    if ui.button("Unregister file types").clicked() {
+                        match fileassoc::unregister() {
+                            Ok(_) => self.notice = Some("File associations removed".into()),
+                            Err(e) => self.error = Some(format!("Unregister failed: {e}")),
+                        }
+                    }
+                } else if ui.button("Register as image viewer…").clicked() {
+                    match fileassoc::register() {
+                        Ok(_) => self.notice = Some("Registered — set default via Explorer's 'Open with'".into()),
+                        Err(e) => self.error = Some(format!("Register failed: {e}")),
+                    }
+                }
+                ui.small("Registers in the user registry (no admin). To make it the default, right-click an image > Open with > Choose another app > Image Viewer > Always.");
                 ui.label(format!("Config: {}", self.config_path.display()));
             });
             if resort {

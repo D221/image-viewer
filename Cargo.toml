@@ -19,6 +19,7 @@ jxl-oxide = { version = "0.12", features = ["image"] }
 heic = { version = "0.1.6", features = ["av1", "parallel"] }
 arboard = "3"
 wallpaper = "3"
+winreg = "0.52"
 
 
 [dev-dependencies]
