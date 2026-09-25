@@ -231,6 +231,41 @@ fn test_buffer_has_alpha() {
 }
 
 #[test]
+fn test_linear_resize_high_contrast_edge() {
+    // CatmullRom overshoots on hard edges (that's its sharpness) — the u16
+    // result can exceed the 12-bit linear range and must clamp, not panic
+    // with a LUT index out of bounds (regression: index 4097 len 4096).
+    let mut rgba = Vec::with_capacity(33 * 33 * 4);
+    for y in 0..33u32 {
+        for x in 0..33u32 {
+            // Hard black/white checkerboard, 1px squares.
+            let v = if (x + y) % 2 == 0 { 0u8 } else { 255u8 };
+            rgba.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let data = image_viewer::ImageData {
+        width: 33,
+        height: 33,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    };
+    let out = image_viewer::downscale_image(&data, 7);
+    assert_eq!((out.width, out.height), (7, 7));
+    assert_eq!(out.rgba.len(), 7 * 7 * 4);
+    // Values stay in gamut.
+    for p in out.rgba.chunks_exact(4) {
+        assert!(p[3] == 255);
+ cosy_check(&p[0..3]);
+    }
+}
+
+fn cosy_check(c: &[u8]) {
+    for v in c {
+        assert!(*v <= 255, "channel out of range: {v}");
+    }
+}
+
+#[test]
 fn test_format_magic_detection() {
     // JXL naked codestream and container both detected.
     assert!(image_viewer::is_jxl_bytes(&[0xFF, 0x0A, 1, 2, 3]));

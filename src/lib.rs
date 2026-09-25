@@ -796,10 +796,12 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     use image::Pixel;
     for px in resized.pixels() {
         let c = px.channels();
-        out.push(to_srgb[c[0] as usize]);
-        out.push(to_srgb[c[1] as usize]);
-        out.push(to_srgb[c[2] as usize]);
-        out.push((c[3] >> 4) as u8);
+        // CatmullRom overshoots on edges and the image crate clamps to the
+        // u16 range, not our 12-bit linear range, so clamp LUT indices.
+        out.push(to_srgb[(c[0] as usize).min(4095)]);
+        out.push(to_srgb[(c[1] as usize).min(4095)]);
+        out.push(to_srgb[(c[2] as usize).min(4095)]);
+        out.push(((c[3].min(4080)) >> 4) as u8);
     }
     out
 }
