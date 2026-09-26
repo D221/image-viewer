@@ -1988,7 +1988,16 @@ impl eframe::App for MyApp {
                     ui.label("Loading EXIF…");
                 } else if let Some(info) = &self.exif_info {
                     for line in info.lines() {
-                        ui.label(line);
+                        if let Some(url) = line.strip_prefix("Maps: ") {
+                            // GPS link: clickable, opens the system browser.
+                            if ui.link("Open in Google Maps ↗").clicked() {
+                                if let Err(e) = open::that_detached(url) {
+                                    self.error = Some(format!("Open link failed: {e}"));
+                                }
+                            }
+                        } else {
+                            ui.label(line);
+                        }
                     }
                 } else {
                     ui.label("No EXIF available.");
