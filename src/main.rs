@@ -524,6 +524,8 @@ struct MyApp {
     next_scan: Instant, // periodic folder rescan (watcher)
     checker: Option<TextureHandle>, // transparency backdrop
     display_dim: Option<(u32, u32)>, // central panel size in physical px
+    suppress_resize_redecode: bool, // panel toggle must not re-decode
+    waiting_load: bool, // block_while_loading: current image not decoded yet
 }
 
 impl MyApp {
@@ -611,6 +613,8 @@ impl MyApp {
             next_scan: Instant::now() + RESCAN_INTERVAL,
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
+            suppress_resize_redecode: false,
+            waiting_load: false,
         };
                 app.goto(ctx);
         app
@@ -626,6 +630,12 @@ impl MyApp {
         self.exif_info = None;
         self.exif_loading = self.cur.is_some();
         self.full_due = Some(Instant::now() + FULL_DWELL);
+        // Blocking mode: only wait when the preview isn't already cached.
+        self.waiting_load = self.config.block_while_loading
+            && self
+                .cur
+                .as_ref()
+                .is_some_and(|c| !self.previews.contains_key(c));
 
         if let Some(name) = self
             .cur
@@ -641,6 +651,10 @@ impl MyApp {
     }
 
     fn step(&mut self, ctx: &Context, forward: bool) {
+        // "Wait for load" mode: throttle stepping to decode completion.
+        if self.config.block_while_loading && self.waiting_load {
+            return;
+        }
         if forward {
             self.gallery.next();
         } else {
@@ -776,12 +790,35 @@ impl MyApp {
                                 below_target: p.below_target,
                             },
                         );
-                        resched |= Some(&path) == self.cur.as_ref();
+                                                resched |= Some(&path) == self.cur.as_ref();
+                        // "Wait for load" mode: arrived preview for the
+                        // current image unblocks; if the key is still held,
+                        // keep flipping at decode speed.
+                        if Some(&path) == self.cur.as_ref() && self.waiting_load {
+                            self.waiting_load = false;
+                            if self.config.block_while_loading {
+                                let (held_fwd, held_prev) = ctx.input(|i| {
+                                    (
+                                        i.key_down(egui::Key::ArrowRight)
+                                            || i.key_down(egui::Key::PageDown)
+                                            || i.key_down(egui::Key::Space),
+                                        i.key_down(egui::Key::ArrowLeft)
+                                            || i.key_down(egui::Key::PageUp),
+                                    )
+                                });
+                                if held_fwd {
+                                    self.step(ctx, true);
+                                } else if held_prev {
+                                    self.step(ctx, false);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("Failed to load {}: {}", path.display(), e);
                         if Some(&path) == self.cur.as_ref() {
                             self.error = Some(format!("Failed to load {}: {}", path.display(), e));
+                            self.waiting_load = false;
                         }
                         self.failed.insert((path, Kind::Preview));
                     }
@@ -1225,12 +1262,16 @@ impl MyApp {
             (panel.width() * ppp).round() as u32,
             (panel.height() * ppp).round() as u32,
         );
-        if self.display_dim != Some(panel_px) {
+                if self.display_dim != Some(panel_px) {
             let grew = self
                 .display_dim
                 .map_or(true, |(w, h)| panel_px.0.max(panel_px.1) > w.max(h));
             self.display_dim = Some(panel_px);
-            if grew {
+            // Hiding/showing panels resizes the display area but must not
+            // reload the image: consume exactly one transition silently.
+            if self.suppress_resize_redecode {
+                self.suppress_resize_redecode = false;
+            } else if grew {
                 let stale: Vec<PathBuf> = self
                     .previews
                     .iter()
@@ -1582,6 +1623,13 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frame_prelude(ctx);
 
+        // F11: fullscreen toggle.
+        let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
+        if f11 {
+            let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+        }
+
         // Keyboard navigation + file triage
         let (next, prev, first, last, toggle) = ctx.input(|i| {
             (
@@ -1617,6 +1665,7 @@ impl eframe::App for MyApp {
             self.goto(ctx);
         }
         if toggle {
+            self.suppress_resize_redecode = true;
             self.show_panels = !self.show_panels;
         }
         if del {
@@ -1663,6 +1712,7 @@ impl eframe::App for MyApp {
                     self.view.fit = true;
                 }
                 if ui.button("Panels (I)").clicked() {
+                    self.suppress_resize_redecode = true;
                     self.show_panels = !self.show_panels;
                 }
                 if ui.button("Delete (Del)").clicked() {
@@ -1741,7 +1791,7 @@ impl eframe::App for MyApp {
                     set_linear_resample(self.config.linear_resample);
                     self.config.save(&self.config_path);
                 }
-                let mut new_filter = self.config.downscale_filter;
+                                let mut new_filter = self.config.downscale_filter;
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
                     egui::ComboBox::from_id_source("ds_filter")
@@ -1756,6 +1806,15 @@ impl eframe::App for MyApp {
                             }
                         });
                 });
+                if ui
+                    .checkbox(
+                        &mut self.config.block_while_loading,
+                        "Wait for image when holding arrows",
+                    )
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                }
                 if new_filter != self.config.downscale_filter {
                     self.config.downscale_filter = new_filter;
                     set_downscale_filter(new_filter);

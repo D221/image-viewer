@@ -38,6 +38,10 @@ pub struct Config {
     #[serde(default)]
     pub downscale_filter: DownscaleFilter,
 
+    /// Hold-to-browse: arrow keys advance only as fast as images decode.
+    #[serde(default)]
+    pub block_while_loading: bool,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -57,6 +61,7 @@ impl Config {
             sort: SortMode::Name,
             linear_resample: true,
             downscale_filter: DownscaleFilter::Hermite,
+            block_while_loading: false,
             last_by_folder: std::collections::HashMap::new(),
         };
 
