@@ -32,9 +32,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    buffer_has_alpha, load_image_full, load_image_preview_full, set_downscale_filter,
-    set_linear_resample, scan_folder_sorted, Animation, Config, DownscaleFilter, Gallery,
-    ImageData, SortMode, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    buffer_has_alpha, extract_zip, is_archive_path, load_image_full, load_image_preview_full,
+    set_downscale_filter, set_linear_resample, scan_folder_sorted, Animation, Config,
+    DownscaleFilter, Gallery, ImageData, SortMode, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -526,6 +526,8 @@ struct MyApp {
     display_dim: Option<(u32, u32)>, // central panel size in physical px
     suppress_resize_redecode: bool, // panel toggle must not re-decode
     waiting_load: bool, // block_while_loading: current image not decoded yet
+    zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
+    zip_temp: Option<PathBuf>, // its extracted temp dir
 }
 
 impl MyApp {
@@ -537,10 +539,27 @@ impl MyApp {
         // Optional CLI argument: a file or a folder ("Open with…").
         let arg = std::env::args_os().nth(1).map(PathBuf::from);
         let explicit_file = arg.as_ref().is_some_and(|a| a.is_file());
+        // An archive argument is extracted up front and opened as its temp dir.
+        let mut zip_archive: Option<PathBuf> = None;
+        let mut zip_temp: Option<PathBuf> = None;
         let (folder, mut gallery) = match arg {
             Some(a) if a.is_dir() => {
                 let g = Gallery::new(&a);
                 (a, g)
+            }
+            Some(a) if a.is_file() && is_archive_path(&a) => {
+                let temp = Self::zip_temp_for(&a);
+                match extract_zip(&a, &temp) {
+                    Ok((count, _)) if count > 0 => {
+                        zip_archive = Some(a.clone());
+                        zip_temp = Some(temp.clone());
+                        (temp.clone(), Gallery::new(&temp))
+                    }
+                    _ => (
+                        a.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+                        Gallery::from_file(a),
+                    ),
+                }
             }
             Some(a) if a.is_file() => {
                 let dir = a.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -565,8 +584,14 @@ impl MyApp {
             let files = scan_folder_sorted(&folder, config.sort);
             if !explicit_file {
                 if let Some(last) = config.last_by_folder.get(&folder.to_string_lossy().to_string()) {
-                    let last = PathBuf::from(last);
-                    if let Some(i) = files.iter().position(|f| *f == last) {
+                    // Stored as a file name (so archives and folders share the
+                    // format); match on the name.
+                    let last = Path::new(last).file_name().map(|n| n.to_string_lossy().into_owned());
+                    if let Some(i) = last.and_then(|name| {
+                        files.iter().position(|f| {
+                            f.file_name().map(|n| n.to_string_lossy().into_owned()) == Some(name.clone())
+                        })
+                    }) {
                         gallery.index = i;
                     }
                 }
@@ -604,7 +629,7 @@ impl MyApp {
                 scale: 1.0,
                 offset: Vec2::ZERO,
             },
-            error: None,
+                        error: None,
             notice: None,
             anim: None,
             exif_info: None,
@@ -615,6 +640,8 @@ impl MyApp {
             display_dim: None,
             suppress_resize_redecode: false,
             waiting_load: false,
+            zip_archive,
+            zip_temp,
         };
                 app.goto(ctx);
         app
@@ -950,7 +977,88 @@ impl MyApp {
         self.goto(ctx);
     }
 
+    /// Release the extracted temp dir of a previously open archive.
+    fn close_zip(&mut self) {
+        if let Some(t) = self.zip_temp.take() {
+            let _ = std::fs::remove_dir_all(t);
+        }
+        self.zip_archive = None;
+    }
+
+    /// Stable temp dir for an archive; reused when the archive is unchanged.
+    fn zip_temp_for(archive: &Path) -> PathBuf {
+        use std::hash::{Hash, Hasher};
+        let meta = std::fs::metadata(archive);
+        let mtime = meta
+            .as_ref()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        archive.hash(&mut h);
+        mtime.hash(&mut h);
+        size.hash(&mut h);
+        std::env::temp_dir()
+            .join("image-viewer")
+            .join(format!("{:016x}", h.finish()))
+    }
+
+    /// Open a cbz/zip image archive: extract supported entries to a stable
+    /// temp dir and treat it as a folder gallery.
+    fn open_archive(&mut self, ctx: &Context, archive: &PathBuf) {
+        self.close_zip();
+        let temp = Self::zip_temp_for(archive);
+        match extract_zip(archive, &temp) {
+            Ok((count, encrypted)) if count > 0 => {
+                self.zip_archive = Some(archive.clone());
+                self.zip_temp = Some(temp.clone());
+                self.folder = temp.clone();
+                self.gallery = Gallery::new(&temp);
+                // Resume the last-viewed member for this archive.
+                let key = archive.to_string_lossy().to_string();
+                if let Some(last) = self.config.last_by_folder.get(&key) {
+                    let last = std::path::Path::new(last)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned());
+                    if let Some(name) = last {
+                        if let Some(i) = self
+                            .gallery
+                            .files
+                            .iter()
+                            .position(|f| {
+                                f.file_name().map(|n| n.to_string_lossy().into_owned())
+                                    == Some(name.clone())
+                            })
+                        {
+                            self.gallery.index = i;
+                        }
+                    }
+                }
+                self.reset_display();
+                self.goto(ctx);
+                let mut n = format!("Archive: {count} images");
+                if encrypted > 0 {
+                    n += &format!(" ({encrypted} encrypted skipped)");
+                }
+                self.notice = Some(n);
+            }
+            Ok((_, encrypted)) => {
+                let msg = if encrypted > 0 {
+                    format!("{encrypted} encrypted entries — unsupported")
+                } else {
+                    "No images inside the archive".to_string()
+                };
+                self.error = Some(msg);
+            }
+            Err(e) => self.error = Some(format!("Archive failed: {e}")),
+        }
+    }
+
     fn open_file(&mut self, ctx: &Context, file: PathBuf) {
+        self.close_zip();
         self.folder = file.parent().unwrap_or(&file).to_path_buf();
         self.gallery = Gallery::from_file(file);
         if self.config.load_all_on_startup {
@@ -965,6 +1073,7 @@ impl MyApp {
             .set_title("Select image folder")
             .pick_folder()
         {
+            self.close_zip();
             self.config.folder = Some(folder.to_string_lossy().to_string());
             self.config.save(&self.config_path);
             self.open_folder(ctx, folder);
@@ -977,18 +1086,29 @@ impl MyApp {
             .add_filter(
                 "Images",
                 &[
-                    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif",
+                    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", "cbz",
+                    "zip",
                 ],
             )
             .pick_file()
         {
-            self.open_file(ctx, file);
+            if is_archive_path(&file) {
+                self.open_archive(ctx, &file);
+            } else {
+                self.close_zip();
+                self.open_file(ctx, file);
+            }
         }
     }
 
     fn load_dropped(&mut self, ctx: &Context, path: PathBuf) {
         if path.is_dir() {
+            self.close_zip();
             self.open_folder(ctx, path);
+            return;
+        }
+        if is_archive_path(&path) {
+            self.open_archive(ctx, &path);
             return;
         }
         let ext = path
@@ -1017,6 +1137,9 @@ impl MyApp {
     /// Re-scan the current folder and merge the result, keeping the user's
     /// position. `force` bypasses the load_all setting (manual reload key).
     fn rescan(&mut self, ctx: &Context, force: bool) {
+        if self.zip_archive.is_some() {
+            return; // archives: the extracted temp dir is stable
+        }
         if !force && !self.config.load_all_on_startup {
             return;
         }
@@ -1072,6 +1195,10 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
+        if self.zip_archive.is_some() {
+            self.error = Some("Delete is not supported for archives".into());
+            return;
+        }
         match trash::delete(&p) {
             Ok(()) => {
                 let name = p
@@ -1090,6 +1217,10 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
+        if self.zip_archive.is_some() {
+            self.error = Some("Move/copy is not supported for archives".into());
+            return;
+        }
         let Some(dest_dir) = rfd::FileDialog::new()
             .set_title(if copy {
                 "Copy image to…"
@@ -1194,7 +1325,28 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
-        match wallpaper::set_from_path(&p.to_string_lossy()) {
+        // For archive members (temp extraction), copy to a stable location
+        // first — the temp dir dies with the app.
+        let target: PathBuf = if self.zip_archive.is_some() {
+            let ext = p
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_else(|| "jpg".into());
+            let dest = self
+                .config_path
+                .parent()
+                .map(|d| d.to_path_buf())
+                .unwrap_or_else(std::env::temp_dir)
+                .join(format!("wallpaper.{ext}"));
+            if let Err(e) = std::fs::copy(&p, &dest) {
+                self.error = Some(format!("Wallpaper failed: {e}"));
+                return;
+            }
+            dest
+        } else {
+            p
+        };
+        match wallpaper::set_from_path(&target.to_string_lossy()) {
             Ok(()) => self.notice = Some("Set as wallpaper".into()),
             Err(e) => self.error = Some(format!("Wallpaper failed: {e}")),
         }
@@ -1214,10 +1366,17 @@ impl MyApp {
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let location = match (&self.zip_archive, self.shown.as_ref()) {
+            (Some(a), Some(p)) => format!(
+                "{}!{}",
+                a.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+            ),
+            _ => format!("{}\\{}", self.folder.display(), filename),
+        };
         let mut s = format!(
-            "{}\\{} - {}/{}",
-            self.folder.display(),
-            filename,
+            "{} - {}/{}",
+            location,
             idx,
             self.gallery.len()
         );
@@ -1609,15 +1768,26 @@ fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle
 // ---------------------------------------------------------------------------
 
 impl eframe::App for MyApp {
-    /// Persist the last-viewed image per folder on app close.
+    /// Persist the last-viewed image per folder on app close, then clean up
+    /// any extracted archive temp dir.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Key by the archive path when one is open (the temp folder name is
+        // meaningless to the user).
+        let key: String = match &self.zip_archive {
+            Some(a) => a.to_string_lossy().into_owned(),
+            None => self.folder.to_string_lossy().into_owned(),
+        };
         if let Some(cur) = self.gallery.current() {
-            self.config.last_by_folder.insert(
-                self.folder.to_string_lossy().into_owned(),
-                cur.to_string_lossy().into_owned(),
-            );
+            // Store just the file name so the same key works for archives
+            // (member name) and folders (file name) alike.
+            let value = cur
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| cur.to_string_lossy().into_owned());
+            self.config.last_by_folder.insert(key, value);
         }
         self.config.save(&self.config_path);
+        self.close_zip();
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {

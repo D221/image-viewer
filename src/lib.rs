@@ -1008,7 +1008,67 @@ pub fn normalized(mut data: ImageData) -> ImageData {
 
 /// True if any pixel has a non-opaque alpha channel (used to decide whether
 /// to draw the transparency checkerboard).
-pub fn buffer_has_alpha(rgba: &[u8]) -> bool {    rgba.chunks_exact(4).any(|p| p[3] != 255)
+pub fn buffer_has_alpha(rgba: &[u8]) -> bool {
+    rgba.chunks_exact(4).any(|p| p[3] != 255)
+}
+
+/// True if the path looks like a zip-based image archive (cbz/zip).
+pub fn is_archive_path(p: &Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "cbz" | "zip"))
+        .unwrap_or(false)
+}
+
+/// Extract supported image entries from a zip/cbz archive into `dest`,
+/// flattening nested paths into the destination directory. Encrypted entries
+/// are skipped and counted. Returns (extracted, encrypted_skipped).
+pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String> {
+    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut z = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut extracted = 0;
+    let mut encrypted = 0;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for i in 0..z.len() {
+        let mut f = z.by_index(i).map_err(|e| e.to_string())?;
+        if f.is_dir() {
+            continue;
+        }
+        if f.encrypted() {
+            encrypted += 1;
+            continue;
+        }
+        let Some(name) = std::path::Path::new(f.name())
+            .file_name()
+            .and_then(|n| n.to_str())
+        else {
+            continue;
+        };
+        let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+        if !SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+            continue;
+        }
+        // Windows-safe file name (entries may contain characters that are
+        // illegal in NTFS file names), deduplicated case-insensitively.
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                    '_'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        if !seen.insert(safe.to_lowercase()) {
+            continue;
+        }
+        let mut out = std::fs::File::create(dest.join(&safe)).map_err(|e| e.to_string())?;
+        std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        extracted += 1;
+    }
+    Ok((extracted, encrypted))
 }
 
 /// A simple gallery state: a list of files and a current index.

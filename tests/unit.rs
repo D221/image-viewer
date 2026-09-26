@@ -332,6 +332,45 @@ fn test_normalized_fixes_mismatched_buffer() {
 }
 
 #[test]
+fn test_extract_zip() {
+    use std::io::Write;
+
+    // Build a zip: b.jpg (root), a.jpg (nested), readme.txt (ignored),
+    // a case-collision duplicate (deduped).
+    let tmp = tempfile::tempdir().unwrap();
+    let zip_path = tmp.path().join("test.cbz");
+    let file = std::fs::File::create(&zip_path).unwrap();
+    let mut zw = zip::ZipWriter::new(file);
+    let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+
+    zw.start_file("b.jpg", opts).unwrap();
+    zw.write_all(&[0u8; 8]).unwrap();
+    zw.start_file("sub/a.jpg", opts).unwrap();
+    zw.write_all(&[0u8; 8]).unwrap();
+    zw.start_file("readme.txt", opts).unwrap();
+    zw.write_all(b"not an image").unwrap();
+    zw.start_file("sub/a.JPG", opts).unwrap(); // case-collision dedup
+    zw.write_all(&[0u8; 8]).unwrap();
+    zw.finish().unwrap();
+
+    let dest = tmp.path().join("out");
+    let (extracted, encrypted) = image_viewer::extract_zip(&zip_path, &dest).unwrap();
+    assert_eq!(extracted, 2, "jpg entries only, deduped");
+    assert_eq!(encrypted, 0);
+    assert!(dest.join("b.jpg").exists());
+    assert!(dest.join("a.jpg").exists()); // nested flattened to root
+    assert!(!dest.join("readme.txt").exists());
+
+    // Gallery scan over the extraction finds both, natural order.
+    let gallery = image_viewer::Gallery::new(&dest);
+    assert_eq!(gallery.len(), 2);
+
+    // Archive detection.
+    assert!(image_viewer::is_archive_path(&zip_path));
+    assert!(!image_viewer::is_archive_path(&tmp.path().join("x.png")));
+}
+
+#[test]
 fn test_format_magic_detection() {
     // JXL naked codestream and container both detected.
     assert!(image_viewer::is_jxl_bytes(&[0xFF, 0x0A, 1, 2, 3]));
