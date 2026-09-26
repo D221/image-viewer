@@ -1833,11 +1833,13 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frame_prelude(ctx);
 
-        // F11: fullscreen toggle.
+        // F11: fullscreen toggle — image + panels only, chrome hidden.
         let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
         if f11 {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+            self.suppress_resize_redecode = true;
+            self.show_panels = fs; // entering fullscreen hides panels; leaving restores
         }
 
         // Keyboard navigation + file triage
@@ -1913,12 +1915,15 @@ impl eframe::App for MyApp {
             self.load_dropped(ctx, path);
         }
 
-        egui::TopBottomPanel::top("status").show(ctx, |ui| {
-            ui.label(self.status_text());
-        });
+        if self.show_panels {
+            egui::TopBottomPanel::top("status").show(ctx, |ui| {
+                ui.label(self.status_text());
+            });
+        }
 
-        egui::TopBottomPanel::bottom("menu").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+        if self.show_panels {
+            egui::TopBottomPanel::bottom("menu").show(ctx, |ui| {
+                ui.horizontal(|ui| {
                 if ui.button("Browse Folder…").clicked() {
                     self.pick_folder(ctx);
                 }
@@ -1959,9 +1964,10 @@ impl eframe::App for MyApp {
                 if ui.button("Wallpaper (W)").clicked() {
                     self.set_wallpaper();
                 }
-                ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
+                    ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
+                });
             });
-        });
+        }
 
         if self.show_panels {
             egui::SidePanel::left("exif").show(ctx, |ui| {
@@ -2111,7 +2117,7 @@ impl eframe::App for MyApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::from_gray(24)))
+            .frame(egui::Frame::none().fill(Color32::BLACK))
             .show(ctx, |ui| {
                 self.central(ui);
             });
