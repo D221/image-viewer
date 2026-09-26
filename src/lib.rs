@@ -42,6 +42,10 @@ pub struct Config {
     #[serde(default)]
     pub block_while_loading: bool,
 
+    /// Mouse wheel flips images (instead of zooming). Ctrl+wheel still zooms.
+    #[serde(default)]
+    pub wheel_navigation: bool,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -62,6 +66,7 @@ impl Config {
             linear_resample: true,
             downscale_filter: DownscaleFilter::Hermite,
             block_while_loading: false,
+            wheel_navigation: false,
             last_by_folder: std::collections::HashMap::new(),
         };
 

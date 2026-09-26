@@ -41,6 +41,9 @@ use image_viewer::{
 // Tunables
 // ---------------------------------------------------------------------------
 
+/// Wheel delta accumulated before a flip triggers in wheel-navigation mode.
+const THRESH_WHEEL: f32 = 60.0;
+
 /// How many images on each side of the current one get their preview preloaded.
 const PRELOAD_RADIUS: usize = 3;
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
@@ -526,8 +529,10 @@ struct MyApp {
     display_dim: Option<(u32, u32)>, // central panel size in physical px
     suppress_resize_redecode: bool, // panel toggle must not re-decode
     waiting_load: bool, // block_while_loading: current image not decoded yet
+    pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
+    wheel_acc: f32, // accumulated wheel delta in wheel-navigation mode
 }
 
 impl MyApp {
@@ -638,10 +643,12 @@ impl MyApp {
             next_scan: Instant::now() + RESCAN_INTERVAL,
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
-            suppress_resize_redecode: false,
+                        suppress_resize_redecode: false,
             waiting_load: false,
-            zip_archive,
+            pending_advance: None,
+                        zip_archive,
             zip_temp,
+            wheel_acc: 0.0,
         };
                 app.goto(ctx);
         app
@@ -817,10 +824,11 @@ impl MyApp {
                                 below_target: p.below_target,
                             },
                         );
-                                                resched |= Some(&path) == self.cur.as_ref();
+                                                                        resched |= Some(&path) == self.cur.as_ref();
                         // "Wait for load" mode: arrived preview for the
                         // current image unblocks; if the key is still held,
-                        // keep flipping at decode speed.
+                        // queue one more advance — consumed next frame so the
+                        // image is guaranteed to have been painted on screen.
                         if Some(&path) == self.cur.as_ref() && self.waiting_load {
                             self.waiting_load = false;
                             if self.config.block_while_loading {
@@ -834,9 +842,9 @@ impl MyApp {
                                     )
                                 });
                                 if held_fwd {
-                                    self.step(ctx, true);
+                                    self.pending_advance = Some(true);
                                 } else if held_prev {
-                                    self.step(ctx, false);
+                                    self.pending_advance = Some(false);
                                 }
                             }
                         }
@@ -1527,10 +1535,25 @@ impl MyApp {
             )
         });
 
+        // Wheel navigation mode: accumulate wheel deltas and flip images
+        // instead of zooming. Ctrl+wheel always zooms.
+        let wheel_nav_active = self.config.wheel_navigation && !ui.input(|i| i.modifiers.ctrl);
+        if wheel_nav_active && scroll != 0.0 {
+            // Scroll down (negative) = next image, scroll up = previous.
+            self.wheel_acc += scroll;
+            if self.wheel_acc <= -THRESH_WHEEL {
+                self.wheel_acc = 0.0;
+                self.step(&ctx, true);
+            } else if self.wheel_acc >= THRESH_WHEEL {
+                self.wheel_acc = 0.0;
+                self.step(&ctx, false);
+            }
+        }
+
         let mut factor = 1.0f32;
         if resp.hovered() {
             factor *= pinch;
-            if scroll != 0.0 {
+            if scroll != 0.0 && !wheel_nav_active {
                 factor *= (scroll * 0.0025).exp();
             }
         }
@@ -1670,6 +1693,23 @@ impl MyApp {
 
     /// Per-frame housekeeping that must run before anything is drawn.
     fn frame_prelude(&mut self, ctx: &Context) {
+        // Consume a queued advance from "wait for load" mode — the image it
+        // belongs to was painted during the previous frame.
+        if let Some(dir) = self.pending_advance.take() {
+            let (fwd, prev) = ctx.input(|i| {
+                (
+                    i.key_down(egui::Key::ArrowRight)
+                        || i.key_down(egui::Key::PageDown)
+                        || i.key_down(egui::Key::Space),
+                    i.key_down(egui::Key::ArrowLeft) || i.key_down(egui::Key::PageUp),
+                )
+            });
+            if dir && fwd {
+                self.step(ctx, true);
+            } else if !dir && prev {
+                self.step(ctx, false);
+            }
+        }
         self.pump(ctx);
         self.sync_shown(ctx);
         self.maybe_rescan(ctx);
@@ -1823,6 +1863,15 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::W) && !i.modifiers.any(),
             )
         });
+        // Mouse side buttons: back = previous image, forward = next image.
+        let (mouse_back, mouse_fwd) = ctx.input(|i| {
+            (
+                i.pointer
+                    .button_clicked(egui::PointerButton::Extra1),
+                i.pointer
+                    .button_clicked(egui::PointerButton::Extra2),
+            )
+        });
         if next {
             self.step(ctx, true);
         } else if prev {
@@ -1852,6 +1901,10 @@ impl eframe::App for MyApp {
             self.copy_image_to_clipboard();
         } else if wall {
             self.set_wallpaper();
+        } else if mouse_back {
+            self.step(ctx, false);
+        } else if mouse_fwd {
+            self.step(ctx, true);
         }
 
         // Drag-and-drop: files or folders
@@ -1980,6 +2033,15 @@ impl eframe::App for MyApp {
                     .checkbox(
                         &mut self.config.block_while_loading,
                         "Wait for image when holding arrows",
+                    )
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                }
+                if ui
+                    .checkbox(
+                        &mut self.config.wheel_navigation,
+                        "Mouse wheel flips images (Ctrl+wheel zooms)",
                     )
                     .changed()
                 {
