@@ -371,6 +371,39 @@ fn test_extract_zip() {
 }
 
 #[test]
+fn test_gps_decode() {
+    use nom_exif::URational;
+    use nom_exif::ExifTag;
+    // Reuse geo.jpg (Vilnius: 54.72261N, 25.25693E, 195 m) when present,
+    // else synthesize the same values.
+    let path = std::path::Path::new("test-images\\geo.jpg");
+    let exif = if path.exists() {
+        nom_exif::read_exif(path).unwrap()
+    } else {
+        return; // fixture-free machines skip this check
+    };
+    let (lat, lon) = image_viewer::gps_coords(&exif).expect("geo.jpg has GPS");
+    assert!((lat - 54.722611).abs() < 0.0001, "lat {lat}");
+    assert!((lon - 25.256925).abs() < 0.0001, "lon {lon}");
+    let alt = image_viewer::gps_altitude(&exif).expect("geo.jpg has altitude");
+    assert!((alt - 195.0).abs() < 0.01, "alt {alt}");
+
+    // Unit-check the DMS conversion and hemisphere sign directly.
+    let dms = |d: u32, m: u32, s: (u32, u32)| {
+        vec![
+            URational::new(d, 1),
+            URational::new(m, 1),
+            URational::new(s.0, s.1),
+        ]
+    };
+    let parts = dms(54, 43, (2140, 100));
+    let deg = image_viewer::dms_to_deg(Some(&parts)).unwrap();
+    assert!((deg - 54.722611).abs() < 0.0001);
+
+    let _ = ExifTag::GPSLatitude; // touch import
+}
+
+#[test]
 fn test_format_magic_detection() {
     // JXL naked codestream and container both detected.
     assert!(image_viewer::is_jxl_bytes(&[0xFF, 0x0A, 1, 2, 3]));

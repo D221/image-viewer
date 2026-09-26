@@ -400,6 +400,18 @@ fn extract_exif(path: &Path) -> Option<String> {
         }
     }
 
+    // GPS: decimal degrees + altitude, and a Google Maps link.
+    if let Some((lat, lon)) = image_viewer::gps_coords(&exif) {
+        info.push(format!("Location: {:.5}, {:.5}", lat, lon));
+        if let Some(alt) = image_viewer::gps_altitude(&exif) {
+            info.push(format!("Altitude: {alt:.0} m"));
+        }
+        info.push(format!(
+            "Maps: https://maps.google.com/?q={:.6},{:.6}",
+            lat, lon
+        ));
+    }
+
     if info.is_empty() {
         None
     } else {

@@ -1,6 +1,7 @@
 //! Core logic for the image viewer, kept separate from the GUI so it can be
 //! unit-tested, benchmarked, and fuzz-tested.
 
+use nom_exif::{ExifTag, URational};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1200,3 +1201,48 @@ impl ZoomPan {
         self.pan_y = 0.0;
     }
 }
+
+/// GPS latitude/longitude in signed decimal degrees (N/E positive).
+/// DMS rationals [deg, min, sec] combined with the N/S, E/W ref tags.
+pub fn gps_coords(exif: &nom_exif::Exif) -> Option<(f64, f64)> {
+    let lat = dms_to_deg(exif.get(ExifTag::GPSLatitude).and_then(|e| e.as_urational_slice()))?;
+    let lon = dms_to_deg(exif.get(ExifTag::GPSLongitude).and_then(|e| e.as_urational_slice()))?;
+    let lat_ref = exif
+        .get(ExifTag::GPSLatitudeRef)
+        .and_then(|v| v.as_str().map(|s| s.trim().to_ascii_uppercase()))
+        .unwrap_or_else(|| "N".into());
+    let lon_ref = exif
+        .get(ExifTag::GPSLongitudeRef)
+        .and_then(|v| v.as_str().map(|s| s.trim().to_ascii_uppercase()))
+        .unwrap_or_else(|| "E".into());
+    let lat = if lat_ref.starts_with('S') { -lat } else { lat };
+    let lon = if lon_ref.starts_with('W') { -lon } else { lon };
+    Some((lat, lon))
+}
+
+/// [deg, min, sec] rationals -> decimal degrees.
+pub fn dms_to_deg(parts: Option<&[URational]>) -> Option<f64> {
+    let parts = parts?;
+    if parts.len() != 3 {
+        return None;
+    }
+    let d = parts[0].to_f64()?;
+    let m = parts[1].to_f64()?;
+    let s = parts[2].to_f64()?;
+    Some(d + m / 60.0 + s / 3600.0)
+}
+
+/// GPS altitude in meters (below-sea-level encoded as negative by the ref tag).
+pub fn gps_altitude(exif: &nom_exif::Exif) -> Option<f64> {
+    let alt = exif
+        .get(ExifTag::GPSAltitude)
+        .and_then(|e| e.as_urational())
+        .and_then(|r| r.to_f64())?;
+    let below = exif
+        .get(ExifTag::GPSAltitudeRef)
+        .and_then(|v| v.as_u8())
+        .unwrap_or(0);
+    Some(if below == 1 { -alt } else { alt })
+}
+
+
