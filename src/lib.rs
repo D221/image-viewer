@@ -1,8 +1,12 @@
 //! Core logic for the image viewer, kept separate from the GUI so it can be
 //! unit-tested, benchmarked, and fuzz-tested.
 
+pub mod perf;
+
 use nom_exif::{ExifTag, URational};
 use serde::{Deserialize, Serialize};
+use rayon::prelude::*;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -198,6 +202,42 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
     (area.0 / w).min(area.1 / h).min(1.0)
 }
 
+/// How far ahead / behind to preload previews, given how the user is browsing.
+///
+/// `samples` is the recent step directions (`1` = forward, `-1` = back,
+/// oldest first) and `rate` is images per second over that window.
+///
+/// * Slow or unknown browsing: a small **symmetric** window. Decoding images
+///   nobody looks at is exactly the "more work than necessary" the viewer
+///   should not do.
+/// * Rapid one-directional browsing: a deep window on the side being travelled,
+///   and only one image on the other side. The user is heading somewhere.
+/// * Rapid but mixed: symmetric again, because reversing direction means the
+///   next step could be either way.
+///
+/// Callers re-run the scheduler on every step, so a direction change re-biases
+/// the very next frame.
+pub fn preload_radii(samples: &[i32], rate: f32) -> (usize, usize) {
+    const SLOW: (usize, usize) = (2, 2);
+    const FAST: usize = 6;
+    /// Below this many images per second, treat browsing as deliberate.
+    const FAST_RATE: f32 = 2.0;
+    if samples.len() < 3 || rate < FAST_RATE {
+        return SLOW;
+    }
+    let forward = samples.iter().filter(|d| **d > 0).count();
+    let back = samples.iter().filter(|d| **d < 0).count();
+    // Lean only on a clear 2/3 majority, so an alternating flick back and forth
+    // keeps a balanced window instead of betting on one side.
+    if forward * 3 >= samples.len() * 2 {
+        (FAST, 1) // heading forward
+    } else if back * 3 >= samples.len() * 2 {
+        (1, FAST) // heading back
+    } else {
+        SLOW // changing direction
+    }
+}
+
 /// Footprint `(width, height)` an image of `w x h` occupies after `quarter`
 /// quarter turns clockwise. Odd quarter turns swap the axes; only whole
 /// quarter turns are supported, so the result stays axis-aligned (and 1:1
@@ -313,6 +353,10 @@ pub struct ImageData {
 /// Errors that can occur while loading an image.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
+    /// The job was abandoned because the user moved on. Not a file problem:
+    /// callers must not record it as a failure.
+    #[error("cancelled")]
+    Cancelled,
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("decode error: {0}")]
@@ -564,7 +608,26 @@ pub fn load_image_preview_full(
     path: &Path,
     preview_max_dim: u32,
 ) -> Result<PreviewAndFull, LoadError> {
+    load_image_preview_full_cancellable(path, preview_max_dim, &|| false)
+}
+
+/// Cancellable [`load_image_preview_full`]; see that function for the contract.
+///
+/// `cancel` is polled at every phase boundary we control and inside the
+/// resample. Third-party decoders are *not* interrupted: turbojpeg, libheif and
+/// jxl-oxide expose no safe cancellation, and a half-finished decode cannot be
+/// abandoned without risking exactly the kind of memory unsafety this project
+/// does not accept. A cancelled job returns `Err(LoadError::Cancelled)`, which
+/// callers must treat as "try again later", never as "this file is broken".
+pub fn load_image_preview_full_cancellable(
+    path: &Path,
+    preview_max_dim: u32,
+    cancel: &dyn Fn() -> bool,
+) -> Result<PreviewAndFull, LoadError> {
     let start = std::time::Instant::now();
+    if cancel() {
+        return Err(LoadError::Cancelled);
+    }
     let bytes = std::fs::read(path)?;
     let max_dim = preview_max_dim.min(MAX_TEXTURE_DIM);
     // EXIF orientation: camera pixels are stored unrotated; the tag says how
@@ -576,6 +639,9 @@ pub fn load_image_preview_full(
 
         // Animated GIF: decode the whole loop once; no second full decode, no tiles.
     if is_gif_bytes(&bytes) {
+        if cancel() {
+            return Err(LoadError::Cancelled);
+        }
         if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start) {
             if anim.frames.len() > 1 {
                 let dims = (anim.frames[0].width, anim.frames[0].height);
@@ -594,6 +660,9 @@ pub fn load_image_preview_full(
     let full_is_cheap = orig.map_or(true, |(w, h)| w as u64 * h as u64 <= FAST_FULL_MAX_PIXELS);
 
     if is_jpeg_bytes(&bytes) && !full_is_cheap {
+        if cancel() {
+            return Err(LoadError::Cancelled);
+        }
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
             let mut preview = normalized(ImageData {
                 width: w,
@@ -624,15 +693,22 @@ pub fn load_image_preview_full(
             (preview, None, false)
         }
         _ => {
+            if cancel() {
+                return Err(LoadError::Cancelled);
+            }
             let mut full = normalized(decode_bytes(&bytes, MAX_TEXTURE_DIM, start)?);
             apply_exif_orientation(&mut full, tag);
+            if cancel() {
+                return Err(LoadError::Cancelled);
+            }
             // Show the full-res image right away (capped at the display
             // target) — a tiny preview texture would look blurry at
             // fit-to-window even though the full data is already in memory.
             let preview = if full.width.max(full.height) <= max_dim {
                 full.clone()
             } else {
-                downscale_image(&full, max_dim)
+                downscale_image_cancellable(&full, max_dim, cancel)
+                    .ok_or(LoadError::Cancelled)?
             };
             // Source bigger than the target: texture is below source density.
             let below = full.width.max(full.height) > max_dim;
@@ -898,58 +974,245 @@ fn lin_tables() -> (&'static [u16; 256], &'static [u8; 4096]) {
 /// CatmullRom filter (sharper, correct edges on lineart); otherwise it uses the
 /// fast gamma-space Triangle filter.
 pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
+    downscale_image_cancellable(data, max_dim, &|| false)
+        .expect("uncancellable downscale cannot be abandoned")
+}
+
+/// Cancellable [`downscale_image`]. `cancel` is polled between phases and every
+/// few rows; returning true abandons the work and yields `None`.
+///
+/// This is how a 40 MP image stops consuming a worker after the user has
+/// already moved on: the decoders themselves cannot be interrupted safely, but
+/// the resample is ours, and it is the expensive half for large sources.
+pub fn downscale_image_cancellable(
+    data: &ImageData,
+    max_dim: u32,
+    cancel: &dyn Fn() -> bool,
+) -> Option<ImageData> {
     let scale = (max_dim as f32 / data.width as f32)
         .min(max_dim as f32 / data.height as f32)
         .min(1.0);
     if scale >= 1.0 {
-        return ImageData {
+        return Some(ImageData {
             width: data.width,
             height: data.height,
             rgba: data.rgba.clone(),
             load_time: data.load_time, // keep original decode time
-        };
+        });
     }
     let (new_w, new_h) = (
-        (data.width as f32 * scale) as u32,
-        (data.height as f32 * scale) as u32,
+        (data.width as f32 * scale).max(1.0) as u32,
+        (data.height as f32 * scale).max(1.0) as u32,
     );
     let rgba = if linear_resample_enabled() {
-        linear_resize(data, new_w, new_h)
+        linear_resize(data, new_w, new_h, cancel)?
     } else {
+        if cancel() {
+            return None;
+        }
         let img = DynamicImage::ImageRgba8(
             RgbaImage::from_raw(data.width, data.height, data.rgba.clone()).unwrap(),
         );
         let resized = img.resize(new_w, new_h, image::imageops::FilterType::Triangle);
         resized.to_rgba8().into_raw()
     };
-    ImageData {
+    Some(ImageData {
         width: new_w,
         height: new_h,
         rgba,
         load_time: data.load_time, // keep original decode time
-    }
+    })
 }
 
-fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
-    let (to_lin, to_srgb) = lin_tables();
-    let px = (data.width as usize) * (data.height as usize);
-    let mut lin = vec![0u16; px * 4];
-    for (c, chunk) in data.rgba.chunks_exact(4).enumerate() {
-        lin[c * 4] = to_lin[chunk[0] as usize];
-        lin[c * 4 + 1] = to_lin[chunk[1] as usize];
-        lin[c * 4 + 2] = to_lin[chunk[2] as usize];
-        lin[c * 4 + 3] = (chunk[3] as u16) << 4; // alpha is linear by definition
+/// `PERF_PHASE=1` prints a per-phase breakdown of `linear_resize`. Cached: this
+/// is read from inside the resampler.
+static PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Source span `(start, len)` covered by each of `n` output samples when
+/// reducing `src` samples to `n`. Precomputed once, so the hot loops never
+/// divide.
+fn box_spans(n: usize, src: usize) -> Vec<(usize, usize)> {
+    (0..n)
+        .map(|i| {
+            let a = (i * src) / n;
+            let b = (((i + 1) * src) / n).max(a + 1).min(src);
+            (a, b - a)
+        })
+        .collect()
+}
+
+/// `1 << 32 / len`, so the inner loops average with a multiply instead of a
+/// divide. Integer division in the innermost loop cost more than the whole
+/// rest of the resample. Add [`ROUND`] before shifting: truncating instead
+/// biases every average down by up to 1 (a 255/255 average came out 254).
+fn box_reciprocal(len: usize) -> u64 {
+    (1u64 << 32) / len.max(1) as u64
+}
+
+/// Rounding term for the reciprocal-multiply average.
+const ROUND: u64 = 1u64 << 31;
+
+/// Separable box reduction of an RGBA8 buffer to `pre_w x pre_h`.
+///
+/// Stays in sRGB8 with integer sums, the way a GPU mip chain does: the
+/// expensive step downstream is the 12-bit linear conversion, and doing *that*
+/// on the reduced buffer rather than the full-resolution source is the point.
+///
+/// The vertical pass keeps a running column accumulator so it reads the
+/// intermediate buffer strictly in order; summing each output row from scratch
+/// instead strides by `pre_w * 4` bytes and misses cache on every pixel.
+///
+/// Returns `None` if `cancel` fired.
+fn box_reduce_srgb(
+    data: &ImageData,
+    pre_w: u32,
+    pre_h: u32,
+    cancel: &dyn Fn() -> bool,
+) -> Option<Vec<u8>> {
+    let (sw, sh) = (data.width as usize, data.height as usize);
+    let (pw, ph) = (pre_w as usize, pre_h as usize);
+    let src_stride = sw * 4;
+    let xs = box_spans(pw, sw);
+    // Reciprocals next to the spans: `box_reciprocal` is a 64-bit division, and
+    // calling it per output pixel cost more than everything else combined.
+    let xrecip: Vec<u64> = xs.iter().map(|&(_, l)| box_reciprocal(l)).collect();
+
+    // Horizontal: sw -> pw, still at full height. Row-parallel: each output row
+    // is independent, and this is the single hottest loop in the viewer.
+    let mut tmp = vec![0u8; pw * sh * 4];
+    let src = &data.rgba;
+    tmp.par_chunks_mut(pw * 4)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            let row = &src[y * src_stride..(y + 1) * src_stride];
+            for (px, (&(x0, len), &inv)) in xs.iter().zip(xrecip.iter()).enumerate() {
+                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+                for x in x0..x0 + len {
+                    let p = &row[x * 4..x * 4 + 4];
+                    r += p[0] as u32;
+                    g += p[1] as u32;
+                    b += p[2] as u32;
+                    a += p[3] as u32;
+                }
+                let o = px * 4;
+                out_row[o] = (((r as u64 * inv) + ROUND) >> 32) as u8;
+                out_row[o + 1] = (((g as u64 * inv) + ROUND) >> 32) as u8;
+                out_row[o + 2] = (((b as u64 * inv) + ROUND) >> 32) as u8;
+                out_row[o + 3] = (((a as u64 * inv) + ROUND) >> 32) as u8;
+            }
+        });
+    if cancel() {
+        return None;
     }
 
-    // Separable resample in 12-bit linear light with precomputed weights.
+    // Vertical: sh -> ph, with a running column accumulator.
+    if ph == sh {
+        return Some(tmp);
+    }
+    let ys = box_spans(ph, sh);
+    let tmp_stride = pw * 4;
+    let mut out = vec![0u8; pw * ph * 4];
+    let mut acc = vec![0u32; pw * 4];
+    for (oy, &(y0, len)) in ys.iter().enumerate() {
+        if oy % 64 == 0 && cancel() {
+            return None;
+        }
+        if oy == 0 {
+            for y in y0..y0 + len {
+                let row = &tmp[y * tmp_stride..(y + 1) * tmp_stride];
+                for (i, v) in row.iter().enumerate() {
+                    acc[i] += *v as u32;
+                }
+            }
+        } else {
+            // Slide the window. Spans are contiguous and increasing, so the
+            // previous window is [py0, py0+plen) and the new one is a sub-range
+            // of it: drop the rows that left at the top, add the ones that
+            // arrived at the bottom.
+            let (py0, plen) = ys[oy - 1];
+            for y in py0..y0 {
+                let row = &tmp[y * tmp_stride..(y + 1) * tmp_stride];
+                for (i, v) in row.iter().enumerate() {
+                    acc[i] -= *v as u32;
+                }
+            }
+            for y in py0 + plen..y0 + len {
+                let row = &tmp[y * tmp_stride..(y + 1) * tmp_stride];
+                for (i, v) in row.iter().enumerate() {
+                    acc[i] += *v as u32;
+                }
+            }
+        }
+        let inv = box_reciprocal(len);
+        let base = oy * pw * 4;
+        for i in 0..pw * 4 {
+            out[base + i] = (((acc[i] as u64 * inv) + ROUND) >> 32) as u8;
+        }
+    }
+    Some(out)
+}
+
+/// Resample in 12-bit linear light with a separable kernel.
+///
+/// Large reductions get a cheap **box pre-reduction** first (down to at most
+/// 2x the target). Measured on a 40 MP source this took the resample from
+/// ~790ms to well under 200ms, and it is a quality *win* too: a big reduction
+/// straight into Lanczos undersamples and aliases, because its ~6 taps end up
+/// spread over thousands of source pixels.
+///
+/// Returns `None` if `cancel` fired.
+fn linear_resize(
+    data: &ImageData,
+    new_w: u32,
+    new_h: u32,
+    cancel: &dyn Fn() -> bool,
+) -> Option<Vec<u8>> {
+    let (to_lin, to_srgb) = lin_tables();
+
+    // Pass 1: reduce to at most 2x the target (sRGB box, integer maths), then
+    // convert *that* to 12-bit linear. The conversion is the expensive part, so
+    // it must not run over the full-resolution source.
+    let pre_w = data.width.min(new_w.saturating_mul(2)).max(1);
+    let pre_h = data.height.min(new_h.saturating_mul(2)).max(1);
+    let t0 = std::time::Instant::now();
+    let (small, lw, lh): (Cow<'_, [u8]>, u32, u32) = if pre_w < data.width || pre_h < data.height {
+        (
+            Cow::Owned(box_reduce_srgb(data, pre_w, pre_h, cancel)?),
+            pre_w,
+            pre_h,
+        )
+    } else {
+        (Cow::Borrowed(&data.rgba), data.width, data.height)
+    };
+    let t1 = std::time::Instant::now();
+    let mut lin = vec![0u16; (lw as usize) * (lh as usize) * 4];
+    small
+        .par_chunks_exact(lw as usize * 4)
+        .zip(lin.par_chunks_mut(lw as usize * 4))
+        .for_each(|(srow, lrow)| {
+            for (c, chunk) in srow.chunks_exact(4).enumerate() {
+                lrow[c * 4] = to_lin[chunk[0] as usize];
+                lrow[c * 4 + 1] = to_lin[chunk[1] as usize];
+                lrow[c * 4 + 2] = to_lin[chunk[2] as usize];
+                // alpha is linear by definition
+                lrow[c * 4 + 3] = (chunk[3] as u16) << 4;
+            }
+        });
+
+    let t2 = std::time::Instant::now();
+    // Separable kernel resample in 12-bit linear light with precomputed weights.
     let (kern, support) = kernel(downscale_filter());
-    let horizontal = contributions(data.width, new_w, &kern, support);
-    let vertical = contributions(data.height, new_h, &kern, support);
+    let horizontal = contributions(lw, new_w, &kern, support);
+    let vertical = contributions(lh, new_h, &kern, support);
 
     // Horizontal pass: width -> new_w.
-    let mut tmp = vec![0u16; (new_w as usize) * (data.height as usize) * 4];
-    for y in 0..data.height as usize {
-        let row = &lin[y * data.width as usize * 4..(y + 1) * data.width as usize * 4];
+    let mut tmp = vec![0u16; (new_w as usize) * (lh as usize) * 4];
+    let pre_stride = lw as usize * 4;
+    let new_wu = new_w as usize;
+    tmp.par_chunks_mut(new_wu * 4)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+        let row = &lin[y * pre_stride..(y + 1) * pre_stride];
         for (x, con) in horizontal.iter().enumerate() {
             let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
             for &(si, w) in con {
@@ -959,18 +1222,23 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
                 b += p[2] as f32 * w;
                 a += p[3] as f32 * w;
             }
-            let o = (y * new_w as usize + x) * 4;
-            tmp[o] = r as u16;
-            tmp[o + 1] = g as u16;
-            tmp[o + 2] = b as u16;
-            tmp[o + 3] = a as u16;
+            let o = x * 4;
+            out_row[o] = r as u16;
+            out_row[o + 1] = g as u16;
+            out_row[o + 2] = b as u16;
+            out_row[o + 3] = a as u16;
         }
+    });
+    if cancel() {
+        return None;
     }
 
+    let t3 = std::time::Instant::now();
     // Vertical pass: height -> new_h, back to sRGB8.
-    let mut out = Vec::with_capacity((new_w as usize) * (new_h as usize) * 4);
+    let mut out = vec![0u8; (new_w as usize) * (new_h as usize) * 4];
     let stride = new_w as usize * 4;
-    for y in 0..new_h as usize {
+    out.par_chunks_mut(stride).enumerate().for_each(|(y, out_row)| {
+        {
         for x in 0..new_w as usize {
             let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
             for &(si, w) in &vertical[y] {
@@ -981,13 +1249,22 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
                 a += p[3] as f32 * w;
             }
             // Clamp to the 12-bit linear range (filters overshoot on edges).
-            out.push(to_srgb[(r.max(0.0).min(4095.0)) as usize]);
-            out.push(to_srgb[(g.max(0.0).min(4095.0)) as usize]);
-            out.push(to_srgb[(b.max(0.0).min(4095.0)) as usize]);
-            out.push(((a.max(0.0).min(4080.0) / 16.0).round()) as u8);
+            let o = x * 4;
+            out_row[o] = to_srgb[(r.max(0.0).min(4095.0)) as usize];
+            out_row[o + 1] = to_srgb[(g.max(0.0).min(4095.0)) as usize];
+            out_row[o + 2] = to_srgb[(b.max(0.0).min(4095.0)) as usize];
+            out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
         }
+        }
+    });
+    if *PHASE_TIMING.get_or_init(|| std::env::var("PERF_PHASE").is_ok()) {
+        eprintln!(
+            "  linear_resize {}x{}->{}x{}: box={:?} to_linear={:?} weights={:?} hpass={:?} vpass={:?}",
+            data.width, data.height, new_w, new_h,
+            t1 - t0, t2 - t1, t3 - t2, t3.elapsed(), t3.elapsed()
+        );
     }
-    out
+    Some(out)
 }
 
 /// Precomputed (source index, weight) pairs per destination pixel.

@@ -7,8 +7,50 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `standard`
 - `cargo test --test unit` — one test file; `cargo test <name>` — one test by name
 - `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
+- `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
+- `cargo run -- --perf <folder>` — turn on latency sampling; the report prints on exit and is written to `%TEMP%\image-viewer-perf.txt` (a release build has no console, so the file is the real output)
+- `PERF_PHASE=1` — per-phase timing inside the linear-light resampler
 - `cargo run` — launch the GUI viewer; `cargo run -- --register` / `--unregister` manage file-type registration (HKCU, no admin) and exit
 - Release builds hide the console (`windows_subsystem = "windows"`); debug keeps it for `eprintln!` diagnostics — don't "fix" this by removing the attribute
+
+## Performance (the core goal — read before touching the pipeline)
+
+- **Measure, don't guess.** `src/perf.rs` samples 16 latency metrics into fixed
+  256-entry atomic rings (p50/p95/p99) plus 8 always-on counters. Enable with
+  `--perf` or `PERF=1`. "First visible pixels" is committed in `frame_prelude`,
+  i.e. *after* the painting frame was presented — never record it when the
+  worker message arrives, that is not on screen yet.
+- **`display-gap frames` must stay 0.** It counts frames that wanted to paint the
+  current image and had no texture. Nonzero means something threw away the
+  texture the user is looking at.
+- **Never drop the displayed texture to re-decode.** On a larger window the
+  existing texture keeps being painted (the GPU scales it) and a sharper one is
+  requested, debounced by `RESIZE_SETTLE` (180 ms) so a drag-resize decodes once.
+  The old code dropped `below_target` previews here, which blanked the image.
+- **The resampler is the hot path for big non-JPEG sources.** `linear_resize`:
+  sRGB box pre-reduction to ≤2x the target (integer running sums, rayon,
+  precomputed reciprocals) → 12-bit linear conversion of *that* buffer → two
+  kernel passes. Hard-won: the conversion must never run over the
+  full-resolution source; a reciprocal **division inside the inner loop cost more
+  than everything else combined**; the vertical pass needs its running column
+  accumulator or it misses cache on every pixel.
+- **Cancellation is phase-based, never unsafe.** `Job.epoch` vs `Loader.epoch`:
+  `schedule()` bumps the epoch, in-flight jobs abandon at phase boundaries and
+  inside the resampler. Third-party decoders (turbojpeg/libheif/jxl-oxide) are
+  *not* interrupted — they expose no safe cancellation. `LoadError::Cancelled`
+  must never be recorded in `failed`; it means "ask again later", not "broken
+  file".
+- **Preloading follows travel direction** (`preload_radii` in lib.rs): slow
+  browsing gets ±2, rapid one-directional browsing gets 6 ahead / 1 behind (or
+  mirrored), and anything without a clear 2/3 majority stays symmetric — lean
+  only on 2/3 or alternating input ends up betting on one side. The current
+  image is always `PRIO_CURRENT_PREVIEW` (0) and every prefetch job is ≥ 10, so
+  prefetch can never starve it.
+- **`queued jobs dropped by rebuild` is the coalescing signal.** Large values mean
+  the user outran the decoder — tune the preload window, don't add workers.
+- **Texture churn is already low**: previews upload once per decode, tiles are
+  created once and reused, animated GIF frames update in place via `set`. Count
+  uploads (`GPU texture uploads`) before "optimising" this.
 
 ## Gotchas
 

@@ -2399,6 +2399,7 @@ dependencies = [
  "nom-exif",
  "open",
  "proptest",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",

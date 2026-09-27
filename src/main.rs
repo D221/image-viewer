@@ -31,9 +31,13 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use image_viewer::perf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
-    load_image_preview_full, rotated_footprint, set_downscale_filter, set_linear_resample,
+    load_image_preview_full_cancellable, preload_radii, rotated_footprint,
+    set_downscale_filter,
+    set_linear_resample,
     scan_folder_sorted, Animation, Config, DownscaleFilter, Gallery, ImageData, SortMode,
     GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
@@ -57,6 +61,11 @@ const TILES_PER_FRAME: usize = 8;
 const MAX_TILES: usize = 64;
 /// Wait this long on an image before starting its full-res decode.
 const FULL_DWELL: Duration = Duration::from_millis(120);
+/// Window size must be stable this long before a resize-driven refinement
+/// is queued, so dragging a window edge decodes once, not per frame.
+const RESIZE_SETTLE: Duration = Duration::from_millis(180);
+/// Never decode a preview smaller than this, however small the window is.
+const PX_FLOOR: u32 = 256;
 /// Poll the folder for new/deleted files this often (watcher).
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Highest zoom, in screen points per source pixel.
@@ -72,6 +81,11 @@ fn main() -> eframe::Result<()> {
     // CLI: `--register` / `--unregister` manage file associations and exit;
     // any other argument is a file or folder to open.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--perf` / `PERF=1` turns on latency sampling; counters are always on.
+    let perf_on = args.iter().any(|a| a == "--perf")
+        || std::env::var("PERF").map(|v| v != "0").unwrap_or(false);
+    image_viewer::perf::mark_boot();
+    image_viewer::perf::set_enabled(perf_on);
     match args.first().map(|s| s.as_str()) {
         Some("--register") => {
             return match fileassoc::register() {
@@ -142,6 +156,10 @@ struct Job {
     prio: u32,
     /// Display target long side in physical pixels (preview jobs only).
     target_dim: u32,
+    /// The loader's epoch when this was queued. The worker abandons the job if
+    /// the epoch moves on, so work for an image the user has already left
+    /// stops costing worker capacity.
+    epoch: u64,
 }
 
 #[derive(Default)]
@@ -159,6 +177,160 @@ struct Thumb {
     texels: [usize; 2],
     /// LRU stamp (frame clock).
     used: u64,
+}
+
+/// How the user is moving through the folder, so preloading can follow them
+/// instead of always paying for a symmetric window.
+///
+/// Slow browsing gets a small symmetric radius (wasting decode capacity on
+/// images nobody looks at is the point of "minimum necessary work"). Rapid
+/// one-directional browsing gets a deep window *ahead* of the user, and
+/// reversing direction re-biases immediately because `schedule()` re-runs on
+/// every step.
+#[derive(Default)]
+struct NavHint {
+    /// Timestamps of the last few steps, oldest first.
+    marks: Vec<Instant>,
+    /// Direction of those steps: 1 = forward, -1 = back.
+    dirs: Vec<i32>,
+}
+
+impl NavHint {
+    /// Images per second over the recent window (0 when idle).
+    fn rate(&self) -> f32 {
+        match (self.marks.first(), self.marks.last()) {
+            (Some(a), Some(b)) if self.marks.len() > 1 => {
+                let dt = b.saturating_duration_since(*a).as_secs_f32();
+                if dt <= 0.0 {
+                    0.0
+                } else {
+                    (self.marks.len() - 1) as f32 / dt
+                }
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// `(ahead, behind)` preview radii to preload.
+    fn radii(&self) -> (usize, usize) {
+        preload_radii(&self.dirs, self.rate())
+    }
+
+    fn note(&mut self, dir: i32) {
+        if self.marks.len() >= 8 {
+            self.marks.remove(0);
+            self.dirs.remove(0);
+        }
+        self.marks.push(Instant::now());
+        self.dirs.push(dir);
+    }
+}
+
+/// Tracks one "user intent -> useful pixels" transition so the perf module can
+/// report real latencies instead of decode times.
+///
+/// The tricky part is *first visible pixels*: a preview arriving on the worker
+/// is not on screen until the frame that paints it has been presented. We only
+/// know a frame was presented when the next one starts, so a paint is recorded
+/// as pending and committed in [`MyApp::frame_prelude`].
+#[derive(Default)]
+struct Latency {
+    /// When the user asked for the current image.
+    t_request: Option<Instant>,
+    /// False for a fresh open, true for next/prev (reported separately).
+    is_nav: bool,
+    /// Set when the requested image was painted during the last frame.
+    painted: Option<Instant>,
+    recorded_first: bool,
+    /// A preview for the requested image exists (fit-to-window quality).
+    t_preview: Option<Instant>,
+    /// A full-resolution decode of it has landed.
+    t_full: Option<Instant>,
+    /// Zoom / pan / resize / gallery / scan in flight.
+    t_zoom: Option<Instant>,
+    t_pan: Option<Instant>,
+    t_resize: Option<Instant>,
+    resize_usable: bool,
+    t_gallery: Option<Instant>,
+    t_scan: Option<Instant>,
+    /// Tiles wanted by a zoom/pan, satisfied when the visible set is complete.
+    want_viewport_tiles: bool,
+}
+
+impl Latency {
+    fn begin(&mut self, now: Instant, is_nav: bool) {
+        self.t_request = Some(now);
+        self.is_nav = is_nav;
+        self.painted = None;
+        self.recorded_first = false;
+        self.t_preview = None;
+        self.t_full = None;
+        self.want_viewport_tiles = false;
+    }
+
+    /// The requested image reached fit-to-window quality.
+    fn preview(&mut self, now: Instant) {
+        if self.t_preview.is_none() {
+            self.t_preview = Some(now);
+        }
+    }
+
+    fn full(&mut self, now: Instant) {
+        if self.t_full.is_none() {
+            self.t_full = Some(now);
+            if let (Some(req), Some(first)) = (self.t_request, self.painted) {
+                let _ = first;
+                perf::record(
+                    if self.is_nav {
+                        perf::NAV_TO_FULL
+                    } else {
+                        perf::SELECT_TO_FULL
+                    },
+                    now.duration_since(req).as_micros() as u64,
+                );
+            }
+        }
+    }
+
+    /// The requested image was painted this frame; commit next frame.
+    fn painted(&mut self, now: Instant) {
+        self.painted = Some(now);
+    }
+
+    /// Called at the start of every frame: the previous frame has been shown.
+    fn commit_frame(&mut self) {
+        if let (Some(painted), Some(req), false) =
+            (self.painted.take(), self.t_request, self.recorded_first)
+        {
+            self.recorded_first = true;
+            perf::record(
+                if self.is_nav {
+                    perf::NAV_TO_FIRST_PIXELS
+                } else {
+                    perf::SELECT_TO_FIRST_PIXELS
+                },
+                painted.duration_since(req).as_micros() as u64,
+            );
+        }
+        if let (Some(prev), Some(req)) = (self.t_preview, self.t_request) {
+            perf::record(perf::SELECT_TO_PREVIEW, prev.duration_since(req).as_micros() as u64);
+            self.t_preview = None;
+        }
+    }
+
+    /// The viewport's tiles are all present: zoom/pan is satisfied.
+    fn viewport_tiles_ready(&mut self, now: Instant) {
+        if !self.want_viewport_tiles {
+            return;
+        }
+        self.want_viewport_tiles = false;
+        if let Some(t) = self.t_zoom.take() {
+            perf::record_since(perf::ZOOM_TO_HIRES, t);
+        } else if let Some(t) = self.t_pan.take() {
+            perf::record_since(perf::PAN_TO_TILES, t);
+        }
+        let _ = now;
+    }
 }
 
 struct PreviewData {
@@ -197,6 +369,9 @@ enum Msg {
 
 struct Loader {
     shared: Arc<(Mutex<QueueState>, Condvar)>,
+    /// Bumped whenever the wanted set changes. In-flight jobs compare against
+    /// it at phase boundaries and bail out if they are stale.
+    epoch: Arc<AtomicU64>,
 }
 
 impl Loader {
@@ -222,9 +397,19 @@ impl Loader {
         cv.notify_all();
     }
 
+    /// Invalidate every outstanding job: the user asked for something else.
+    fn bump_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn epoch_now(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
+    }
+
     fn new(ctx: &Context, tx: Sender<Msg>) -> Self {
         let shared: Arc<(Mutex<QueueState>, Condvar)> =
             Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
+        let epoch = Arc::new(AtomicU64::new(0));
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -234,6 +419,7 @@ impl Loader {
             let shared = shared.clone();
             let tx = tx.clone();
             let ctx = ctx.clone();
+            let epoch = epoch.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, cv) = &*shared;
@@ -255,8 +441,10 @@ impl Loader {
                 };
 
                 // A decoder panic on a corrupt file must not kill the worker.
-                let msg = std::panic::catch_unwind(AssertUnwindSafe(|| run_job(&job)))
-                    .unwrap_or_else(|_| fail_msg(&job, "decoder panicked".into()));
+                let msg = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    run_job(&job, &|| epoch.load(Ordering::Relaxed) != job.epoch)
+                }))
+                .unwrap_or_else(|_| fail_msg(&job, "decoder panicked".into()));
 
                 let alive = tx.send(msg).is_ok();
                 shared.0.lock().unwrap().busy.remove(&(job.path, job.kind));
@@ -266,7 +454,7 @@ impl Loader {
                 ctx.request_repaint();
             });
         }
-        Self { shared }
+        Self { shared, epoch }
     }
 
     /// Replace everything that is still *queued* with `jobs` (in-flight work is left
@@ -276,15 +464,25 @@ impl Loader {
         let (lock, cv) = &*self.shared;
         let mut q = lock.lock().unwrap();
         let busy = q.busy.clone();
+        let before = q.jobs.len();
         q.jobs = jobs
             .into_iter()
             .filter(|j| !busy.contains(&(j.path.clone(), j.kind)))
             .collect();
+        // Coalescing: how much queued work a navigation threw away. High values
+        // mean the user outran the decoder, which is the thing to tune.
+        if before > q.jobs.len() {
+            perf::count(perf::C_JOBS_DROPPED, (before - q.jobs.len()) as u64);
+        }
         cv.notify_all();
     }
 }
 
 fn fail_msg(job: &Job, err: String) -> Msg {
+    if err == "cancelled" {
+        // Nothing to report: the job was abandoned on purpose.
+        perf::count(perf::C_JOBS_CANCELLED, 1);
+    }
     match job.kind {
         Kind::Preview => Msg::Preview {
             path: job.path.clone(),
@@ -305,21 +503,21 @@ fn fail_msg(job: &Job, err: String) -> Msg {
     }
 }
 
-fn run_job(job: &Job) -> Msg {
+fn run_job(job: &Job, cancel: &dyn Fn() -> bool) -> Msg {
     let path = job.path.clone();
     match job.kind {
         Kind::Preview => Msg::Preview {
-            result: decode_preview(&path, job.target_dim),
+            result: decode_preview(&path, job.target_dim, cancel),
             path,
         },
         Kind::Thumb => Msg::Thumb {
-            result: decode_preview(&path, job.target_dim),
+            result: decode_preview(&path, job.target_dim, cancel),
             path,
         },
         Kind::Full => Msg::Full {
             result: load_image_full(&path)
                 .map(Arc::new)
-                .map_err(|e| e.to_string()),
+                .map_err(|e: image_viewer::LoadError| e.to_string()),
             path,
         },
         Kind::Exif => Msg::Exif {
@@ -332,11 +530,21 @@ fn run_job(job: &Job) -> Msg {
 /// Decode a preview sized for the current display area (in physical pixels).
 /// The result is the full-res image when it fits the target, otherwise a
 /// texture capped at the target long side — always sharp at fit-to-window.
-fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
+fn decode_preview(
+    path: &Path,
+    target_dim: u32,
+    cancel: &dyn Fn() -> bool,
+) -> Result<PreviewData, String> {
     // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
     // preview; everything else is fully decoded once and the preview is
     // derived from that, so the full image is already available.
-    let r = load_image_preview_full(path, target_dim).map_err(|e| e.to_string())?;
+    let r = load_image_preview_full_cancellable(path, target_dim, cancel).map_err(|e| {
+        if matches!(e, image_viewer::LoadError::Cancelled) {
+            perf::count(perf::C_JOBS_CANCELLED, 1);
+        }
+        e.to_string()
+    })?;
+    perf::count(perf::C_DECODE_CALLS, 1);
     let image = ColorImage::from_rgba_unmultiplied(
         [r.preview.width as usize, r.preview.height as usize],
         &r.preview.rgba,
@@ -606,6 +814,14 @@ struct MyApp {
     grid_cols: usize,
     /// Quarter turns clockwise applied to the shown image (0..4).
     rot: u8,
+    /// Browsing direction/speed, used to aim the preload window.
+    nav: NavHint,
+    /// "User intent -> useful pixels" tracking for the perf report.
+    lat: Latency,
+    /// When the debounced resize-driven refinement should be queued.
+    resize_due: Option<Instant>,
+    /// First frame's timestamp, for startup latency.
+    t_boot: Option<Instant>,
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
@@ -728,6 +944,10 @@ impl MyApp {
             grid_sel: 0,
             grid_cols: 1,
             rot: 0,
+            nav: NavHint::default(),
+            lat: Latency::default(),
+            resize_due: None,
+            t_boot: perf::boot(),
             pending_advance: None,
             zip_archive,
             zip_temp,
@@ -744,7 +964,23 @@ impl MyApp {
 
     /// Point the app at `gallery.current()` and (re)plan all background work.
     fn goto(&mut self, ctx: &Context) {
+        // A goto that follows a keypress is navigation; a fresh open/click is a
+        // selection. They are reported separately because the preloaded case
+        // (0 ms) is the common one for navigation.
+        let is_nav = self.lat.t_request.is_some();
+        self.lat.begin(Instant::now(), is_nav);
         self.cur = self.gallery.current().map(|p| p.to_path_buf());
+        // Preloading hit rate: the new image already had a preview, so the
+        // first pixel is free. If this counter stays low, the preload window
+        // is aimed wrong.
+        if is_nav
+            && self
+                .cur
+                .as_ref()
+                .is_some_and(|c| self.previews.contains_key(c))
+        {
+            perf::count(perf::C_PREVIEW_REUSED, 1);
+        }
         self.error = None;
         self.notice = None;
         self.exif_info = None;
@@ -775,6 +1011,7 @@ impl MyApp {
         if self.config.block_while_loading && self.waiting_load {
             return;
         }
+        self.nav.note(if forward { 1 } else { -1 });
         if forward {
             self.gallery.next();
         } else {
@@ -813,6 +1050,71 @@ impl MyApp {
         (pv.orig.0 as u64 * pv.orig.1 as u64) <= MAX_FULL_PIXELS
     }
 
+    /// Is the shown image's texture too small for the (now larger) display?
+    fn needs_bigger_preview(&self) -> bool {
+        let (Some(target), Some(shown)) = (self.display_dim, self.shown.as_ref()) else {
+            return false;
+        };
+        let target = target.0.max(target.1).max(PX_FLOOR) as f32;
+        self.previews
+            .get(shown)
+            .map(|pv| (pv.tex.size()[0] as f32) < target || pv.below_target)
+            .unwrap_or(false)
+    }
+
+    /// Queue the debounced resize refinement: drop the too-small texture and
+    /// re-decode at the new target. Only the *stale* entries go, so the image
+    /// on screen keeps its texture until the replacement arrives.
+    fn refine_for_resize(&mut self, ctx: &Context) {
+        let Some(shown) = self.shown.clone() else {
+            return;
+        };
+        let stale: Vec<PathBuf> = self
+            .previews
+            .iter()
+            .filter(|(p, pv)| {
+                pv.below_target
+                    && (pv.tex.size()[0] as f32)
+                        < self.display_dim
+                            .map(|d| d.0.max(d.1).max(PX_FLOOR) as f32)
+                            .unwrap_or(0.0)
+                    && **p != shown
+            })
+            .map(|(p, _)| p.clone())
+            .collect();
+        // The current image is re-decoded too, but only once its old texture is
+        // no longer the one being displayed: we keep painting it meanwhile.
+        let current_stale = self
+            .previews
+            .get(&shown)
+            .map(|pv| {
+                pv.below_target
+                    && (pv.tex.size()[0] as f32)
+                        < self.display_dim
+                            .map(|d| d.0.max(d.1).max(PX_FLOOR) as f32)
+                            .unwrap_or(0.0)
+            })
+            .unwrap_or(false);
+        if current_stale {
+            if let Some(pv) = self.previews.get_mut(&shown) {
+                // Ask for a re-decode, but do not drop the texture: `below_target`
+                // + a fresh job is enough, and `schedule` will re-queue it.
+                pv.below_target = true;
+            }
+            self.failed.remove(&(shown.clone(), Kind::Preview));
+        }
+        let had_stale = !stale.is_empty();
+        for p in stale {
+            self.previews.remove(&p);
+            self.failed.remove(&(p, Kind::Preview));
+        }
+        if current_stale || had_stale {
+            perf::count(perf::C_RESIZE_REDECODES, 1);
+            self.schedule();
+        }
+        let _ = ctx;
+    }
+
     fn schedule(&mut self) {
         let mut jobs = Vec::new();
         let files = &self.gallery.files;
@@ -836,45 +1138,48 @@ impl MyApp {
             .unwrap_or(PREVIEW_TEXTURE_DIM)
             .clamp(256, PREVIEW_TEXTURE_DIM);
 
+        // Every rebuild of the wanted set invalidates outstanding work, so a
+        // decode still in flight for an image we have left can bail out.
+        let epoch = self.loader.bump_epoch();
+        let job = |path: PathBuf, kind: Kind, prio: u32, target_dim: u32| Job {
+            path,
+            kind,
+            prio,
+            target_dim,
+            epoch,
+        };
+
         if need_preview(cur) {
-            jobs.push(Job {
-                path: cur.clone(),
-                kind: Kind::Preview,
-                prio: PRIO_CURRENT_PREVIEW,
+            jobs.push(job(
+                cur.clone(),
+                Kind::Preview,
+                PRIO_CURRENT_PREVIEW,
                 target_dim,
-            });
+            ));
         }
         if self.exif_loading {
-            jobs.push(Job {
-                path: cur.clone(),
-                kind: Kind::Exif,
-                prio: PRIO_CURRENT_EXIF,
-                target_dim: 0,
-            });
+            jobs.push(job(cur.clone(), Kind::Exif, PRIO_CURRENT_EXIF, 0));
         }
         if self.full_due.is_none() && self.needs_full(cur) {
-            jobs.push(Job {
-                path: cur.clone(),
-                kind: Kind::Full,
-                prio: PRIO_FULL,
-                target_dim: 0,
-            });
+            jobs.push(job(cur.clone(), Kind::Full, PRIO_FULL, 0));
         }
 
-        // Neighbours: "next" slightly ahead of "previous" at each distance.
+        // Neighbours, biased along the direction the user is actually moving.
+        // The image on screen is always PRIO_CURRENT_PREVIEW (0), so prefetch
+        // can never starve it: every prefetch job is >= 10.
+        let (ahead, behind) = self.nav.radii();
         let mut seen: HashSet<usize> = HashSet::from([i]);
-        for d in 1..=PRELOAD_RADIUS {
-            for (idx, prio) in [
-                ((i + d) % n, 10 + 2 * d as u32),
-                ((i + n - d % n) % n, 11 + 2 * d as u32),
-            ] {
+        for d in 1..=ahead.max(behind) {
+            if d <= ahead {
+                let idx = (i + d) % n;
                 if seen.insert(idx) && need_preview(&files[idx]) {
-                    jobs.push(Job {
-                        path: files[idx].clone(),
-                        kind: Kind::Preview,
-                        prio,
-                        target_dim,
-                    });
+                    jobs.push(job(files[idx].clone(), Kind::Preview, 10 + 2 * d as u32, target_dim));
+                }
+            }
+            if d <= behind {
+                let idx = (i + n - d % n) % n;
+                if seen.insert(idx) && need_preview(&files[idx]) {
+                    jobs.push(job(files[idx].clone(), Kind::Preview, 30 + 2 * d as u32, target_dim));
                 }
             }
         }
@@ -896,6 +1201,17 @@ impl MyApp {
                     Ok(p) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
+                        perf::count(perf::C_TEXTURE_UPLOADS, 1);
+                        perf::record(perf::JOB_PREVIEW_MS, p.load_ms * 1000);
+                        if Some(&path) == self.cur.as_ref() {
+                            self.lat.preview(Instant::now());
+                            if self.lat.t_resize.is_some() {
+                                let t = self.lat.t_resize.take();
+                                if let Some(t) = t {
+                                    perf::record_since(perf::RESIZE_TO_REFINED, t);
+                                }
+                            }
+                        }
                         self.clock += 1;
                         self.previews.insert(
                             path.clone(),
@@ -949,6 +1265,13 @@ impl MyApp {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let texels = p.image.size;
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
+                        perf::count(perf::C_TEXTURE_UPLOADS, 1);
+                        perf::record(perf::JOB_THUMB_MS, p.load_ms * 1000);
+                        // First thumbnail after opening the grid: that is the
+                        // "gallery open -> something useful on screen" latency.
+                        if let Some(t) = self.lat.t_gallery.take() {
+                            perf::record_since(perf::GALLERY_TO_THUMBS, t);
+                        }
                         self.clock += 1;
                         self.thumbs.insert(
                             path.clone(),
@@ -976,8 +1299,10 @@ impl MyApp {
                 },
                 Msg::Full { path, result } => match result {
                     Ok(data) => {
+                        perf::record(perf::JOB_FULL_MS, data.load_time.as_micros() as u64);
                         // Only keep it if the user is still on this image.
                         if Some(&path) == self.cur.as_ref() {
+                            self.lat.full(Instant::now());
                             let load_ms = data.load_time.as_millis() as u64;
                             self.full = Some(FullImage {
                                 path,
@@ -1285,6 +1610,7 @@ impl MyApp {
         if !force && !self.config.load_all_on_startup {
             return;
         }
+        self.lat.t_scan = Some(Instant::now());
         let mut files = scan_folder_sorted(&self.folder, self.config.sort);
         // Random must not reshuffle on every poll: keep the user's order,
         // append new files, drop vanished ones (manual reload reshuffles).
@@ -1576,19 +1902,23 @@ impl MyApp {
             // reload the image: consume exactly one transition silently.
             if self.suppress_resize_redecode {
                 self.suppress_resize_redecode = false;
-            } else if grew {
-                let stale: Vec<PathBuf> = self
-                    .previews
-                    .iter()
-                    .filter(|(_, pv)| pv.below_target)
-                    .map(|(p, _)| p.clone())
-                    .collect();
-                if !stale.is_empty() {
-                    for p in &stale {
-                        self.previews.remove(p);
-                        self.failed.remove(&(p.clone(), Kind::Preview));
-                    }
-                    self.schedule();
+            } else {
+                // Keep displaying the texture we already have (the GPU scales
+                // it to the new size) and refine in the background. The old
+                // code *dropped* below-target previews here, which blanked the
+                // current image until the re-decode landed - precisely the
+                // "loading flash on resize" that must not happen.
+                if self.shown.is_some() {
+                    // Something is on screen to keep showing, so this *is* a
+                    // resize from the user's point of view. (At startup
+                    // display_dim goes None -> real, which is not one.)
+                    self.lat.t_resize = Some(Instant::now());
+                    self.lat.resize_usable = true;
+                }
+                if grew && self.needs_bigger_preview() {
+                    // Debounced: a drag-resize changes the size every frame and
+                    // we only want one refinement for where the window settles.
+                    self.resize_due = Some(Instant::now() + RESIZE_SETTLE);
                 }
             }
         }
@@ -1625,6 +1955,10 @@ impl MyApp {
 
         let (orig, tex_id, tex_w, pv_has_alpha) = {
             let Some(pv) = self.previews.get_mut(&shown) else {
+                // The wanted image has no texture yet: this frame shows nothing.
+                // Counted as a regression guard - it should stay at 0 except
+                // for the very first frames of a cold open.
+                perf::count(perf::C_DISPLAY_GAP_FRAMES, 1);
                 return;
             };
             pv.used = self.clock;
@@ -1722,6 +2056,10 @@ impl MyApp {
         }
         let target_scale = target_scale.clamp(fit_scale, max_scale);
         if (target_scale - scale).abs() > f32::EPSILON {
+            // Zooming in: the visible content gets sharper. Time it from the
+            // input, not from when the tiles happen to finish.
+            self.lat.t_zoom = Some(Instant::now());
+            self.lat.want_viewport_tiles = true;
             // Keep the point under the cursor fixed.
             let c = anchor - panel.center();
             offset = c - (c - offset) * (target_scale / scale);
@@ -1729,6 +2067,8 @@ impl MyApp {
         }
         if resp.dragged() {
             offset += resp.drag_delta();
+            self.lat.t_pan = Some(Instant::now());
+            self.lat.want_viewport_tiles = true;
         }
 
         // Keep the image from being lost off-screen; centre it on axes where it fits.
@@ -1774,6 +2114,11 @@ impl MyApp {
             }
         }
         paint_tex(&painter, tex_id, rect, uv, quarter);
+        // The wanted image is now on screen. The *latency* is committed next
+        // frame, once this one has actually been presented.
+        if self.cur.as_ref() == Some(&shown) {
+            self.lat.painted(Instant::now());
+        }
 
         // --- full-resolution tiles ---
         let preview_density = tex_w / img_px.x; // texture px per source px
@@ -1802,6 +2147,7 @@ impl MyApp {
                                     }
                                     budget -= 1;
                                     let tex = make_tile(&ctx, &full.data, tx, ty);
+                                    perf::count(perf::C_TILES_CREATED, 1);
                                     full.tiles.insert(
                                         (tx, ty),
                                         Tile {
@@ -1824,6 +2170,9 @@ impl MyApp {
                     }
                     if pending {
                         ctx.request_repaint();
+                    } else {
+                        // Everything the viewport needs is on screen.
+                        self.lat.viewport_tiles_ready(Instant::now());
                     }
                 }
 
@@ -1863,6 +2212,7 @@ impl MyApp {
         if self.gallery_view {
             // Start the highlight on the image currently shown.
             self.grid_sel = self.gallery.index.min(self.gallery.len().saturating_sub(1));
+            self.lat.t_gallery = Some(Instant::now());
         }
     }
 
@@ -1957,6 +2307,20 @@ impl MyApp {
 
     /// Per-frame housekeeping that must run before anything is drawn.
     fn frame_prelude(&mut self, ctx: &Context) {
+        // The previous frame has been presented by the time the next one
+        // starts, so this is where "first visible pixels" is honestly known.
+        self.lat.commit_frame();
+        if let Some(t) = self.t_boot.take() {
+            perf::record_since(perf::STARTUP_TO_FIRST_FRAME, t);
+        }
+        // Debounced resize refinement: one decode for where the window settles,
+        // never one per frame of a drag.
+        if let Some(due) = self.resize_due {
+            if Instant::now() >= due {
+                self.resize_due = None;
+                self.refine_for_resize(ctx);
+            }
+        }
         // LRU clock for the preview/thumbnail caches. Lives here (not in
         // `central`) so it also advances while the gallery grid is open.
         self.clock += 1;
@@ -2046,6 +2410,7 @@ fn grid_cell(
             kind: Kind::Thumb,
             prio: PRIO_THUMB,
             target_dim: THUMB_DIM,
+            epoch: loader.epoch_now(),
         });
     }
     if let Some(t) = thumbs.get_mut(path) {
@@ -2246,6 +2611,14 @@ impl eframe::App for MyApp {
         }
         self.config.save(&self.config_path);
         self.close_zip();
+        if image_viewer::perf::enabled() {
+            let report = image_viewer::perf::report();
+            eprint!("{report}");
+            // A release build has no console, so also leave the report where it
+            // can be found: %TEMP%\image-viewer-perf.txt.
+            let path = std::env::temp_dir().join("image-viewer-perf.txt");
+            image_viewer::perf::write_report(&path);
+        }
     }
 
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {

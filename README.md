@@ -159,15 +159,42 @@ role — Windows requires the user to confirm that themselves.
 - **Large JPEGs get a DCT-scaled preview** (turbojpeg scales in the DCT
   domain), so opening a 40 MP photo doesn't mean decoding 40 MP twice. The
   full decode starts only after you have actually looked at it for 120 ms.
+- **Big images are resampled in two steps.** A cheap box pass reduces the source
+  to at most twice the display size, and only that reduced buffer is converted
+  to linear light and filtered — measured at **790 ms → 219 ms** for a 40 MP
+  source, and it aliases less than filtering straight from full resolution.
+- **Preloading follows how you browse.** Deliberate paging preloads ±2 images;
+  running forward fast preloads 6 ahead and 1 behind (mirrored when you go
+  back), so decode capacity goes where you are going.
+- **Abandoned work stops early.** Every job carries an epoch; when you navigate
+  away, the in-flight decode abandons its remaining phases instead of finishing
+  work nobody will see. Decoder threads themselves are never interrupted.
 - **Previews are sized to your display**, not a fixed cap, so the texture is
   exactly as sharp as the screen can show.
+- **Resizing never blanks.** The current texture keeps being painted (scaled by
+  the GPU) while a sharper one is decoded in the background, debounced so a
+  window drag triggers a single re-decode.
 - **Decoding never blocks the UI.** A 2–4 thread worker pool with priorities:
-  the image you are looking at first, its neighbours next, grid thumbnails
-  last. Thumbnail requests re-arm every frame, so they survive the queue being
-  rebuilt while you navigate.
+  the image you are looking at first, then previews along your direction of
+  travel, grid thumbnails last. Thumbnail requests re-arm every frame, so they
+  survive the queue being rebuilt while you navigate.
 - **Bounded memory.** Preview cache capped at 16 textures, tile cache at 64
   (≈256 MB), thumbnails LRU-capped at 512, animated GIFs at 240 frames /
   256 MB.
+
+### Measuring it
+
+Built in, because the interesting numbers are about what you *see*, not about
+how long a decode takes:
+
+```
+image-viewer.exe --perf <folder>     # latency report on exit
+```
+
+It records time from intent to useful pixels — startup, selection, next/prev,
+zoom, pan, gallery open, folder scan, resize — at p50/p95/p99, plus counters for
+blank frames, dropped jobs, cancelled decodes and GPU uploads. A release build
+has no console, so the report is written to `%TEMP%\image-viewer-perf.txt`.
 
 ---
 
@@ -177,13 +204,15 @@ role — Windows requires the user to confirm that themselves.
 cargo build --release      # the exe users run
 cargo test                 # unit + property + integration
 cargo bench                # criterion benchmarks
+cargo test --release --test pathological -- --ignored --nocapture   # 40/60 MP timings
 ```
 
 Requires the MSVC toolchain and CMake (turbojpeg builds libjpeg-turbo from
 source). Tests are fixture-free — they build their own images in a temp dir —
 and fast. `test-images/` is gitignored, so `cargo test --test standard` needs
 `test-images\booklet_front.jpg` supplied locally; the `unit` and `property`
-suites do not.
+suites do not. The `pathological` suite generates its own 40/60 MP images and is
+`#[ignore]`d because it takes seconds.
 
 ---
 

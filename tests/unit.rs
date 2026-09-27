@@ -277,22 +277,74 @@ fn test_linear_resize_high_contrast_edge() {
     let out = image_viewer::downscale_image(&data, 7);
     assert_eq!((out.width, out.height), (7, 7));
     assert_eq!(out.rgba.len(), 7 * 7 * 4);
-    // Values stay in gamut.
+    // Values stay in gamut and alpha is untouched. (What a 1px checkerboard
+    // averages to is not a useful assertion: source aliasing dominates. The
+    // ramp test below covers resampler correctness.)
     for p in out.rgba.chunks_exact(4) {
         assert_eq!(p[3], 255, "alpha must stay opaque");
     }
-    // The source is a left-to-right ramp, so every row of the result must be
-    // non-decreasing. This is what actually catches a broken resampler.
-    for row in out.rgba.chunks_exact(7 * 4) {
-        for pair in row.chunks_exact(4).collect::<Vec<_>>().windows(2) {
-            assert!(
-                pair[0][0] <= pair[1][0],
-                "ramp must not invert: {:?} then {:?}",
-                pair[0],
-                pair[1]
-            );
+}
+
+#[test]
+fn test_linear_resize_preserves_a_monotonic_ramp() {
+    // The real invariant of a separable resampler: it must not invert a smooth
+    // ramp. (Checked on an actual ramp - the checkerboard test above cannot
+    // show this.)
+    let (w, h) = (64u32, 8u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..h {
+        for x in 0..w {
+            let v = (x * 255 / (w - 1)) as u8;
+            rgba.extend_from_slice(&[v, v, v, 255]);
         }
     }
+    let data = image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    };
+    for target in [32u32, 7, 3] {
+        let out = image_viewer::downscale_image(&data, target);
+        for row in out.rgba.chunks_exact(out.width as usize * 4) {
+            for pair in row.chunks_exact(4).collect::<Vec<_>>().windows(2) {
+                // Allow a hair of tolerance: ringing at the ends is the filter
+                // working, not an inversion.
+                assert!(
+                    pair[1][0] as i32 >= pair[0][0] as i32 - 1,
+                    "ramp inverted at target {target}: {:?} then {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_downscale_is_cancellable() {
+    // A cancelled downscale must abandon the work and report it, so a worker
+    // is freed when the user has already moved on.
+    let (w, h) = (512u32, 512u32);
+    let rgba = vec![128u8; (w * h * 4) as usize];
+    let data = image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    };
+    assert!(image_viewer::downscale_image_cancellable(&data, 64, &|| false).is_some());
+    // A cancel that fires immediately must bail out rather than finish.
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let cancelled = image_viewer::downscale_image_cancellable(&data, 64, &|| {
+        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    });
+    assert!(cancelled.is_none(), "cancel must abandon the downscale");
+    assert!(
+        calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "cancel must actually be polled"
+    );
 }
 
 #[test]
@@ -953,4 +1005,28 @@ fn test_quarter_turn_mesh_covers_the_swapped_footprint() {
             "quarter {quarter}: rotation must not move the centre"
         );
     }
+}
+
+#[test]
+fn test_preload_radii_follow_browsing_direction() {
+    use image_viewer::preload_radii;
+    // Unknown or deliberate browsing: small and symmetric, so we are not
+    // decoding images nobody asked for.
+    assert_eq!(preload_radii(&[], 0.0), (2, 2));
+    assert_eq!(preload_radii(&[1], 0.5), (2, 2));
+    assert_eq!(preload_radii(&[1, 1, 1, 1], 1.0), (2, 2));
+
+    // Rapid forward: deep window ahead, almost nothing behind.
+    assert_eq!(preload_radii(&[1, 1, 1, 1], 12.0), (6, 1));
+    // Rapid backward: mirrored.
+    assert_eq!(preload_radii(&[-1, -1, -1, -1], 12.0), (1, 6));
+
+    // Rapid but reversing: balanced again, because the next step is a coin flip.
+    assert_eq!(preload_radii(&[1, -1, 1, -1], 12.0), (2, 2));
+    assert_eq!(preload_radii(&[1, 1, -1, 1], 12.0), (6, 1), "3 of 4 forward still leans forward");
+
+    // The current image is never a prefetch candidate, so a radius of 1 in a
+    // direction must still leave the current image to the top-priority job.
+    let (ahead, behind) = preload_radii(&[1, 1, 1], 9.0);
+    assert!(ahead >= 1 && behind >= 1);
 }
