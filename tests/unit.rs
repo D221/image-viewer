@@ -1054,3 +1054,77 @@ fn test_cancelled_load_is_not_a_failure() {
         Ok(_) => panic!("a cancelled job must not return a result"),
     }
 }
+
+#[test]
+fn test_gallery_scroll_offset_lands_the_selected_row_in_view() {
+    // Regression: opening the grid did not focus the current image once you had
+    // browsed a few images. `Response::scroll_to_me` cannot fix that, because
+    // `ScrollArea::show_rows` only lays out the rows inside the viewport — a
+    // selected row that starts off-screen is never built, so it never issues a
+    // scroll request. It only appeared to work when the current image was
+    // already in view (i.e. right after opening the first image).
+    //
+    // The one-shot `vertical_scroll_offset` must put the selected row inside
+    // the laid-out band, and we also pin that the old mechanism cannot.
+    use egui::{Context, FontDefinitions, RawInput};
+
+    const ROWS: usize = 200;
+    const COLS: usize = 4;
+    const SEL_ROW: usize = 137; // far down a long folder
+
+    let ctx = Context::default();
+    ctx.set_fonts(FontDefinitions::empty());
+
+    /// Lay out the rows and report which ones egui actually built.
+    fn laid_out_rows(ctx: &Context, offset: f32) -> (Vec<usize>, f32) {
+        let mut rows = Vec::new();
+        let mut pitch = 0.0f32;
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                pitch = GRID_ROW_H + ui.spacing().item_spacing.y;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .vertical_scroll_offset(offset)
+                    .show_rows(ui, GRID_ROW_H, ROWS, |ui, range| {
+                        rows.extend(range.clone());
+                        for row in range {
+                            ui.horizontal(|ui| {
+                                for _ in 0..COLS {
+                                    let (rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(GRID_CELL, GRID_CELL + GRID_LABEL_H),
+                                        egui::Sense::click(),
+                                    );
+                                    if row == SEL_ROW {
+                                        // The old mechanism, kept only to show
+                                        // it cannot rescue an off-screen row.
+                                        resp.scroll_to_me(Some(egui::Align::Center));
+                                    }
+                                    let _ = rect;
+                                }
+                            });
+                        }
+                    });
+            });
+        });
+        (rows, pitch)
+    }
+
+    // The fix: one-shot offset at the selected row lands it in the band.
+    let probe = laid_out_rows(&ctx, 0.0);
+    let pitch = probe.1;
+    assert!(pitch > GRID_ROW_H, "show_rows adds item spacing to the pitch");
+    let (rows, _) = laid_out_rows(&ctx, SEL_ROW as f32 * pitch);
+    assert!(
+        rows.contains(&SEL_ROW),
+        "selected row {SEL_ROW} must be laid out, got rows {rows:?} (pitch {pitch})"
+    );
+
+    // And the old mechanism alone demonstrably does not: with a stale offset of
+    // 0, scroll_to_me never sees the selected row, so nothing scrolls.
+    let (rows, _) = laid_out_rows(&ctx, 0.0);
+    assert!(
+        !rows.contains(&SEL_ROW),
+        "a row far below the viewport must not be laid out, otherwise this \
+         test is not exercising the bug"
+    );
+}

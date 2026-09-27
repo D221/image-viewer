@@ -868,6 +868,8 @@ struct MyApp {
     rot: u8,
     /// Browsing direction/speed, used to aim the preload window.
     nav: NavHint,
+    /// Scroll the grid to `grid_sel` on the next frame (set when opening).
+    grid_scroll_to_sel: bool,
     /// "User intent -> useful pixels" tracking for the perf report.
     lat: Latency,
     /// When the debounced resize-driven refinement should be queued.
@@ -997,6 +999,7 @@ impl MyApp {
             grid_cols: 1,
             rot: 0,
             nav: NavHint::default(),
+            grid_scroll_to_sel: false,
             lat: Latency::default(),
             resize_due: None,
             t_boot: perf::boot(),
@@ -2319,6 +2322,7 @@ impl MyApp {
         if self.gallery_view {
             // Start the highlight on the image currently shown.
             self.grid_sel = self.gallery.index.min(self.gallery.len().saturating_sub(1));
+            self.grid_scroll_to_sel = true;
             self.lat.t_gallery = Some(Instant::now());
         }
     }
@@ -2359,9 +2363,21 @@ impl MyApp {
             ..
         } = self;
         let files = &gallery.files;
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show_rows(ui, row_h, total_rows, |ui, rows| {
+        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        // On open, jump straight to the current image.
+        //
+        // `scroll_to_me` below cannot do this job: `show_rows` only lays out
+        // the rows inside the viewport, so a selected row that starts off-screen
+        // never gets built, never issues the scroll request, and the grid sits
+        // wherever it was left. It only appeared to work when the current
+        // image was already in view. Setting the offset once is deterministic
+        // and does not depend on the cell being laid out.
+        if std::mem::take(&mut self.grid_scroll_to_sel) {
+            // show_rows adds vertical item spacing on top of row_h.
+            let pitch = row_h + ui.spacing().item_spacing.y;
+            sa = sa.vertical_scroll_offset((sel / cols) as f32 * pitch);
+        }
+        sa.show_rows(ui, row_h, total_rows, |ui, rows| {
                 for row in rows {
                     ui.horizontal(|ui| {
                         for col in 0..cols {
@@ -2380,11 +2396,13 @@ impl MyApp {
                                 loader,
                             );
                             if idx == sel {
-                                // Keep the highlight in view. egui's
-                                // scroll_to_me is a no-op while the cell is
-                                // already on screen, so this never fights the
-                                // user's own scrolling — unlike forcing the
-                                // scroll offset every frame.
+                                // Keep the highlight in view while browsing
+                                // with the arrows. egui's scroll_to_me is a
+                                // no-op while the cell is on screen, so it never
+                                // fights the user's own scrolling; and the row
+                                // next to the viewport *is* laid out, so it
+                                // works for keyboard moves (unlike the initial
+                                // jump, which is handled above).
                                 resp.scroll_to_me(Some(egui::Align::Center));
                             }
                             if resp.clicked() && clicked.is_none() {
