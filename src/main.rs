@@ -65,6 +65,7 @@ const MAX_SCALE: f32 = 32.0;
 const PRIO_CURRENT_PREVIEW: u32 = 0;
 const PRIO_CURRENT_EXIF: u32 = 5;
 const PRIO_FULL: u32 = 15;
+const PRIO_THUMB: u32 = 45;
 
 fn main() -> eframe::Result<()> {
     // CLI: `--register` / `--unregister` manage file associations and exit;
@@ -122,7 +123,11 @@ enum Kind {
     Preview,
     Full,
     Exif,
+    Thumb,
 }
+
+/// Long side of grid thumbnails.
+const THUMB_DIM: u32 = 256;
 
 struct Job {
     path: PathBuf,
@@ -136,6 +141,13 @@ struct Job {
 struct QueueState {
     jobs: Vec<Job>,
     busy: HashSet<(PathBuf, Kind)>,
+}
+
+/// A decoded grid thumbnail: texture, source dims, LRU stamp.
+struct Thumb {
+    tex: TextureHandle,
+    orig: (u32, u32),
+    used: u64,
 }
 
 struct PreviewData {
@@ -158,6 +170,10 @@ enum Msg {
         path: PathBuf,
         result: Result<PreviewData, String>,
     },
+    Thumb {
+        path: PathBuf,
+        result: Result<PreviewData, String>,
+    },
     Full {
         path: PathBuf,
         result: Result<Arc<ImageData>, String>,
@@ -170,6 +186,24 @@ enum Msg {
 
 struct Loader {
     shared: Arc<(Mutex<QueueState>, Condvar)>,
+}
+
+impl Loader {
+    /// Queue a job without dropping existing queued work (used by the grid
+    /// for on-demand thumbnail requests).
+    fn push(&self, job: Job) {
+        let (lock, cv) = &*self.shared;
+        let mut q = lock.lock().unwrap();
+        if q.busy.contains(&(job.path.clone(), job.kind)) {
+            return;
+        }
+        if q.jobs.iter().any(|j| j.path == job.path && j.kind == job.kind) {
+            return;
+        }
+        q.jobs.push(job);
+        cv.notify_all();
+    }
+
 }
 
 impl Loader {
@@ -245,6 +279,10 @@ fn fail_msg(job: &Job, err: String) -> Msg {
             path: job.path.clone(),
             result: Err(err),
         },
+        Kind::Thumb => Msg::Thumb {
+            path: job.path.clone(),
+            result: Err(err),
+        },
         Kind::Exif => Msg::Exif {
             path: job.path.clone(),
             info: None,
@@ -256,6 +294,10 @@ fn run_job(job: &Job) -> Msg {
     let path = job.path.clone();
     match job.kind {
         Kind::Preview => Msg::Preview {
+            result: decode_preview(&path, job.target_dim),
+            path,
+        },
+        Kind::Thumb => Msg::Thumb {
             result: decode_preview(&path, job.target_dim),
             path,
         },
@@ -541,10 +583,14 @@ struct MyApp {
     display_dim: Option<(u32, u32)>, // central panel size in physical px
     suppress_resize_redecode: bool, // panel toggle must not re-decode
     waiting_load: bool, // block_while_loading: current image not decoded yet
+    scroll_to_current: bool, // grid: scroll to the current image on next render
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
     wheel_acc: f32, // accumulated wheel delta in wheel-navigation mode
+    thumbs: HashMap<PathBuf, (TextureHandle, (u32, u32), u64)>, // grid thumbnails
+    thumb_requested: HashSet<PathBuf>,
+    gallery_view: bool, // grid browser open
 }
 
 impl MyApp {
@@ -657,10 +703,14 @@ impl MyApp {
             display_dim: None,
                         suppress_resize_redecode: false,
             waiting_load: false,
+            scroll_to_current: false,
             pending_advance: None,
-                        zip_archive,
+            zip_archive,
             zip_temp,
             wheel_acc: 0.0,
+            thumbs: HashMap::new(),
+            thumb_requested: HashSet::new(),
+            gallery_view: false,
         };
                 app.goto(ctx);
         app
@@ -868,6 +918,21 @@ impl MyApp {
                             self.waiting_load = false;
                         }
                         self.failed.insert((path, Kind::Preview));
+                    }
+                },
+                Msg::Thumb { path, result } => match result {
+                    Ok(p) => {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
+                        self.clock += 1;
+                        self.thumbs.insert(
+                            path.clone(),
+                            (tex, p.orig, self.clock),
+                        );
+                        self.thumb_requested.remove(&path);
+                    }
+                    Err(_) => {
+                        self.thumb_requested.remove(&path);
                     }
                 },
                 Msg::Full { path, result } => match result {
@@ -1467,6 +1532,12 @@ impl MyApp {
             }
         }
 
+        // Gallery grid view (G): scrollable thumbnail grid, click to open.
+        if self.gallery_view {
+            self.gallery_grid(ui, &ctx, panel);
+            return;
+        }
+
         let Some(shown) = self.shown.clone() else {
             let msg = if let Some(e) = &self.error {
                 e.clone()
@@ -1703,6 +1774,114 @@ impl MyApp {
         }
     }
 
+    /// Gallery grid view (G): scrollable thumbnails of every image in the
+    /// queue. Thumbs decode lazily for visible cells; clicking one navigates
+    /// and closes the grid. Esc closes it too (before fullscreen Esc).
+    fn gallery_grid(&mut self, ui: &mut egui::Ui, ctx: &Context, panel: egui::Rect) {
+        const CELL: f32 = 150.0;
+        let cols = ((panel.width() / (CELL + 8.0)).floor() as usize).clamp(1, 24);
+        let row_h = CELL + 34.0;
+        let files = self.gallery.files.clone();
+        let total = files.len();
+        let total_rows = (total + cols - 1) / cols;
+        let mut clicked: Option<PathBuf> = None;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+            ui,
+            row_h,
+            total_rows,
+            |ui, rows| {
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for col in 0..cols {
+                            let idx = row * cols + col;
+                            let Some(path) = files.get(idx).cloned() else { continue; };
+                            let selected = self.cur.as_ref() == Some(&path);
+                            let hit = self.grid_cell(ui, ctx, path.clone(), CELL, idx, selected);
+                            if hit && clicked.is_none() {
+                                clicked = Some(path.clone());
+                            }
+                        }
+                    });
+                }
+            },
+        );
+        if let Some(path) = clicked {
+            if let Some(i) = self.gallery.files.iter().position(|f| *f == path) {
+                self.gallery.index = i;
+                self.gallery_view = false;
+                self.goto(ctx);
+            }
+        }
+    }
+
+    /// One grid cell: thumbnail (or placeholder) + file name; click opens it.
+    /// Returns true when this cell was clicked (caller navigates).
+    fn grid_cell(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &Context,
+        path: PathBuf,
+        cell: f32,
+        idx: usize,
+        selected: bool,
+    ) -> bool {
+        const CELL: f32 = 150.0;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        // Request a thumbnail for visible cells (idempotent).
+        if !self.thumbs.contains_key(&path)
+            && !self.thumb_requested.contains(&path)
+            && !self.failed.contains(&(path.clone(), Kind::Thumb))
+        {
+            self.thumb_requested.insert(path.clone());
+            self.loader.push(Job {
+                path: path.clone(),
+                kind: Kind::Thumb,
+                prio: PRIO_THUMB,
+                target_dim: THUMB_DIM,
+            });
+        }
+
+    let fill = if selected {
+        egui::Color32::from_rgb(28, 58, 118)
+    } else {
+        egui::Color32::from_rgb(38, 38, 38)
+    };
+    let stroke = if selected {
+        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 255))
+    } else {
+        egui::Stroke::NONE
+    };
+    let frame_resp = egui::Frame::default()
+        .fill(fill)
+        .stroke(stroke)
+        .inner_margin(4.0)
+        .show(ui, |ui| {
+            ui.set_min_size(egui::vec2(cell, cell + 22.0));
+            if let Some((tex, _, _)) = self.thumbs.get(&path) {
+                ui.add(
+                    egui::Image::new(tex)
+                        .max_size(egui::vec2(CELL, CELL))
+                        .fit_to_exact_size(egui::vec2(CELL, CELL)),
+                );
+            } else {
+                ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
+                ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new("...").weak());
+                });
+            }
+            ui.label(
+                egui::RichText::new(&name)
+                    .small()
+                    .color(egui::Color32::from_gray(200)),
+            );
+        });
+        frame_resp.response.clicked()
+    }
+
     /// Per-frame housekeeping that must run before anything is drawn.
     fn frame_prelude(&mut self, ctx: &Context) {
         // Consume a queued advance from "wait for load" mode — the image it
@@ -1855,20 +2034,25 @@ impl eframe::App for MyApp {
             self.suppress_resize_redecode = true;
             self.show_panels = fs; // entering fullscreen hides panels; leaving restores
         }
-        if esc {
-            let in_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            if in_fullscreen {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                self.show_panels = true;
-                self.suppress_resize_redecode = true;
+                        if esc {
+            if self.gallery_view {
+                self.gallery_view = false; // close the grid first
             } else {
-                self.close_zip();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                let in_fullscreen = ctx
+                    .input(|i| i.viewport().fullscreen.unwrap_or(false));
+                if in_fullscreen {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    self.show_panels = true;
+                    self.suppress_resize_redecode = true;
+                } else {
+                    self.close_zip();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
 
-        // Keyboard navigation + file triage
-        let (next, prev, first, last, toggle) = ctx.input(|i| {
+                // Keyboard navigation + file triage
+        let (next, prev, first, last, toggle, grid) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::ArrowRight)
                     || i.key_pressed(egui::Key::PageDown)
@@ -1877,6 +2061,7 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::Home),
                 i.key_pressed(egui::Key::End),
                 i.key_pressed(egui::Key::I),
+                i.key_pressed(egui::Key::G),
             )
         });
         let (del, move_f, copy_f, explore, reload, clip_img, wall) = ctx.input(|i| {
@@ -1913,6 +2098,10 @@ impl eframe::App for MyApp {
         if toggle {
             self.suppress_resize_redecode = true;
             self.show_panels = !self.show_panels;
+        }
+        if grid {
+            self.gallery_view = !self.gallery_view;
+            self.scroll_to_current = true;
         }
         if del {
             self.delete_current(ctx);
