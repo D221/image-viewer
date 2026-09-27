@@ -34,9 +34,7 @@ use std::time::{Duration, Instant};
 use image_viewer::perf;
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
-    load_image_preview_full_cancellable, preload_radii, rotated_footprint,
-    set_downscale_filter,
-    set_linear_resample,
+    load_image_preview_full, rotated_footprint, set_downscale_filter, set_linear_resample,
     scan_folder_sorted, Animation, Config, DownscaleFilter, Gallery, ImageData, SortMode,
     GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
@@ -52,9 +50,6 @@ const THRESH_WHEEL: f32 = 60.0;
 const PRELOAD_RADIUS: usize = 3;
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
 const PREVIEW_CACHE_CAP: usize = 16;
-/// Ceiling on cached preview *texture* bytes. Sixteen 4096px RGBA textures are
-/// 1 GB on their own, which is what made fast browsing exhaust RAM.
-const PREVIEW_BYTE_BUDGET: usize = 512 << 20;
 /// Full-res tile edge in source pixels.
 const TILE: u32 = 1024;
 /// Max tiles converted+uploaded per frame (keeps frames smooth while zooming).
@@ -63,11 +58,6 @@ const TILES_PER_FRAME: usize = 8;
 const MAX_TILES: usize = 64;
 /// Wait this long on an image before starting its full-res decode.
 const FULL_DWELL: Duration = Duration::from_millis(120);
-/// Window size must be stable this long before a resize-driven refinement
-/// is queued, so dragging a window edge decodes once, not per frame.
-const RESIZE_SETTLE: Duration = Duration::from_millis(180);
-/// Never decode a preview smaller than this, however small the window is.
-const PX_FLOOR: u32 = 256;
 /// Poll the folder for new/deleted files this often (watcher).
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Highest zoom, in screen points per source pixel.
@@ -177,53 +167,6 @@ struct Thumb {
     used: u64,
 }
 
-/// How the user is moving through the folder, so preloading can follow them
-/// instead of always paying for a symmetric window.
-///
-/// Slow browsing gets a small symmetric radius (wasting decode capacity on
-/// images nobody looks at is the point of "minimum necessary work"). Rapid
-/// one-directional browsing gets a deep window *ahead* of the user, and
-/// reversing direction re-biases immediately because `schedule()` re-runs on
-/// every step.
-#[derive(Default)]
-struct NavHint {
-    /// Timestamps of the last few steps, oldest first.
-    marks: Vec<Instant>,
-    /// Direction of those steps: 1 = forward, -1 = back.
-    dirs: Vec<i32>,
-}
-
-impl NavHint {
-    /// Images per second over the recent window (0 when idle).
-    fn rate(&self) -> f32 {
-        match (self.marks.first(), self.marks.last()) {
-            (Some(a), Some(b)) if self.marks.len() > 1 => {
-                let dt = b.saturating_duration_since(*a).as_secs_f32();
-                if dt <= 0.0 {
-                    0.0
-                } else {
-                    (self.marks.len() - 1) as f32 / dt
-                }
-            }
-            _ => 0.0,
-        }
-    }
-
-    /// `(ahead, behind)` preview radii to preload.
-    fn radii(&self) -> (usize, usize) {
-        preload_radii(&self.dirs, self.rate())
-    }
-
-    fn note(&mut self, dir: i32) {
-        if self.marks.len() >= 8 {
-            self.marks.remove(0);
-            self.dirs.remove(0);
-        }
-        self.marks.push(Instant::now());
-        self.dirs.push(dir);
-    }
-}
-
 /// Tracks one "user intent -> useful pixels" transition so the perf module can
 /// report real latencies instead of decode times.
 ///
@@ -247,11 +190,9 @@ struct Latency {
     /// A stall was already reported for this request (report once, not per
     /// frame).
     stall_logged: bool,
-    /// Zoom / pan / resize / gallery / scan in flight.
+    /// Zoom / pan / gallery / scan in flight.
     t_zoom: Option<Instant>,
     t_pan: Option<Instant>,
-    t_resize: Option<Instant>,
-    resize_usable: bool,
     t_gallery: Option<Instant>,
     t_scan: Option<Instant>,
     /// Tiles wanted by a zoom/pan, satisfied when the visible set is complete.
@@ -350,46 +291,18 @@ struct PreviewData {
     below_target: bool,
 }
 
-/// A worker outcome. `Cancelled` is **not** a failure: it means the user moved
-/// on, the work was abandoned on purpose, and nothing should be reported or
-/// remembered. Conflating the two is what made abandoned images look
-/// permanently broken (poisoned `failed`, error spam, never retried).
-#[derive(Debug)]
-enum JobErr {
-    Cancelled,
-    Decode(String),
-}
-
-impl std::fmt::Display for JobErr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            JobErr::Cancelled => write!(f, "cancelled"),
-            JobErr::Decode(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl From<image_viewer::LoadError> for JobErr {
-    fn from(e: image_viewer::LoadError) -> Self {
-        match e {
-            image_viewer::LoadError::Cancelled => JobErr::Cancelled,
-            other => JobErr::Decode(other.to_string()),
-        }
-    }
-}
-
 enum Msg {
     Preview {
         path: PathBuf,
-        result: Result<PreviewData, JobErr>,
+        result: Result<PreviewData, String>,
     },
     Thumb {
         path: PathBuf,
-        result: Result<PreviewData, JobErr>,
+        result: Result<PreviewData, String>,
     },
     Full {
         path: PathBuf,
-        result: Result<Arc<ImageData>, JobErr>,
+        result: Result<Arc<ImageData>, String>,
     },
     Exif {
         path: PathBuf,
@@ -399,13 +312,6 @@ enum Msg {
 
 struct Loader {
     shared: Arc<(Mutex<QueueState>, Condvar)>,
-    /// Paths whose results are still wanted. A job whose path is not in here is
-    /// abandoned at its next phase boundary.
-    ///
-    /// A *set of paths*, not a global epoch counter: re-planning the same work
-    /// (a neighbour preview arriving, the dwell timer, a watcher poll) must not
-    /// cancel anything. An epoch did exactly that, and every image failed.
-    wanted: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Loader {
@@ -431,20 +337,9 @@ impl Loader {
         cv.notify_all();
     }
 
-    /// Is this path still being decoded? (diagnostics)
-    fn is_wanted(&self, path: &Path) -> bool {
-        self.wanted.lock().unwrap().contains(path)
-    }
-
-    /// Replace the set of paths whose decodes are still wanted.
-    fn set_wanted(&self, wanted: HashSet<PathBuf>) {
-        *self.wanted.lock().unwrap() = wanted;
-    }
-
     fn new(ctx: &Context, tx: Sender<Msg>) -> Self {
         let shared: Arc<(Mutex<QueueState>, Condvar)> =
             Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
-        let wanted = Arc::new(Mutex::new(HashSet::new()));
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -454,7 +349,6 @@ impl Loader {
             let shared = shared.clone();
             let tx = tx.clone();
             let ctx = ctx.clone();
-            let wanted = wanted.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, cv) = &*shared;
@@ -476,17 +370,7 @@ impl Loader {
                 };
 
                 // A decoder panic on a corrupt file must not kill the worker.
-                // Thumbnails are cheap and bounded by THUMB_DIM, and the grid
-                // re-requests them, so they are never cancelled. Real-sized
-                // decodes are abandoned as soon as their path stops being
-                // wanted - which never includes the image on screen, because
-                // schedule() always puts it in the set.
-                let cancelable = job.kind != Kind::Thumb;
-                let msg = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_job(&job, &|| {
-                        cancelable && !wanted.lock().unwrap().contains(&job.path)
-                    })
-                })) {
+                let msg = match std::panic::catch_unwind(AssertUnwindSafe(|| run_job(&job))) {
                     Ok(m) => m,
                     Err(payload) => {
                         // Keep the message: a bare "decoder panicked" hid the
@@ -510,7 +394,7 @@ impl Loader {
                 ctx.request_repaint();
             });
         }
-        Self { shared, wanted }
+        Self { shared }
     }
 
     /// Replace everything that is still *queued* with `jobs` (in-flight work is left
@@ -538,15 +422,15 @@ fn fail_msg(job: &Job, err: String) -> Msg {
     match job.kind {
         Kind::Preview => Msg::Preview {
             path: job.path.clone(),
-            result: Err(JobErr::Decode(err)),
+            result: Err(err),
         },
         Kind::Full => Msg::Full {
             path: job.path.clone(),
-            result: Err(JobErr::Decode(err)),
+            result: Err(err),
         },
         Kind::Thumb => Msg::Thumb {
             path: job.path.clone(),
-            result: Err(JobErr::Decode(err)),
+            result: Err(err),
         },
         Kind::Exif => Msg::Exif {
             path: job.path.clone(),
@@ -555,19 +439,21 @@ fn fail_msg(job: &Job, err: String) -> Msg {
     }
 }
 
-fn run_job(job: &Job, cancel: &dyn Fn() -> bool) -> Msg {
+fn run_job(job: &Job) -> Msg {
     let path = job.path.clone();
     match job.kind {
         Kind::Preview => Msg::Preview {
-            result: decode_preview(&path, job.target_dim, cancel),
+            result: decode_preview(&path, job.target_dim),
             path,
         },
         Kind::Thumb => Msg::Thumb {
-            result: decode_preview(&path, job.target_dim, cancel),
+            result: decode_preview(&path, job.target_dim),
             path,
         },
         Kind::Full => Msg::Full {
-            result: load_image_full(&path).map(Arc::new).map_err(JobErr::from),
+            result: load_image_full(&path)
+                .map(Arc::new)
+                .map_err(|e| e.to_string()),
             path,
         },
         Kind::Exif => Msg::Exif {
@@ -580,20 +466,11 @@ fn run_job(job: &Job, cancel: &dyn Fn() -> bool) -> Msg {
 /// Decode a preview sized for the current display area (in physical pixels).
 /// The result is the full-res image when it fits the target, otherwise a
 /// texture capped at the target long side — always sharp at fit-to-window.
-fn decode_preview(
-    path: &Path,
-    target_dim: u32,
-    cancel: &dyn Fn() -> bool,
-) -> Result<PreviewData, JobErr> {
+fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
     // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
     // preview; everything else is fully decoded once and the preview is
     // derived from that, so the full image is already available.
-    let r = load_image_preview_full_cancellable(path, target_dim, cancel).map_err(|e| {
-        if matches!(e, image_viewer::LoadError::Cancelled) {
-            perf::count(perf::C_JOBS_CANCELLED, 1);
-        }
-        JobErr::from(e)
-    })?;
+    let r = load_image_preview_full(path, target_dim).map_err(|e| e.to_string())?;
     perf::count(perf::C_DECODE_CALLS, 1);
     let image = ColorImage::from_rgba_unmultiplied(
         [r.preview.width as usize, r.preview.height as usize],
@@ -782,8 +659,6 @@ fn flash_label(v: u16) -> &'static str {
 
 struct Preview {
     tex: TextureHandle,
-    /// Texel size of the uploaded texture, for the cache byte budget.
-    texels: [usize; 2],
     orig: (u32, u32),
     load_ms: u64,
     used: u64, // LRU stamp
@@ -866,15 +741,11 @@ struct MyApp {
     grid_cols: usize,
     /// Quarter turns clockwise applied to the shown image (0..4).
     rot: u8,
-    /// Browsing direction/speed, used to aim the preload window.
-    nav: NavHint,
     /// Selection index the grid's scroll offset was last set for. The offset is
     /// written only when this differs, so manual scrolling is never fought.
     grid_sel_scrolled: usize,
     /// "User intent -> useful pixels" tracking for the perf report.
     lat: Latency,
-    /// When the debounced resize-driven refinement should be queued.
-    resize_due: Option<Instant>,
     /// First frame's timestamp, for startup latency.
     t_boot: Option<Instant>,
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
@@ -999,10 +870,8 @@ impl MyApp {
             grid_sel: 0,
             grid_cols: 1,
             rot: 0,
-            nav: NavHint::default(),
             grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
-            resize_due: None,
             t_boot: perf::boot(),
             pending_advance: None,
             zip_archive,
@@ -1067,7 +936,6 @@ impl MyApp {
         if self.config.block_while_loading && self.waiting_load {
             return;
         }
-        self.nav.note(if forward { 1 } else { -1 });
         if forward {
             self.gallery.next();
         } else {
@@ -1106,71 +974,6 @@ impl MyApp {
         (pv.orig.0 as u64 * pv.orig.1 as u64) <= MAX_FULL_PIXELS
     }
 
-    /// Is the shown image's texture too small for the (now larger) display?
-    fn needs_bigger_preview(&self) -> bool {
-        let (Some(target), Some(shown)) = (self.display_dim, self.shown.as_ref()) else {
-            return false;
-        };
-        let target = target.0.max(target.1).max(PX_FLOOR) as f32;
-        self.previews
-            .get(shown)
-            .map(|pv| (pv.tex.size()[0] as f32) < target || pv.below_target)
-            .unwrap_or(false)
-    }
-
-    /// Queue the debounced resize refinement: drop the too-small texture and
-    /// re-decode at the new target. Only the *stale* entries go, so the image
-    /// on screen keeps its texture until the replacement arrives.
-    fn refine_for_resize(&mut self, ctx: &Context) {
-        let Some(shown) = self.shown.clone() else {
-            return;
-        };
-        let stale: Vec<PathBuf> = self
-            .previews
-            .iter()
-            .filter(|(p, pv)| {
-                pv.below_target
-                    && (pv.tex.size()[0] as f32)
-                        < self.display_dim
-                            .map(|d| d.0.max(d.1).max(PX_FLOOR) as f32)
-                            .unwrap_or(0.0)
-                    && **p != shown
-            })
-            .map(|(p, _)| p.clone())
-            .collect();
-        // The current image is re-decoded too, but only once its old texture is
-        // no longer the one being displayed: we keep painting it meanwhile.
-        let current_stale = self
-            .previews
-            .get(&shown)
-            .map(|pv| {
-                pv.below_target
-                    && (pv.tex.size()[0] as f32)
-                        < self.display_dim
-                            .map(|d| d.0.max(d.1).max(PX_FLOOR) as f32)
-                            .unwrap_or(0.0)
-            })
-            .unwrap_or(false);
-        if current_stale {
-            if let Some(pv) = self.previews.get_mut(&shown) {
-                // Ask for a re-decode, but do not drop the texture: `below_target`
-                // + a fresh job is enough, and `schedule` will re-queue it.
-                pv.below_target = true;
-            }
-            self.failed.remove(&(shown.clone(), Kind::Preview));
-        }
-        let had_stale = !stale.is_empty();
-        for p in stale {
-            self.previews.remove(&p);
-            self.failed.remove(&(p, Kind::Preview));
-        }
-        if current_stale || had_stale {
-            perf::count(perf::C_RESIZE_REDECODES, 1);
-            self.schedule();
-        }
-        let _ = ctx;
-    }
-
     fn schedule(&mut self) {
         let mut jobs = Vec::new();
         let files = &self.gallery.files;
@@ -1194,58 +997,48 @@ impl MyApp {
             .unwrap_or(PREVIEW_TEXTURE_DIM)
             .clamp(256, PREVIEW_TEXTURE_DIM);
 
-        // Publish what we actually want. In-flight decodes of anything *not* in
-        // this set are abandoned at their next phase boundary; re-planning the
-        // same set cancels nothing.
-        let mut wanted: HashSet<PathBuf> = HashSet::from([cur.clone()]);
-        let job = |path: PathBuf, kind: Kind, prio: u32, target_dim: u32| Job {
-            path,
-            kind,
-            prio,
-            target_dim,
-        };
-
         if need_preview(cur) {
-            jobs.push(job(
-                cur.clone(),
-                Kind::Preview,
-                PRIO_CURRENT_PREVIEW,
+            jobs.push(Job {
+                path: cur.clone(),
+                kind: Kind::Preview,
+                prio: PRIO_CURRENT_PREVIEW,
                 target_dim,
-            ));
+            });
         }
         if self.exif_loading {
-            jobs.push(job(cur.clone(), Kind::Exif, PRIO_CURRENT_EXIF, 0));
+            jobs.push(Job {
+                path: cur.clone(),
+                kind: Kind::Exif,
+                prio: PRIO_CURRENT_EXIF,
+                target_dim: 0,
+            });
         }
         if self.full_due.is_none() && self.needs_full(cur) {
-            jobs.push(job(cur.clone(), Kind::Full, PRIO_FULL, 0));
+            jobs.push(Job {
+                path: cur.clone(),
+                kind: Kind::Full,
+                prio: PRIO_FULL,
+                target_dim: 0,
+            });
         }
 
-        // Neighbours, biased along the direction the user is actually moving.
-        // The image on screen is always PRIO_CURRENT_PREVIEW (0), so prefetch
-        // can never starve it: every prefetch job is >= 10.
-        let (ahead, behind) = self.nav.radii();
+        // Neighbours: "next" slightly ahead of "previous" at each distance.
         let mut seen: HashSet<usize> = HashSet::from([i]);
-        for d in 1..=ahead.max(behind) {
-            if d <= ahead {
-                let idx = (i + d) % n;
+        for d in 1..=PRELOAD_RADIUS {
+            for (idx, prio) in [
+                ((i + d) % n, 10 + 2 * d as u32),
+                ((i + n - d % n) % n, 11 + 2 * d as u32),
+            ] {
                 if seen.insert(idx) && need_preview(&files[idx]) {
-                    let p = files[idx].clone();
-                    wanted.insert(p.clone());
-                    jobs.push(job(p, Kind::Preview, 10 + 2 * d as u32, target_dim));
-                }
-            }
-            if d <= behind {
-                let idx = (i + n - d % n) % n;
-                if seen.insert(idx) && need_preview(&files[idx]) {
-                    let p = files[idx].clone();
-                    wanted.insert(p.clone());
-                    jobs.push(job(p, Kind::Preview, 30 + 2 * d as u32, target_dim));
+                    jobs.push(Job {
+                        path: files[idx].clone(),
+                        kind: Kind::Preview,
+                        prio,
+                        target_dim,
+                    });
                 }
             }
         }
-        // Everything queued is wanted, so publishing the set before the swap
-        // means an in-flight job is never cancelled by its own re-plan.
-        self.loader.set_wanted(wanted);
         self.loader.replace(jobs);
     }
 
@@ -1263,43 +1056,22 @@ impl MyApp {
                 Msg::Preview { path, result } => match result {
                     Ok(p) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
-                        let texels = p.image.size;
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         perf::count(perf::C_TEXTURE_UPLOADS, 1);
                         perf::record(perf::JOB_PREVIEW_MS, p.load_ms * 1000);
-                        let PreviewData { mut full, mut anim, .. } = p;
-                        // **Memory.** The full-resolution buffer (up to
-                        // MAX_FULL_PIXELS = 300 MP = 1.2 GB) rides along for
-                        // free, which is great for the image you are looking at
-                        // and catastrophic for six prefetched neighbours. Only
-                        // the current image keeps it; neighbours re-decode on
-                        // demand if you actually stop on them (FULL_DWELL
-                        // exists for exactly that). Same for animation frames.
-                        if Some(&path) != self.cur.as_ref() {
-                            if full.take().is_some() || anim.take().is_some() {
-                                perf::count(perf::C_FULL_DROPPED, 1);
-                            }
-                        }
                         if Some(&path) == self.cur.as_ref() {
                             self.lat.preview(Instant::now());
-                            if self.lat.t_resize.is_some() {
-                                let t = self.lat.t_resize.take();
-                                if let Some(t) = t {
-                                    perf::record_since(perf::RESIZE_TO_REFINED, t);
-                                }
-                            }
                         }
                         self.clock += 1;
                         self.previews.insert(
                             path.clone(),
                             Preview {
                                 tex,
-                                texels,
                                 orig: p.orig,
                                 load_ms: p.load_ms,
                                 used: self.clock,
-                                full,
-                                anim,
+                                full: p.full,
+                                anim: p.anim,
                                 has_alpha: p.has_alpha,
                                 below_target: p.below_target,
                             },
@@ -1362,11 +1134,7 @@ impl MyApp {
                         self.thumb_tries.remove(&path);
                         self.evict_thumbs();
                     }
-                    Err(JobErr::Cancelled) => {
-                        // Abandoned on purpose: neither a failure nor an
-                        // attempt. The grid re-requests it when visible again.
-                    }
-                    Err(JobErr::Decode(_)) => {
+                    Err(_) => {
                         // Count the attempt (done in pump, not at queue time, so
                         // a job wiped by schedule() costs nothing). After
                         // THUMB_TRIES the cell stops asking, so one corrupt
@@ -1414,34 +1182,7 @@ impl MyApp {
     }
 
     fn evict_previews(&mut self) {
-        // A count cap alone is meaningless when each texture can be 67 MB
-        // (4096² RGBA) and eight are alive during fast browsing, so the cache is
-        // bounded by *bytes* as well.
-        while (self.previews.len() > PREVIEW_CACHE_CAP
-            || self.preview_bytes() > PREVIEW_BYTE_BUDGET)
-            && self.previews.len() > 1
-        {
-            if !self.evict_one_preview() {
-                break; // everything left is on screen or adjacent to it
-            }
-        }
-        perf::gauge(
-            perf::C_PREVIEW_BYTES,
-            (self.preview_bytes() as u64) / (1 << 20),
-        );
-    }
-
-    fn preview_bytes(&self) -> usize {
-        self.previews
-            .values()
-            .map(|pv| pv.texels[0] * pv.texels[1] * 4)
-            .sum()
-    }
-
-    /// Drop the least-recently-painted unprotected preview.
-    /// Returns false when everything left is on screen or adjacent to it.
-    fn evict_one_preview(&mut self) -> bool {
-        {
+        while self.previews.len() > PREVIEW_CACHE_CAP {
             let n = self.gallery.files.len();
             let i = self.gallery.index;
             let protected: HashSet<&PathBuf> = (0..=2 * PRELOAD_RADIUS)
@@ -1459,10 +1200,8 @@ impl MyApp {
             match victim {
                 Some(v) => {
                     self.previews.remove(&v);
-                    true
                 }
-                // Nothing evictable: everything left is on screen or adjacent.
-                None => false,
+                None => break,
             }
         }
     }
@@ -2013,23 +1752,20 @@ impl MyApp {
             // reload the image: consume exactly one transition silently.
             if self.suppress_resize_redecode {
                 self.suppress_resize_redecode = false;
-            } else {
-                // Keep displaying the texture we already have (the GPU scales
-                // it to the new size) and refine in the background. The old
-                // code *dropped* below-target previews here, which blanked the
-                // current image until the re-decode landed - precisely the
-                // "loading flash on resize" that must not happen.
-                if self.shown.is_some() {
-                    // Something is on screen to keep showing, so this *is* a
-                    // resize from the user's point of view. (At startup
-                    // display_dim goes None -> real, which is not one.)
-                    self.lat.t_resize = Some(Instant::now());
-                    self.lat.resize_usable = true;
-                }
-                if grew && self.needs_bigger_preview() {
-                    // Debounced: a drag-resize changes the size every frame and
-                    // we only want one refinement for where the window settles.
-                    self.resize_due = Some(Instant::now() + RESIZE_SETTLE);
+            } else if grew {
+                let stale: Vec<PathBuf> = self
+                    .previews
+                    .iter()
+                    .filter(|(_, pv)| pv.below_target)
+                    .map(|(p, _)| p.clone())
+                    .collect();
+                if !stale.is_empty() {
+                    perf::count(perf::C_RESIZE_REDECODES, 1);
+                    for p in &stale {
+                        self.previews.remove(p);
+                        self.failed.remove(&(p.clone(), Kind::Preview));
+                    }
+                    self.schedule();
                 }
             }
         }
@@ -2454,10 +2190,9 @@ impl MyApp {
         perf::count(perf::C_STALL, 1);
         let cached = self.previews.contains_key(cur);
         let poisoned = self.failed.contains(&(cur.clone(), Kind::Preview));
-        let wanted = self.loader.is_wanted(cur);
         eprintln!(
             "stall: {:?} not painted after {:?}\n  index={}/{} shown={:?} shown==cur={}\n  \
-cached={} poisoned={} wanted={} previews={} thumbs={} previewMB={} panics={}",
+cached={} poisoned={} previews={} thumbs={} panics={}",
             cur.file_name().unwrap_or_default(),
             t.elapsed(),
             self.gallery.index,
@@ -2466,10 +2201,8 @@ cached={} poisoned={} wanted={} previews={} thumbs={} previewMB={} panics={}",
             self.shown == self.cur,
             cached,
             poisoned,
-            wanted,
             self.previews.len(),
             self.thumbs.len(),
-            self.preview_bytes() / (1 << 20),
             perf::counter(perf::C_DECODE_PANICS),
         );
     }
@@ -2482,14 +2215,6 @@ cached={} poisoned={} wanted={} previews={} thumbs={} previewMB={} panics={}",
             perf::record_since(perf::STARTUP_TO_FIRST_FRAME, t);
         }
         self.check_for_stall(ctx);
-        // Debounced resize refinement: one decode for where the window settles,
-        // never one per frame of a drag.
-        if let Some(due) = self.resize_due {
-            if Instant::now() >= due {
-                self.resize_due = None;
-                self.refine_for_resize(ctx);
-            }
-        }
         // LRU clock for the preview/thumbnail caches. Lives here (not in
         // `central`) so it also advances while the gallery grid is open.
         self.clock += 1;

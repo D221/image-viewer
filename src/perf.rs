@@ -33,7 +33,7 @@ pub fn boot() -> Option<std::time::Instant> {
 }
 
 /// Number of latency metrics (see [`METRICS`]).
-const N_METRICS: usize = 16;
+const N_METRICS: usize = 15;
 /// Samples retained per metric.
 const CAP: usize = 256;
 
@@ -49,12 +49,11 @@ pub const PAN_TO_TILES: usize = 7;
 pub const GALLERY_TO_THUMBS: usize = 8;
 pub const SCAN_TO_GALLERY: usize = 9;
 pub const RESIZE_TO_USABLE: usize = 10;
-pub const RESIZE_TO_REFINED: usize = 11;
 /// How long a single worker job ran, by kind (Preview / Full / Thumb / Exif).
-pub const JOB_PREVIEW_MS: usize = 12;
-pub const JOB_FULL_MS: usize = 13;
-pub const JOB_THUMB_MS: usize = 14;
-pub const JOB_EXIF_MS: usize = 15;
+pub const JOB_PREVIEW_MS: usize = 11;
+pub const JOB_FULL_MS: usize = 12;
+pub const JOB_THUMB_MS: usize = 13;
+pub const JOB_EXIF_MS: usize = 14;
 
 const NAMES: [&str; N_METRICS] = [
     "startup -> first frame",
@@ -68,7 +67,6 @@ const NAMES: [&str; N_METRICS] = [
     "gallery open -> first thumbs",
     "folder scan -> usable gallery",
     "resize -> usable",
-    "resize -> refined",
     "worker: preview decode",
     "worker: full decode",
     "worker: thumbnail decode",
@@ -78,31 +76,25 @@ const NAMES: [&str; N_METRICS] = [
 /// Cheap counters, always recorded.
 pub const C_DISPLAY_GAP_FRAMES: usize = 0; // frames that could not paint the wanted image
 pub const C_JOBS_DROPPED: usize = 1; // queued jobs discarded by a queue rebuild
-pub const C_JOBS_CANCELLED: usize = 2; // decodes abandoned via the cancel token
-pub const C_TEXTURE_UPLOADS: usize = 3; // textures created or updated on the GPU
-pub const C_TILES_CREATED: usize = 4; // full-res tiles cut and uploaded
-pub const C_DECODE_CALLS: usize = 5; // file reads + decodes started
-pub const C_PREVIEW_REUSED: usize = 6; // previews served without a new decode
-pub const C_RESIZE_REDECODES: usize = 7; // resize-driven refinement requests
-pub const C_DECODE_PANICS: usize = 8; // worker panics caught (usually OOM)
-pub const C_FULL_DROPPED: usize = 9; // full-res buffers released for prefetched images
-pub const C_STALL: usize = 10; // times an image took absurdly long to appear
-pub const C_PREVIEW_BYTES: usize = 11; // bytes of texture data cached right now
+pub const C_TEXTURE_UPLOADS: usize = 2; // textures created or updated on the GPU
+pub const C_TILES_CREATED: usize = 3; // full-res tiles cut and uploaded
+pub const C_DECODE_CALLS: usize = 4; // file reads + decodes started
+pub const C_PREVIEW_REUSED: usize = 5; // previews served without a new decode
+pub const C_RESIZE_REDECODES: usize = 6; // resize-driven re-decodes of stale textures
+pub const C_DECODE_PANICS: usize = 7; // worker panics caught (usually OOM)
+pub const C_STALL: usize = 8; // times an image took absurdly long to appear
 
-const N_COUNTERS: usize = 12;
+const N_COUNTERS: usize = 9;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
-    "decodes cancelled mid-flight",
     "GPU texture uploads",
     "full-res tiles created",
     "decode calls started",
     "previews reused (no decode)",
     "resize-driven re-decodes",
     "worker decode panics",
-    "full-res buffers dropped (prefetch)",
     "stalls (>5s to first pixels)",
-    "preview texture MB cached",
 ];
 
 struct Metric {

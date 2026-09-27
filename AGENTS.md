@@ -15,18 +15,14 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Performance (the core goal — read before touching the pipeline)
 
-- **Measure, don't guess.** `src/perf.rs` samples 16 latency metrics into fixed
-  256-entry atomic rings (p50/p95/p99) plus 8 always-on counters. Enable with
+- **Measure, don't guess.** `src/perf.rs` samples 15 latency metrics into fixed
+  256-entry atomic rings (p50/p95/p99) plus 9 always-on counters. Enable with
   `--perf` or `PERF=1`. "First visible pixels" is committed in `frame_prelude`,
   i.e. *after* the painting frame was presented — never record it when the
   worker message arrives, that is not on screen yet.
 - **`display-gap frames` must stay 0.** It counts frames that wanted to paint the
   current image and had no texture. Nonzero means something threw away the
   texture the user is looking at.
-- **Never drop the displayed texture to re-decode.** On a larger window the
-  existing texture keeps being painted (the GPU scales it) and a sharper one is
-  requested, debounced by `RESIZE_SETTLE` (180 ms) so a drag-resize decodes once.
-  The old code dropped `below_target` previews here, which blanked the image.
 - **The resampler is the hot path for big non-JPEG sources.** `linear_resize`:
   sRGB box pre-reduction to ≤2x the target (integer running sums, rayon,
   precomputed reciprocals) → 12-bit linear conversion of *that* buffer → two
@@ -34,42 +30,44 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   full-resolution source; a reciprocal **division inside the inner loop cost more
   than everything else combined**; the vertical pass needs its running column
   accumulator or it misses cache on every pixel.
-- **Cancellation is a set of wanted paths, never a global epoch.** `Loader.wanted`
-  is published by `schedule()`; a job is abandoned when its path leaves the set
-  (thumbnails are never cancelled — cheap, and the grid re-requests them). Two
-  rules an earlier epoch-based design got catastrophically wrong: re-planning
-  the *same* work must cancel nothing, and `JobErr::Cancelled` must never be
-  shown, logged, or recorded in `failed` — it means "ask again later", not
-  "broken file". Conflating the two poisoned every image the user passed, and
-  the image was then never retried. `schedule()` always puts the current image
-  in the set, so it can never be cancelled. Third-party decoders
-  (turbojpeg/libheif/jxl-oxide) are *not* interrupted; they expose no safe
-  cancellation.
-- **Preloading follows travel direction** (`preload_radii` in lib.rs): slow
-  browsing gets ±2, rapid one-directional browsing gets 6 ahead / 1 behind (or
-  mirrored), and anything without a clear 2/3 majority stays symmetric — lean
-  only on 2/3 or alternating input ends up betting on one side. The current
-  image is always `PRIO_CURRENT_PREVIEW` (0) and every prefetch job is ≥ 10, so
-  prefetch can never starve it.
+- **Decoding is never interrupted, and nothing is ever abandoned.**
+  A job runs to completion even if the user has navigated away. An earlier
+  design published a set of "wanted" paths from `schedule()` and cancelled any
+  in-flight decode whose path left it; combined with `Loader::replace` dropping
+  queued-but-busy jobs, that **stranded images that were never re-requested** —
+  "random images don't load, and the stall watchdog says they are not cached, not
+  poisoned, and nothing is decoding them". Do not reintroduce cancellation
+  without proving every cancelled job is re-queued. Third-party decoders
+  (turbojpeg/libheif/jxl-oxide) are not interruptible regardless.
+- **A decode error is permanent for the session.** `failed` is a
+  `HashSet<(PathBuf, Kind)>` and nothing clears it broadly — only that one path
+  on triage (`remove_current_from_gallery`), the resize drop, and the filter
+  change (`refilter`). A *transient* error (a file still hydrating from
+  OneDrive, a partially-copied file) therefore poisons the image until restart,
+  and the viewer keeps showing the old frame. If a load failure looks
+  mysterious, suspect this before anything else.
+- **Preloading is a fixed symmetric window**: `PRELOAD_RADIUS` (3) each side,
+  "next" at `10 + 2d` and "previous" at `11 + 2d` so a step forward is slightly
+  favoured. The current image is always `PRIO_CURRENT_PREVIEW` (0) and every
+  prefetch job is ≥ 10, so prefetch can never starve it. Direction-aware radii
+  were tried and removed.
 - **`queued jobs dropped by rebuild` is the coalescing signal.** Large values mean
   the user outran the decoder — tune the preload window, don't add workers.
 - **Texture churn is already low**: previews upload once per decode, tiles are
   created once and reused, animated GIF frames update in place via `set`. Count
   uploads (`GPU texture uploads`) before "optimising" this.
 - **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
-  300 MP = **1.2 GB** for one full-res buffer, and a preview carries one for
-  free. Only the **current** image keeps it — prefetched neighbours drop
-  `full`/`anim` on arrival (`C_FULL_DROPPED` counts it) and re-decode if you
-  actually stop on them. The preview cache is bounded by **bytes**
-  (`PREVIEW_BYTE_BUDGET` = 512 MB) as well as by count, because 16 × 4096px RGBA
-  textures is 1 GB on its own. If you raise the prefetch radius, re-check this.
-- **A worker panic is usually OOM**, and its payload is kept and logged
-  (`C_DECODE_PANICS`) — do not reduce it back to a bare "decoder panicked"; that
-  hid the real cause behind an unreproducible symptom.
+  300 MP = **1.2 GB** for one full-res buffer, and every cached preview carries
+  one for free (single-pass decode), so the whole preview cache can hold several
+  GB. It is bounded by **count** only (`PREVIEW_CACHE_CAP` = 16, LRU, never
+  evicting the current image or its ±`PRELOAD_RADIUS` neighbours). If you raise
+  the radius, re-check that. A worker panic here is usually OOM, and its payload
+  is kept and logged (`C_DECODE_PANICS`) — don't reduce it back to a bare
+  "decoder panicked"; that hid the real cause.
 - **`stalls (>5s to first pixels)` must stay 0.** The watchdog reports the whole
-  state (cached / poisoned / wanted / shown==cur / cache MB / panics) once per
-  request. It fires only when no pixels were painted at all — check
-  `recorded_first`, not just age, or it cries wolf on cache hits.
+  state (cached / poisoned / shown==cur / cache sizes / panics) once per request.
+  It fires only when no pixels were painted at all — check `recorded_first`, not
+  just age, or it cries wolf on cache hits.
 
 ## Gotchas
 

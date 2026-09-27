@@ -322,32 +322,6 @@ fn test_linear_resize_preserves_a_monotonic_ramp() {
 }
 
 #[test]
-fn test_downscale_is_cancellable() {
-    // A cancelled downscale must abandon the work and report it, so a worker
-    // is freed when the user has already moved on.
-    let (w, h) = (512u32, 512u32);
-    let rgba = vec![128u8; (w * h * 4) as usize];
-    let data = image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    };
-    assert!(image_viewer::downscale_image_cancellable(&data, 64, &|| false).is_some());
-    // A cancel that fires immediately must bail out rather than finish.
-    let calls = std::sync::atomic::AtomicUsize::new(0);
-    let cancelled = image_viewer::downscale_image_cancellable(&data, 64, &|| {
-        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        true
-    });
-    assert!(cancelled.is_none(), "cancel must abandon the downscale");
-    assert!(
-        calls.load(std::sync::atomic::Ordering::Relaxed) > 0,
-        "cancel must actually be polled"
-    );
-}
-
-#[test]
 fn test_normalized_fixes_mismatched_buffer() {
     use image_viewer::ImageData;
 
@@ -1004,54 +978,6 @@ fn test_quarter_turn_mesh_covers_the_swapped_footprint() {
             (got.center() - centre).x.abs() < 0.01 && (got.center() - centre).y.abs() < 0.01,
             "quarter {quarter}: rotation must not move the centre"
         );
-    }
-}
-
-#[test]
-fn test_preload_radii_follow_browsing_direction() {
-    use image_viewer::preload_radii;
-    // Unknown or deliberate browsing: small and symmetric, so we are not
-    // decoding images nobody asked for.
-    assert_eq!(preload_radii(&[], 0.0), (2, 2));
-    assert_eq!(preload_radii(&[1], 0.5), (2, 2));
-    assert_eq!(preload_radii(&[1, 1, 1, 1], 1.0), (2, 2));
-
-    // Rapid forward: deep window ahead, almost nothing behind.
-    assert_eq!(preload_radii(&[1, 1, 1, 1], 12.0), (6, 1));
-    // Rapid backward: mirrored.
-    assert_eq!(preload_radii(&[-1, -1, -1, -1], 12.0), (1, 6));
-
-    // Rapid but reversing: balanced again, because the next step is a coin flip.
-    assert_eq!(preload_radii(&[1, -1, 1, -1], 12.0), (2, 2));
-    assert_eq!(preload_radii(&[1, 1, -1, 1], 12.0), (6, 1), "3 of 4 forward still leans forward");
-
-    // The current image is never a prefetch candidate, so a radius of 1 in a
-    // direction must still leave the current image to the top-priority job.
-    let (ahead, behind) = preload_radii(&[1, 1, 1], 9.0);
-    assert!(ahead >= 1 && behind >= 1);
-}
-
-#[test]
-fn test_cancelled_load_is_not_a_failure() {
-    // Regression: a cancelled decode used to be reported as a load failure and
-    // recorded in the app's `failed` set, which permanently poisoned the image
-    // (error spam, never retried, "some load, some never do"). Cancelling must
-    // be a distinct, benign outcome all the way from the library up.
-    use image_viewer::{load_image_preview_full_cancellable, LoadError};
-
-    let tmp = tempfile::tempdir().unwrap();
-    let p = tmp.path().join("x.jpg");
-    let img = image::DynamicImage::new_rgb8(400, 300);
-    img.save(&p).unwrap();
-
-    // A token that never fires: a real decode comes back.
-    assert!(load_image_preview_full_cancellable(&p, 200, &|| false).is_ok());
-
-    // A token that fires immediately: Cancelled, not a decode error.
-    match load_image_preview_full_cancellable(&p, 200, &|| true) {
-        Err(LoadError::Cancelled) => {}
-        Err(other) => panic!("expected Cancelled, got {other:?}"),
-        Ok(_) => panic!("a cancelled job must not return a result"),
     }
 }
 

@@ -163,21 +163,15 @@ role — Windows requires the user to confirm that themselves.
   to at most twice the display size, and only that reduced buffer is converted
   to linear light and filtered — measured at **790 ms → 219 ms** for a 40 MP
   source, and it aliases less than filtering straight from full resolution.
-- **Preloading follows how you browse.** Deliberate paging preloads ±2 images;
-  running forward fast preloads 6 ahead and 1 behind (mirrored when you go
-  back), so decode capacity goes where you are going.
-- **Abandoned work stops early.** Every job carries an epoch; when you navigate
-  away, the in-flight decode abandons its remaining phases instead of finishing
-  work nobody will see. Decoder threads themselves are never interrupted.
+- **Neighbours are preloaded.** A fixed window of 3 images either side of the
+  current one, with "next" prioritised slightly over "previous".
 - **Previews are sized to your display**, not a fixed cap, so the texture is
   exactly as sharp as the screen can show.
-- **Resizing never blanks.** The current texture keeps being painted (scaled by
-  the GPU) while a sharper one is decoded in the background, debounced so a
-  window drag triggers a single re-decode.
 - **Decoding never blocks the UI.** A 2–4 thread worker pool with priorities:
-  the image you are looking at first, then previews along your direction of
-  travel, grid thumbnails last. Thumbnail requests re-arm every frame, so they
-  survive the queue being rebuilt while you navigate.
+  the image you are looking at first, its neighbours next, grid thumbnails
+  last. Thumbnail requests re-arm every frame, so they survive the queue being
+  rebuilt while you navigate. A job that has started always runs to
+  completion — nothing is abandoned halfway.
 - **Bounded memory.** Preview cache capped at 16 textures, tile cache at 64
   (≈256 MB), thumbnails LRU-capped at 512, animated GIFs at 240 frames /
   256 MB.
@@ -193,8 +187,9 @@ image-viewer.exe --perf <folder>     # latency report on exit
 
 It records time from intent to useful pixels — startup, selection, next/prev,
 zoom, pan, gallery open, folder scan, resize — at p50/p95/p99, plus counters for
-blank frames, dropped jobs, cancelled decodes and GPU uploads. A release build
-has no console, so the report is written to `%TEMP%\image-viewer-perf.txt`.
+blank frames, dropped jobs, GPU uploads, decode panics and stalls. A release
+build has no console, so the report is written to
+`%TEMP%\image-viewer-perf.txt`.
 
 ---
 
