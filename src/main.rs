@@ -1846,12 +1846,25 @@ impl eframe::App for MyApp {
         self.frame_prelude(ctx);
 
         // F11: fullscreen toggle — image + panels only, chrome hidden.
+        // Esc: exit fullscreen when in it, otherwise close the app.
         let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
+        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         if f11 {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
             self.suppress_resize_redecode = true;
             self.show_panels = fs; // entering fullscreen hides panels; leaving restores
+        }
+        if esc {
+            let in_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            if in_fullscreen {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                self.show_panels = true;
+                self.suppress_resize_redecode = true;
+            } else {
+                self.close_zip();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
 
         // Keyboard navigation + file triage
