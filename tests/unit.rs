@@ -279,14 +279,19 @@ fn test_linear_resize_high_contrast_edge() {
     assert_eq!(out.rgba.len(), 7 * 7 * 4);
     // Values stay in gamut.
     for p in out.rgba.chunks_exact(4) {
-        assert!(p[3] == 255);
- cosy_check(&p[0..3]);
+        assert_eq!(p[3], 255, "alpha must stay opaque");
     }
-}
-
-fn cosy_check(c: &[u8]) {
-    for v in c {
-        assert!(*v <= 255, "channel out of range: {v}");
+    // The source is a left-to-right ramp, so every row of the result must be
+    // non-decreasing. This is what actually catches a broken resampler.
+    for row in out.rgba.chunks_exact(7 * 4) {
+        for pair in row.chunks_exact(4).collect::<Vec<_>>().windows(2) {
+            assert!(
+                pair[0][0] <= pair[1][0],
+                "ramp must not invert: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 }
 
@@ -632,4 +637,121 @@ fn test_fit_to_window() {
     assert!(zoom_pan.zoom > 1.0);
     assert!(zoom_pan.pan_x == 0.0);
     assert!(zoom_pan.pan_y == 0.0);
+}
+
+
+use image_viewer::{grid_cols, GRID_CELL, GRID_LABEL_H, GRID_ROW_H};
+
+/// Draw one row of `cols` cells exactly the way `gallery_grid`/`grid_cell` do.
+/// Returns the laid-out cell rects; `hits` collects clicked cell indices.
+fn grid_row(ui: &mut egui::Ui, cols: usize, out: &mut Vec<egui::Rect>, hits: &mut Vec<usize>) {
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show_rows(ui, GRID_ROW_H, 1, |ui, _| {
+            ui.horizontal(|ui| {
+                for i in 0..cols {
+                    // Explicit allocation: this is the whole point of the test.
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(GRID_CELL, GRID_CELL + GRID_LABEL_H),
+                        egui::Sense::click(),
+                    );
+                    if ui.is_rect_visible(rect) {
+                        ui.painter().rect(
+                            rect,
+                            0.0,
+                            egui::Color32::from_gray(40),
+                            egui::Stroke::NONE,
+                        );
+                    }
+                    let mut child =
+                        ui.child_ui(rect.shrink(4.0), egui::Layout::top_down(egui::Align::Min));
+                    child.allocate_exact_size(
+                        egui::vec2(rect.width() - 8.0, GRID_CELL),
+                        egui::Sense::hover(),
+                    );
+                    child.add(egui::Label::new("a-fairly-long-file-name.jpg").truncate(true));
+                    out.push(resp.rect);
+                    if resp.clicked() {
+                        hits.push(i);
+                    }
+                }
+            });
+        });
+}
+
+#[test]
+fn test_gallery_grid_cells_fit_row_and_register_clicks() {
+    // Regression test for the gallery grid (G) view. Cells must be allocated
+    // explicitly with `Sense::click()`. Wrapping them in `egui::Frame::show`
+    // is wrong in two ways that both looked fine in a screenshot-less build:
+    //
+    //  1. `Frame::begin` builds its child Ui from
+    //     `ui.available_rect_before_wrap()`, so the frame is as wide as the
+    //     rest of the row. The first cell swallows the whole row and every
+    //     later cell is laid out past the panel edge — the "offscreen grid".
+    //  2. `Frame::end` calls `allocate_space(.., Sense::hover())`, so
+    //     `Response::clicked()` is never true and cells cannot be opened.
+    use egui::{Event, FontDefinitions, PointerButton, RawInput};
+
+    let ctx = egui::Context::default();
+    ctx.set_fonts(FontDefinitions::empty()); // don't load fonts in tests
+
+    // Pass 1: lay the row out and record where each cell landed.
+    let mut input = RawInput::default();
+    let mut rects = Vec::new();
+    let mut panel = egui::Rect::ZERO;
+    let mut cols = 0usize;
+    let _ = ctx.run(input.clone(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            panel = ui.available_rect_before_wrap();
+            // Same column math gallery_grid uses.
+            cols = grid_cols(panel.width());
+            let mut hits = Vec::new();
+            grid_row(ui, cols, &mut rects, &mut hits);
+        });
+    });
+
+    assert!(cols >= 2, "test needs a multi-cell row, got {cols}");
+    assert_eq!(rects.len(), cols, "every cell of the row must be laid out");
+    for r in &rects {
+        assert!(
+            (r.width() - GRID_CELL).abs() < 1.0
+                && (r.height() - (GRID_CELL + GRID_LABEL_H)).abs() < 1.0,
+            "cell must take exactly the size it asked for, got {r:?}"
+        );
+        assert!(
+            r.max.x <= panel.max.x + 1.0,
+            "cell at x={} escapes the panel ({:?}) — row is too wide",
+            r.min.x,
+            panel
+        );
+    }
+    for pair in rects.windows(2) {
+        assert!(
+            (pair[1].min.x - pair[0].max.x - 8.0).abs() < 1.0,
+            "cells must sit side by side with 8pt spacing, got {:?} then {:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // Pass 2: press the 3rd cell. Pass 3: release there. Only it may click.
+    let target = rects[2].center();
+    let mut clicks = Vec::new();
+    for pass in 0..2 {
+        input.events.push(Event::PointerMoved(target));
+        input.events.push(Event::PointerButton {
+            pos: target,
+            button: PointerButton::Primary,
+            pressed: pass == 0,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut out = Vec::new();
+                grid_row(ui, cols, &mut out, &mut clicks);
+            });
+        });
+    }
+    assert_eq!(clicks, vec![2], "only the pressed cell may report the click");
 }

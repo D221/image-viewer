@@ -32,9 +32,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    buffer_has_alpha, extract_zip, is_archive_path, load_image_full, load_image_preview_full,
-    set_downscale_filter, set_linear_resample, scan_folder_sorted, Animation, Config,
-    DownscaleFilter, Gallery, ImageData, SortMode, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    buffer_has_alpha, extract_zip, grid_cols, is_archive_path, load_image_full,
+    load_image_preview_full, set_downscale_filter, set_linear_resample, scan_folder_sorted, Animation,
+    Config, DownscaleFilter, Gallery, ImageData, SortMode, GRID_CELL, GRID_LABEL_H, GRID_ROW_H,
+    MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -128,6 +129,8 @@ enum Kind {
 
 /// Long side of grid thumbnails.
 const THUMB_DIM: u32 = 256;
+/// Max grid thumbnails kept on the GPU (256 x ~0.3 MB ≈ 80 MB).
+const THUMB_CACHE_CAP: usize = 512;
 
 struct Job {
     path: PathBuf,
@@ -141,13 +144,6 @@ struct Job {
 struct QueueState {
     jobs: Vec<Job>,
     busy: HashSet<(PathBuf, Kind)>,
-}
-
-/// A decoded grid thumbnail: texture, source dims, LRU stamp.
-struct Thumb {
-    tex: TextureHandle,
-    orig: (u32, u32),
-    used: u64,
 }
 
 struct PreviewData {
@@ -925,14 +921,15 @@ impl MyApp {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         self.clock += 1;
-                        self.thumbs.insert(
-                            path.clone(),
-                            (tex, p.orig, self.clock),
-                        );
+                        self.thumbs
+                            .insert(path.clone(), (tex, p.orig, self.clock));
                         self.thumb_requested.remove(&path);
+                        self.evict_thumbs();
                     }
                     Err(_) => {
                         self.thumb_requested.remove(&path);
+                        // Don't retry a file we cannot decode on every frame.
+                        self.failed.insert((path, Kind::Thumb));
                     }
                 },
                 Msg::Full { path, result } => match result {
@@ -986,6 +983,24 @@ impl MyApp {
             match victim {
                 Some(v) => {
                     self.previews.remove(&v);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Drop the least-recently-painted grid thumbnails once the cache is full.
+    /// Cells re-request on demand, so eviction only costs a re-decode.
+    fn evict_thumbs(&mut self) {
+        while self.thumbs.len() > THUMB_CACHE_CAP {
+            let victim = self
+                .thumbs
+                .iter()
+                .min_by_key(|(_, v)| v.2)
+                .map(|(p, _)| p.clone());
+            match victim {
+                Some(v) => {
+                    self.thumbs.remove(&v);
                 }
                 None => break,
             }
@@ -1495,8 +1510,6 @@ impl MyApp {
     fn central(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let panel = ui.available_rect_before_wrap();
-        let resp = ui.allocate_rect(panel, egui::Sense::click_and_drag());
-        let painter = ui.painter_at(panel);
         let ppp = ctx.pixels_per_point();
 
         // Track the display area in physical pixels; previews are decoded to
@@ -1506,7 +1519,7 @@ impl MyApp {
             (panel.width() * ppp).round() as u32,
             (panel.height() * ppp).round() as u32,
         );
-                if self.display_dim != Some(panel_px) {
+        if self.display_dim != Some(panel_px) {
             let grew = self
                 .display_dim
                 .map_or(true, |(w, h)| panel_px.0.max(panel_px.1) > w.max(h));
@@ -1533,10 +1546,16 @@ impl MyApp {
         }
 
         // Gallery grid view (G): scrollable thumbnail grid, click to open.
+        // This must run *before* the panel rect is allocated below — an
+        // allocated rect consumes the whole panel, leaving the grid's
+        // ScrollArea with no space (it would render offscreen).
         if self.gallery_view {
             self.gallery_grid(ui, &ctx, panel);
             return;
         }
+
+        let resp = ui.allocate_rect(panel, egui::Sense::click_and_drag());
+        let painter = ui.painter_at(panel);
 
         let Some(shown) = self.shown.clone() else {
             let msg = if let Some(e) = &self.error {
@@ -1556,7 +1575,6 @@ impl MyApp {
             return;
         };
 
-        self.clock += 1;
         let (orig, tex_id, tex_w, pv_has_alpha) = {
             let Some(pv) = self.previews.get_mut(&shown) else {
                 return;
@@ -1778,112 +1796,78 @@ impl MyApp {
     /// queue. Thumbs decode lazily for visible cells; clicking one navigates
     /// and closes the grid. Esc closes it too (before fullscreen Esc).
     fn gallery_grid(&mut self, ui: &mut egui::Ui, ctx: &Context, panel: egui::Rect) {
-        const CELL: f32 = 150.0;
-        let cols = ((panel.width() / (CELL + 8.0)).floor() as usize).clamp(1, 24);
-        let row_h = CELL + 34.0;
-        let files = self.gallery.files.clone();
-        let total = files.len();
+        let cols = grid_cols(panel.width());
+        let row_h = GRID_ROW_H;
+        let total = self.gallery.files.len();
         let total_rows = (total + cols - 1) / cols;
-        let mut clicked: Option<PathBuf> = None;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
-            ui,
-            row_h,
-            total_rows,
-            |ui, rows| {
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for col in 0..cols {
-                            let idx = row * cols + col;
-                            let Some(path) = files.get(idx).cloned() else { continue; };
-                            let selected = self.cur.as_ref() == Some(&path);
-                            let hit = self.grid_cell(ui, ctx, path.clone(), CELL, idx, selected);
-                            if hit && clicked.is_none() {
-                                clicked = Some(path.clone());
-                            }
+        let current = self.gallery.index;
+        let cur = self.cur.clone();
+        let clock = self.clock;
+        let mut clicked: Option<usize> = None;
+
+        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        // Jump to the current image the first time the grid is shown (and after
+        // navigating with the keyboard). Only set on those transitions — the
+        // offset builder overrides the persisted scroll position every frame
+        // it is present, which would fight the user's own scrolling.
+        if std::mem::take(&mut self.scroll_to_current) {
+            // show_rows adds vertical item spacing on top of row_h.
+            let pitch = GRID_ROW_H + ui.spacing().item_spacing.y;
+            sa = sa.vertical_scroll_offset((current / cols) as f32 * pitch);
+        }
+
+        // Split the borrows so cells can be drawn without cloning the file
+        // list (a big folder is thousands of PathBufs per frame otherwise).
+        let Self {
+            gallery,
+            thumbs,
+            thumb_requested,
+            failed,
+            loader,
+            ..
+        } = self;
+        let files = &gallery.files;
+        sa.show_rows(ui, row_h, total_rows, |ui, rows| {
+            for row in rows {
+                ui.horizontal(|ui| {
+                    for col in 0..cols {
+                        let idx = row * cols + col;
+                        let Some(path) = files.get(idx) else {
+                            continue;
+                        };
+                        let selected = cur.as_deref() == Some(path.as_path());
+                        let hit = grid_cell(
+                            ui,
+                            path,
+                            GRID_CELL,
+                            selected,
+                            clock,
+                            thumbs,
+                            thumb_requested,
+                            failed,
+                            loader,
+                        );
+                        if hit && clicked.is_none() {
+                            clicked = Some(idx);
                         }
-                    });
-                }
-            },
-        );
-        if let Some(path) = clicked {
-            if let Some(i) = self.gallery.files.iter().position(|f| *f == path) {
-                self.gallery.index = i;
-                self.gallery_view = false;
-                self.goto(ctx);
-            }
-        }
-    }
-
-    /// One grid cell: thumbnail (or placeholder) + file name; click opens it.
-    /// Returns true when this cell was clicked (caller navigates).
-    fn grid_cell(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &Context,
-        path: PathBuf,
-        cell: f32,
-        idx: usize,
-        selected: bool,
-    ) -> bool {
-        const CELL: f32 = 150.0;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        // Request a thumbnail for visible cells (idempotent).
-        if !self.thumbs.contains_key(&path)
-            && !self.thumb_requested.contains(&path)
-            && !self.failed.contains(&(path.clone(), Kind::Thumb))
-        {
-            self.thumb_requested.insert(path.clone());
-            self.loader.push(Job {
-                path: path.clone(),
-                kind: Kind::Thumb,
-                prio: PRIO_THUMB,
-                target_dim: THUMB_DIM,
-            });
-        }
-
-    let fill = if selected {
-        egui::Color32::from_rgb(28, 58, 118)
-    } else {
-        egui::Color32::from_rgb(38, 38, 38)
-    };
-    let stroke = if selected {
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 170, 255))
-    } else {
-        egui::Stroke::NONE
-    };
-    let frame_resp = egui::Frame::default()
-        .fill(fill)
-        .stroke(stroke)
-        .inner_margin(4.0)
-        .show(ui, |ui| {
-            ui.set_min_size(egui::vec2(cell, cell + 22.0));
-            if let Some((tex, _, _)) = self.thumbs.get(&path) {
-                ui.add(
-                    egui::Image::new(tex)
-                        .max_size(egui::vec2(CELL, CELL))
-                        .fit_to_exact_size(egui::vec2(CELL, CELL)),
-                );
-            } else {
-                ui.allocate_exact_size(egui::vec2(cell, cell), egui::Sense::hover());
-                ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new("...").weak());
+                    }
                 });
             }
-            ui.label(
-                egui::RichText::new(&name)
-                    .small()
-                    .color(egui::Color32::from_gray(200)),
-            );
         });
-        frame_resp.response.clicked()
+
+        if let Some(i) = clicked {
+            self.gallery.index = i;
+            self.gallery_view = false;
+            self.goto(ctx);
+        }
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
     fn frame_prelude(&mut self, ctx: &Context) {
+        // LRU clock for the preview/thumbnail caches. Lives here (not in
+        // `central`) so it also advances while the gallery grid is open.
+        self.clock += 1;
+
         // Consume a queued advance from "wait for load" mode — the image it
         // belongs to was painted during the previous frame.
         if let Some(dir) = self.pending_advance.take() {
@@ -1936,6 +1920,102 @@ fn anim_frame_state(anim: &Animation, elapsed: Duration) -> (usize, Duration) {
         anim.frames.len().saturating_sub(1),
         Duration::from_millis(20),
     )
+}
+
+/// One gallery-grid cell: thumbnail (or placeholder) + file name. Requests the
+/// thumbnail when it is missing, then returns true if the cell was clicked.
+///
+/// Free function (not a method) so `gallery_grid` can hand out split borrows
+/// and avoid cloning the whole file list every frame.
+fn grid_cell(
+    ui: &mut egui::Ui,
+    path: &Path,
+    cell: f32,
+    selected: bool,
+    clock: u64,
+    thumbs: &mut HashMap<PathBuf, (TextureHandle, (u32, u32), u64)>,
+    requested: &mut HashSet<PathBuf>,
+    failed: &HashSet<(PathBuf, Kind)>,
+    loader: &Loader,
+) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    // Request a thumbnail for visible cells. Idempotent per frame; failures are
+    // recorded so an unreadable file is not retried on every frame.
+    let thumbed = match thumbs.get_mut(path) {
+        Some(t) => {
+            t.2 = clock; // LRU stamp
+            true
+        }
+        None => false,
+    };
+    if !thumbed
+        && !requested.contains(path)
+        && !failed.iter().any(|(p, k)| *k == Kind::Thumb && p == path)
+    {
+        requested.insert(path.to_path_buf());
+        loader.push(Job {
+            path: path.to_path_buf(),
+            kind: Kind::Thumb,
+            prio: PRIO_THUMB,
+            target_dim: THUMB_DIM,
+        });
+    }
+
+    let fill = if selected {
+        egui::Color32::from_rgb(28, 58, 118)
+    } else {
+        egui::Color32::from_rgb(38, 38, 38)
+    };
+    let stroke = if selected {
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 255))
+    } else {
+        egui::Stroke::NONE
+    };
+
+    // Allocate the cell *ourselves* with click sense. `Frame::show` would
+    // size itself to the rest of the row and only register hover, which both
+    // pushed the following cells offscreen and made clicks dead.
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(cell, cell + GRID_LABEL_H),
+        egui::Sense::click(),
+    );
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(rect, 0.0, fill, stroke);
+    }
+
+    let inner = rect.shrink(4.0);
+    let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Min));
+    match thumbs.get(path).map(|(t, _, _)| t.clone()) {
+        Some(tex) => {
+            child.add(
+                egui::Image::new(&tex)
+                    .max_size(egui::vec2(inner.width(), cell)),
+            );
+        }
+        None => {
+            child.allocate_exact_size(
+                egui::vec2(inner.width(), cell),
+                egui::Sense::hover(),
+            );
+            child.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("…").weak());
+            });
+        }
+    }
+    child.add(
+        egui::Label::new(
+            egui::RichText::new(&name)
+                .small()
+                .color(egui::Color32::from_gray(200)),
+        )
+        .truncate(true),
+    );
+
+    resp.clicked()
 }
 
 /// A small 2x2-square checker texture used as the transparency backdrop.
@@ -2094,6 +2174,10 @@ impl eframe::App for MyApp {
         } else if last && !self.gallery.is_empty() {
             self.gallery.index = self.gallery.len() - 1;
             self.goto(ctx);
+        }
+        // Keep the open grid scrolled to whatever is current.
+        if self.gallery_view && (next || prev || first || last) {
+            self.scroll_to_current = true;
         }
         if toggle {
             self.suppress_resize_redecode = true;

@@ -170,6 +170,19 @@ pub enum SortMode {
     Random,
 }
 
+/// Side of one gallery-grid (G) thumbnail.
+pub const GRID_CELL: f32 = 150.0;
+/// Label strip reserved under each grid thumbnail for the file name.
+pub const GRID_LABEL_H: f32 = 20.0;
+/// Vertical pitch of one grid row (cell + label + inter-row padding).
+pub const GRID_ROW_H: f32 = GRID_CELL + GRID_LABEL_H + 8.0;
+
+/// How many grid cells fit across a display area `panel_w` points wide.
+/// Cells are laid out with egui's default 8pt item spacing, hence the +8.
+pub fn grid_cols(panel_w: f32) -> usize {
+    ((panel_w / (GRID_CELL + 8.0)).floor() as usize).clamp(1, 24)
+}
+
 /// Case-insensitive "natural" string comparison: runs of digits compare
 /// numerically, so `IMG_10` sorts after `IMG_2` like Explorer does.
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
