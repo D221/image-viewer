@@ -56,6 +56,20 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - **Texture churn is already low**: previews upload once per decode, tiles are
   created once and reused, animated GIF frames update in place via `set`. Count
   uploads (`GPU texture uploads`) before "optimising" this.
+- **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
+  300 MP = **1.2 GB** for one full-res buffer, and a preview carries one for
+  free. Only the **current** image keeps it — prefetched neighbours drop
+  `full`/`anim` on arrival (`C_FULL_DROPPED` counts it) and re-decode if you
+  actually stop on them. The preview cache is bounded by **bytes**
+  (`PREVIEW_BYTE_BUDGET` = 512 MB) as well as by count, because 16 × 4096px RGBA
+  textures is 1 GB on its own. If you raise the prefetch radius, re-check this.
+- **A worker panic is usually OOM**, and its payload is kept and logged
+  (`C_DECODE_PANICS`) — do not reduce it back to a bare "decoder panicked"; that
+  hid the real cause behind an unreproducible symptom.
+- **`stalls (>5s to first pixels)` must stay 0.** The watchdog reports the whole
+  state (cached / poisoned / wanted / shown==cur / cache MB / panics) once per
+  request. It fires only when no pixels were painted at all — check
+  `recorded_first`, not just age, or it cries wolf on cache hits.
 
 ## Gotchas
 

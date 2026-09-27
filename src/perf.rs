@@ -84,8 +84,12 @@ pub const C_TILES_CREATED: usize = 4; // full-res tiles cut and uploaded
 pub const C_DECODE_CALLS: usize = 5; // file reads + decodes started
 pub const C_PREVIEW_REUSED: usize = 6; // previews served without a new decode
 pub const C_RESIZE_REDECODES: usize = 7; // resize-driven refinement requests
+pub const C_DECODE_PANICS: usize = 8; // worker panics caught (usually OOM)
+pub const C_FULL_DROPPED: usize = 9; // full-res buffers released for prefetched images
+pub const C_STALL: usize = 10; // times an image took absurdly long to appear
+pub const C_PREVIEW_BYTES: usize = 11; // bytes of texture data cached right now
 
-const N_COUNTERS: usize = 8;
+const N_COUNTERS: usize = 12;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
@@ -95,6 +99,10 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "decode calls started",
     "previews reused (no decode)",
     "resize-driven re-decodes",
+    "worker decode panics",
+    "full-res buffers dropped (prefetch)",
+    "stalls (>5s to first pixels)",
+    "preview texture MB cached",
 ];
 
 struct Metric {
@@ -168,6 +176,18 @@ pub fn record_since(idx: usize, start: std::time::Instant) {
 pub fn count(idx: usize, by: u64) {
     if let Some(c) = COUNTERS.get(idx) {
         c.fetch_add(by, Relaxed);
+    }
+}
+
+/// Read a counter (for diagnostics).
+pub fn counter(idx: usize) -> u64 {
+    COUNTERS.get(idx).map(|c| c.load(Relaxed)).unwrap_or(0)
+}
+
+/// Publish a gauge (e.g. bytes currently cached) rather than adding to it.
+pub fn gauge(idx: usize, value: u64) {
+    if let Some(c) = COUNTERS.get(idx) {
+        c.store(value, Relaxed);
     }
 }
 

@@ -52,6 +52,9 @@ const THRESH_WHEEL: f32 = 60.0;
 const PRELOAD_RADIUS: usize = 3;
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
 const PREVIEW_CACHE_CAP: usize = 16;
+/// Ceiling on cached preview *texture* bytes. Sixteen 4096px RGBA textures are
+/// 1 GB on their own, which is what made fast browsing exhaust RAM.
+const PREVIEW_BYTE_BUDGET: usize = 512 << 20;
 /// Full-res tile edge in source pixels.
 const TILE: u32 = 1024;
 /// Max tiles converted+uploaded per frame (keeps frames smooth while zooming).
@@ -241,6 +244,9 @@ struct Latency {
     t_preview: Option<Instant>,
     /// A full-resolution decode of it has landed.
     t_full: Option<Instant>,
+    /// A stall was already reported for this request (report once, not per
+    /// frame).
+    stall_logged: bool,
     /// Zoom / pan / resize / gallery / scan in flight.
     t_zoom: Option<Instant>,
     t_pan: Option<Instant>,
@@ -256,6 +262,7 @@ impl Latency {
     fn begin(&mut self, now: Instant, is_nav: bool) {
         self.t_request = Some(now);
         self.is_nav = is_nav;
+        self.stall_logged = false;
         self.painted = None;
         self.recorded_first = false;
         self.t_preview = None;
@@ -424,6 +431,11 @@ impl Loader {
         cv.notify_all();
     }
 
+    /// Is this path still being decoded? (diagnostics)
+    fn is_wanted(&self, path: &Path) -> bool {
+        self.wanted.lock().unwrap().contains(path)
+    }
+
     /// Replace the set of paths whose decodes are still wanted.
     fn set_wanted(&self, wanted: HashSet<PathBuf>) {
         *self.wanted.lock().unwrap() = wanted;
@@ -470,12 +482,25 @@ impl Loader {
                 // wanted - which never includes the image on screen, because
                 // schedule() always puts it in the set.
                 let cancelable = job.kind != Kind::Thumb;
-                let msg = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let msg = match std::panic::catch_unwind(AssertUnwindSafe(|| {
                     run_job(&job, &|| {
                         cancelable && !wanted.lock().unwrap().contains(&job.path)
                     })
-                }))
-                .unwrap_or_else(|_| fail_msg(&job, "decoder panicked".into()));
+                })) {
+                    Ok(m) => m,
+                    Err(payload) => {
+                        // Keep the message: a bare "decoder panicked" hid the
+                        // most likely cause (allocation failure under memory
+                        // pressure) behind an unreproducible symptom.
+                        perf::count(perf::C_DECODE_PANICS, 1);
+                        let detail = payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        fail_msg(&job, format!("decoder panicked: {detail}"))
+                    }
+                };
 
                 let alive = tx.send(msg).is_ok();
                 shared.0.lock().unwrap().busy.remove(&(job.path, job.kind));
@@ -757,6 +782,8 @@ fn flash_label(v: u16) -> &'static str {
 
 struct Preview {
     tex: TextureHandle,
+    /// Texel size of the uploaded texture, for the cache byte budget.
+    texels: [usize; 2],
     orig: (u32, u32),
     load_ms: u64,
     used: u64, // LRU stamp
@@ -1232,9 +1259,23 @@ impl MyApp {
                 Msg::Preview { path, result } => match result {
                     Ok(p) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let texels = p.image.size;
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         perf::count(perf::C_TEXTURE_UPLOADS, 1);
                         perf::record(perf::JOB_PREVIEW_MS, p.load_ms * 1000);
+                        let PreviewData { mut full, mut anim, .. } = p;
+                        // **Memory.** The full-resolution buffer (up to
+                        // MAX_FULL_PIXELS = 300 MP = 1.2 GB) rides along for
+                        // free, which is great for the image you are looking at
+                        // and catastrophic for six prefetched neighbours. Only
+                        // the current image keeps it; neighbours re-decode on
+                        // demand if you actually stop on them (FULL_DWELL
+                        // exists for exactly that). Same for animation frames.
+                        if Some(&path) != self.cur.as_ref() {
+                            if full.take().is_some() || anim.take().is_some() {
+                                perf::count(perf::C_FULL_DROPPED, 1);
+                            }
+                        }
                         if Some(&path) == self.cur.as_ref() {
                             self.lat.preview(Instant::now());
                             if self.lat.t_resize.is_some() {
@@ -1249,11 +1290,12 @@ impl MyApp {
                             path.clone(),
                             Preview {
                                 tex,
+                                texels,
                                 orig: p.orig,
                                 load_ms: p.load_ms,
                                 used: self.clock,
-                                full: p.full,
-                                anim: p.anim,
+                                full,
+                                anim,
                                 has_alpha: p.has_alpha,
                                 below_target: p.below_target,
                             },
@@ -1368,7 +1410,34 @@ impl MyApp {
     }
 
     fn evict_previews(&mut self) {
-        while self.previews.len() > PREVIEW_CACHE_CAP {
+        // A count cap alone is meaningless when each texture can be 67 MB
+        // (4096² RGBA) and eight are alive during fast browsing, so the cache is
+        // bounded by *bytes* as well.
+        while (self.previews.len() > PREVIEW_CACHE_CAP
+            || self.preview_bytes() > PREVIEW_BYTE_BUDGET)
+            && self.previews.len() > 1
+        {
+            if !self.evict_one_preview() {
+                break; // everything left is on screen or adjacent to it
+            }
+        }
+        perf::gauge(
+            perf::C_PREVIEW_BYTES,
+            (self.preview_bytes() as u64) / (1 << 20),
+        );
+    }
+
+    fn preview_bytes(&self) -> usize {
+        self.previews
+            .values()
+            .map(|pv| pv.texels[0] * pv.texels[1] * 4)
+            .sum()
+    }
+
+    /// Drop the least-recently-painted unprotected preview.
+    /// Returns false when everything left is on screen or adjacent to it.
+    fn evict_one_preview(&mut self) -> bool {
+        {
             let n = self.gallery.files.len();
             let i = self.gallery.index;
             let protected: HashSet<&PathBuf> = (0..=2 * PRELOAD_RADIUS)
@@ -1386,8 +1455,10 @@ impl MyApp {
             match victim {
                 Some(v) => {
                     self.previews.remove(&v);
+                    true
                 }
-                None => break,
+                // Nothing evictable: everything left is on screen or adjacent.
+                None => false,
             }
         }
     }
@@ -2342,6 +2413,50 @@ impl MyApp {
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
+    /// Report (once) an image that has not reached the screen long after it was
+    /// asked for. Without this, "the viewer hangs on some images" is
+    /// undiagnosable from the outside: the state below is the whole story.
+    fn check_for_stall(&mut self, _ctx: &Context) {
+        const STALL_AFTER: Duration = Duration::from_secs(5);
+        if self.lat.stall_logged {
+            return;
+        }
+        // Only a request that has *not* produced pixels is a stall. Without
+        // this check the watchdog fires on any request older than the
+        // threshold — including images that were served instantly from cache.
+        if self.lat.recorded_first {
+            return;
+        }
+        let (Some(t), Some(cur)) = (self.lat.t_request, self.cur.as_ref()) else {
+            return;
+        };
+        if t.elapsed() < STALL_AFTER {
+            return;
+        }
+        self.lat.stall_logged = true;
+        perf::count(perf::C_STALL, 1);
+        let cached = self.previews.contains_key(cur);
+        let poisoned = self.failed.contains(&(cur.clone(), Kind::Preview));
+        let wanted = self.loader.is_wanted(cur);
+        eprintln!(
+            "stall: {:?} not painted after {:?}\n  index={}/{} shown={:?} shown==cur={}\n  \
+cached={} poisoned={} wanted={} previews={} thumbs={} previewMB={} panics={}",
+            cur.file_name().unwrap_or_default(),
+            t.elapsed(),
+            self.gallery.index,
+            self.gallery.len(),
+            self.shown.as_ref().and_then(|p| p.file_name()),
+            self.shown == self.cur,
+            cached,
+            poisoned,
+            wanted,
+            self.previews.len(),
+            self.thumbs.len(),
+            self.preview_bytes() / (1 << 20),
+            perf::counter(perf::C_DECODE_PANICS),
+        );
+    }
+
     fn frame_prelude(&mut self, ctx: &Context) {
         // The previous frame has been presented by the time the next one
         // starts, so this is where "first visible pixels" is honestly known.
@@ -2349,6 +2464,7 @@ impl MyApp {
         if let Some(t) = self.t_boot.take() {
             perf::record_since(perf::STARTUP_TO_FIRST_FRAME, t);
         }
+        self.check_for_stall(ctx);
         // Debounced resize refinement: one decode for where the window settles,
         // never one per frame of a drag.
         if let Some(due) = self.resize_due {
