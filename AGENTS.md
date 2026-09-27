@@ -34,12 +34,17 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   full-resolution source; a reciprocal **division inside the inner loop cost more
   than everything else combined**; the vertical pass needs its running column
   accumulator or it misses cache on every pixel.
-- **Cancellation is phase-based, never unsafe.** `Job.epoch` vs `Loader.epoch`:
-  `schedule()` bumps the epoch, in-flight jobs abandon at phase boundaries and
-  inside the resampler. Third-party decoders (turbojpeg/libheif/jxl-oxide) are
-  *not* interrupted — they expose no safe cancellation. `LoadError::Cancelled`
-  must never be recorded in `failed`; it means "ask again later", not "broken
-  file".
+- **Cancellation is a set of wanted paths, never a global epoch.** `Loader.wanted`
+  is published by `schedule()`; a job is abandoned when its path leaves the set
+  (thumbnails are never cancelled — cheap, and the grid re-requests them). Two
+  rules an earlier epoch-based design got catastrophically wrong: re-planning
+  the *same* work must cancel nothing, and `JobErr::Cancelled` must never be
+  shown, logged, or recorded in `failed` — it means "ask again later", not
+  "broken file". Conflating the two poisoned every image the user passed, and
+  the image was then never retried. `schedule()` always puts the current image
+  in the set, so it can never be cancelled. Third-party decoders
+  (turbojpeg/libheif/jxl-oxide) are *not* interrupted; they expose no safe
+  cancellation.
 - **Preloading follows travel direction** (`preload_radii` in lib.rs): slow
   browsing gets ±2, rapid one-directional browsing gets 6 ahead / 1 behind (or
   mirrored), and anything without a clear 2/3 majority stays symmetric — lean

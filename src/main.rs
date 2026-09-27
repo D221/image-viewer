@@ -32,7 +32,6 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::perf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
     load_image_preview_full_cancellable, preload_radii, rotated_footprint,
@@ -156,10 +155,6 @@ struct Job {
     prio: u32,
     /// Display target long side in physical pixels (preview jobs only).
     target_dim: u32,
-    /// The loader's epoch when this was queued. The worker abandons the job if
-    /// the epoch moves on, so work for an image the user has already left
-    /// stops costing worker capacity.
-    epoch: u64,
 }
 
 #[derive(Default)]
@@ -348,18 +343,46 @@ struct PreviewData {
     below_target: bool,
 }
 
+/// A worker outcome. `Cancelled` is **not** a failure: it means the user moved
+/// on, the work was abandoned on purpose, and nothing should be reported or
+/// remembered. Conflating the two is what made abandoned images look
+/// permanently broken (poisoned `failed`, error spam, never retried).
+#[derive(Debug)]
+enum JobErr {
+    Cancelled,
+    Decode(String),
+}
+
+impl std::fmt::Display for JobErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JobErr::Cancelled => write!(f, "cancelled"),
+            JobErr::Decode(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<image_viewer::LoadError> for JobErr {
+    fn from(e: image_viewer::LoadError) -> Self {
+        match e {
+            image_viewer::LoadError::Cancelled => JobErr::Cancelled,
+            other => JobErr::Decode(other.to_string()),
+        }
+    }
+}
+
 enum Msg {
     Preview {
         path: PathBuf,
-        result: Result<PreviewData, String>,
+        result: Result<PreviewData, JobErr>,
     },
     Thumb {
         path: PathBuf,
-        result: Result<PreviewData, String>,
+        result: Result<PreviewData, JobErr>,
     },
     Full {
         path: PathBuf,
-        result: Result<Arc<ImageData>, String>,
+        result: Result<Arc<ImageData>, JobErr>,
     },
     Exif {
         path: PathBuf,
@@ -369,9 +392,13 @@ enum Msg {
 
 struct Loader {
     shared: Arc<(Mutex<QueueState>, Condvar)>,
-    /// Bumped whenever the wanted set changes. In-flight jobs compare against
-    /// it at phase boundaries and bail out if they are stale.
-    epoch: Arc<AtomicU64>,
+    /// Paths whose results are still wanted. A job whose path is not in here is
+    /// abandoned at its next phase boundary.
+    ///
+    /// A *set of paths*, not a global epoch counter: re-planning the same work
+    /// (a neighbour preview arriving, the dwell timer, a watcher poll) must not
+    /// cancel anything. An epoch did exactly that, and every image failed.
+    wanted: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Loader {
@@ -397,19 +424,15 @@ impl Loader {
         cv.notify_all();
     }
 
-    /// Invalidate every outstanding job: the user asked for something else.
-    fn bump_epoch(&self) -> u64 {
-        self.epoch.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    fn epoch_now(&self) -> u64 {
-        self.epoch.load(Ordering::Relaxed)
+    /// Replace the set of paths whose decodes are still wanted.
+    fn set_wanted(&self, wanted: HashSet<PathBuf>) {
+        *self.wanted.lock().unwrap() = wanted;
     }
 
     fn new(ctx: &Context, tx: Sender<Msg>) -> Self {
         let shared: Arc<(Mutex<QueueState>, Condvar)> =
             Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
-        let epoch = Arc::new(AtomicU64::new(0));
+        let wanted = Arc::new(Mutex::new(HashSet::new()));
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(2)
@@ -419,7 +442,7 @@ impl Loader {
             let shared = shared.clone();
             let tx = tx.clone();
             let ctx = ctx.clone();
-            let epoch = epoch.clone();
+            let wanted = wanted.clone();
             std::thread::spawn(move || loop {
                 let job = {
                     let (lock, cv) = &*shared;
@@ -441,8 +464,16 @@ impl Loader {
                 };
 
                 // A decoder panic on a corrupt file must not kill the worker.
+                // Thumbnails are cheap and bounded by THUMB_DIM, and the grid
+                // re-requests them, so they are never cancelled. Real-sized
+                // decodes are abandoned as soon as their path stops being
+                // wanted - which never includes the image on screen, because
+                // schedule() always puts it in the set.
+                let cancelable = job.kind != Kind::Thumb;
                 let msg = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_job(&job, &|| epoch.load(Ordering::Relaxed) != job.epoch)
+                    run_job(&job, &|| {
+                        cancelable && !wanted.lock().unwrap().contains(&job.path)
+                    })
                 }))
                 .unwrap_or_else(|_| fail_msg(&job, "decoder panicked".into()));
 
@@ -454,7 +485,7 @@ impl Loader {
                 ctx.request_repaint();
             });
         }
-        Self { shared, epoch }
+        Self { shared, wanted }
     }
 
     /// Replace everything that is still *queued* with `jobs` (in-flight work is left
@@ -479,22 +510,18 @@ impl Loader {
 }
 
 fn fail_msg(job: &Job, err: String) -> Msg {
-    if err == "cancelled" {
-        // Nothing to report: the job was abandoned on purpose.
-        perf::count(perf::C_JOBS_CANCELLED, 1);
-    }
     match job.kind {
         Kind::Preview => Msg::Preview {
             path: job.path.clone(),
-            result: Err(err),
+            result: Err(JobErr::Decode(err)),
         },
         Kind::Full => Msg::Full {
             path: job.path.clone(),
-            result: Err(err),
+            result: Err(JobErr::Decode(err)),
         },
         Kind::Thumb => Msg::Thumb {
             path: job.path.clone(),
-            result: Err(err),
+            result: Err(JobErr::Decode(err)),
         },
         Kind::Exif => Msg::Exif {
             path: job.path.clone(),
@@ -515,9 +542,7 @@ fn run_job(job: &Job, cancel: &dyn Fn() -> bool) -> Msg {
             path,
         },
         Kind::Full => Msg::Full {
-            result: load_image_full(&path)
-                .map(Arc::new)
-                .map_err(|e: image_viewer::LoadError| e.to_string()),
+            result: load_image_full(&path).map(Arc::new).map_err(JobErr::from),
             path,
         },
         Kind::Exif => Msg::Exif {
@@ -534,7 +559,7 @@ fn decode_preview(
     path: &Path,
     target_dim: u32,
     cancel: &dyn Fn() -> bool,
-) -> Result<PreviewData, String> {
+) -> Result<PreviewData, JobErr> {
     // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
     // preview; everything else is fully decoded once and the preview is
     // derived from that, so the full image is already available.
@@ -542,7 +567,7 @@ fn decode_preview(
         if matches!(e, image_viewer::LoadError::Cancelled) {
             perf::count(perf::C_JOBS_CANCELLED, 1);
         }
-        e.to_string()
+        JobErr::from(e)
     })?;
     perf::count(perf::C_DECODE_CALLS, 1);
     let image = ColorImage::from_rgba_unmultiplied(
@@ -1138,15 +1163,15 @@ impl MyApp {
             .unwrap_or(PREVIEW_TEXTURE_DIM)
             .clamp(256, PREVIEW_TEXTURE_DIM);
 
-        // Every rebuild of the wanted set invalidates outstanding work, so a
-        // decode still in flight for an image we have left can bail out.
-        let epoch = self.loader.bump_epoch();
+        // Publish what we actually want. In-flight decodes of anything *not* in
+        // this set are abandoned at their next phase boundary; re-planning the
+        // same set cancels nothing.
+        let mut wanted: HashSet<PathBuf> = HashSet::from([cur.clone()]);
         let job = |path: PathBuf, kind: Kind, prio: u32, target_dim: u32| Job {
             path,
             kind,
             prio,
             target_dim,
-            epoch,
         };
 
         if need_preview(cur) {
@@ -1173,16 +1198,23 @@ impl MyApp {
             if d <= ahead {
                 let idx = (i + d) % n;
                 if seen.insert(idx) && need_preview(&files[idx]) {
-                    jobs.push(job(files[idx].clone(), Kind::Preview, 10 + 2 * d as u32, target_dim));
+                    let p = files[idx].clone();
+                    wanted.insert(p.clone());
+                    jobs.push(job(p, Kind::Preview, 10 + 2 * d as u32, target_dim));
                 }
             }
             if d <= behind {
                 let idx = (i + n - d % n) % n;
                 if seen.insert(idx) && need_preview(&files[idx]) {
-                    jobs.push(job(files[idx].clone(), Kind::Preview, 30 + 2 * d as u32, target_dim));
+                    let p = files[idx].clone();
+                    wanted.insert(p.clone());
+                    jobs.push(job(p, Kind::Preview, 30 + 2 * d as u32, target_dim));
                 }
             }
         }
+        // Everything queued is wanted, so publishing the set before the swap
+        // means an in-flight job is never cancelled by its own re-plan.
+        self.loader.set_wanted(wanted);
         self.loader.replace(jobs);
     }
 
@@ -1284,7 +1316,11 @@ impl MyApp {
                         self.thumb_tries.remove(&path);
                         self.evict_thumbs();
                     }
-                    Err(_) => {
+                    Err(JobErr::Cancelled) => {
+                        // Abandoned on purpose: neither a failure nor an
+                        // attempt. The grid re-requests it when visible again.
+                    }
+                    Err(JobErr::Decode(_)) => {
                         // Count the attempt (done in pump, not at queue time, so
                         // a job wiped by schedule() costs nothing). After
                         // THUMB_TRIES the cell stops asking, so one corrupt
@@ -2410,7 +2446,6 @@ fn grid_cell(
             kind: Kind::Thumb,
             prio: PRIO_THUMB,
             target_dim: THUMB_DIM,
-            epoch: loader.epoch_now(),
         });
     }
     if let Some(t) = thumbs.get_mut(path) {

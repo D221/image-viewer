@@ -1030,3 +1030,27 @@ fn test_preload_radii_follow_browsing_direction() {
     let (ahead, behind) = preload_radii(&[1, 1, 1], 9.0);
     assert!(ahead >= 1 && behind >= 1);
 }
+
+#[test]
+fn test_cancelled_load_is_not_a_failure() {
+    // Regression: a cancelled decode used to be reported as a load failure and
+    // recorded in the app's `failed` set, which permanently poisoned the image
+    // (error spam, never retried, "some load, some never do"). Cancelling must
+    // be a distinct, benign outcome all the way from the library up.
+    use image_viewer::{load_image_preview_full_cancellable, LoadError};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("x.jpg");
+    let img = image::DynamicImage::new_rgb8(400, 300);
+    img.save(&p).unwrap();
+
+    // A token that never fires: a real decode comes back.
+    assert!(load_image_preview_full_cancellable(&p, 200, &|| false).is_ok());
+
+    // A token that fires immediately: Cancelled, not a decode error.
+    match load_image_preview_full_cancellable(&p, 200, &|| true) {
+        Err(LoadError::Cancelled) => {}
+        Err(other) => panic!("expected Cancelled, got {other:?}"),
+        Ok(_) => panic!("a cancelled job must not return a result"),
+    }
+}
