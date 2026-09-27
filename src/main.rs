@@ -131,6 +131,10 @@ enum Kind {
 const THUMB_DIM: u32 = 256;
 /// Max grid thumbnails kept on the GPU (256 x ~0.3 MB ≈ 80 MB).
 const THUMB_CACHE_CAP: usize = 512;
+/// Decode attempts per file before a grid cell gives up (permanent
+/// placeholder). Enough for transient failures, bounded so a corrupt file
+/// can't keep the worker pool busy.
+const THUMB_TRIES: u8 = 3;
 
 struct Job {
     path: PathBuf,
@@ -185,8 +189,15 @@ struct Loader {
 }
 
 impl Loader {
-    /// Queue a job without dropping existing queued work (used by the grid
-    /// for on-demand thumbnail requests).
+    /// Queue a job without dropping existing queued work (used by the grid for
+    /// on-demand thumbnail requests). A job that is already queued or in
+    /// flight is left alone — this dedup is the *only* one the grid needs.
+    ///
+    /// Note `push` does not survive `replace()`: `schedule()` calls `replace()`
+    /// to drop stale work, which throws queued thumbnails away mid-grid. The
+    /// grid therefore re-requests every frame instead of keeping a
+    /// "requested" set, which could desync from the queue and strand a cell as
+    /// a permanent placeholder.
     fn push(&self, job: Job) {
         let (lock, cv) = &*self.shared;
         let mut q = lock.lock().unwrap();
@@ -200,9 +211,6 @@ impl Loader {
         cv.notify_all();
     }
 
-}
-
-impl Loader {
     fn new(ctx: &Context, tx: Sender<Msg>) -> Self {
         let shared: Arc<(Mutex<QueueState>, Condvar)> =
             Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
@@ -585,7 +593,7 @@ struct MyApp {
     zip_temp: Option<PathBuf>, // its extracted temp dir
     wheel_acc: f32, // accumulated wheel delta in wheel-navigation mode
     thumbs: HashMap<PathBuf, (TextureHandle, (u32, u32), u64)>, // grid thumbnails
-    thumb_requested: HashSet<PathBuf>,
+    thumb_tries: HashMap<PathBuf, u8>, // per-path thumb attempts (bounded retry)
     gallery_view: bool, // grid browser open
 }
 
@@ -705,7 +713,7 @@ impl MyApp {
             zip_temp,
             wheel_acc: 0.0,
             thumbs: HashMap::new(),
-            thumb_requested: HashSet::new(),
+            thumb_tries: HashMap::new(),
             gallery_view: false,
         };
                 app.goto(ctx);
@@ -923,13 +931,20 @@ impl MyApp {
                         self.clock += 1;
                         self.thumbs
                             .insert(path.clone(), (tex, p.orig, self.clock));
-                        self.thumb_requested.remove(&path);
+                        self.thumb_tries.remove(&path);
                         self.evict_thumbs();
                     }
                     Err(_) => {
-                        self.thumb_requested.remove(&path);
-                        // Don't retry a file we cannot decode on every frame.
-                        self.failed.insert((path, Kind::Thumb));
+                        // Count the attempt (done in pump, not at queue time, so
+                        // a job wiped by schedule() costs nothing). After
+                        // THUMB_TRIES the cell stops asking, so one corrupt
+                        // file can't keep the worker pool spinning — while a
+                        // transient failure still gets its retries.
+                        let e = self.thumb_tries.entry(path).or_insert(0);
+                        *e = e.saturating_add(1);
+                        if self.thumb_tries.len() > 4096 {
+                            self.thumb_tries.clear();
+                        }
                     }
                 },
                 Msg::Full { path, result } => match result {
@@ -1792,6 +1807,13 @@ impl MyApp {
         }
     }
 
+    /// Show/hide the thumbnail grid (G key and the bottom-panel button).
+    fn toggle_gallery(&mut self) {
+        self.gallery_view = !self.gallery_view;
+        // Only matters when opening: land on the current image, not the top.
+        self.scroll_to_current = self.gallery_view;
+    }
+
     /// Gallery grid view (G): scrollable thumbnails of every image in the
     /// queue. Thumbs decode lazily for visible cells; clicking one navigates
     /// and closes the grid. Esc closes it too (before fullscreen Esc).
@@ -1821,8 +1843,7 @@ impl MyApp {
         let Self {
             gallery,
             thumbs,
-            thumb_requested,
-            failed,
+            thumb_tries,
             loader,
             ..
         } = self;
@@ -1843,8 +1864,7 @@ impl MyApp {
                             selected,
                             clock,
                             thumbs,
-                            thumb_requested,
-                            failed,
+                            thumb_tries,
                             loader,
                         );
                         if hit && clicked.is_none() {
@@ -1934,8 +1954,7 @@ fn grid_cell(
     selected: bool,
     clock: u64,
     thumbs: &mut HashMap<PathBuf, (TextureHandle, (u32, u32), u64)>,
-    requested: &mut HashSet<PathBuf>,
-    failed: &HashSet<(PathBuf, Kind)>,
+    tries: &mut HashMap<PathBuf, u8>,
     loader: &Loader,
 ) -> bool {
     let name = path
@@ -1943,26 +1962,21 @@ fn grid_cell(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    // Request a thumbnail for visible cells. Idempotent per frame; failures are
-    // recorded so an unreadable file is not retried on every frame.
-    let thumbed = match thumbs.get_mut(path) {
-        Some(t) => {
-            t.2 = clock; // LRU stamp
-            true
-        }
-        None => false,
-    };
-    if !thumbed
-        && !requested.contains(path)
-        && !failed.iter().any(|(p, k)| *k == Kind::Thumb && p == path)
-    {
-        requested.insert(path.to_path_buf());
+    // Ask for the thumbnail whenever it is missing. `Loader::push` dedups
+    // against queued + in-flight work, so this costs one lock per visible cell
+    // per frame, and it self-heals after `schedule()` wipes the queue.
+    // `tries` counts *completed* attempts, so jobs lost to a queue wipe cost
+    // nothing; only real decode failures count against the budget.
+    if !thumbs.contains_key(path) && tries.get(path).copied().unwrap_or(0) < THUMB_TRIES {
         loader.push(Job {
             path: path.to_path_buf(),
             kind: Kind::Thumb,
             prio: PRIO_THUMB,
             target_dim: THUMB_DIM,
         });
+    }
+    if let Some(t) = thumbs.get_mut(path) {
+        t.2 = clock; // LRU stamp
     }
 
     let fill = if selected {
@@ -2184,8 +2198,7 @@ impl eframe::App for MyApp {
             self.show_panels = !self.show_panels;
         }
         if grid {
-            self.gallery_view = !self.gallery_view;
-            self.scroll_to_current = true;
+            self.toggle_gallery();
         }
         if del {
             self.delete_current(ctx);
@@ -2221,47 +2234,52 @@ impl eframe::App for MyApp {
 
         if self.show_panels {
             egui::TopBottomPanel::bottom("menu").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                if ui.button("Browse Folder…").clicked() {
-                    self.pick_folder(ctx);
-                }
-                if ui.button("Browse File…").clicked() {
-                    self.pick_file(ctx);
-                }
-                if ui.button("Prev (←)").clicked() {
-                    self.step(ctx, false);
-                }
-                if ui.button("Next (→)").clicked() {
-                    self.step(ctx, true);
-                }
-                if ui.button("Fit (F)").clicked() {
-                    self.view.fit = true;
-                }
-                if ui.button("Panels (I)").clicked() {
-                    self.suppress_resize_redecode = true;
-                    self.show_panels = !self.show_panels;
-                }
-                if ui.button("Delete (Del)").clicked() {
-                    self.delete_current(ctx);
-                }
-                if ui.button("Move… (M)").clicked() {
-                    self.transfer_current(ctx, false);
-                }
-                if ui.button("Copy… (C)").clicked() {
-                    self.transfer_current(ctx, true);
-                }
-                if ui.button("Explore (E)").clicked() {
-                    self.explore_current();
-                }
-                if ui.button("Reload (R)").clicked() {
-                    self.rescan(ctx, true);
-                }
-                if ui.button("Copy IMG (Ctrl+C)").clicked() {
-                    self.copy_image_to_clipboard();
-                }
-                if ui.button("Wallpaper (W)").clicked() {
-                    self.set_wallpaper();
-                }
+                // Wrapped: a single row of buttons overflows a narrow
+                // window and the tail (incl. the hints) gets clipped.
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Browse Folder…").clicked() {
+                        self.pick_folder(ctx);
+                    }
+                    if ui.button("Browse File…").clicked() {
+                        self.pick_file(ctx);
+                    }
+                    if ui.button("Prev (←)").clicked() {
+                        self.step(ctx, false);
+                    }
+                    if ui.button("Next (→)").clicked() {
+                        self.step(ctx, true);
+                    }
+                    if ui.button("Fit (F)").clicked() {
+                        self.view.fit = true;
+                    }
+                    if ui.button("Gallery (G)").clicked() {
+                        self.toggle_gallery();
+                    }
+                    if ui.button("Panels (I)").clicked() {
+                        self.suppress_resize_redecode = true;
+                        self.show_panels = !self.show_panels;
+                    }
+                    if ui.button("Delete (Del)").clicked() {
+                        self.delete_current(ctx);
+                    }
+                    if ui.button("Move… (M)").clicked() {
+                        self.transfer_current(ctx, false);
+                    }
+                    if ui.button("Copy… (C)").clicked() {
+                        self.transfer_current(ctx, true);
+                    }
+                    if ui.button("Explore (E)").clicked() {
+                        self.explore_current();
+                    }
+                    if ui.button("Reload (R)").clicked() {
+                        self.rescan(ctx, true);
+                    }
+                    if ui.button("Copy IMG (Ctrl+C)").clicked() {
+                        self.copy_image_to_clipboard();
+                    }
+                    if ui.button("Wallpaper (W)").clicked() {
+                        self.set_wallpaper();
+                    }
                     ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
                 });
             });
