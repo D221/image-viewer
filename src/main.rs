@@ -32,7 +32,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    buffer_has_alpha, extract_zip, grid_cols, is_archive_path, load_image_full,
+    buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
     load_image_preview_full, set_downscale_filter, set_linear_resample, scan_folder_sorted, Animation,
     Config, DownscaleFilter, Gallery, ImageData, SortMode, GRID_CELL, GRID_LABEL_H, GRID_ROW_H,
     MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
@@ -2002,22 +2002,45 @@ fn grid_cell(
     }
 
     let inner = rect.shrink(4.0);
-    let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Min));
+    let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Center));
+
+    // Thumbnail area: full width, cell height. The image is *painted* centred
+    // in it rather than added as a widget — `Image::ui` (and any
+    // `allocate_exact_size`) places at the cursor, so a centred Layout alone
+    // would leave the thumb in the top-left corner.
+    let img_area = egui::Rect::from_min_size(
+        egui::Pos2::new(inner.min.x, inner.min.y),
+        egui::vec2(inner.width(), cell),
+    );
+    child.allocate_exact_size(img_area.size(), egui::Sense::hover());
     match thumbs.get(path).map(|(t, _, _)| t.clone()) {
         Some(tex) => {
-            child.add(
-                egui::Image::new(&tex)
-                    .max_size(egui::vec2(inner.width(), cell)),
+            let [w, h] = tex.size();
+            let uv = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32));
+            // Texture texels -> points, so a 256px thumb is the same apparent
+            // size regardless of the display's pixel ratio.
+            let natural = egui::vec2(w as f32, h as f32) / ui.ctx().pixels_per_point();
+            let scale = fit_scale_no_upscale(
+                (natural.x, natural.y),
+                (img_area.width(), img_area.height()),
             );
+            let draw = egui::Rect::from_center_size(
+                img_area.center(),
+                natural * scale,
+            );
+            if ui.is_rect_visible(draw) {
+                ui.painter().image(tex.id(), draw, uv, Color32::WHITE);
+            }
         }
         None => {
-            child.allocate_exact_size(
-                egui::vec2(inner.width(), cell),
-                egui::Sense::hover(),
+            // Centred like a real thumbnail would be.
+            child.painter().text(
+                img_area.center(),
+                egui::Align2::CENTER_CENTER,
+                "\u{2026}",
+                egui::FontId::proportional(16.0),
+                ui.visuals().weak_text_color(),
             );
-            child.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new("…").weak());
-            });
         }
     }
     child.add(

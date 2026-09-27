@@ -183,6 +183,21 @@ pub fn grid_cols(panel_w: f32) -> usize {
     ((panel_w / (GRID_CELL + 8.0)).floor() as usize).clamp(1, 24)
 }
 
+/// Scale factor that fits an image of `natural` size into an `area`, keeping
+/// the aspect ratio and never upscaling (1.0 means "draw at native size").
+///
+/// The gallery grid centres thumbnails with this: upscaling a small image to
+/// fill a cell only makes it blurry, so a 40x30 picture stays 40x30 and is
+/// simply centred in the middle of the cell. All sizes are in the same unit
+/// (the caller works in points: texture texels / `pixels_per_point`).
+pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
+    let (w, h) = (natural.0.max(1.0), natural.1.max(1.0));
+    if w <= 0.0 || h <= 0.0 || area.0 <= 0.0 || area.1 <= 0.0 {
+        return 1.0;
+    }
+    (area.0 / w).min(area.1 / h).min(1.0)
+}
+
 /// Case-insensitive "natural" string comparison: runs of digits compare
 /// numerically, so `IMG_10` sorts after `IMG_2` like Explorer does.
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {

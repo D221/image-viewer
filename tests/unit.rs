@@ -643,8 +643,13 @@ fn test_fit_to_window() {
 use image_viewer::{grid_cols, GRID_CELL, GRID_LABEL_H, GRID_ROW_H};
 
 /// Draw one row of `cols` cells exactly the way `gallery_grid`/`grid_cell` do.
-/// Returns the laid-out cell rects; `hits` collects clicked cell indices.
-fn grid_row(ui: &mut egui::Ui, cols: usize, out: &mut Vec<egui::Rect>, hits: &mut Vec<usize>) {
+/// `out` collects the cell rects, `hits` the clicked cell indices.
+fn grid_row(
+    ui: &mut egui::Ui,
+    cols: usize,
+    out: &mut Vec<egui::Rect>,
+    hits: &mut Vec<usize>,
+) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, GRID_ROW_H, 1, |ui, _| {
@@ -663,12 +668,13 @@ fn grid_row(ui: &mut egui::Ui, cols: usize, out: &mut Vec<egui::Rect>, hits: &mu
                             egui::Stroke::NONE,
                         );
                     }
-                    let mut child =
-                        ui.child_ui(rect.shrink(4.0), egui::Layout::top_down(egui::Align::Min));
-                    child.allocate_exact_size(
-                        egui::vec2(rect.width() - 8.0, GRID_CELL),
-                        egui::Sense::hover(),
-                    );
+                    let inner = rect.shrink(4.0);
+                    let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Center));
+                    // Thumbnail area. The image itself is painted centred by
+                    // hand (fit_scale_no_upscale + from_center_size), which is
+                    // covered by test_fit_scale_no_upscale; a widget here
+                    // cannot demonstrate it because widgets place at the cursor.
+                    child.allocate_exact_size(egui::vec2(inner.width(), GRID_CELL), egui::Sense::hover());
                     child.add(egui::Label::new("a-fairly-long-file-name.jpg").truncate(true));
                     out.push(resp.rect);
                     if resp.clicked() {
@@ -754,4 +760,41 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
         });
     }
     assert_eq!(clicks, vec![2], "only the pressed cell may report the click");
+}
+
+#[test]
+fn test_fit_scale_no_upscale_centres_thumbnails() {
+    use image_viewer::fit_scale_no_upscale;
+    let area = (150.0_f32, 150.0_f32);
+
+    // A big landscape thumb scales down to the cell width, aspect kept.
+    let s = fit_scale_no_upscale((400.0, 300.0), area);
+    assert!((s - 0.375).abs() < 1e-6, "got {s}");
+    assert!((400.0 * s - 150.0).abs() < 1e-4, "must fill the width");
+    assert!((300.0 * s - 112.5).abs() < 1e-4, "aspect must be kept");
+
+    // A tall portrait thumb is bounded by the height instead.
+    let s = fit_scale_no_upscale((200.0, 400.0), area);
+    assert!((s - 0.375).abs() < 1e-6, "got {s}");
+    assert!((400.0 * s - 150.0).abs() < 1e-4, "must fill the height");
+
+    // A panorama is bounded by the width and stays short.
+    let s = fit_scale_no_upscale((1000.0, 100.0), area);
+    assert!((s - 0.15).abs() < 1e-6, "got {s}");
+    assert!((100.0 * s - 15.0).abs() < 1e-4, "aspect must be kept");
+
+    // Never upscale: a small image is centred at native size rather than
+    // blown up into a blurry square.
+    for natural in [(40.0_f32, 30.0_f32), (1.0, 1.0), (150.0, 150.0)] {
+        assert_eq!(
+            fit_scale_no_upscale(natural, area),
+            1.0,
+            "{natural:?} must not be upscaled"
+        );
+    }
+
+    // Degenerate inputs must not produce NaN (that would silently blank cells).
+    assert_eq!(fit_scale_no_upscale((0.0, 0.0), area), 1.0);
+    assert_eq!(fit_scale_no_upscale((100.0, 100.0), (0.0, 0.0)), 1.0);
+    assert!(fit_scale_no_upscale((100.0, 100.0), (1e9, 1.9)).is_finite());
 }
