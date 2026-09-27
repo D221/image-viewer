@@ -798,3 +798,87 @@ fn test_fit_scale_no_upscale_centres_thumbnails() {
     assert_eq!(fit_scale_no_upscale((100.0, 100.0), (0.0, 0.0)), 1.0);
     assert!(fit_scale_no_upscale((100.0, 100.0), (1e9, 1.9)).is_finite());
 }
+#[test]
+fn test_grid_thumbnail_is_centred_and_textured() {
+    // Guards the gallery-grid thumbnail against two regressions that both
+    // shipped once, and neither of which a compile or a screenshot-free build
+    // would catch:
+    //
+    //  1. It stopped being *centred*: widgets place at the cursor, and a
+    //     `Layout::top_down(Align::Center)` does not move them (a top-down
+    //     flow's initial cursor runs to +infinity on the main axis, so
+    //     `allocate_exact_size` centres only across the cross axis). The
+    //     widget therefore lives in a Ui bounded to the computed rect.
+    //  2. It stopped being *textured* (solid colour blocks) when the cell was
+    //     painted by hand via `painter().image(...)`. egui owns that
+    //     plumbing, so the widget is used and only the rect is computed here.
+    //
+    // A real egui pass is driven and the produced shapes are inspected.
+    use egui::{Color32, ColorImage, Context, RawInput, Rect, TextureOptions, Vec2};
+
+    let ctx = Context::default();
+    ctx.set_fonts(egui::FontDefinitions::empty());
+
+    let texels = [200_usize, 100_usize];
+    let img = ColorImage::new([texels[0], texels[1]], Color32::from_rgb(200, 30, 30));
+    let tex = ctx.load_texture("thumb-regression", img, TextureOptions::LINEAR);
+
+    // A cell's thumbnail area, as gallery_grid lays it out.
+    let area = Rect::from_min_size(egui::Pos2::new(20.0, 20.0), Vec2::new(142.0, 150.0));
+    let natural = Vec2::new(texels[0] as f32, texels[1] as f32);
+    let scale = image_viewer::fit_scale_no_upscale(
+        (natural.x, natural.y),
+        (area.width(), area.height()),
+    );
+    let draw_size = (natural * scale).min(area.size());
+    let draw = Rect::from_center_size(area.center(), draw_size);
+
+    let out = ctx.run(RawInput::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // Exactly what grid_cell does.
+            let mut img_ui = ui.child_ui(draw, egui::Layout::top_down(egui::Align::Min));
+            img_ui.add(egui::Image::new(&tex).max_size(draw_size));
+        });
+    });
+
+    // egui paints an image as a RectShape carrying a texture id.
+    let textured: Vec<_> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Rect(r) if r.fill_texture_id != egui::TextureId::default() => {
+                Some((r.rect, r.uv))
+            }
+            _ => None,
+        })
+        .collect();
+    let (rect, uv) = *textured
+        .first()
+        .expect("no textured quad painted: the cell would show only its background");
+
+    // Textured: a collapsed UV samples one texel and stretches it, which is
+    // what a "solid colour" thumbnail is.
+    assert!(
+        uv.width() > 0.0 && uv.height() > 0.0,
+        "UV must be non-degenerate, got {uv:?}"
+    );
+    // Aspect kept.
+    let drawn = rect.width() / rect.height();
+    let source = texels[0] as f32 / texels[1] as f32;
+    assert!(
+        (drawn - source).abs() < 0.02,
+        "aspect must be preserved: drew {drawn}, source {source}"
+    );
+    // Fits the cell, and fills it (this thumb is larger than the area).
+    assert!(
+        rect.width() <= area.width() + 0.5 && rect.height() <= area.height() + 0.5,
+        "thumbnail {rect:?} must fit the area {area:?}"
+    );
+    assert!((rect.width() - area.width()).abs() < 0.5, "should fill the width");
+    // Centred on both axes.
+    assert!(
+        (rect.center().x - area.center().x).abs() < 0.5
+            && (rect.center().y - area.center().y).abs() < 0.5,
+        "thumbnail {rect:?} must be centred in {area:?}, not stuck in a corner"
+    );
+}

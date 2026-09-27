@@ -150,6 +150,17 @@ struct QueueState {
     busy: HashSet<(PathBuf, Kind)>,
 }
 
+/// A decoded gallery-grid thumbnail.
+///
+/// `texels` is the *decoded* pixel size of the uploaded texture, recorded at
+/// upload time so the cell layout never has to ask the texture manager.
+struct Thumb {
+    tex: TextureHandle,
+    texels: [usize; 2],
+    /// LRU stamp (frame clock).
+    used: u64,
+}
+
 struct PreviewData {
     image: ColorImage, // already converted on the worker thread
     orig: (u32, u32),  // source dimensions
@@ -592,7 +603,7 @@ struct MyApp {
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
     wheel_acc: f32, // accumulated wheel delta in wheel-navigation mode
-    thumbs: HashMap<PathBuf, (TextureHandle, (u32, u32), u64)>, // grid thumbnails
+    thumbs: HashMap<PathBuf, Thumb>, // grid thumbnails
     thumb_tries: HashMap<PathBuf, u8>, // per-path thumb attempts (bounded retry)
     gallery_view: bool, // grid browser open
 }
@@ -927,10 +938,17 @@ impl MyApp {
                 Msg::Thumb { path, result } => match result {
                     Ok(p) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let texels = p.image.size;
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         self.clock += 1;
-                        self.thumbs
-                            .insert(path.clone(), (tex, p.orig, self.clock));
+                        self.thumbs.insert(
+                            path.clone(),
+                            Thumb {
+                                tex,
+                                texels,
+                                used: self.clock,
+                            },
+                        );
                         self.thumb_tries.remove(&path);
                         self.evict_thumbs();
                     }
@@ -1011,7 +1029,7 @@ impl MyApp {
             let victim = self
                 .thumbs
                 .iter()
-                .min_by_key(|(_, v)| v.2)
+                .min_by_key(|(_, v)| v.used)
                 .map(|(p, _)| p.clone());
             match victim {
                 Some(v) => {
@@ -1953,7 +1971,7 @@ fn grid_cell(
     cell: f32,
     selected: bool,
     clock: u64,
-    thumbs: &mut HashMap<PathBuf, (TextureHandle, (u32, u32), u64)>,
+    thumbs: &mut HashMap<PathBuf, Thumb>,
     tries: &mut HashMap<PathBuf, u8>,
     loader: &Loader,
 ) -> bool {
@@ -1976,7 +1994,7 @@ fn grid_cell(
         });
     }
     if let Some(t) = thumbs.get_mut(path) {
-        t.2 = clock; // LRU stamp
+        t.used = clock; // LRU stamp
     }
 
     let fill = if selected {
@@ -2004,35 +2022,44 @@ fn grid_cell(
     let inner = rect.shrink(4.0);
     let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Center));
 
-    // Thumbnail area: full width, cell height. The image is *painted* centred
-    // in it rather than added as a widget — `Image::ui` (and any
-    // `allocate_exact_size`) places at the cursor, so a centred Layout alone
-    // would leave the thumb in the top-left corner.
+    // Thumbnail area: full width, cell height. Only the *rect* is computed
+    // here; egui still does the painting. Widgets place at the cursor, and a
+    // `Layout::top_down(Align::Center)` does not move them (a top-down flow's
+    // initial cursor runs to +infinity on the main axis, so
+    // `allocate_exact_size` only centres on the cross axis), hence the
+    // explicit rect.
     let img_area = egui::Rect::from_min_size(
         egui::Pos2::new(inner.min.x, inner.min.y),
         egui::vec2(inner.width(), cell),
     );
     child.allocate_exact_size(img_area.size(), egui::Sense::hover());
-    match thumbs.get(path).map(|(t, _, _)| t.clone()) {
-        Some(tex) => {
-            let [w, h] = tex.size();
-            let uv = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32));
-            // Texture texels -> points, so a 256px thumb is the same apparent
-            // size regardless of the display's pixel ratio.
-            let natural = egui::vec2(w as f32, h as f32) / ui.ctx().pixels_per_point();
+    match thumbs.get(path) {
+        Some(t) if t.texels[0] > 0 && t.texels[1] > 0 => {
+            // Texels -> points, so a 256px thumb looks the same size whatever
+            // the display's pixel ratio. `texels` is the decoded buffer's size,
+            // recorded at upload time: the ground truth, with no dependency on
+            // texture-manager state.
+            let ppp = ui.ctx().pixels_per_point();
+            let natural = egui::vec2(t.texels[0] as f32, t.texels[1] as f32) / ppp;
             let scale = fit_scale_no_upscale(
                 (natural.x, natural.y),
                 (img_area.width(), img_area.height()),
             );
-            let draw = egui::Rect::from_center_size(
-                img_area.center(),
-                natural * scale,
-            );
+            let draw_size = (natural * scale)
+                .max(egui::Vec2::splat(1.0))
+                .min(img_area.size());
+            let draw = egui::Rect::from_center_size(img_area.center(), draw_size);
             if ui.is_rect_visible(draw) {
-                ui.painter().image(tex.id(), draw, uv, Color32::WHITE);
+                // Give the widget a Ui bounded to the centred rect: that is
+                // what centres it. Do NOT paint the texture by hand here
+                // (`painter().image`) — that shipped once and turned every
+                // thumbnail into a solid block.
+                let mut img_ui =
+                    child.child_ui(draw, egui::Layout::top_down(egui::Align::Min));
+                img_ui.add(egui::Image::new(&t.tex).max_size(draw_size));
             }
         }
-        None => {
+        _ => {
             // Centred like a real thumbnail would be.
             child.painter().text(
                 img_area.center(),
