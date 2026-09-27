@@ -868,8 +868,9 @@ struct MyApp {
     rot: u8,
     /// Browsing direction/speed, used to aim the preload window.
     nav: NavHint,
-    /// Scroll the grid to `grid_sel` on the next frame (set when opening).
-    grid_scroll_to_sel: bool,
+    /// Selection index the grid's scroll offset was last set for. The offset is
+    /// written only when this differs, so manual scrolling is never fought.
+    grid_sel_scrolled: usize,
     /// "User intent -> useful pixels" tracking for the perf report.
     lat: Latency,
     /// When the debounced resize-driven refinement should be queued.
@@ -999,7 +1000,7 @@ impl MyApp {
             grid_cols: 1,
             rot: 0,
             nav: NavHint::default(),
-            grid_scroll_to_sel: false,
+            grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
             resize_due: None,
             t_boot: perf::boot(),
@@ -2322,7 +2323,9 @@ impl MyApp {
         if self.gallery_view {
             // Start the highlight on the image currently shown.
             self.grid_sel = self.gallery.index.min(self.gallery.len().saturating_sub(1));
-            self.grid_scroll_to_sel = true;
+            // Always re-focus on open, even if the selection index happens to
+            // be the same: the offset is per-folder state.
+            self.grid_sel_scrolled = usize::MAX;
             self.lat.t_gallery = Some(Instant::now());
         }
     }
@@ -2364,18 +2367,24 @@ impl MyApp {
         } = self;
         let files = &gallery.files;
         let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
-        // On open, jump straight to the current image.
+        // Scroll to the selection, but only when the selection actually moved.
         //
-        // `scroll_to_me` below cannot do this job: `show_rows` only lays out
-        // the rows inside the viewport, so a selected row that starts off-screen
-        // never gets built, never issues the scroll request, and the grid sits
-        // wherever it was left. It only appeared to work when the current
-        // image was already in view. Setting the offset once is deterministic
-        // and does not depend on the cell being laid out.
-        if std::mem::take(&mut self.grid_scroll_to_sel) {
-            // show_rows adds vertical item spacing on top of row_h.
+        // Two mechanisms were tried and both had a failure mode:
+        //
+        //  * `Response::scroll_to_me` cannot reach a row that is not laid out,
+        //    and `show_rows` only lays out the viewport — so opening the grid
+        //    on an off-screen image did nothing.
+        //  * Re-issuing it every frame (or forcing the offset every frame) fights
+        //    the user: any small manual scroll kept re-centring the selection.
+        //
+        // Writing the offset once per *selection change* handles opening,
+        // arrows and Home/End uniformly, is deterministic, and leaves manual
+        // scrolling completely alone. show_rows adds vertical item spacing on
+        // top of row_h, hence the pitch.
+        if sel != self.grid_sel_scrolled {
             let pitch = row_h + ui.spacing().item_spacing.y;
             sa = sa.vertical_scroll_offset((sel / cols) as f32 * pitch);
+            self.grid_sel_scrolled = sel;
         }
         sa.show_rows(ui, row_h, total_rows, |ui, rows| {
                 for row in rows {
@@ -2395,16 +2404,6 @@ impl MyApp {
                                 thumb_tries,
                                 loader,
                             );
-                            if idx == sel {
-                                // Keep the highlight in view while browsing
-                                // with the arrows. egui's scroll_to_me is a
-                                // no-op while the cell is on screen, so it never
-                                // fights the user's own scrolling; and the row
-                                // next to the viewport *is* laid out, so it
-                                // works for keyboard moves (unlike the initial
-                                // jump, which is handled above).
-                                resp.scroll_to_me(Some(egui::Align::Center));
-                            }
                             if resp.clicked() && clicked.is_none() {
                                 clicked = Some(idx);
                             }
