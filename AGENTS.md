@@ -27,7 +27,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - **Animated GIFs** decode to all composited frames (`Animation`, caps: 240 frames / 256 MB), ride the preview cache, never get tiles, and play back through a single re-uploaded texture with delays floored to 20 ms.
 - **Never decode on the UI thread.** All decode runs on the worker pool (`Loader` in `main.rs`); the UI only paints textures. Grid thumbnails use `Kind::Thumb` jobs (`Loader::push`, prio 45) and an LRU-capped `thumbs` cache — `grid_cell` requests them lazily for visible cells only.
 - **Folder watcher**: `maybe_rescan` polls `scan_folder` every 2 s and keeps the user's position. Skipped while a cbz/zip archive is open.
-- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; Esc = close grid → exit fullscreen → close window. Side mouse buttons = prev/next.
+- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; in the grid the arrows/Home/End move a *selection* (they do not change the shown image) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; Esc = close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳ are bottom-panel buttons only (temporary UI; `self.rot` is a view transform, re-fits after each turn).
 
 ## Gotchas by feature
 

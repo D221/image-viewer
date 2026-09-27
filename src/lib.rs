@@ -198,6 +198,18 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
     (area.0 / w).min(area.1 / h).min(1.0)
 }
 
+/// Footprint `(width, height)` an image of `w x h` occupies after `quarter`
+/// quarter turns clockwise. Odd quarter turns swap the axes; only whole
+/// quarter turns are supported, so the result stays axis-aligned (and 1:1
+/// stays pixel-sharp).
+pub fn rotated_footprint(w: f32, h: f32, quarter: u8) -> (f32, f32) {
+    if quarter & 1 == 1 {
+        (h, w)
+    } else {
+        (w, h)
+    }
+}
+
 /// Case-insensitive "natural" string comparison: runs of digits compare
 /// numerically, so `IMG_10` sorts after `IMG_2` like Explorer does.
 pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {

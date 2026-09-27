@@ -882,3 +882,75 @@ fn test_grid_thumbnail_is_centred_and_textured() {
         "thumbnail {rect:?} must be centred in {area:?}, not stuck in a corner"
     );
 }
+
+#[test]
+fn test_rotated_footprint_swaps_on_odd_quarters() {
+    use image_viewer::rotated_footprint;
+    let (w, h) = (4000.0_f32, 3000.0_f32);
+    // Even quarters: unchanged. Odd: axes swapped.
+    assert_eq!(rotated_footprint(w, h, 0), (w, h));
+    assert_eq!(rotated_footprint(w, h, 1), (h, w));
+    assert_eq!(rotated_footprint(w, h, 2), (w, h));
+    assert_eq!(rotated_footprint(w, h, 3), (h, w));
+    // Out-of-range quarters wrap (rot uses rem_euclid, but be safe here).
+    assert_eq!(rotated_footprint(w, h, 4), (w, h));
+    assert_eq!(rotated_footprint(w, h, 5), (h, w));
+}
+
+#[test]
+fn test_quarter_turn_mesh_covers_the_swapped_footprint() {
+    // The rotate buttons paint the image by rotating its rect about the rect
+    // centre (see `paint_tex`). That only keeps the image centred if a 90°
+    // turn of an axis-aligned rect lands exactly on the axis-swapped
+    // footprint — which is what fit/pan clamping is computed against. If this
+    // premise were wrong, rotating would swing the image off-centre.
+    use egui::{Color32, Rect, Vec2};
+
+    for quarter in 0..4u8 {
+        let src = Vec2::new(300.0, 100.0);
+        let scale = 0.5;
+        let centre = egui::Pos2::new(400.0, 300.0);
+        let rect = Rect::from_center_size(centre, src * scale);
+
+        let mut mesh = egui::epaint::Mesh::with_texture(egui::TextureId::default());
+        mesh.add_rect_with_uv(
+            rect,
+            Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        if quarter & 3 != 0 {
+            mesh.rotate(
+                egui::emath::Rot2::from_angle(quarter as f32 * std::f32::consts::FRAC_PI_2),
+                rect.center(),
+            );
+        }
+
+        let (dw, dh) = image_viewer::rotated_footprint(src.x * scale, src.y * scale, quarter);
+        let want = Rect::from_center_size(centre, Vec2::new(dw, dh));
+
+        let xs: Vec<f32> = mesh.vertices.iter().map(|v| v.pos.x).collect();
+        let ys: Vec<f32> = mesh.vertices.iter().map(|v| v.pos.y).collect();
+        let got = Rect::from_min_max(
+            egui::Pos2::new(
+                xs.iter().cloned().fold(f32::MAX, f32::min),
+                ys.iter().cloned().fold(f32::MAX, f32::min),
+            ),
+            egui::Pos2::new(
+                xs.iter().cloned().fold(f32::MIN, f32::max),
+                ys.iter().cloned().fold(f32::MIN, f32::max),
+            ),
+        );
+        assert!(
+            (got.min.x - want.min.x).abs() < 0.01
+                && (got.min.y - want.min.y).abs() < 0.01
+                && (got.max.x - want.max.x).abs() < 0.01
+                && (got.max.y - want.max.y).abs() < 0.01,
+            "quarter {quarter}: rotated image {got:?} must fill the footprint {want:?}"
+        );
+        // And it must stay centred where the unrotated image was.
+        assert!(
+            (got.center() - centre).x.abs() < 0.01 && (got.center() - centre).y.abs() < 0.01,
+            "quarter {quarter}: rotation must not move the centre"
+        );
+    }
+}

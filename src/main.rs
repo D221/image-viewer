@@ -33,9 +33,9 @@ use std::time::{Duration, Instant};
 
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
-    load_image_preview_full, set_downscale_filter, set_linear_resample, scan_folder_sorted, Animation,
-    Config, DownscaleFilter, Gallery, ImageData, SortMode, GRID_CELL, GRID_LABEL_H, GRID_ROW_H,
-    MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    load_image_preview_full, rotated_footprint, set_downscale_filter, set_linear_resample,
+    scan_folder_sorted, Animation, Config, DownscaleFilter, Gallery, ImageData, SortMode,
+    GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -598,7 +598,14 @@ struct MyApp {
     display_dim: Option<(u32, u32)>, // central panel size in physical px
     suppress_resize_redecode: bool, // panel toggle must not re-decode
     waiting_load: bool, // block_while_loading: current image not decoded yet
-    scroll_to_current: bool, // grid: scroll to the current image on next render
+    /// Index highlighted in the grid (G). Browsing the grid does *not* change
+    /// the shown image — only Enter or a click does — so arrowing around a
+    /// 2000-image folder costs no re-decodes.
+    grid_sel: usize,
+    /// Columns the grid last laid out with; Up/Down move by this much.
+    grid_cols: usize,
+    /// Quarter turns clockwise applied to the shown image (0..4).
+    rot: u8,
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
@@ -718,7 +725,9 @@ impl MyApp {
             display_dim: None,
                         suppress_resize_redecode: false,
             waiting_load: false,
-            scroll_to_current: false,
+            grid_sel: 0,
+            grid_cols: 1,
+            rot: 0,
             pending_advance: None,
             zip_archive,
             zip_temp,
@@ -1515,6 +1524,12 @@ impl MyApp {
         );
         if let Some(pv) = self.shown.as_ref().and_then(|p| self.previews.get(p)) {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
+            // Show the dimensions as displayed once rotated, so the readout
+            // matches what is on screen.
+            if self.rot & 3 != 0 {
+                let (w, h) = rotated_footprint(pv.orig.0 as f32, pv.orig.1 as f32, self.rot);
+                s += &format!(" (rotated {}x{})", w as u32, h as u32);
+            }
             if let Some(anim) = &pv.anim {
                 s += &format!(" - anim {} frames", anim.frames.len());
             } else {
@@ -1641,8 +1656,14 @@ impl MyApp {
         };
 
         let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
-        let fit_scale = (panel.width() / img_px.x)
-            .min(panel.height() / img_px.y)
+        // Quarter turns clockwise. Only 90° steps, so the image stays
+        // axis-aligned and 1:1 stays pixel-sharp.
+        let quarter = self.rot & 3;
+        // What the image *occupies* on screen: odd quarter turns swap the axes.
+        let (dw, dh) = rotated_footprint(img_px.x, img_px.y, quarter);
+        let display_px = Vec2::new(dw, dh);
+        let fit_scale = (panel.width() / display_px.x)
+            .min(panel.height() / display_px.y)
             .clamp(1e-4, 8.0);
         let max_scale = MAX_SCALE.max(fit_scale);
 
@@ -1711,7 +1732,9 @@ impl MyApp {
         }
 
         // Keep the image from being lost off-screen; centre it on axes where it fits.
-        let size = img_px * scale;
+        // Uses the *rotated* footprint, so panning limits and fit are correct
+        // whichever way up the image is.
+        let size = display_px * scale;
         let max_off = ((size - panel.size()) * 0.5).max(Vec2::ZERO);
         offset = offset.clamp(-max_off, max_off);
 
@@ -1724,11 +1747,20 @@ impl MyApp {
         self.view.offset = offset;
 
         // Snap the image origin to the physical pixel grid so 1:1 is razor sharp.
+        // `rect` stays in *unrotated* image space — that is what the tiles and
+        // the source-pixel mapping below expect — and is rotated about its
+        // centre at paint time, which makes it exactly cover `size`.
         let snap = |v: f32| (v * ppp).round() / ppp;
         let centre = panel.center() + offset;
-        let min = Pos2::new(snap(centre.x - size.x * 0.5), snap(centre.y - size.y * 0.5));
-        let rect = Rect::from_min_size(min, size);
+        let src_size = img_px * scale;
+        let min = Pos2::new(
+            snap(centre.x - src_size.x * 0.5),
+            snap(centre.y - src_size.y * 0.5),
+        );
+        let rect = Rect::from_min_size(min, src_size);
         let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+        // The on-screen footprint, i.e. `rect` turned by `quarter`.
+        let footprint = Rect::from_center_size(centre, size);
 
         // Always paint the preview first; tiles refine it where available.
         // Transparent images get a checkerboard backdrop underneath.
@@ -1736,12 +1768,12 @@ impl MyApp {
             if let Some(checker) = &self.checker {
                 let uv = Rect::from_min_max(
                     Pos2::ZERO,
-                    Pos2::new(size.x / 32.0, size.y / 32.0),
+                    Pos2::new(src_size.x / 32.0, src_size.y / 32.0),
                 );
-                painter.image(checker.id(), rect, uv, Color32::WHITE);
+                paint_tex(&painter, checker.id(), rect, uv, quarter);
             }
         }
-        painter.image(tex_id, rect, uv, Color32::WHITE);
+        paint_tex(&painter, tex_id, rect, uv, quarter);
 
         // --- full-resolution tiles ---
         let preview_density = tex_w / img_px.x; // texture px per source px
@@ -1751,7 +1783,7 @@ impl MyApp {
         if let Some(full) = self.full.as_mut().filter(|f| f.path == shown) {
             if screen_density > preview_density {
                 let (fw, fh) = (full.data.width, full.data.height);
-                let vis = panel.intersect(rect);
+                let vis = panel.intersect(footprint);
                 if vis.width() > 0.0 && vis.height() > 0.0 {
                     let x0 = (((vis.min.x - rect.min.x) / scale).floor().max(0.0) as u32).min(fw);
                     let y0 = (((vis.min.y - rect.min.y) / scale).floor().max(0.0) as u32).min(fh);
@@ -1786,7 +1818,7 @@ impl MyApp {
                                     rect.min + Vec2::new(px as f32, py as f32) * scale,
                                     Vec2::new(tw as f32, th as f32) * scale,
                                 );
-                                painter.image(tile.tex.id(), r, uv, Color32::WHITE);
+                                paint_tex(&painter, tile.tex.id(), r, uv, quarter);
                             }
                         }
                     }
@@ -1828,33 +1860,37 @@ impl MyApp {
     /// Show/hide the thumbnail grid (G key and the bottom-panel button).
     fn toggle_gallery(&mut self) {
         self.gallery_view = !self.gallery_view;
-        // Only matters when opening: land on the current image, not the top.
-        self.scroll_to_current = self.gallery_view;
+        if self.gallery_view {
+            // Start the highlight on the image currently shown.
+            self.grid_sel = self.gallery.index.min(self.gallery.len().saturating_sub(1));
+        }
+    }
+
+    /// Open the grid's highlighted image and leave the grid (Enter or click).
+    fn pick_grid_selection(&mut self, ctx: &Context) {
+        if self.gallery.is_empty() {
+            return;
+        }
+        self.gallery.index = self.grid_sel.min(self.gallery.len() - 1);
+        self.gallery_view = false;
+        self.goto(ctx);
     }
 
     /// Gallery grid view (G): scrollable thumbnails of every image in the
-    /// queue. Thumbs decode lazily for visible cells; clicking one navigates
-    /// and closes the grid. Esc closes it too (before fullscreen Esc).
+    /// queue. Thumbs decode lazily for visible cells.
+    ///
+    /// Browsing here does *not* change the shown image: arrows/Home/End only
+    /// move `grid_sel`, and Enter (or a click) opens it. Arrowing around a
+    /// 2000-image folder therefore costs no re-decodes.
     fn gallery_grid(&mut self, ui: &mut egui::Ui, ctx: &Context, panel: egui::Rect) {
         let cols = grid_cols(panel.width());
+        self.grid_cols = cols; // Up/Down in update() step by this
         let row_h = GRID_ROW_H;
         let total = self.gallery.files.len();
         let total_rows = (total + cols - 1) / cols;
-        let current = self.gallery.index;
-        let cur = self.cur.clone();
         let clock = self.clock;
+        let sel = self.grid_sel;
         let mut clicked: Option<usize> = None;
-
-        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
-        // Jump to the current image the first time the grid is shown (and after
-        // navigating with the keyboard). Only set on those transitions — the
-        // offset builder overrides the persisted scroll position every frame
-        // it is present, which would fight the user's own scrolling.
-        if std::mem::take(&mut self.scroll_to_current) {
-            // show_rows adds vertical item spacing on top of row_h.
-            let pitch = GRID_ROW_H + ui.spacing().item_spacing.y;
-            sa = sa.vertical_scroll_offset((current / cols) as f32 * pitch);
-        }
 
         // Split the borrows so cells can be drawn without cloning the file
         // list (a big folder is thousands of PathBufs per frame otherwise).
@@ -1866,38 +1902,57 @@ impl MyApp {
             ..
         } = self;
         let files = &gallery.files;
-        sa.show_rows(ui, row_h, total_rows, |ui, rows| {
-            for row in rows {
-                ui.horizontal(|ui| {
-                    for col in 0..cols {
-                        let idx = row * cols + col;
-                        let Some(path) = files.get(idx) else {
-                            continue;
-                        };
-                        let selected = cur.as_deref() == Some(path.as_path());
-                        let hit = grid_cell(
-                            ui,
-                            path,
-                            GRID_CELL,
-                            selected,
-                            clock,
-                            thumbs,
-                            thumb_tries,
-                            loader,
-                        );
-                        if hit && clicked.is_none() {
-                            clicked = Some(idx);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, row_h, total_rows, |ui, rows| {
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for col in 0..cols {
+                            let idx = row * cols + col;
+                            let Some(path) = files.get(idx) else {
+                                continue;
+                            };
+                            let resp = grid_cell(
+                                ui,
+                                path,
+                                GRID_CELL,
+                                idx == sel,
+                                clock,
+                                thumbs,
+                                thumb_tries,
+                                loader,
+                            );
+                            if idx == sel {
+                                // Keep the highlight in view. egui's
+                                // scroll_to_me is a no-op while the cell is
+                                // already on screen, so this never fights the
+                                // user's own scrolling — unlike forcing the
+                                // scroll offset every frame.
+                                resp.scroll_to_me(Some(egui::Align::Center));
+                            }
+                            if resp.clicked() && clicked.is_none() {
+                                clicked = Some(idx);
+                            }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
 
         if let Some(i) = clicked {
-            self.gallery.index = i;
-            self.gallery_view = false;
-            self.goto(ctx);
+            self.grid_sel = i;
+            self.pick_grid_selection(ctx);
         }
+    }
+
+    /// Turn the shown image by `steps` quarter turns clockwise (negative =
+    /// counter-clockwise). Re-fits afterwards, since the footprint changes
+    /// shape. Temporary UI: the rotation is a view transform only — nothing is
+    /// written back to the file.
+    fn rotate(&mut self, steps: i32, ctx: &Context) {
+        self.rot = (self.rot as i32 + steps).rem_euclid(4) as u8;
+        self.view.fit = true;
+        self.view.offset = Vec2::ZERO;
+        ctx.request_repaint();
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
@@ -1974,7 +2029,7 @@ fn grid_cell(
     thumbs: &mut HashMap<PathBuf, Thumb>,
     tries: &mut HashMap<PathBuf, u8>,
     loader: &Loader,
-) -> bool {
+) -> egui::Response {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -2079,7 +2134,7 @@ fn grid_cell(
         .truncate(true),
     );
 
-    resp.clicked()
+    resp
 }
 
 /// A small 2x2-square checker texture used as the transparency backdrop.
@@ -2114,6 +2169,34 @@ fn set_clipboard_rgba(d: &ImageData) -> Result<(), String> {
         bytes: std::borrow::Cow::Owned(d.rgba.clone()),
     })
     .map_err(|e| e.to_string())
+}
+
+/// Paint a texture into `rect`, rotated by `quarter` (0..4) 90° steps clockwise
+/// about the rect's centre.
+///
+/// `painter.image` cannot rotate, so build a mesh and rotate it — the same
+/// trick egui's own `Image::paint_at` uses for `ImageOptions::rotation`. A
+/// quarter turn keeps everything axis-aligned, so 1:1 stays pixel-sharp and
+/// the caller can keep working in unrotated image space.
+fn paint_tex(
+    painter: &egui::Painter,
+    tex_id: egui::TextureId,
+    rect: egui::Rect,
+    uv: egui::Rect,
+    quarter: u8,
+) {
+    let quarter = quarter & 3;
+    if quarter == 0 {
+        painter.image(tex_id, rect, uv, Color32::WHITE);
+        return;
+    }
+    let mut mesh = egui::epaint::Mesh::with_texture(tex_id);
+    mesh.add_rect_with_uv(rect, uv, Color32::WHITE);
+    mesh.rotate(
+        egui::emath::Rot2::from_angle(quarter as f32 * std::f32::consts::FRAC_PI_2),
+        rect.center(),
+    );
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Copy one tile out of the full-res RGBA buffer and upload it.
@@ -2208,6 +2291,15 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::G),
             )
         });
+        // In grid mode the arrows drive the grid's own selection instead of
+        // changing the shown image, and Enter opens the highlighted cell.
+        let (up, down, enter) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.key_pressed(egui::Key::Enter),
+            )
+        });
         let (del, move_f, copy_f, explore, reload, clip_img, wall) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
@@ -2228,7 +2320,24 @@ impl eframe::App for MyApp {
                     .button_clicked(egui::PointerButton::Extra2),
             )
         });
-        if next {
+        if self.gallery_view {
+            // Grid: arrows move the highlight, Enter opens it. Clamped, so
+            // walking off an edge stops instead of jumping to the far end.
+            let cols = self.grid_cols.max(1);
+            let last_idx = self.gallery.len().saturating_sub(1);
+            let sel = &mut self.grid_sel;
+            if next || down {
+                *sel = (*sel + if down { cols } else { 1 }).min(last_idx);
+            } else if prev || up {
+                *sel = sel.saturating_sub(if up { cols } else { 1 });
+            } else if first {
+                *sel = 0;
+            } else if last {
+                *sel = last_idx;
+            } else if enter {
+                self.pick_grid_selection(ctx);
+            }
+        } else if next {
             self.step(ctx, true);
         } else if prev {
             self.step(ctx, false);
@@ -2238,10 +2347,6 @@ impl eframe::App for MyApp {
         } else if last && !self.gallery.is_empty() {
             self.gallery.index = self.gallery.len() - 1;
             self.goto(ctx);
-        }
-        // Keep the open grid scrolled to whatever is current.
-        if self.gallery_view && (next || prev || first || last) {
-            self.scroll_to_current = true;
         }
         if toggle {
             self.suppress_resize_redecode = true;
@@ -2304,6 +2409,12 @@ impl eframe::App for MyApp {
                     }
                     if ui.button("Gallery (G)").clicked() {
                         self.toggle_gallery();
+                    }
+                    if ui.button("Rotate ⟲").clicked() {
+                        self.rotate(-1, ctx);
+                    }
+                    if ui.button("Rotate ⟳").clicked() {
+                        self.rotate(1, ctx);
                     }
                     if ui.button("Panels (I)").clicked() {
                         self.suppress_resize_redecode = true;
