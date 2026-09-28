@@ -4,7 +4,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Commands
 
-- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `embedded_thumbs`, `filter_and_paging`, `standard`
+- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `standard`, `embedded_thumbs`, `filter_and_paging`, plus the in-crate `--lib` perf tests. It **stops at the first failing target**, so use `cargo test --no-fail-fast` to see everything.
 - `cargo test --test unit` — one test file; `cargo test <name>` — one test by name
 - `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
 - `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
@@ -97,7 +97,27 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Gotchas
 
-- **`test-images/` is gitignored but `tests/standard.rs`, `tests/integration.rs`, and both bench files hardcode `test-images\booklet_front.jpg`.** In a fresh clone `cargo test --test standard` fails with NotFound until that file is supplied. `unit` + `property` tests are fixture-free (`tempfile`) — run those to verify logic-only changes.
+- **Every suite is fixture-free now; do not reintroduce hardcoded
+  `test-images/` paths into tests.** `test-images/` is gitignored, so a test
+  that reads from it passes on your machine and fails in a fresh clone —
+  `tests/standard.rs` did exactly that for the whole history of this repo and
+  died with a bare `NotFound`. Build the image you need with the `image` crate
+  in a `tempfile::tempdir()`. The two **bench** files are the deliberate
+  exception (they measure a real large photo, so generating a synthetic one
+  would change the numbers): they pick the largest JPEG in `test-images/` and
+  print a "drop a photo in test-images/ to benchmark" message instead of
+  panicking if there is none.
+- **`load_image`'s `max_dim` is a minimum long-side target, not a hard cap.**
+  `decode_jpeg_scaled` picks a power-of-two DCT factor and deliberately chooses
+  the smallest reduction that still leaves `>= max_dim`, so a source sitting
+  between two factors comes back *larger* than asked for rather than smaller and
+  blurry: `load_image(2400x1600, 1600)` returns 2400x1600, because 2400/2 = 1200
+  is already below the target. Assert the real contract in tests; I wrote the
+  intuitive one first and it failed.
+- **`cargo test` aborts after the first failing target** — use
+  `cargo test --no-fail-fast` when you want the whole picture, and note that
+  `--lib` (the in-crate `perf` tests) is a target that the per-target commands in
+  this file never run.
 - **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings.
 - **Format handling is content-based, never extension-based.** Magic-byte sniffing picks the decoder (JPEG/PNG/WebP/GIF via the `image` crate; JXL via `jxl-oxide`; HEIC/HEIF/AVIF via the `heic` crate; misnamed files like a PNG saved as `.jpg` must keep loading — regression test exists). `image_dims_bytes` probes header dims per format.
 - **`normalized()` (lib.rs) guards every decode exit** — and it must guard the
