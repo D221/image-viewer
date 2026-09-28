@@ -8,6 +8,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - `cargo test --test unit` — one test file; `cargo test <name>` — one test by name
 - `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
 - `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
+- `cargo test --release --test bench_browse -- --ignored --nocapture` — **browsing benchmark**; flips through a generated folder at several press rates and prints time-to-first-pixels, wasted decode share, peak MB, cache-hit rate. Median of 3 (`IV_BENCH_RUNS`), 24 images by default (`IV_BENCH_N`). This is the number to move when changing the queue, the preloading window or the cache policy
 - `cargo run -- --perf <folder>` — turn on latency sampling; the report prints on exit and is written to `%TEMP%\image-viewer-perf.txt` (a release build has no console, so the file is the real output)
 - `PERF_PHASE=1` — per-phase timing inside the linear-light resampler
 - `cargo run` — launch the GUI viewer; `cargo run -- --register` / `--unregister` manage file-type registration (HKCU, no admin) and exit
