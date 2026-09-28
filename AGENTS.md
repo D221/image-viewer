@@ -97,17 +97,38 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Gotchas
 
-- **egui/eframe is 0.36; the renderer is `wgpu` on DX12, pinned in code.** The
-  renderer changed *as a side effect* of the 0.27→0.36 upgrade: 0.27's default
-  features enabled `glow`, 0.36's enable `wgpu`. `dx12_only_wgpu()` in
-  `main.rs` narrows wgpu to `Backends::DX12`, and that is load-bearing, not a
-  preference: wgpu enumerates *every* backend during adapter discovery, and on a
-  machine with a Vulkan loader and **zero registered ICDs**
-  (`HKLM\SOFTWARE\Khronos\Vulkan\Drivers` empty — an RDP/VM session, or a
-  Microsoft Basic Display Adapter) that enumeration is a hard `0xC0000005`
-  access violation before the window opens, with nothing on stderr. Verified:
-  `dx12` and `opengl` start, `vulkan` and the unpinned default do not. **Do not
-  restore `Backends::all()`.** Nothing in the suite covers any of this.
+- **egui/eframe is 0.36; the renderer is `wgpu` on DX12, with Vulkan opt-in.**
+  The renderer changed *as a side effect* of the 0.27→0.36 upgrade: 0.27's
+  default features enabled `glow`, 0.36's enable `wgpu`. wgpu enumerates every
+  enabled backend during adapter discovery, **before** picking one, and on this
+  machine that enumeration is a hard `0xC0000005` before the window opens, with
+  nothing on stderr. wgpu offers no "try this, else that" —
+  `native_adapter_selector` still filters enumeration by `backends` first — so
+  the set must be decided up front. `wgpu_options()` therefore enables **DX12
+  always**, plus Vulkan only when asked: `IV_WGPU_BACKEND=vulkan` (unrecognised
+  values fall back to the default; the chosen set is printed at startup).
+- **"Is Vulkan installed" is the wrong question, and the registry is a liar.**
+  Do not reintroduce a `Khronos\Vulkan\Drivers` probe. Measured here: `vulkaninfo`
+  reports a healthy Intel UHD 620 at API 1.2.187 with a clean environment, while
+  `Khronos\Vulkan\Drivers` is **absent** (only `ImplicitLayers` exists, no
+  `VK_*` vars) — the loader finds the driver's `igvk64.dll` some other way. And
+  wgpu + Vulkan still crashes 3/3. So Vulkan working does not imply
+  wgpu-on-Vulkan working, and the only way to discover that is to crash. Do not
+  set `Backends::all()`, and do not enable Vulkan unconditionally.
+- **Frame rates measured over RDP are meaningless — they were the reason for a
+  whole wrong theory.** On the RDP session the animated GIF ran at 12.7 fps on
+  wgpu vs 21 fps on glow, which looked like a wgpu smoothness regression. On the
+  real 60 Hz display: **58.7 fps on wgpu, 59.5 on glow, 30.0 on 0.27** — the
+  "regression" was entirely the remote display adapter. Always check whether the
+  session is remote (`Win32_VideoController` showing a *Microsoft Remote Display
+  Adapter*) before believing any frame-rate number.
+- **0.36 plays GIFs at vsync rate, 0.27 paced them to the GIF's own delay.**
+  The GIF is 4 frames x 30 ms (33 fps target); 0.27 rendered ~30 fps, 0.36
+  renders ~59 fps. Per-frame cost went *down* (3.52 ms wgpu vs 4.22 ms for 0.27)
+  but total CPU on animation went *up* (20.7% vs 12.7%) purely because it draws
+  twice as many frames. Honouring the frame delay would put it near 10.5%, i.e.
+  below the old build. Not done yet — the fix belongs in the animation repaint
+  path around `request_repaint_after(next_in)` in `central()`.
 - **`--perf <folder>` used to open the wrong folder, silently.** `MyApp::new`
   took the path as `args_os().nth(1)` while `main` scanned the whole list for
   flags, so `--perf` was taken as the path, matched nothing, and the app fell

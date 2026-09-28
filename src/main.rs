@@ -112,7 +112,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
-        wgpu_options: dx12_only_wgpu(),
+        wgpu_options: wgpu_options(),
         ..Default::default()
     };
     // eframe 0.36 (unlike 0.27) defaults the renderer to `wgpu`, so the
@@ -125,33 +125,57 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// wgpu configuration that enumerates **DX12 only**.
+/// wgpu configuration for this machine.
 ///
 /// eframe 0.27 defaulted the renderer to `glow` (OpenGL); 0.36 defaults to
 /// `wgpu`, so upgrading silently switched the rendering backend. That is the
-/// right direction, but wgpu's default backend set is "all of them", and it
-/// *enumerates* Vulkan during adapter discovery even when it ends up choosing
-/// DX12. On a machine with a Vulkan loader but no registered ICDs (checked:
-/// `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` empty — common on remote-desktop and
-/// VM sessions, and on machines with only a Microsoft Basic Display Adapter)
-/// that enumeration is a hard `0xC0000005` access violation before the window
-/// ever opens, with nothing on stderr.
+/// right direction, and wgpu's own backend preference is fine on a machine
+/// where wgpu's Vulkan backend works.
 ///
-/// Verified on this machine: `WGPU_BACKEND=dx12` starts, `WGPU_BACKEND=vulkan`
-/// access-violates, and the unpinned default access-violates too — so the crash
-/// is the *enumeration*, not the adapter choice.
+/// The problem is that wgpu enumerates every enabled backend during adapter
+/// discovery, before it has picked anything, and on this machine that
+/// enumeration is fatal. Measured, not assumed:
 ///
-/// Pinning DX12 is the native Windows backend anyway, and it removes the
-/// "laptop with a stale Vulkan driver picks the broken one" class of failure.
-/// If you ever need Vulkan, gate this on a config flag rather than deleting
-/// it — `Backends::all()` brings the crash straight back.
-fn dx12_only_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
+/// - `vulkaninfo` reports a healthy device — Intel UHD 620, API 1.2.187,
+///   integrated GPU, Intel driver. So **Vulkan itself works.**
+/// - wgpu with `Backends::VULKAN | DX12` access-violates (`0xC0000005`) before
+///   the window opens. 3/3 trials, and on the previous RDP session too. Nothing
+///   on stderr.
+/// - wgpu with `Backends::DX12` starts every time.
+///
+/// So Vulkan being installed does not imply wgpu-on-Vulkan working, and the only
+/// way to find out is to crash. Hence: **DX12 by default, Vulkan opt-in** with
+/// `IV_WGPU_BACKEND=vulkan`. A registry probe for
+/// `Khronos\Vulkan\Drivers` was tried and is a false signal in both directions —
+/// the key is *absent* on this machine while Vulkan works (the loader finds the
+/// Intel ICD with no `Drivers` key and no `VK_*` variables set), and a key being
+/// present does not mean wgpu can use the driver behind it. Deleted rather than
+/// kept as a "usually right" heuristic.
+///
+/// The chosen set is printed so a crash is never a mystery.
+fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{
         wgpu::{Backends, InstanceDescriptor},
         WgpuSetup, WgpuSetupCreateNew,
     };
+    use image_viewer::{wgpu_backend_set, WgpuBackend};
+
+    let requested = std::env::var("IV_WGPU_BACKEND")
+        .ok()
+        .and_then(|v| WgpuBackend::parse(&v))
+        .unwrap_or(WgpuBackend::Auto);
+    let (vulkan, dx12) = wgpu_backend_set(requested);
+    let mut backends = Backends::empty();
+    if vulkan {
+        backends |= Backends::VULKAN;
+    }
+    if dx12 {
+        backends |= Backends::DX12;
+    }
+    eprintln!("wgpu backends: {backends:?} (requested {requested:?})");
+
     let mut instance = InstanceDescriptor::new_without_display_handle();
-    instance.backends = Backends::DX12;
+    instance.backends = backends;
     eframe::egui_wgpu::WgpuConfiguration {
         wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
             instance_descriptor: instance,

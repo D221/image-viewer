@@ -127,9 +127,51 @@ Enumerating that empty Vulkan stack crashes wgpu-native rather than returning
 | 0.36, `WGPU_BACKEND=opengl` | runs |
 | 0.36, DX12 pinned in code | runs |
 
-Fix is `dx12_only_wgpu()` in `main.rs`: DX12 is the native Windows backend
-anyway, and pinning it also removes the "stale Vulkan driver gets picked" class
-of failure. **Do not restore `Backends::all()`** — the crash comes back.
+Fix is `wgpu_options()` in `main.rs`: **DX12 always, Vulkan only when explicitly
+asked** via `IV_WGPU_BACKEND=vulkan`. wgpu offers no "try this else that" —
+`backends` filters enumeration *before* any adapter selector runs, so the set
+has to be decided before instance creation.
+
+An intermediate version gated Vulkan on whether `Khronos\Vulkan\Drivers` had an
+ICD. That was wrong, and only measurable on a real (non-RDP) display: the
+registry key is **absent** on this machine while `vulkaninfo` reports a healthy
+Intel UHD 620 at API 1.2.187, and wgpu + Vulkan still crashes 3/3. Vulkan
+working does not imply wgpu-on-Vulkan working, and the only way to learn that is
+to crash, so the probe was deleted rather than kept as a "usually right"
+heuristic that can silently pick a crashing backend.
+
+### What the upgrade actually cost and gained (real display, not RDP)
+
+Release build, median of 3, animated GIF and static photo:
+
+| | ms CPU/frame | GIF fps | GIF CPU% | static CPU% |
+|---|---|---|---|---|
+| 0.27 + glow *(before)* | 4.22 | 30.0 | 12.7 | 7.1 |
+| 0.36 + glow | 13.69 | 59.5 | 81.0 | 8.4 |
+| 0.36 + wgpu DX12 *(now)* | **3.52** | 58.7 | 20.7 | 7.8 |
+
+- **egui 0.36 costs ~3.2x more CPU per frame than 0.27** (4.22 → 13.69 ms,
+  same glow backend, so it is the version and not the backend). The wgpu swap
+  more than reverses it: 3.52 ms, the best of the three.
+- **The smoothness worry was an artifact of RDP.** Over the remote session the
+  GIF ran at 12.7 fps on wgpu vs 21 on glow and it looked like a wgpu
+  regression. On the real 60 Hz display it is 58.7 vs 59.5 — no difference. If
+  you read any frame-rate number from this repo, check the session is not remote
+  first.
+- **One real regression remains, and it is pacing, not cost:** 0.27 played the
+  GIF at its own ~30 fps, 0.36 paints at vsync (~59 fps). Per frame is cheaper,
+  but drawing twice as many frames makes total animation CPU *worse* than the
+  old build (20.7% vs 12.7%). Honouring the frame delay would land it near
+  10.5%, i.e. below 0.27. Unfixed — see below.
+- Static photos are idle-bound and show no meaningful difference across all three.
+
+### 4. Animated GIF playback ignores the frame delay  ← new, real, unfixed
+
+The fix belongs in the repaint path around `request_repaint_after(next_in)` in
+`central()`. Something there (or vsync interaction in 0.36) is overriding the
+GIF's own 30 ms delay with a per-vsync repaint, so the app renders ~2x more
+frames than the animation needs. Worth doing: it is the only measured case where
+the current build spends more CPU than the one it replaced.
 
 **Still unverified by the suite** (see §5): nothing about rendering is covered by
 tests, and a 20 s `--perf` run is the only end-to-end evidence. It reported

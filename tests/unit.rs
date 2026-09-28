@@ -949,6 +949,40 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
 }
 
 #[test]
+fn test_wgpu_backend_set_defaults_to_dx12_and_never_drops_it() {
+    use image_viewer::{wgpu_backend_set, WgpuBackend};
+
+    // Default is DX12 only. Not "Vulkan when a driver is registered": on this
+    // machine `vulkaninfo` reports a healthy device and wgpu still crashes, and
+    // the registry key is absent while Vulkan works, so there is no signal to
+    // condition on. A crash is not a thing you can probe your way out of.
+    assert_eq!(wgpu_backend_set(WgpuBackend::Auto), (false, true));
+    assert_eq!(wgpu_backend_set(WgpuBackend::Dx12), (false, true));
+
+    // Vulkan is opt-in, and DX12 stays enabled alongside it as the fallback.
+    assert_eq!(wgpu_backend_set(WgpuBackend::Vulkan), (true, true));
+
+    // DX12 is never dropped in any mode: it is the only backend verified to
+    // work here, and without it there could be no adapter at all.
+    for req in [WgpuBackend::Auto, WgpuBackend::Vulkan, WgpuBackend::Dx12] {
+        assert!(
+            wgpu_backend_set(req).1,
+            "DX12 must always be enabled ({req:?})"
+        );
+    }
+
+    // Parsing: an unrecognised value must not silently select something, and
+    // callers treat `None` as the default.
+    assert_eq!(WgpuBackend::parse("auto"), Some(WgpuBackend::Auto));
+    assert_eq!(WgpuBackend::parse("  DX12 "), Some(WgpuBackend::Dx12));
+    assert_eq!(WgpuBackend::parse("vulkan"), Some(WgpuBackend::Vulkan));
+    assert_eq!(WgpuBackend::parse("vk"), Some(WgpuBackend::Vulkan));
+    assert_eq!(WgpuBackend::parse("d3d12"), Some(WgpuBackend::Dx12));
+    assert_eq!(WgpuBackend::parse("opengl"), None);
+    assert_eq!(WgpuBackend::parse("nonsense"), None);
+}
+
+#[test]
 fn test_path_arg_skips_flags() {
     use image_viewer::path_arg;
 

@@ -194,6 +194,62 @@ pub fn grid_cols(panel_w: f32) -> usize {
     ((panel_w / (GRID_CELL + 8.0)).floor() as usize).clamp(1, 24)
 }
 
+/// Which wgpu backends to enable at instance-creation time.
+///
+/// wgpu has no "try this, else that": `WgpuSetup::native_adapter_selector`
+/// still filters enumeration by `InstanceDescriptor::backends` first, so every
+/// enabled backend is *probed* before one is chosen, and the probe is a hard
+/// crash (`0xC0000005`) when wgpu's Vulkan backend cannot cope with a driver.
+///
+/// That crash is why this enum exists at all, and it is also why `Auto` cannot
+/// be smarter. Measured on this machine: `vulkaninfo` reports a healthy
+/// Intel UHD 620 device at API 1.2.187, and wgpu + Vulkan still access-violates
+/// every single time. So "is Vulkan installed" is the wrong question — Vulkan
+/// working does not imply wgpu-on-Vulkan working, and the only way to find out
+/// is to crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgpuBackend {
+    /// The safe default. Currently DX12 only; see [`wgpu_backend_set`].
+    Auto,
+    /// Also enable Vulkan, accepting the risk of the enumeration crash.
+    Vulkan,
+    /// DX12 only.
+    Dx12,
+}
+
+impl WgpuBackend {
+    /// Parse a backend choice, case-insensitively. `None` for anything
+    /// unrecognised, so a typo falls back to the default rather than picking
+    /// something surprising.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "" => Some(Self::Auto),
+            "vulkan" | "vk" => Some(Self::Vulkan),
+            "dx12" | "d3d12" => Some(Self::Dx12),
+            _ => None,
+        }
+    }
+}
+
+/// The backend set to actually enable, as `(vulkan, dx12)`.
+///
+/// DX12 is always kept: it is the native Windows backend and the only one
+/// verified to work here.
+///
+/// `Auto` deliberately resolves to DX12 only. It *would* be nicer to prefer
+/// Vulkan when a driver is present, and that was tried: `Khronos\Vulkan\Drivers`
+/// turned out to be a false signal in both directions — absent on this machine
+/// while Vulkan works fine (the loader finds the Intel ICD with no `Drivers`
+/// key at all), and present on machines whose driver wgpu still crashes on.
+/// There is no safe probe, so the safe default wins and Vulkan is opt-in.
+pub fn wgpu_backend_set(requested: WgpuBackend) -> (bool, bool) {
+    let vulkan = match requested {
+        WgpuBackend::Auto | WgpuBackend::Dx12 => false,
+        WgpuBackend::Vulkan => true,
+    };
+    (vulkan, true)
+}
+
 /// The file or folder to open, taken from the command line: the first argument
 /// that is not a flag.
 ///
