@@ -4,7 +4,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Commands
 
-- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `standard`
+- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `standard`, `embedded_thumbs`
 - `cargo test --test unit` — one test file; `cargo test <name>` — one test by name
 - `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
 - `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
@@ -53,9 +53,35 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   were tried and removed.
 - **`queued jobs dropped by rebuild` is the coalescing signal.** Large values mean
   the user outran the decoder — tune the preload window, don't add workers.
+- **Grid thumbnails use the camera's embedded EXIF thumbnail** when there is
+  one, which skips decoding the source entirely (measured 16-40x on the
+  `test-images` JPEGs: 631 ms -> 16 ms, 748 ms -> 25 ms). Gated on
+  `preview_max_dim <= EMBEDDED_THUMB_MAX_TARGET` (512), so it only ever applies
+  to `Kind::Thumb` grid cells — the main view always decodes for real. The
+  thumbnail is ~160 px, so a grid cell is slightly softer than a real 256 px
+  decode; that is the trade, and it is the one every photo browser makes.
+- **Never guess the embedded thumbnail's rotation.** The spec does not say
+  whether a camera stores the thumbnail already rotated, and makers differ.
+  `embedded_thumb_rotation` decides *per file from the aspect ratio* (a
+  quarter-turn orientation makes the two hypotheses produce mirrored ratios) and
+  returns `None` when it cannot — mirrored/180 orientations and near-square
+  sources — so those files simply decode normally. A guessed rotation shows
+  sideways photos in the grid, which is worse than being slow.
+- **`find_embedded_thumbnail` parses untrusted input.** Offsets and lengths come
+  straight out of the file. Every read is bounds-checked against the APP1
+  segment, the IFD entry count is capped, the slice must start `FFD8` and end
+  `FFD9`, and any failure returns `None` (decode normally) rather than panicking
+  on a worker. Keep it that way if you touch it. IFD1 is reached via IFD0's
+  *next-IFD pointer* (which sits after IFD0's entry table), not the header's
+  IFD0 offset — reading the wrong one looks like it works and silently finds
+  nothing.
 - **Texture churn is already low**: previews upload once per decode, tiles are
   created once and reused, animated GIF frames update in place via `set`. Count
   uploads (`GPU texture uploads`) before "optimising" this.
+- **Known waste:** `exif_orientation(path)` calls `nom_exif::read_exif(path)`,
+  which re-reads the whole file even though `load_image_preview_full` already
+  has it in memory. The new `Tiff` walker reads orientation's neighbours for
+  free, so this is a cheap follow-up if decode time ever matters again.
 - **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
   300 MP = **1.2 GB** for one full-res buffer, and every cached preview carries
   one for free (single-pass decode), so the whole preview cache can hold several
@@ -91,7 +117,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Architecture (things that are easy to break)
 
-- **Decode is single-pass** (`load_image_preview_full` in `src/lib.rs`): the file is decoded once; the preview texture is derived from the full decode and sized to the *display area* (`Job.target_dim`, the central panel in physical px). Large JPEGs (> 12 MP, `FAST_FULL_MAX_PIXELS`) are the exception — turbojpeg DCT preview, then a full decode after a 120 ms dwell.
+- **Decode is single-pass** (`load_image_preview_full` in `src/lib.rs`): the file is decoded once; the preview texture is derived from the full decode and sized to the *display area* (`Job.target_dim`, the central panel in physical px). Large JPEGs (> 12 MP, `FAST_FULL_MAX_PIXELS`) are the exception — turbojpeg DCT preview, then a full decode after a 120 ms dwell. Grid thumbnails (`Kind::Thumb`, target 256) are the other exception: they may come from the embedded EXIF thumbnail, in which case `full` is `None` and `below_target` is true, which is correct — nothing adopts a grid thumbnail, and the main view never asks for one.
 - **The full image rides on the preview cache.** `Preview` carries `full: Option<Arc<ImageData>>` (and `anim` for GIFs); `sync_shown(ctx)` adopts it for the current image. `needs_full()` checks data availability, *not* texture size vs. source size — the size heuristic was a bug that permanently skipped full-res for preloaded neighbors. Don't reintroduce it.
 - **Resize events**: growing the display drops `below_target` previews and re-decodes at the new target. Panel toggles and F11 set `suppress_resize_redecode` for exactly one transition so layout changes don't count as "window grew".
 - **Hold-to-browse** (`block_while_loading` setting): `step()` is throttled while `waiting_load`; on preview arrival a `pending_advance` is queued and consumed at the *start of the next frame* — the arrived image is guaranteed to have been painted. Consuming it in the same frame skips the render (that was the original bug).
