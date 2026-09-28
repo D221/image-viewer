@@ -140,38 +140,48 @@ working does not imply wgpu-on-Vulkan working, and the only way to learn that is
 to crash, so the probe was deleted rather than kept as a "usually right"
 heuristic that can silently pick a crashing backend.
 
-### What the upgrade actually cost and gained (real display, not RDP)
+### What the upgrade actually cost and gained
 
-Release build, median of 3, animated GIF and static photo:
+Verified on the **console** session (not RDP), release build, 60 s with a
+visible window:
 
-| | ms CPU/frame | GIF fps | GIF CPU% | static CPU% |
-|---|---|---|---|---|
-| 0.27 + glow *(before)* | 4.22 | 30.0 | 12.7 | 7.1 |
-| 0.36 + glow | 13.69 | 59.5 | 81.0 | 8.4 |
-| 0.36 + wgpu DX12 *(now)* | **3.52** | 58.7 | 20.7 | 7.8 |
+| | idle CPU%, static photo | animation fps (30 fps GIF) |
+|---|---|---|
+| 0.27 + glow *(before)* | 6.5 | 30 |
+| 0.36 + glow | 5.4 | 30 |
+| 0.36 + wgpu DX12 *(now)* | **4.6** | 30 |
 
-- **egui 0.36 costs ~3.2x more CPU per frame than 0.27** (4.22 → 13.69 ms,
-  same glow backend, so it is the version and not the backend). The wgpu swap
-  more than reverses it: 3.52 ms, the best of the three.
-- **The smoothness worry was an artifact of RDP.** Over the remote session the
-  GIF ran at 12.7 fps on wgpu vs 21 on glow and it looked like a wgpu
-  regression. On the real 60 Hz display it is 58.7 vs 59.5 — no difference. If
-  you read any frame-rate number from this repo, check the session is not remote
-  first.
-- **One real regression remains, and it is pacing, not cost:** 0.27 played the
-  GIF at its own ~30 fps, 0.36 paints at vsync (~59 fps). Per frame is cheaper,
-  but drawing twice as many frames makes total animation CPU *worse* than the
-  old build (20.7% vs 12.7%). Honouring the frame delay would land it near
-  10.5%, i.e. below 0.27. Unfixed — see below.
-- Static photos are idle-bound and show no meaningful difference across all three.
+Net win: lower idle CPU than the build it replaced, and animated GIFs play at
+exactly the right rate on every configuration. The one behavioural difference is
+that 0.36 draws at 60 fps (vsync-locked) where 0.27 drew at 30 — two draw calls
+per animation frame. That is minor waste, not a defect.
 
-### 4. Animated GIF playback ignores the frame delay  ← new, real, unfixed
+**An earlier version of this section claimed egui 0.36 cost ~3.2x more CPU per
+frame and that DX12 halved animation frame rate. Both were wrong, both measured
+over an RDP session.** Retracted rather than left to be re-derived.
 
-The fix belongs in the repaint path around `request_repaint_after(next_in)` in
-`central()`. Something there (or vsync interaction in 0.36) is overriding the
-GIF's own 30 ms delay with a per-vsync repaint, so the app renders ~2x more
-frames than the animation needs. Worth doing: it is the only measured case where
-the current build spends more CPU than the one it replaced.
+---
+
+## 4. ~~Animated GIFs are choppy on DX12~~  ← was an RDP artifact, no defect
+
+Retained only because the reasoning error is the useful part.
+
+`test-images/MouseUtils.gif` is **147 frames, delays cycling 30/30/40 ms, total
+4900 ms — a 30 fps animation**. (An earlier claim that it was 4 frames came from
+a hand-rolled GIF parser that desynchronised on the sub-block skip; the `image`
+crate's decoder is the authority, and the frame count matters when computing
+advancement — ignoring the loop wrap makes the animation look like it is running
+at half speed when it is not.)
+
+The reported defect was that DX12 drew ~12 fps against OpenGL's ~21, and that
+`SurfaceConfig::LOW_LATENCY` made it worse still (9.3 fps). On the console
+session both vanish: every renderer draws 60 fps and advances the animation at
+30 fps, including `LOW_LATENCY`. Nothing was wrong with the renderer, the
+scheduling, or the frame-delay logic, and no code change was warranted.
+
+The lesson is in AGENTS.md: check `quser` for `console` and the video adapter
+list before believing a frame rate. This cost two full investigations in one
+session, and one of them was committed as fact before it was caught.
 
 **Still unverified by the suite** (see §5): nothing about rendering is covered by
 tests, and a 20 s `--perf` run is the only end-to-end evidence. It reported

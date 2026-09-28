@@ -122,13 +122,33 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   "regression" was entirely the remote display adapter. Always check whether the
   session is remote (`Win32_VideoController` showing a *Microsoft Remote Display
   Adapter*) before believing any frame-rate number.
-- **0.36 plays GIFs at vsync rate, 0.27 paced them to the GIF's own delay.**
-  The GIF is 4 frames x 30 ms (33 fps target); 0.27 rendered ~30 fps, 0.36
-  renders ~59 fps. Per-frame cost went *down* (3.52 ms wgpu vs 4.22 ms for 0.27)
-  but total CPU on animation went *up* (20.7% vs 12.7%) purely because it draws
-  twice as many frames. Honouring the frame delay would put it near 10.5%, i.e.
-  below the old build. Not done yet — the fix belongs in the animation repaint
-  path around `request_repaint_after(next_in)` in `central()`.
+- **Verify the session is NOT remote before trusting any frame rate.** This bit
+  twice in one session: a whole "wgpu animation runs at 12 fps vs 21 fps on
+  OpenGL" investigation, and a "LOW_LATENCY made it worse, 12 → 9.3 fps"
+  experiment, were both artifacts of measuring over RDP. On the console session
+  every renderer plays the animation at exactly 30 fps. Check with
+  `quser` (look for `console`, not `rdp-tcp#N`) and `Get-CimInstance
+  Win32_VideoController` (a *Microsoft Remote Display Adapter* means remote).
+- **Frame-rate measurement traps, all of which produced wrong numbers here.**
+  (1) RDP, above — the big one. (2) `-WindowStyle Hidden`: a hidden window gets
+  no ordinary paint/vsync delivery; every fps measured that way was garbage
+  (swung 12/13/19/59 across runs). (3) Deriving fps from
+  `frames_built / process_lifetime` folds in startup and idle. (4) Reading only
+  percentiles from the 256-entry ring, whose contents depend on sample age. Use
+  a **visible** window, a settle period longer than any decode, and instrument
+  the thing you are actually measuring.
+- **Verified on the console session, 60 s visible, static photo / 30 fps GIF:**
+
+  | | idle CPU% (static) | animation fps |
+  |---|---|---|
+  | 0.27 + glow *(before)* | 6.5 | 30 |
+  | 0.36 + glow | 5.4 | 30 |
+  | 0.36 + wgpu DX12 *(now)* | **4.6** | 30 |
+
+  So the upgrade is a net win on CPU and animation is correct everywhere. The
+  only difference worth noting: 0.36 draws at 60 fps (vsync-locked) where 0.27
+  drew at 30, i.e. two draw calls per animation frame. That is a small waste,
+  not a defect, and being vsync-locked is arguably the better behaviour.
 - **`--perf <folder>` used to open the wrong folder, silently.** `MyApp::new`
   took the path as `args_os().nth(1)` while `main` scanned the whole list for
   flags, so `--perf` was taken as the path, matched nothing, and the app fell
