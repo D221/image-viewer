@@ -97,6 +97,45 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Gotchas
 
+- **egui/eframe is 0.36; the renderer is `wgpu` on DX12, pinned in code.** The
+  renderer changed *as a side effect* of the 0.27→0.36 upgrade: 0.27's default
+  features enabled `glow`, 0.36's enable `wgpu`. `dx12_only_wgpu()` in
+  `main.rs` narrows wgpu to `Backends::DX12`, and that is load-bearing, not a
+  preference: wgpu enumerates *every* backend during adapter discovery, and on a
+  machine with a Vulkan loader and **zero registered ICDs**
+  (`HKLM\SOFTWARE\Khronos\Vulkan\Drivers` empty — an RDP/VM session, or a
+  Microsoft Basic Display Adapter) that enumeration is a hard `0xC0000005`
+  access violation before the window opens, with nothing on stderr. Verified:
+  `dx12` and `opengl` start, `vulkan` and the unpinned default do not. **Do not
+  restore `Backends::all()`.** Nothing in the suite covers any of this.
+- **Use `Ui::new_child(UiBuilder)`, never `Ui::scope_builder(..)`, to replace
+  0.27's `Ui::child_ui(rect, layout)`.** They look interchangeable and are not.
+  `scope_builder` runs the closure and *then* calls
+  `advance_cursor_after_rect` on the parent, so calling it on a `Ui` that has
+  already allocated its own rect double-advances the cursor. In `grid_cell` that
+  silently ate 4 pt of `item_spacing` per cell — cells tightened from 8 pt to
+  4 pt, no error, no warning. `new_child` returns an owned `Ui` and leaves the
+  parent's cursor alone, which is exactly what `child_ui` did.
+- **Headless egui tests must clear `TexturesDelta` (0.36).** epaint now
+  debug-asserts when one is dropped unapplied. A `Context::run_ui` pass emits
+  the font-atlas delta every frame and nothing applies it (eframe's renderer
+  does in the real app), so tests go through the `run_pass` helper in
+  `tests/unit.rs`, which calls `out.textures_delta.clear()`. Note
+  `Context::run(input, |ctx| ..)` is now `Context::run_ui(input, |ui| ..)` and
+  the closure gets a `Ui`; `CentralPanel`/`Panel` are shown on that `Ui`.
+- **`RectShape` moved its texture fields into a `Brush`.** 0.36 has
+  `brush: Option<Arc<Brush>>` holding `fill_texture_id` + `uv`; a plain
+  `RectShape::filled` has `brush: None`. `test_grid_thumbnail_is_centred_and_textured`
+  inspects it to prove a cell isn't a solid colour block, and it has to look
+  through the `Option` now.
+- **Don't hardcode egui's default `item_spacing` in a test.** The grid test used
+  to assert an 8 pt gap between cells. `grid_row` now reports the spacing from
+  the layout that actually placed them. Egui's defaults move between releases and
+  a hardcoded number fails on upgrade for no real reason.
+- **`ComboBox::from_id_source` → `from_id_salt`, and `ComboBox::new(id, "")` is
+  NOT the replacement.** 0.36 stores `label: Option<WidgetText>` and calls
+  `ui.label(label)` when it is `Some`, so `new(id, "")` renders an empty label
+  widget and shifts the settings panel. Use `from_id_salt`.
 - **Every suite is fixture-free now; do not reintroduce hardcoded
   `test-images/` paths into tests.** `test-images/` is gitignored, so a test
   that reads from it passes on your machine and fails in a fresh clone —
@@ -192,9 +231,9 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   filter cannot be forgotten. The filter is *not* persisted — a filter that
   silently survived a restart would hide files with no obvious way back.
 - **Global single-key shortcuts must stand down while typing.** The filter box
-  is the first text input this app has, so `update()` reads
-  `ctx.wants_keyboard_input()` and gates every single-letter and navigation key
-  on it. Without that, typing "g" into the filter toggles the grid and "r"
+  is the first text input this app has, so `App::ui` reads
+  `ctx.egui_wants_keyboard_input()` and gates every single-letter and navigation
+  key on it. Without that, typing "g" into the filter toggles the grid and "r"
   reloads the folder. Esc while the box is focused clears the filter (or
   defocuses) and must never fall through to "close the grid / quit".
 - **The grid's scrollbar needed `auto_shrink([false, true])`.** With
@@ -220,4 +259,4 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 - **Config location is platform-dependent:** `%APPDATA%\image-viewer\config.json` on Windows — see `Config::default_path()` in `src/lib.rs`. New `Config` fields need `#[serde(default)]` or old configs fail to load.
 - **`test-images/JPEGView_L` is a checked-out reference viewer** (JPEGView fork, C++) used for feature ideas, not part of the app.
-- **`PLAN.md` is a stale early-project feature list, not documentation of current behavior** — most of it is already implemented. `TODO.md` holds the actual deferred work (P3 → sRGB conversion, the egui 0.27 → 0.36 upgrade, the HEIC `colr` blind spot) with the investigation already done. Read `TODO.md` before starting anything colour- or GUI-related; it records verified numbers that are expensive to re-derive.
+- **`PLAN.md` is a stale early-project feature list, not documentation of current behavior** — most of it is already implemented. `TODO.md` holds the actual deferred work (P3 → sRGB conversion, the HEIC `colr` blind spot) with the investigation already done. Read `TODO.md` before starting anything colour- or GUI-related; it records verified numbers that are expensive to re-derive.

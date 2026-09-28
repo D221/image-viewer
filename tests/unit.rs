@@ -788,18 +788,38 @@ fn test_fit_to_window() {
 
 use image_viewer::{grid_cols, GRID_CELL, GRID_LABEL_H, GRID_ROW_H};
 
+/// Drive one headless egui pass and return its output.
+///
+/// egui 0.36 debug-asserts when a `TexturesDelta` is dropped unapplied
+/// (`TexturesDelta::drop` in epaint). A headless pass emits the font-atlas
+/// delta every frame and nothing applies it — in the real app eframe's
+/// renderer does — so every test pass has to clear it. Tests that want the
+/// returned `FullOutput` should go through this rather than `Context::run_ui`.
+fn run_pass(
+    ctx: &egui::Context,
+    input: egui::RawInput,
+    f: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let mut out = ctx.run_ui(input, f);
+    out.textures_delta.clear();
+    out
+}
+
 /// Draw one row of `cols` cells exactly the way `gallery_grid`/`grid_cell` do.
-/// `out` collects the cell rects, `hits` the clicked cell indices.
+/// `out` collects the cell rects, `hits` the clicked cell indices, `gap` the
+/// horizontal `item_spacing` of the layout that actually placed the cells.
 fn grid_row(
     ui: &mut egui::Ui,
     cols: usize,
     out: &mut Vec<egui::Rect>,
     hits: &mut Vec<usize>,
+    gap: &mut f32,
 ) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, GRID_ROW_H, 1, |ui, _| {
             ui.horizontal(|ui| {
+                *gap = ui.spacing().item_spacing.x;
                 for i in 0..cols {
                     // Explicit allocation: this is the whole point of the test.
                     let (rect, resp) = ui.allocate_exact_size(
@@ -812,16 +832,28 @@ fn grid_row(
                             0.0,
                             egui::Color32::from_gray(40),
                             egui::Stroke::NONE,
+                            egui::StrokeKind::Inside,
                         );
                     }
                     let inner = rect.shrink(4.0);
-                    let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Center));
+                    // `new_child`, not `scope_builder`: the cell above already
+                    // advanced this row's cursor, and `scope_builder` would
+                    // advance it a second time, stealing `item_spacing` from
+                    // every following cell. 0.27's `child_ui` did not advance.
+                    let mut child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(inner)
+                            .layout(egui::Layout::top_down(egui::Align::Center)),
+                    );
                     // Thumbnail area. The image itself is painted centred by
                     // hand (fit_scale_no_upscale + from_center_size), which is
-                    // covered by test_fit_scale_no_upscale; a widget here
-                    // cannot demonstrate it because widgets place at the cursor.
-                    child.allocate_exact_size(egui::vec2(inner.width(), GRID_CELL), egui::Sense::hover());
-                    child.add(egui::Label::new("a-fairly-long-file-name.jpg").truncate(true));
+                    // covered by test_fit_scale_no_upscale; a widget here cannot
+                    // demonstrate it because widgets place at the cursor.
+                    child.allocate_exact_size(
+                        egui::vec2(inner.width(), GRID_CELL),
+                        egui::Sense::hover(),
+                    );
+                    child.add(egui::Label::new("a-fairly-long-file-name.jpg").truncate());
                     out.push(resp.rect);
                     if resp.clicked() {
                         hits.push(i);
@@ -837,12 +869,14 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
     // explicitly with `Sense::click()`. Wrapping them in `egui::Frame::show`
     // is wrong in two ways that both looked fine in a screenshot-less build:
     //
-    //  1. `Frame::begin` builds its child Ui from
+    //  1. `Frame::show` builds its child Ui from
     //     `ui.available_rect_before_wrap()`, so the frame is as wide as the
     //     rest of the row. The first cell swallows the whole row and every
     //     later cell is laid out past the panel edge — the "offscreen grid".
-    //  2. `Frame::end` calls `allocate_space(.., Sense::hover())`, so
+    //  2. `Frame::show` allocates its space with `Sense::hover()`, so
     //     `Response::clicked()` is never true and cells cannot be opened.
+    //     (In 0.27 this was `Frame::begin` / `Frame::end`; 0.36 has only
+    //     `Frame::show`.)
     use egui::{Event, FontDefinitions, PointerButton, RawInput};
 
     let ctx = egui::Context::default();
@@ -853,13 +887,18 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
     let mut rects = Vec::new();
     let mut panel = egui::Rect::ZERO;
     let mut cols = 0usize;
-    let _ = ctx.run(input.clone(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    // `gap` is read by `grid_row` from the layout that actually placed the cells,
+    // rather than hardcoding egui's default `item_spacing`. The assertion is
+    // "the cells tile with the spacing the row used", and egui's default is a
+    // moving target across upgrades: 0.27 put 8pt here, 0.36 puts 4pt.
+    let mut gap = 0.0f32;
+    let _ = run_pass(&ctx, input.clone(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             panel = ui.available_rect_before_wrap();
             // Same column math gallery_grid uses.
             cols = grid_cols(panel.width());
             let mut hits = Vec::new();
-            grid_row(ui, cols, &mut rects, &mut hits);
+            grid_row(ui, cols, &mut rects, &mut hits, &mut gap);
         });
     });
 
@@ -880,8 +919,8 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
     }
     for pair in rects.windows(2) {
         assert!(
-            (pair[1].min.x - pair[0].max.x - 8.0).abs() < 1.0,
-            "cells must sit side by side with 8pt spacing, got {:?} then {:?}",
+            (pair[1].min.x - pair[0].max.x - gap).abs() < 1.0,
+            "cells must sit side by side with {gap}pt spacing, got {:?} then {:?}",
             pair[0],
             pair[1]
         );
@@ -898,10 +937,11 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
             pressed: pass == 0,
             modifiers: egui::Modifiers::default(),
         });
-        let _ = ctx.run(input.clone(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_pass(&ctx, input.clone(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let mut out = Vec::new();
-                grid_row(ui, cols, &mut out, &mut clicks);
+                let mut gap = 0.0f32;
+                grid_row(ui, cols, &mut out, &mut clicks, &mut gap);
             });
         });
     }
@@ -966,7 +1006,7 @@ fn test_grid_thumbnail_is_centred_and_textured() {
     ctx.set_fonts(egui::FontDefinitions::empty());
 
     let texels = [200_usize, 100_usize];
-    let img = ColorImage::new([texels[0], texels[1]], Color32::from_rgb(200, 30, 30));
+    let img = ColorImage::filled([texels[0], texels[1]], Color32::from_rgb(200, 30, 30));
     let tex = ctx.load_texture("thumb-regression", img, TextureOptions::LINEAR);
 
     // A cell's thumbnail area, as gallery_grid lays it out.
@@ -979,22 +1019,28 @@ fn test_grid_thumbnail_is_centred_and_textured() {
     let draw_size = (natural * scale).min(area.size());
     let draw = Rect::from_center_size(area.center(), draw_size);
 
-    let out = ctx.run(RawInput::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    let out = run_pass(&ctx, RawInput::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             // Exactly what grid_cell does.
-            let mut img_ui = ui.child_ui(draw, egui::Layout::top_down(egui::Align::Min));
+            let mut img_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(draw)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
             img_ui.add(egui::Image::new(&tex).max_size(draw_size));
         });
     });
 
-    // egui paints an image as a RectShape carrying a texture id.
+    // egui paints an image as a RectShape whose `brush` carries a texture id.
+    // (0.36 moved `fill_texture_id`/`uv` off `RectShape` and behind an
+    // `Option<Arc<Brush>>`; a plain `RectShape::filled` has `brush: None`.)
     let textured: Vec<_> = out
         .shapes
         .iter()
         .filter_map(|c| match &c.shape {
-            egui::Shape::Rect(r) if r.fill_texture_id != egui::TextureId::default() => {
-                Some((r.rect, r.uv))
-            }
+            egui::Shape::Rect(r) => r.brush.as_ref().and_then(|b| {
+                (b.fill_texture_id != egui::TextureId::default()).then_some((r.rect, b.uv))
+            }),
             _ => None,
         })
         .collect();
@@ -1129,8 +1175,8 @@ fn test_gallery_scroll_offset_lands_the_selected_row_in_view() {
     fn laid_out_rows(ctx: &Context, offset: Option<f32>) -> (Vec<usize>, f32) {
         let mut rows = Vec::new();
         let mut pitch = 0.0f32;
-        let _ = ctx.run(RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_pass(ctx, RawInput::default(), |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 pitch = GRID_ROW_H + ui.spacing().item_spacing.y;
                 // Mirrors the real grid: auto_shrink([false, true]) is what
                 // gives the scrollbar somewhere to live.

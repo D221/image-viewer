@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.27"
-egui = "0.27"
+eframe = "0.36"
+egui = "0.36"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "rayon"] }
 # PNG stores its iCCP profile zlib-compressed. Already in the tree via `png`,
 # pure Rust (miniz_oxide), so this adds no native code.

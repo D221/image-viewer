@@ -112,13 +112,53 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+        wgpu_options: dx12_only_wgpu(),
         ..Default::default()
     };
+    // eframe 0.36 (unlike 0.27) defaults the renderer to `wgpu`, so the
+    // rendering backend changed as a side effect of the version bump. See
+    // `dx12_only_wgpu` for why the backend set is narrowed.
     eframe::run_native(
         "Image Viewer",
         options,
-        Box::new(|cc| Box::new(MyApp::new(cc))),
+        Box::new(|cc| Ok(Box::new(MyApp::new(cc)) as Box<dyn eframe::App>)),
     )
+}
+
+/// wgpu configuration that enumerates **DX12 only**.
+///
+/// eframe 0.27 defaulted the renderer to `glow` (OpenGL); 0.36 defaults to
+/// `wgpu`, so upgrading silently switched the rendering backend. That is the
+/// right direction, but wgpu's default backend set is "all of them", and it
+/// *enumerates* Vulkan during adapter discovery even when it ends up choosing
+/// DX12. On a machine with a Vulkan loader but no registered ICDs (checked:
+/// `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` empty — common on remote-desktop and
+/// VM sessions, and on machines with only a Microsoft Basic Display Adapter)
+/// that enumeration is a hard `0xC0000005` access violation before the window
+/// ever opens, with nothing on stderr.
+///
+/// Verified on this machine: `WGPU_BACKEND=dx12` starts, `WGPU_BACKEND=vulkan`
+/// access-violates, and the unpinned default access-violates too — so the crash
+/// is the *enumeration*, not the adapter choice.
+///
+/// Pinning DX12 is the native Windows backend anyway, and it removes the
+/// "laptop with a stale Vulkan driver picks the broken one" class of failure.
+/// If you ever need Vulkan, gate this on a config flag rather than deleting
+/// it — `Backends::all()` brings the crash straight back.
+fn dx12_only_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
+    use eframe::egui_wgpu::{
+        wgpu::{Backends, InstanceDescriptor},
+        WgpuSetup, WgpuSetupCreateNew,
+    };
+    let mut instance = InstanceDescriptor::new_without_display_handle();
+    instance.backends = Backends::DX12;
+    eframe::egui_wgpu::WgpuConfiguration {
+        wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
+            instance_descriptor: instance,
+            ..WgpuSetupCreateNew::without_display_handle()
+        }),
+        ..Default::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2552,11 +2592,24 @@ fn grid_cell(
         egui::Sense::click(),
     );
     if ui.is_rect_visible(rect) {
-        ui.painter().rect(rect, 0.0, fill, stroke);
+        ui.painter().rect(rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
     }
 
     let inner = rect.shrink(4.0);
-    let mut child = ui.child_ui(inner, egui::Layout::top_down(egui::Align::Center));
+    // `Ui::child_ui(rect, layout)` (0.27) is gone. The migration target is
+    // `Ui::new_child(UiBuilder)`, NOT `Ui::scope_builder(..)`: both create a Ui
+    // bounded to `inner`, but `scope_builder` additionally calls
+    // `advance_cursor_after_rect` on *this* `ui` afterwards. That is invisible
+    // for a scope that owns the parent's space, and wrong here — the cell was
+    // already allocated above, so the extra advance doubled up and ate 4pt of
+    // `item_spacing` per cell (cells visibly tightened from 8pt to 4pt).
+    // `new_child` returns an owned `Ui` and leaves the parent cursor alone,
+    // which is exactly what 0.27's `child_ui` did.
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+    );
 
     // Thumbnail area: full width, cell height. Only the *rect* is computed
     // here; egui still does the painting. Widgets place at the cursor, and a
@@ -2590,8 +2643,11 @@ fn grid_cell(
                 // what centres it. Do NOT paint the texture by hand here
                 // (`painter().image`) — that shipped once and turned every
                 // thumbnail into a solid block.
-                let mut img_ui =
-                    child.child_ui(draw, egui::Layout::top_down(egui::Align::Min));
+                let mut img_ui = child.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(draw)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
                 img_ui.add(egui::Image::new(&t.tex).max_size(draw_size));
             }
         }
@@ -2612,7 +2668,7 @@ fn grid_cell(
                 .small()
                 .color(egui::Color32::from_gray(200)),
         )
-        .truncate(true),
+        .truncate(),
     );
 
     resp
@@ -2635,6 +2691,7 @@ fn make_checker_texture(ctx: &Context) -> TextureHandle {
         "checker",
         ColorImage {
             size: [N, N],
+            source_size: egui::vec2(N as f32, N as f32),
             pixels,
         },
         TextureOptions::NEAREST_REPEAT,
@@ -2697,6 +2754,7 @@ fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle
     }
     let img = ColorImage {
         size: [w, h],
+        source_size: egui::vec2(w as f32, h as f32),
         pixels,
     };
     ctx.load_texture(format!("tile {tx},{ty}"), img, TextureOptions::LINEAR)
@@ -2709,7 +2767,7 @@ fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle
 impl eframe::App for MyApp {
     /// Persist the last-viewed image per folder on app close, then clean up
     /// any extracted archive temp dir.
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         // Key by the archive path when one is open (the temp folder name is
         // meaningless to the user).
         let key: String = match &self.zip_archive {
@@ -2737,7 +2795,13 @@ impl eframe::App for MyApp {
         }
     }
 
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // egui 0.31+ replaced `App::update(&Context)` with `App::ui(&mut Ui)`.
+        // The panels below are now shown on this `ui` rather than on a
+        // `Context`, which is the whole point of the change: Ui-first means
+        // nested containers, not a flat sequence of Context-rooted panels.
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
         self.frame_prelude(ctx);
 
         // Read every key up front, before anything acts on them: Esc needs to
@@ -2746,7 +2810,7 @@ impl eframe::App for MyApp {
         // `typing` is true when a text field owns the keyboard. All the global
         // single-key handling below has to stand down then, or typing "g" into
         // the filter would toggle the grid and "r" would reload the folder.
-        let typing = ctx.wants_keyboard_input();
+        let typing = ctx.egui_wants_keyboard_input();
         let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
         let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         // Keyboard navigation + file triage
@@ -2898,12 +2962,12 @@ impl eframe::App for MyApp {
 
         // Drag-and-drop: files or folders
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        if let Some(path) = dropped.first().and_then(|f| f.path.clone()) {
+        if let Some(path) = dropped.first().map(|f| f.path().to_path_buf()) {
             self.load_dropped(ctx, path);
         }
 
         if self.show_panels {
-            egui::TopBottomPanel::top("status").show(ctx, |ui| {
+            egui::Panel::top("status").show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(self.status_text());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2936,7 +3000,7 @@ impl eframe::App for MyApp {
         }
 
         if self.show_panels {
-            egui::TopBottomPanel::bottom("menu").show(ctx, |ui| {
+            egui::Panel::bottom("menu").show(ui, |ui| {
                 // Wrapped: a single row of buttons overflows a narrow
                 // window and the tail (incl. the hints) gets clipped.
                 ui.horizontal_wrapped(|ui| {
@@ -2995,7 +3059,7 @@ impl eframe::App for MyApp {
         }
 
         if self.show_panels {
-            egui::SidePanel::left("exif").show(ctx, |ui| {
+            egui::Panel::left("exif").show(ui, |ui| {
                 ui.heading("EXIF");
                 if self.exif_loading {
                     ui.label("Loading EXIF…");
@@ -3028,7 +3092,7 @@ impl eframe::App for MyApp {
 
             let mut resort = false;
             let mut refilter = false;
-            egui::SidePanel::right("settings").show(ctx, |ui| {
+            egui::Panel::right("settings").show(ui, |ui| {
                 ui.heading("Settings");
                 if ui
                     .checkbox(
@@ -3057,7 +3121,7 @@ impl eframe::App for MyApp {
                                 let mut new_filter = self.config.downscale_filter;
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
-                    egui::ComboBox::from_id_source("ds_filter")
+                    egui::ComboBox::from_id_salt("ds_filter")
                         .selected_text(format!("{:?}", self.config.downscale_filter))
                         .show_ui(ui, |ui| {
                             for f in [
@@ -3105,7 +3169,7 @@ impl eframe::App for MyApp {
                 let mut new_sort = self.config.sort;
                 ui.horizontal(|ui| {
                     ui.label("Sort:");
-                    egui::ComboBox::from_id_source("sort_mode")
+                    egui::ComboBox::from_id_salt("sort_mode")
                         .selected_text(format!("{new_sort:?}"))
                         .show_ui(ui, |ui| {
                             for m in [
@@ -3160,8 +3224,8 @@ impl eframe::App for MyApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(Color32::BLACK))
-            .show(ctx, |ui| {
+            .frame(egui::Frame::new().fill(Color32::BLACK))
+            .show(ui, |ui| {
                 self.central(ui);
             });
     }

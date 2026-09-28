@@ -81,29 +81,60 @@ is how a wide-gamut HEIC looks flat and nobody notices, because everything
 
 ---
 
-## 3. egui 0.27 → 0.36.2  ← overdue, not a colour prerequisite
+## 3. ~~egui 0.27 → 0.36.2~~ ← **done**, see the commit
 
-The GUI layer is the only stale dependency: **egui/eframe 0.27.2 (July 2024)**
-while `image` is 0.25.10, `nom-exif` 3.8, `rustc` 1.98. Latest stable is
-**0.36.2**. Nine minor releases and ~2 years behind. It reads like a 2024
-`eframe-template` that was never refreshed.
+**Landed.** `egui`/`eframe` are 0.36.2, as its own commit with nothing else in
+it. What the notes below predicted is what actually cost the time, and one
+prediction was wrong in an interesting way:
 
-**Verified from 0.36.2 source — it does *not* unlock HDR or wide-gamut:**
-`App::clear_color` is still documented as gamma-space sRGB, and `TextureOptions`
-still has no `srgb` field. So the colour work does not need to wait for this.
-
-Migration cost, measured:
-- `App::update` is **replaced** by `App::ui(&mut self, ui: &mut Ui, frame: &mut Frame)`.
-  Our `update()` loses its `&Context` parameter and must use `ui.ctx().clone()` —
-  ~200 lines, structural rather than mechanical. There is also a new `logic()` hook.
+- `App::update` → `App::ui(&mut self, ui: &mut Ui, frame: &mut Frame)`. The
+  `&Context` parameter is gone; our `update()` opens with `ui.ctx().clone()`.
+  Because panels are now shown on a parent `Ui`, the whole panel sequence nests
+  under the `Ui` instead of being rooted at the `Context`.
+- **`SidePanel` and `TopBottomPanel` were merged into one `egui::Panel`**
+  (`Panel::left/right/top/bottom`). The "cannot find `TopBottomPanel` in `egui`"
+  error is real, not a cascade. Defaults are unchanged: `top`/`bottom` are still
+  not resizable, `left`/`right` still default to 200 px.
+- `Ui::child_ui(rect, layout)` is gone. The migration target is
+  **`Ui::new_child(UiBuilder)`**, *not* `Ui::scope_builder(..)` — see the trap
+  in AGENTS.md, it is silent and it changes the layout.
+- `Frame::none()` → `Frame::new()` (documented as identical to `Frame::NONE`).
+- `ComboBox::from_id_source` → **`from_id_salt`**, and note `ComboBox::new(id, "")`
+  is *not* the same thing: it stores `label: Some("")` and renders an empty label
+  widget, which shifts the settings panel.
+- `Context::wants_keyboard_input` → `egui_wants_keyboard_input`. `Painter::rect`
+  gained a `StrokeKind`. `ColorImage` gained `source_size`. `Label::truncate(true)`
+  → `truncate()`. `DroppedFile::path` is a method. `on_exit` lost its glow param.
 - `wgpu 0.19 → 30`, `winit 0.29 → 0.30`, `glow 0.13 → 0.17`.
-- At-risk API sites in our code are few: `TextureOptions::LINEAR` ×5,
-  `show_rows` ×4, `Sense` ×3, `Frame::none` ×1, plus the `on_exit` signature.
-- The real cost is the one the suite cannot check: the **rendering backend
-  changes underneath** (drivers, texture upload paths, filtering).
 
-Do it as its own commit with nothing else in it. Bundling a backend swap with a
-decode-pipeline change is how you get an unexplained regression.
+**The rendering backend changed underneath, as predicted — and that turned out to
+be the only thing that actually broke.** eframe 0.27's `default` features enabled
+`glow`; 0.36's enable `wgpu`. So the upgrade silently swapped OpenGL for wgpu,
+and on this machine the unpinned wgpu default **access-violates
+(`0xC0000005`) before the window opens**. Root cause: wgpu enumerates *all*
+backends during adapter discovery, and this machine has a Vulkan loader with
+**zero registered ICDs** (`HKLM\SOFTWARE\Khronos\Vulkan\Drivers` is empty — an
+Intel UHD 620 plus a Microsoft Remote Display Adapter, i.e. an RDP/VM session).
+Enumerating that empty Vulkan stack crashes wgpu-native rather than returning
+"no devices". Verified by isolating each backend:
+
+| config | result |
+|---|---|
+| 0.27 (glow) | runs |
+| 0.36, default (all backends) | `0xC0000005` |
+| 0.36, `WGPU_BACKEND=dx12` | runs |
+| 0.36, `WGPU_BACKEND=vulkan` | `0xC0000005` |
+| 0.36, `WGPU_BACKEND=opengl` | runs |
+| 0.36, DX12 pinned in code | runs |
+
+Fix is `dx12_only_wgpu()` in `main.rs`: DX12 is the native Windows backend
+anyway, and pinning it also removes the "stale Vulkan driver gets picked" class
+of failure. **Do not restore `Backends::all()`** — the crash comes back.
+
+**Still unverified by the suite** (see §5): nothing about rendering is covered by
+tests, and a 20 s `--perf` run is the only end-to-end evidence. It reported
+`display-gap frames 0`, `stalls 0`, `worker decode panics 0`, 7 decodes / 7 GPU
+texture uploads, graceful exit 0 — but that is one folder on one machine.
 
 ---
 
@@ -133,8 +164,9 @@ time, and moving logic into `lib.rs` is the fix.
   app and a real editor. Check: change a file on disk, confirm it reloads within
   a few seconds, *including while it is mid-write* — that case is the one that
   would poison the file if `invalidate_path` stopped clearing `failed`.
-- **Everything in `eframe::App::update`** (keys, panels, Esc precedence).
-- **Rendering behaviour** after the egui upgrade.
+- **Everything in `eframe::App::ui`** (keys, panels, Esc precedence).
+- **Rendering behaviour** after the egui 0.36 upgrade. The backend swap is the
+  one part of that commit no test touches; §3 has the one run that was done.
 - **Colour correctness** — see decision 2 above. There is no ground truth.
 
 ---
