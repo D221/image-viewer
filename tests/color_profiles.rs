@@ -202,9 +202,62 @@ fn test_malformed_profiles_never_panic_and_never_claim_srgb() {
 }
 
 #[test]
+fn test_a_profile_is_reported_even_with_no_exif_block() {
+    // The regression. `extract_exif` used to open with `read_exif(path).ok()?`,
+    // so a file with an ICC profile and **no** EXIF — which is what a
+    // screenshot or a forwarded/downloaded phone photo is — returned `None` and
+    // the panel rendered empty, hiding the only interesting fact about the file.
+    // Real file hit: `color-p3-named.jpg` from a phone backup.
+    let mut bytes = jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0));
+    assert!(
+        !bytes.windows(6).any(|w| w == b"Exif\0\0"),
+        "fixture must have no APP1/Exif for this test to mean anything"
+    );
+    let info = jpeg(&bytes);
+    assert_eq!(info.space, ColorSpace::WideGamut);
+    assert!(
+        info.panel_line().is_some(),
+        "a P3 file with no EXIF must still produce a panel line"
+    );
+
+    // An untagged file stays quiet — that is the overwhelming majority, and
+    // "Colour profile: sRGB (untagged)" on every screenshot is noise.
+    assert!(jpeg(&jpeg_with_icc(32, 32, &[])).panel_line().is_none());
+    // An explicitly sRGB-profiled file *does* earn a line: it tells the user the
+    // file was checked and needs no conversion, which is the reassuring answer
+    // rather than a useless one.
+    let tagged = jpeg(&jpeg_with_icc(32, 32, &icc_profile(Some("sRGB IEC61966-2.1"), SRGB_RED, 0)));
+    assert_eq!(tagged.space, ColorSpace::Srgb);
+    assert!(
+        tagged.panel_line().is_some(),
+        "an explicitly tagged sRGB file is worth confirming"
+    );
+
+    // Anything the user might act on does earn a line.
+    for (what, info) in [
+        (
+            "wide gamut",
+            jpeg(&jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0))),
+        ),
+        (
+            "unreadable profile in a real jpeg",
+            jpeg(&jpeg_with_icc(32, 32, &vec![0u8; 300])),
+        ),
+        (
+            "format we do not read",
+            color_info_from_bytes(b"\0\0\0\x18ftypheic", false, false),
+        ),
+    ] {
+        assert!(
+            info.panel_line().is_some(),
+            "{what} ({:?}) should be surfaced to the user",
+            info.space
+        );
+    }
+}
+
+#[test]
 fn test_color_info_on_disk_matches_bytes() {
-    // The file-level entry point and the byte-level one must agree; the app uses
-    // the former, tests mostly the latter.
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("p3.jpg");
     std::fs::write(

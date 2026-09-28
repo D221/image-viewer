@@ -520,10 +520,29 @@ fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
     })
 }
 
+/// Metadata panel text for `path`, or `None` when there is nothing worth saying.
+///
+/// EXIF and the colour profile are gathered **independently**. They used to be
+/// one function with `read_exif(path).ok()?` at the top, which meant a file
+/// with an ICC profile but no EXIF block — which is exactly what a screenshot or
+/// a downloaded/forwarded phone photo is — showed a completely empty panel and
+/// hid the only interesting thing about it.
 fn extract_exif(path: &Path) -> Option<String> {
-    let exif = read_exif(path).ok()?;
-
     let mut info = Vec::new();
+
+    // Colour first: it is independent of EXIF, and often the only thing there is.
+    if let Some(line) = image_viewer::color_info(path).panel_line() {
+        info.push(line);
+    }
+
+    // Everything below needs an EXIF block; absent one just means fewer lines.
+    let Ok(exif) = read_exif(path) else {
+        return if info.is_empty() {
+            None
+        } else {
+            Some(info.join("\n"))
+        };
+    };
 
     if let Some(entry) = exif.get(ExifTag::Make) {
         info.push(format!("Camera: {}", entry));
@@ -621,23 +640,6 @@ fn extract_exif(path: &Path) -> Option<String> {
     if let Some(entry) = exif.get(ExifTag::ImageWidth) {
         if let Some(h_entry) = exif.get(ExifTag::ImageHeight) {
             info.push(format!("Dimensions: {}x{} px", entry, h_entry));
-        }
-    }
-
-    // Colour: the ICC profile, if any. Reported only — the pixels are not
-    // transformed (see the `ColorSpace` docs in lib.rs for why that needs to be
-    // a user choice, not a silent one).
-    {
-        let c = image_viewer::color_info(path);
-        // Only worth a line when there is something to say: a wide-gamut file, a
-        // real profile, or a format we cannot read. "sRGB (untagged)" on every
-        // screenshot is noise.
-        let interesting = !matches!(
-            c.space,
-            image_viewer::ColorSpace::UntaggedSrgb | image_viewer::ColorSpace::Srgb
-        );
-        if interesting || c.profile_bytes > 0 {
-            info.push(format!("Colour profile: {}", c.summary()));
         }
     }
 

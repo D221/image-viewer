@@ -408,6 +408,23 @@ impl ColorInfo {
             format!("{} — {}", self.space.label(), self.description)
         }
     }
+
+    /// The line to show in the metadata panel, or `None` when it is not worth
+    /// saying.
+    ///
+    /// An untagged or sRGB-profiled file is the overwhelmingly common case, and
+    /// "Colour profile: sRGB" on every screenshot is noise. What earns a line is
+    /// something the user might act on: a wide-gamut or non-RGB space, a profile
+    /// we could not classify, a format whose colour we do not read at all, or
+    /// any real embedded profile.
+    pub fn panel_line(&self) -> Option<String> {
+        let routine = matches!(self.space, ColorSpace::UntaggedSrgb | ColorSpace::Srgb)
+            && self.profile_bytes == 0;
+        if routine {
+            return None;
+        }
+        Some(format!("Colour profile: {}", self.summary()))
+    }
 }
 
 /// The red primary of the standard sRGB ICC profile, D50-adapted, as it appears
