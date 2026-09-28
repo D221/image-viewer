@@ -220,4 +220,4 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 - **Config location is platform-dependent:** `%APPDATA%\image-viewer\config.json` on Windows — see `Config::default_path()` in `src/lib.rs`. New `Config` fields need `#[serde(default)]` or old configs fail to load.
 - **`test-images/JPEGView_L` is a checked-out reference viewer** (JPEGView fork, C++) used for feature ideas, not part of the app.
-- `PLAN.md` is a feature backlog, not documentation of current behavior — verify claims against code before trusting it.
+- **`PLAN.md` is a stale early-project feature list, not documentation of current behavior** — most of it is already implemented. `TODO.md` holds the actual deferred work (P3 → sRGB conversion, the egui 0.27 → 0.36 upgrade, the HEIC `colr` blind spot) with the investigation already done. Read `TODO.md` before starting anything colour- or GUI-related; it records verified numbers that are expensive to re-derive.
