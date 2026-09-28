@@ -108,6 +108,25 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   access violation before the window opens, with nothing on stderr. Verified:
   `dx12` and `opengl` start, `vulkan` and the unpinned default do not. **Do not
   restore `Backends::all()`.** Nothing in the suite covers any of this.
+- **`--perf <folder>` used to open the wrong folder, silently.** `MyApp::new`
+  took the path as `args_os().nth(1)` while `main` scanned the whole list for
+  flags, so `--perf` was taken as the path, matched nothing, and the app fell
+  through to the persisted/default folder. The perf report still got written —
+  for the wrong folder. Fixed by `image_viewer::path_arg` (in `lib.rs`, not
+  `main.rs`, so a test can see it; `main.rs` being a binary is why this
+  survived). **If you add a CLI flag, add it to `path_arg` and its test.** The
+  tell that it bit: a run of a *one-file* folder reporting 7 decode calls.
+- **A frame count does not mean the app is spinning.** Frame rate can be set by
+  the presentation pipeline rather than by demand for frames; a 20x smaller
+  window produced the same cadence here, which is what gave it away. Before
+  concluding the app burns CPU idly, check `frames with input events` (0 while
+  idle) and `frame interval` in the `--perf` report, and ask egui who asked:
+  the report's "who asked for a repaint" section lists the `file:line` of every
+  `request_repaint`. On a static photo the only source is the 2 s folder
+  watcher (`maybe_rescan`) and the app idles at ~2 fps. That is correct.
+- **`ms/frame` is meaningless when frames are rare.** It is CPU amortised over
+  whatever frames happened; at 2 fps on a static photo it is just startup
+  spread thin. Use total CPU% unless frames are frequent (an animation).
 - **Use `Ui::new_child(UiBuilder)`, never `Ui::scope_builder(..)`, to replace
   0.27's `Ui::child_ui(rect, layout)`.** They look interchangeable and are not.
   `scope_builder` runs the closure and *then* calls
