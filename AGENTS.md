@@ -134,6 +134,32 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   because previews are sized to the display area, so a small target rounds hard
   enough for the aspect-ratio clamp to bite.
 - **EXIF orientation is applied only to JPEGs.** For HEIF/AVIF the `heic` crate already applies container transforms (`irot`/`imir`); applying the EXIF tag on top would double-rotate. Some HEICs in test dumps have no EXIF at all (exiftool-verified) — that's correct, not a bug.
+- **Colour is *detected*, never transformed (yet).** `color_info` parses the ICC
+  profile and reports the space; no pixel is touched. The renderer uploads
+  `ColorImage` as `Rgba8UnormSrgb` and egui wants a gamma-space surface, so the
+  pipeline is 8-bit sRGB end to end in **0.27 and 0.36 alike** — a newer egui
+  does not unlock HDR or wide-gamut output (`TextureOptions` has no `srgb` field;
+  `App::clear_color` is documented as gamma-space sRGB). Converting P3 → sRGB is
+  therefore not a downgrade on an HDR monitor; it is the only way to display P3
+  correctly at all. Real numbers: **200 of 1001** images in a phone backup are
+  Display P3.
+- **Classify colour by primaries, not by the description string.** 170 of those
+  200 files carry a profile with **no `desc` tag at all**. The two primaries that
+  actually occur are sRGB `(28578, 14581, 912)` and Display P3
+  `(33759, 15807, -69)`, both D50-adapted, and they never mix. Those are
+  *measured* values — do not "correct" them from memory; I guessed P3 as
+  `(43682, 22250)` once and it was wrong.
+- **PNG `iCCP` is zlib-compressed.** Handing the raw chunk to the ICC parser
+  finds no `acsp` at offset 36 and silently reports "unknown". Inflating it is
+  not optional. This shipped as a bug until real P3 PNGs appeared to test against.
+- **`icc_tags_valid` refuses corrupt profiles outright.** Every tag must lie
+  inside the profile and the declared count must fit. Both wrong answers are
+  harmful: claiming sRGB skips a conversion the image needs, and claiming wide
+  gamut pushes a correct image through a P3 matrix. "Unknown" is the safe answer.
+- **HEIC/AVIF/JXL report `NotInspected`, deliberately not assumed sRGB.** Their
+  colour lives in an ISO-BMFF `colr` box or the codestream. Assuming is how a
+  wide-gamut HEIC looks flat and nobody notices, because everything "works".
+  29 of the 1001 files in that backup are HEIF and are currently a blind spot.
 
 ## Architecture (things that are easy to break)
 

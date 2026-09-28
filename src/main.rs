@@ -624,6 +624,23 @@ fn extract_exif(path: &Path) -> Option<String> {
         }
     }
 
+    // Colour: the ICC profile, if any. Reported only — the pixels are not
+    // transformed (see the `ColorSpace` docs in lib.rs for why that needs to be
+    // a user choice, not a silent one).
+    {
+        let c = image_viewer::color_info(path);
+        // Only worth a line when there is something to say: a wide-gamut file, a
+        // real profile, or a format we cannot read. "sRGB (untagged)" on every
+        // screenshot is noise.
+        let interesting = !matches!(
+            c.space,
+            image_viewer::ColorSpace::UntaggedSrgb | image_viewer::ColorSpace::Srgb
+        );
+        if interesting || c.profile_bytes > 0 {
+            info.push(format!("Colour profile: {}", c.summary()));
+        }
+    }
+
     // GPS: decimal degrees + altitude, and a Google Maps link.
     if let Some((lat, lon)) = image_viewer::gps_coords(&exif) {
         info.push(format!("Location: {:.5}, {:.5}", lat, lon));

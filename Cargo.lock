@@ -2393,6 +2393,7 @@ dependencies = [
  "criterion",
  "eframe",
  "egui",
+ "flate2",
  "heic",
  "image 0.25.10",
  "jxl-oxide",
