@@ -18,6 +18,66 @@ fn gallery(names: &[&str]) -> Gallery {
 }
 
 #[test]
+fn test_loop_back_on_by_default_wraps_at_both_ends() {
+    // The historical behaviour, and what an existing config with no
+    // `loop_back` key must keep getting.
+    let mut g = gallery(&["a.jpg", "b.jpg", "c.jpg"]);
+    assert!(g.loop_back, "looping must default to on");
+
+    assert!(g.next());
+    assert!(g.next());
+    assert_eq!(g.index, 2);
+    assert!(g.next(), "past the end it wraps to the first");
+    assert_eq!(g.index, 0);
+    assert!(g.prev(), "before the start it wraps to the last");
+    assert_eq!(g.index, 2);
+}
+
+#[test]
+fn test_loop_back_off_stops_at_both_ends() {
+    let mut g = gallery(&["a.jpg", "b.jpg", "c.jpg"]);
+    g.loop_back = false;
+
+    assert!(g.next());
+    assert!(g.next());
+    assert_eq!(g.index, 2);
+    assert!(!g.next(), "stepping past the last image must not move");
+    assert_eq!(g.index, 2, "and must stay on the last image");
+    // Repeatedly pressing must stay put, not creep or wrap.
+    for _ in 0..5 {
+        assert!(!g.next());
+    }
+    assert_eq!(g.index, 2);
+
+    assert!(g.prev());
+    assert!(g.prev());
+    assert_eq!(g.index, 0);
+    assert!(!g.prev(), "stepping before the first image must not move");
+    assert_eq!(g.index, 0, "and must stay on the first image");
+}
+
+#[test]
+fn test_loop_back_off_is_safe_on_an_empty_gallery() {
+    // No files at all: nothing to move to, and nothing may panic.
+    let mut g = Gallery::from_file(p("only.jpg"));
+    g.files.clear();
+    g.loop_back = false;
+    assert!(!g.next());
+    assert!(!g.prev());
+    assert!(g.is_empty());
+}
+
+#[test]
+fn test_loop_back_off_with_a_single_image_never_moves() {
+    let mut g = gallery(&["only.jpg"]);
+    g.loop_back = false;
+    assert!(!g.next());
+    assert!(!g.prev());
+    assert_eq!(g.index, 0);
+    assert_eq!(file_name_of(g.current().unwrap()), "only.jpg");
+}
+
+#[test]
 fn test_filter_is_a_case_insensitive_name_substring() {
     let mut g = gallery(&["Beach.jpg", "beach2.JPG", "Mountain.png", "portrait.jpeg"]);
     g.set_filtered(&g.files.clone(), "beach");

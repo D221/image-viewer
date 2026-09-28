@@ -51,6 +51,12 @@ pub struct Config {
     #[serde(default)]
     pub wheel_navigation: bool,
 
+    /// Wrap from the last image back to the first (and vice versa) when
+    /// navigating. On by default, which is the historical behaviour, so an old
+    /// config without this key keeps looping.
+    #[serde(default = "default_true")]
+    pub loop_back: bool,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -72,6 +78,7 @@ impl Config {
             downscale_filter: DownscaleFilter::Hermite,
             block_while_loading: false,
             wheel_navigation: false,
+            loop_back: true,
             last_by_folder: std::collections::HashMap::new(),
         };
 
@@ -1677,6 +1684,12 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
 pub struct Gallery {
     pub files: Vec<PathBuf>,
     pub index: usize,
+    /// Whether advancing past either end wraps around to the other end.
+    ///
+    /// Defaults to on (the historical behaviour, and what old configs get). It
+    /// lives here rather than in the caller so `next`/`prev` cannot be used in a
+    /// way that quietly ignores the setting.
+    pub loop_back: bool,
 }
 
 impl Gallery {
@@ -1684,6 +1697,7 @@ impl Gallery {
         Self {
             files: scan_folder(folder),
             index: 0,
+            loop_back: true,
         }
     }
 
@@ -1692,6 +1706,7 @@ impl Gallery {
         Self {
             files: vec![path],
             index: 0,
+            loop_back: true,
         }
     }
 
@@ -1726,19 +1741,41 @@ impl Gallery {
         self.current() != current.as_deref()
     }
 
-    pub fn next(&mut self) {
-        if !self.files.is_empty() {
-            self.index = (self.index + 1) % self.files.len();
+    /// Advance one image. Returns whether the view actually moved — `false` at
+    /// the end with `loop_back` off, so the caller can skip the work that a
+    /// real change would justify.
+    pub fn next(&mut self) -> bool {
+        if self.files.is_empty() {
+            return false;
+        }
+        match self.index.checked_add(1) {
+            Some(i) if i < self.files.len() => {
+                self.index = i;
+                true
+            }
+            _ if self.loop_back => {
+                self.index = 0;
+                true
+            }
+            _ => false,
         }
     }
 
-    pub fn prev(&mut self) {
-        if !self.files.is_empty() {
-            self.index = if self.index == 0 {
-                self.files.len() - 1
-            } else {
-                self.index - 1
-            };
+    /// Go back one image. Returns whether the view actually moved.
+    pub fn prev(&mut self) -> bool {
+        if self.files.is_empty() {
+            return false;
+        }
+        match self.index.checked_sub(1) {
+            Some(i) => {
+                self.index = i;
+                true
+            }
+            None if self.loop_back => {
+                self.index = self.files.len() - 1;
+                true
+            }
+            None => false,
         }
     }
 

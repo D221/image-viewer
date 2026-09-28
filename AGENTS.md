@@ -154,6 +154,13 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - **The grid's scrollbar needed `auto_shrink([false, true])`.** With
   `[false, false]` the `ScrollArea` demands the full panel width, leaving no room
   for the bar, so a long folder had no visible scroll position.
+- **End-of-folder navigation is a `Gallery` policy, not a caller concern.**
+  `Gallery::loop_back` (mirrors `Config::loop_back`, default **on** so old
+  configs keep looping) lives on the gallery so `next`/`prev` cannot be used in a
+  way that quietly ignores the setting. Both return `bool` — whether the view
+  actually moved — and `step()` skips `goto()` when it did not, which avoids
+  resetting the full-res dwell timer and re-planning the queue for an image that
+  did not change. The grid's own selection already clamped and never wrapped.
 - **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳ are bottom-panel buttons only (temporary UI; `self.rot` is a view transform, re-fits after each turn).
 
 ## Gotchas by feature

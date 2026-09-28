@@ -883,6 +883,7 @@ impl MyApp {
 
         // Taken before `gallery` is moved into the struct below.
         let all_files = gallery.files.clone();
+        gallery.loop_back = config.loop_back;
         let mut app = Self {
             folder,
             gallery,
@@ -987,12 +988,17 @@ impl MyApp {
         if self.config.block_while_loading && self.waiting_load {
             return;
         }
-        if forward {
-            self.gallery.next();
+        // With looping off, stepping at either end goes nowhere. Returning
+        // without `goto` matters: it avoids resetting the full-res dwell timer
+        // and re-planning the queue for an image that did not change.
+        let moved = if forward {
+            self.gallery.next()
         } else {
-            self.gallery.prev();
+            self.gallery.prev()
+        };
+        if moved {
+            self.goto(ctx);
         }
-        self.goto(ctx);
     }
 
     // ---- file list and filtering ------------------------------------------
@@ -1020,9 +1026,10 @@ impl MyApp {
     }
 
     /// Adopt a freshly built gallery (folder / archive / single file), honouring
-    /// any active filter.
+    /// any active filter and the looping setting.
     fn adopt_gallery(&mut self, g: Gallery, ctx: &Context) {
         self.gallery = g;
+        self.gallery.loop_back = self.config.loop_back;
         self.all_files = self.gallery.files.clone();
         self.apply_filter();
         self.reset_display();
@@ -1418,6 +1425,7 @@ impl MyApp {
                 self.zip_temp = Some(temp.clone());
                 self.folder = temp.clone();
                 self.gallery = Gallery::new(&temp);
+                self.gallery.loop_back = self.config.loop_back;
                 self.all_files = self.gallery.files.clone();
                 self.apply_filter();
                 // Resume the last-viewed member for this archive. Looked up in
@@ -3058,6 +3066,15 @@ impl eframe::App for MyApp {
                     )
                     .changed()
                 {
+                    self.config.save(&self.config_path);
+                }
+                if ui
+                    .checkbox(&mut self.config.loop_back, "Loop back at folder ends")
+                    .changed()
+                {
+                    // Apply straight away; the gallery owns the wrap behaviour,
+                    // so it has to be told.
+                    self.gallery.loop_back = self.config.loop_back;
                     self.config.save(&self.config_path);
                 }
                 if new_filter != self.config.downscale_filter {

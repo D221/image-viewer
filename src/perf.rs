@@ -247,10 +247,17 @@ pub fn write_report(path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    /// `ENABLED`, `METRIC` and `COUNTERS` are process-wide statics, and
+    /// `cargo test` runs these two tests concurrently. Both flip `set_enabled`,
+    /// so without this they race: one disables sampling while the other is
+    /// mid-loop, its `record` calls become no-ops, and it fails intermittently
+    /// (observed ~40% of runs).
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use super::*;
 
     #[test]
     fn records_and_reports_percentiles() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         set_enabled(true);
         for i in 1..=100u64 {
             record(SELECT_TO_FIRST_PIXELS, i * 10);
@@ -276,6 +283,7 @@ mod tests {
 
     #[test]
     fn ring_wraps_without_unbounded_memory() {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         set_enabled(true);
         for i in 0..(CAP as u64 * 3) {
             record(NAV_TO_FULL, i);
