@@ -177,6 +177,13 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
     let mut instance = InstanceDescriptor::new_without_display_handle();
     instance.backends = backends;
     eframe::egui_wgpu::WgpuConfiguration {
+        // `surface` is deliberately left at the default (HIGH_THROUGHPUT, frame
+        // latency 2). `SurfaceConfig::LOW_LATENCY` is documented as the right
+        // choice for a GUI with little GPU work, which is this app, so it looks
+        // like a free improvement — but it was tried and could not be shown to be
+        // one. Don't flip it on the strength of the docs: re-measure on a *local
+        // console* session first. An earlier attempt at this produced a confident
+        // wrong answer by measuring over RDP; see TODO.md.
         wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
             instance_descriptor: instance,
             ..WgpuSetupCreateNew::without_display_handle()
