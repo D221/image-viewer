@@ -314,6 +314,14 @@ pub struct ImageData {
     pub load_time: std::time::Duration,
 }
 
+/// File name as a lossy string, the key `last_by_folder` resume stores and the
+/// thing a gallery filter matches against.
+pub fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Errors that can occur while loading an image.
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -1689,6 +1697,33 @@ impl Gallery {
 
     pub fn current(&self) -> Option<&Path> {
         self.files.get(self.index).map(|p| p.as_path())
+    }
+
+    /// Rebuild [`Self::files`] from `all`, keeping only names matching `needle`.
+    ///
+    /// The match is a case-insensitive substring of the file name; an empty or
+    /// whitespace-only needle means "no filter". The folder is scanned flat, so
+    /// there is no directory component to match beyond the name.
+    ///
+    /// The current image is kept if it survived, otherwise the index falls back
+    /// to the nearest surviving position (clamped, never out of range). Returns
+    /// true if the current image changed, which is the caller's cue to re-goto.
+    pub fn set_filtered(&mut self, all: &[PathBuf], needle: &str) -> bool {
+        let current = self.current().map(|p| p.to_path_buf());
+        let needle = needle.trim().to_lowercase();
+        self.files = if needle.is_empty() {
+            all.to_vec()
+        } else {
+            all.iter()
+                .filter(|p| file_name_of(p).to_lowercase().contains(&needle))
+                .cloned()
+                .collect()
+        };
+        self.index = current
+            .as_ref()
+            .and_then(|p| self.files.iter().position(|f| f == p))
+            .unwrap_or_else(|| self.index.min(self.files.len().saturating_sub(1)));
+        self.current() != current.as_deref()
     }
 
     pub fn next(&mut self) {

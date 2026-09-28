@@ -156,6 +156,38 @@ struct QueueState {
     busy: HashSet<(PathBuf, Kind)>,
 }
 
+/// File name as a lossy string, the key `last_by_folder` resume stores.
+fn file_name_of(p: &Path) -> String {
+    image_viewer::file_name_of(p)
+}
+
+/// Identity of a file's *contents* for change detection.
+///
+/// `mtime` alone is not enough: editors and copy tools can write a file with a
+/// preserved timestamp, and a same-size overwrite within one filesystem tick
+/// can keep the same one too. The pair catches the common cases at the cost of
+/// one `metadata` call per file per poll, which the poll already does not
+/// otherwise need.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    mtime: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Stamp {
+        match std::fs::metadata(path) {
+            Ok(m) => Stamp {
+                mtime: m.modified().ok(),
+                len: m.len(),
+            },
+            // A file we cannot stat is treated as distinct-but-stable rather
+            // than as "changed every time", which would spin the reload path.
+            Err(_) => Stamp { mtime: None, len: 0 },
+        }
+    }
+}
+
 /// A decoded gallery-grid thumbnail.
 ///
 /// `texels` is the *decoded* pixel size of the uploaded texture, recorded at
@@ -755,6 +787,19 @@ struct MyApp {
     thumbs: HashMap<PathBuf, Thumb>, // grid thumbnails
     thumb_tries: HashMap<PathBuf, u8>, // per-path thumb attempts (bounded retry)
     gallery_view: bool, // grid browser open
+    /// Every file in the folder, **unfiltered**. `gallery.files` is this list
+    /// run through `filter`, so a filter is always reversible and the folder's
+    /// real contents are never thrown away.
+    all_files: Vec<PathBuf>,
+    /// Case-insensitive substring match on the file name. Empty = show all.
+    /// Deliberately not persisted: a filter that silently survived a restart
+    /// would hide files with no obvious way back.
+    filter: String,
+    /// `Stamp` per gallery file as of the last poll. A stamp that moved means
+    /// the file was edited on disk and anything cached for it is stale.
+    stamps: HashMap<PathBuf, Stamp>,
+    /// Grid rows currently on screen, so PageUp/PageDown can move a page.
+    grid_page_rows: usize,
 }
 
 impl MyApp {
@@ -836,6 +881,8 @@ impl MyApp {
         let (tx, rx) = mpsc::channel();
         let loader = Loader::new(ctx, tx);
 
+        // Taken before `gallery` is moved into the struct below.
+        let all_files = gallery.files.clone();
         let mut app = Self {
             folder,
             gallery,
@@ -879,6 +926,10 @@ impl MyApp {
             wheel_acc: 0.0,
             thumbs: HashMap::new(),
             thumb_tries: HashMap::new(),
+            all_files,
+            filter: String::new(),
+            stamps: HashMap::new(),
+            grid_page_rows: 1,
             gallery_view: false,
         };
                 app.goto(ctx);
@@ -941,6 +992,40 @@ impl MyApp {
         } else {
             self.gallery.prev();
         }
+        self.goto(ctx);
+    }
+
+    // ---- file list and filtering ------------------------------------------
+
+    /// Rebuild `gallery.files` from `all_files` and the current filter. The
+    /// filtering itself lives in [`Gallery::set_filtered`] so it is testable.
+    fn apply_filter(&mut self) {
+        self.gallery.set_filtered(&self.all_files, &self.filter);
+    }
+
+    /// Install a new **unfiltered** file list and re-apply the filter.
+    ///
+    /// This is the single place `gallery.files` is rebuilt from a whole-folder
+    /// scan, so the filter cannot be forgotten on any path.
+    fn set_files(&mut self, files: Vec<PathBuf>, ctx: &Context) {
+        let current = self.gallery.current().map(|p| p.to_path_buf());
+        self.all_files = files;
+        self.apply_filter();
+        if self.gallery.current() != current.as_deref() {
+            self.reset_display();
+            self.goto(ctx);
+        } else {
+            self.schedule();
+        }
+    }
+
+    /// Adopt a freshly built gallery (folder / archive / single file), honouring
+    /// any active filter.
+    fn adopt_gallery(&mut self, g: Gallery, ctx: &Context) {
+        self.gallery = g;
+        self.all_files = self.gallery.files.clone();
+        self.apply_filter();
+        self.reset_display();
         self.goto(ctx);
     }
 
@@ -1286,12 +1371,11 @@ impl MyApp {
 
     fn open_folder(&mut self, ctx: &Context, folder: PathBuf) {
         self.folder = folder.clone();
-        self.gallery = Gallery::new(&folder);
+        let mut g = Gallery::new(&folder);
         if self.config.load_all_on_startup {
-            self.gallery.load_all_from_folder(&folder);
+            g.load_all_from_folder(&folder);
         }
-        self.reset_display();
-        self.goto(ctx);
+        self.adopt_gallery(g, ctx);
     }
 
     /// Release the extracted temp dir of a previously open archive.
@@ -1334,7 +1418,11 @@ impl MyApp {
                 self.zip_temp = Some(temp.clone());
                 self.folder = temp.clone();
                 self.gallery = Gallery::new(&temp);
-                // Resume the last-viewed member for this archive.
+                self.all_files = self.gallery.files.clone();
+                self.apply_filter();
+                // Resume the last-viewed member for this archive. Looked up in
+                // the *filtered* list, so a resume can never select something
+                // the user cannot see.
                 let key = archive.to_string_lossy().to_string();
                 if let Some(last) = self.config.last_by_folder.get(&key) {
                     let last = std::path::Path::new(last)
@@ -1345,10 +1433,7 @@ impl MyApp {
                             .gallery
                             .files
                             .iter()
-                            .position(|f| {
-                                f.file_name().map(|n| n.to_string_lossy().into_owned())
-                                    == Some(name.clone())
-                            })
+                            .position(|f| file_name_of(f) == *name)
                         {
                             self.gallery.index = i;
                         }
@@ -1377,12 +1462,11 @@ impl MyApp {
     fn open_file(&mut self, ctx: &Context, file: PathBuf) {
         self.close_zip();
         self.folder = file.parent().unwrap_or(&file).to_path_buf();
-        self.gallery = Gallery::from_file(file);
+        let mut g = Gallery::from_file(file);
         if self.config.load_all_on_startup {
-            self.gallery.load_all_from_folder(&self.folder);
+            g.load_all_from_folder(&self.folder);
         }
-        self.reset_display();
-        self.goto(ctx);
+        self.adopt_gallery(g, ctx);
     }
 
     fn pick_folder(&mut self, ctx: &Context) {
@@ -1446,9 +1530,97 @@ impl MyApp {
         let now = Instant::now();
         if now >= self.next_scan {
             self.next_scan = now + RESCAN_INTERVAL;
+            // Change detection is *not* gated on `load_all_on_startup`: that
+            // setting is about listing files at startup, but noticing that the
+            // file you are looking at just got re-exported should not depend on
+            // it.
+            self.check_changed(ctx);
             self.rescan(ctx, false);
         }
         ctx.request_repaint_after(self.next_scan.saturating_duration_since(Instant::now()));
+    }
+
+    /// Re-stat every file and invalidate anything whose contents changed since
+    /// the last poll.
+    ///
+    /// Only files we hold state for are worth reloading, so the common case
+    /// (a big folder, one image on screen) costs a metadata call per file and
+    /// no decoding at all.
+    fn check_changed(&mut self, ctx: &Context) {
+        if self.zip_archive.is_some() {
+            return; // archives: the extracted temp dir is stable
+        }
+        let mut fresh: HashMap<PathBuf, Stamp> =
+            HashMap::with_capacity(self.gallery.files.len());
+        let mut changed: Vec<PathBuf> = Vec::new();
+        for p in &self.gallery.files {
+            let now = Stamp::of(p);
+            let moved = self.stamps.get(p).is_some_and(|old| *old != now);
+            fresh.insert(p.clone(), now);
+            if moved && self.has_cached_state_for(p) {
+                changed.push(p.clone());
+            }
+        }
+        self.stamps = fresh;
+        if changed.is_empty() {
+            return;
+        }
+        for p in changed {
+            self.invalidate_path(&p, ctx);
+        }
+    }
+
+    /// Do we hold anything that a content change would make stale?
+    fn has_cached_state_for(&self, p: &Path) -> bool {
+        self.previews.contains_key(p)
+            || self.thumbs.contains_key(p)
+            || self.full.as_ref().is_some_and(|f| f.path == p)
+            || self.cur.as_deref() == Some(p)
+            || self.failed.iter().any(|(q, _)| q == p)
+    }
+
+    /// Throw away everything cached for `p` and, if it is on screen, ask for it
+    /// again.
+    ///
+    /// Clearing `failed` here is what makes an edit **self-healing**: a file
+    /// that is re-read while it is still being written fails to decode, and
+    /// `failed` is permanent for the session — but the writer's finishing
+    /// touches the stamp again, so the next poll re-detects the change, clears
+    /// the entry and retries. Without this, "edit the file I am looking at"
+    /// would reliably poison it.
+    fn invalidate_path(&mut self, p: &Path, ctx: &Context) {
+        self.previews.remove(p);
+        self.thumbs.remove(p);
+        self.thumb_tries.remove(p);
+        self.failed.retain(|(q, _)| q != p);
+        let shown_gone = self.shown.as_deref() == Some(p);
+        if self.full.as_ref().is_some_and(|f| f.path == p) {
+            self.full = None;
+            self.anim = None;
+        }
+        if shown_gone {
+            // The texture on screen belongs to a version that no longer exists,
+            // so stop showing it. `central()` paints nothing until the new
+            // decode lands — the same thing that happens when you navigate to
+            // an image that is not cached yet. Deliberately *not* a stale-texture
+            // holdover: keeping old pixels for a re-exported file is the one
+            // outcome that looks like a bug.
+            self.shown = None;
+        }
+        if self.cur.as_deref() == Some(p) {
+            self.error = None;
+            self.waiting_load = false;
+            // A re-exported file usually has new dimensions, so re-fit instead
+            // of keeping a view scale chosen for the old pixels.
+            self.view = View {
+                fit: true,
+                scale: 1.0,
+                offset: Vec2::ZERO,
+            };
+            self.full_due = Some(Instant::now() + FULL_DWELL);
+            self.schedule();
+            ctx.request_repaint();
+        }
     }
 
     /// Re-scan the current folder and merge the result, keeping the user's
@@ -1464,27 +1636,42 @@ impl MyApp {
         let mut files = scan_folder_sorted(&self.folder, self.config.sort);
         // Random must not reshuffle on every poll: keep the user's order,
         // append new files, drop vanished ones (manual reload reshuffles).
-        if self.config.sort == SortMode::Random && !force && !self.gallery.files.is_empty() {
+        if self.config.sort == SortMode::Random && !force && !self.all_files.is_empty() {
             let fresh: HashSet<&PathBuf> = files.iter().collect();
-            self.gallery.files.retain(|p| fresh.contains(p));
+            self.all_files.retain(|p| fresh.contains(p));
             for f in &files {
-                if !self.gallery.files.contains(f) {
-                    self.gallery.files.push(f.clone());
+                if !self.all_files.contains(f) {
+                    self.all_files.push(f.clone());
                 }
             }
-            files = self.gallery.files.clone();
+            files = self.all_files.clone();
         }
+        self.set_files(files, ctx);
+    }
+
+    /// Re-apply the filter after the user edited the search box. Clears caches
+    /// only when the *set of files* changes; a re-filter that keeps the same
+    /// files must not throw away decoded pixels.
+    fn on_filter_changed(&mut self, ctx: &Context) {
+        let before: HashSet<PathBuf> = self.gallery.files.iter().cloned().collect();
         let current = self.gallery.current().map(|p| p.to_path_buf());
-        self.gallery.files = files;
-        self.gallery.index = current
-            .as_ref()
-            .and_then(|p| self.gallery.files.iter().position(|f| f == p))
-            .unwrap_or_else(|| self.gallery.index.min(self.gallery.len().saturating_sub(1)));
+        self.apply_filter();
         if self.gallery.current() != current.as_deref() {
             self.reset_display();
             self.goto(ctx);
         } else {
             self.schedule();
+        }
+        // Release pixels for files the filter hid: they are unreachable now, so
+        // holding them is pure waste. Keyed on the *new* visible set, so a file
+        // that is still visible keeps its texture instead of re-decoding on
+        // every keystroke.
+        let now: HashSet<PathBuf> = self.gallery.files.iter().cloned().collect();
+        if before != now {
+            let cur = self.cur.clone();
+            self.previews
+                .retain(|p, _| now.contains(p) || Some(p) == cur.as_ref());
+            self.thumbs.retain(|p, _| now.contains(p));
         }
     }
 
@@ -2086,6 +2273,11 @@ impl MyApp {
         let cols = grid_cols(panel.width());
         self.grid_cols = cols; // Up/Down in update() step by this
         let row_h = GRID_ROW_H;
+        // How many rows actually fit, so PageUp/PageDown move a page rather than
+        // a fixed guess. `show_rows` adds vertical item spacing on top of
+        // row_h, so the pitch is not row_h.
+        let pitch = row_h as f32 + ui.spacing().item_spacing.y;
+        self.grid_page_rows = ((panel.height() / pitch).floor() as usize).max(1);
         let total = self.gallery.files.len();
         let total_rows = (total + cols - 1) / cols;
         let clock = self.clock;
@@ -2102,7 +2294,11 @@ impl MyApp {
             ..
         } = self;
         let files = &gallery.files;
-        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        // auto_shrink([false, true]) is what makes the scrollbar appear: with
+        // [false, false] the ScrollArea demands the full width and there is no
+        // room left for the bar, so a long folder had no visible way to show
+        // where you were.
+        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, true]);
         // Scroll to the selection, but only when the selection actually moved.
         //
         // Two mechanisms were tried and both had a failure mode:
@@ -2517,18 +2713,52 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.frame_prelude(ctx);
 
-        // F11: fullscreen toggle — image + panels only, chrome hidden.
-        // Esc: exit fullscreen when in it, otherwise close the app.
+        // Read every key up front, before anything acts on them: Esc needs to
+        // know whether the search box has focus, and the panels are drawn last.
+        //
+        // `typing` is true when a text field owns the keyboard. All the global
+        // single-key handling below has to stand down then, or typing "g" into
+        // the filter would toggle the grid and "r" would reload the folder.
+        let typing = ctx.wants_keyboard_input();
         let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
         let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        // Keyboard navigation + file triage
+        let (next, prev, first, last, toggle, grid, page_up, page_down, focus_search) =
+            ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::Home),
+                    i.key_pressed(egui::Key::End),
+                    i.key_pressed(egui::Key::I),
+                    i.key_pressed(egui::Key::G),
+                    i.key_pressed(egui::Key::PageUp),
+                    i.key_pressed(egui::Key::PageDown),
+                    // `/` is the usual "search" chord and is not otherwise used.
+                    i.key_pressed(egui::Key::Slash) && !i.modifiers.ctrl && !i.modifiers.alt,
+                )
+            });
+
         if f11 {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
             self.suppress_resize_redecode = true;
             self.show_panels = fs; // entering fullscreen hides panels; leaving restores
         }
-                        if esc {
-            if self.gallery_view {
+        if esc {
+            if typing {
+                // Esc belongs to the search box while it has focus: clear the
+                // filter, or if there is nothing to clear just defocus. It must
+                // not fall through to "close the grid" or "quit the app" —
+                // clicking into the search box and pressing Esc should never
+                // exit the viewer.
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.on_filter_changed(ctx);
+                } else {
+                    ctx.memory_mut(|m| m.request_focus(egui::Id::NULL));
+                }
+            } else if self.gallery_view {
                 self.gallery_view = false; // close the grid first
             } else {
                 let in_fullscreen = ctx
@@ -2544,19 +2774,6 @@ impl eframe::App for MyApp {
             }
         }
 
-                // Keyboard navigation + file triage
-        let (next, prev, first, last, toggle, grid) = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::ArrowRight)
-                    || i.key_pressed(egui::Key::PageDown)
-                    || i.key_pressed(egui::Key::Space),
-                i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::PageUp),
-                i.key_pressed(egui::Key::Home),
-                i.key_pressed(egui::Key::End),
-                i.key_pressed(egui::Key::I),
-                i.key_pressed(egui::Key::G),
-            )
-        });
         // In grid mode the arrows drive the grid's own selection instead of
         // changing the shown image, and Enter opens the highlighted cell.
         let (up, down, enter) = ctx.input(|i| {
@@ -2586,59 +2803,70 @@ impl eframe::App for MyApp {
                     .button_clicked(egui::PointerButton::Extra2),
             )
         });
-        if self.gallery_view {
-            // Grid: arrows move the highlight, Enter opens it. Clamped, so
-            // walking off an edge stops instead of jumping to the far end.
-            let cols = self.grid_cols.max(1);
-            let last_idx = self.gallery.len().saturating_sub(1);
-            let sel = &mut self.grid_sel;
-            if next || down {
-                *sel = (*sel + if down { cols } else { 1 }).min(last_idx);
-            } else if prev || up {
-                *sel = sel.saturating_sub(if up { cols } else { 1 });
-            } else if first {
-                *sel = 0;
-            } else if last {
-                *sel = last_idx;
-            } else if enter {
-                self.pick_grid_selection(ctx);
+        // `typing` is true when the search box owns the keyboard. All of this is
+        // global single-key handling, so it must stand down or typing "g" into
+        // the filter would toggle the grid and "r" would reload the folder.
+        if !typing {
+            if self.gallery_view {
+                // Grid: arrows move the highlight, PageUp/PageDown move a page,
+                // Home/End jump to the ends, Enter opens it. Clamped, so walking
+                // off an edge stops instead of jumping to the far end.
+                let cols = self.grid_cols.max(1);
+                let page = self.grid_page_rows.max(1) * cols;
+                let last_idx = self.gallery.len().saturating_sub(1);
+                let sel = &mut self.grid_sel;
+                if page_down {
+                    *sel = (*sel + page).min(last_idx);
+                } else if page_up {
+                    *sel = sel.saturating_sub(page);
+                } else if next || down {
+                    *sel = (*sel + if down { cols } else { 1 }).min(last_idx);
+                } else if prev || up {
+                    *sel = sel.saturating_sub(if up { cols } else { 1 });
+                } else if first {
+                    *sel = 0;
+                } else if last {
+                    *sel = last_idx;
+                } else if enter {
+                    self.pick_grid_selection(ctx);
+                }
+            } else if next {
+                self.step(ctx, true);
+            } else if prev {
+                self.step(ctx, false);
+            } else if first && !self.gallery.is_empty() {
+                self.gallery.index = 0;
+                self.goto(ctx);
+            } else if last && !self.gallery.is_empty() {
+                self.gallery.index = self.gallery.len() - 1;
+                self.goto(ctx);
             }
-        } else if next {
-            self.step(ctx, true);
-        } else if prev {
-            self.step(ctx, false);
-        } else if first && !self.gallery.is_empty() {
-            self.gallery.index = 0;
-            self.goto(ctx);
-        } else if last && !self.gallery.is_empty() {
-            self.gallery.index = self.gallery.len() - 1;
-            self.goto(ctx);
-        }
-        if toggle {
-            self.suppress_resize_redecode = true;
-            self.show_panels = !self.show_panels;
-        }
-        if grid {
-            self.toggle_gallery();
-        }
-        if del {
-            self.delete_current(ctx);
-        } else if move_f {
-            self.transfer_current(ctx, false);
-        } else if copy_f {
-            self.transfer_current(ctx, true);
-        } else if explore {
-            self.explore_current();
-        } else if reload {
-            self.rescan(ctx, true);
-        } else if clip_img {
-            self.copy_image_to_clipboard();
-        } else if wall {
-            self.set_wallpaper();
-        } else if mouse_back {
-            self.step(ctx, false);
-        } else if mouse_fwd {
-            self.step(ctx, true);
+            if toggle {
+                self.suppress_resize_redecode = true;
+                self.show_panels = !self.show_panels;
+            }
+            if grid {
+                self.toggle_gallery();
+            }
+            if del {
+                self.delete_current(ctx);
+            } else if move_f {
+                self.transfer_current(ctx, false);
+            } else if copy_f {
+                self.transfer_current(ctx, true);
+            } else if explore {
+                self.explore_current();
+            } else if reload {
+                self.rescan(ctx, true);
+            } else if clip_img {
+                self.copy_image_to_clipboard();
+            } else if wall {
+                self.set_wallpaper();
+            } else if mouse_back {
+                self.step(ctx, false);
+            } else if mouse_fwd {
+                self.step(ctx, true);
+            }
         }
 
         // Drag-and-drop: files or folders
@@ -2649,7 +2877,34 @@ impl eframe::App for MyApp {
 
         if self.show_panels {
             egui::TopBottomPanel::top("status").show(ctx, |ui| {
-                ui.label(self.status_text());
+                ui.horizontal(|ui| {
+                    ui.label(self.status_text());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Clear button first so it sits at the right edge.
+                        if !self.filter.is_empty() && ui.small_button("x").clicked() {
+                            self.filter.clear();
+                            self.on_filter_changed(ctx);
+                        }
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .hint_text("filter (/)")
+                                .desired_width(160.0),
+                        );
+                        if focus_search {
+                            resp.request_focus();
+                        }
+                        if resp.changed() {
+                            self.on_filter_changed(ctx);
+                        }
+                    });
+                });
+                if !self.filter.is_empty() {
+                    ui.label(format!(
+                        "{} of {} shown",
+                        self.gallery.len(),
+                        self.all_files.len()
+                    ));
+                }
             });
         }
 

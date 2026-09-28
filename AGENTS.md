@@ -4,7 +4,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Commands
 
-- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `standard`, `embedded_thumbs`
+- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `embedded_thumbs`, `filter_and_paging`, `standard`
 - `cargo test --test unit` — one test file; `cargo test <name>` — one test by name
 - `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
 - `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
@@ -123,8 +123,38 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - **Hold-to-browse** (`block_while_loading` setting): `step()` is throttled while `waiting_load`; on preview arrival a `pending_advance` is queued and consumed at the *start of the next frame* — the arrived image is guaranteed to have been painted. Consuming it in the same frame skips the render (that was the original bug).
 - **Animated GIFs** decode to all composited frames (`Animation`, caps: 240 frames / 256 MB), ride the preview cache, never get tiles, and play back through a single re-uploaded texture with delays floored to 20 ms.
 - **Never decode on the UI thread.** All decode runs on the worker pool (`Loader` in `main.rs`); the UI only paints textures. Grid thumbnails use `Kind::Thumb` jobs (`Loader::push`, prio 45) and an LRU-capped `thumbs` cache — `grid_cell` requests them lazily for visible cells only.
-- **Folder watcher**: `maybe_rescan` polls `scan_folder` every 2 s and keeps the user's position. Skipped while a cbz/zip archive is open.
-- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; in the grid the arrows/Home/End move a *selection* (they do not change the shown image) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; Esc = close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳ are bottom-panel buttons only (temporary UI; `self.rot` is a view transform, re-fits after each turn).
+- **Folder watcher**: `maybe_rescan` polls every 2 s. `check_changed` re-stats
+  every gallery file (`Stamp` = mtime + len) and invalidates anything whose
+  contents moved; `rescan` adds/removes files. Change detection is deliberately
+  **not** gated on `load_all_on_startup` — that setting is about listing files at
+  startup, and noticing that the file you are looking at was just re-exported
+  should not depend on it. Both are skipped while a cbz/zip archive is open.
+- **Reloading a changed file is self-healing, and that is the point.**
+  `invalidate_path` clears the `failed` entry as well as the caches. A file
+  re-read *while it is still being written* fails to decode, and `failed` is
+  permanent for the session — but the writer finishing moves the stamp again, so
+  the next poll re-detects and retries. Do not "optimise" that `failed.retain`
+  away: without it, editing the image you are looking at reliably poisons it,
+  which is the "random images never load" bug from this session. The reload
+  deliberately does **not** keep the stale texture on screen (a re-export can
+  change the dimensions); it blanks for one decode, like navigating to an
+  uncached image.
+- **The filter is the whole viewer, not just the grid.** `MyApp.all_files` is
+  the unfiltered list; `gallery.files` is it run through `filter` by
+  `Gallery::set_filtered` (in lib.rs, so it is testable). Every site that
+  rebuilds the whole file list goes through `set_files`/`adopt_gallery` so the
+  filter cannot be forgotten. The filter is *not* persisted — a filter that
+  silently survived a restart would hide files with no obvious way back.
+- **Global single-key shortcuts must stand down while typing.** The filter box
+  is the first text input this app has, so `update()` reads
+  `ctx.wants_keyboard_input()` and gates every single-letter and navigation key
+  on it. Without that, typing "g" into the filter toggles the grid and "r"
+  reloads the folder. Esc while the box is focused clears the filter (or
+  defocuses) and must never fall through to "close the grid / quit".
+- **The grid's scrollbar needed `auto_shrink([false, true])`.** With
+  `[false, false]` the `ScrollArea` demands the full panel width, leaving no room
+  for the bar, so a long folder had no visible scroll position.
+- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳ are bottom-panel buttons only (temporary UI; `self.rot` is a view transform, re-fits after each turn).
 
 ## Gotchas by feature
 

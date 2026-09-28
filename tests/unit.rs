@@ -1132,7 +1132,9 @@ fn test_gallery_scroll_offset_lands_the_selected_row_in_view() {
         let _ = ctx.run(RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 pitch = GRID_ROW_H + ui.spacing().item_spacing.y;
-                let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                // Mirrors the real grid: auto_shrink([false, true]) is what
+                // gives the scrollbar somewhere to live.
+                let mut sa = egui::ScrollArea::vertical().auto_shrink([false, true]);
                 if let Some(o) = offset {
                     sa = sa.vertical_scroll_offset(o);
                 }
