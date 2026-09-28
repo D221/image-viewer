@@ -1,5 +1,22 @@
 use image_viewer::{load_image, Gallery, ZoomPan};
 
+/// `set_linear_resample` / `set_downscale_filter` are process-wide globals, and
+/// `cargo test` runs the tests in this file concurrently. Anything that asserts
+/// on a *specific* filter path has to take this lock and put the globals back,
+/// or it silently tests whichever path another test last selected.
+static FILTER_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Run `f` with the downscale filter globals forced to `linear`, restoring the
+/// previous setting afterwards.
+fn with_linear_resample<T>(linear: bool, f: impl FnOnce() -> T) -> T {
+    let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+    let was = image_viewer::linear_resample_enabled();
+    image_viewer::set_linear_resample(linear);
+    let out = f();
+    image_viewer::set_linear_resample(was);
+    out
+}
+
 #[test]
 fn test_load_misnamed_png_with_jpg_extension() {
     // A real PNG saved with a .jpg extension must still decode fully;
@@ -235,7 +252,7 @@ fn test_linear_resize_uniform_color() {
         rgba,
         load_time: std::time::Duration::ZERO,
     };
-    let out = image_viewer::downscale_image(&data, 8);
+    let out = with_linear_resample(true, || image_viewer::downscale_image(&data, 8));
     assert_eq!((out.width, out.height), (8, 8));
     assert!(!out.rgba.is_empty());
     // All pixels stay (approximately) the original color.
@@ -274,7 +291,7 @@ fn test_linear_resize_high_contrast_edge() {
         rgba,
         load_time: std::time::Duration::ZERO,
     };
-    let out = image_viewer::downscale_image(&data, 7);
+    let out = with_linear_resample(true, || image_viewer::downscale_image(&data, 7));
     assert_eq!((out.width, out.height), (7, 7));
     assert_eq!(out.rgba.len(), 7 * 7 * 4);
     // Values stay in gamut and alpha is untouched. (What a 1px checkerboard
@@ -305,7 +322,7 @@ fn test_linear_resize_preserves_a_monotonic_ramp() {
         load_time: std::time::Duration::ZERO,
     };
     for target in [32u32, 7, 3] {
-        let out = image_viewer::downscale_image(&data, target);
+        let out = with_linear_resample(true, || image_viewer::downscale_image(&data, target));
         for row in out.rgba.chunks_exact(out.width as usize * 4) {
             for pair in row.chunks_exact(4).collect::<Vec<_>>().windows(2) {
                 // Allow a hair of tolerance: ringing at the ends is the filter
@@ -317,6 +334,109 @@ fn test_linear_resize_preserves_a_monotonic_ramp() {
                     pair[1]
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn test_downscale_output_buffer_matches_its_dimensions() {
+    // THE regression. `ColorImage::from_rgba_unmultiplied` asserts
+    // `size[0] * size[1] * 4 == rgba.len()`, and that assert fires on the
+    // *worker*, so a violation shows up as "decoder panicked" and lands the
+    // image in `failed` permanently.
+    //
+    // It was violated on the gamma-space path (linear-light downsampling off)
+    // only: `DynamicImage::resize` preserves the aspect ratio, so it returns an
+    // image smaller than the one we asked for (980x552 -> asked 300x168, got
+    // 298x168), and we were reporting our requested size next to its buffer.
+    //
+    // It became visible when previews were sized to the display area (11d778c)
+    // rather than a fixed 4096: small targets round much harder, so the clamp
+    // started actually shaving pixels. Hence "works on my machine / not on
+    // his / works again after I resized the window".
+    //
+    // So: both paths, many shapes, many targets, invariant must always hold.
+    fn mk(w: u32, h: u32) -> image_viewer::ImageData {
+        image_viewer::ImageData {
+            width: w,
+            height: h,
+            rgba: vec![200u8; (w as usize) * (h as usize) * 4],
+            load_time: std::time::Duration::ZERO,
+        }
+    }
+
+    // 980x552 is the real file from the report; the rest are aspect ratios that
+    // make the aspect-ratio-preserving clamp bite hardest.
+    let shapes = [
+        (980u32, 552u32),
+        (552, 980),
+        (1000, 3),
+        (3, 1000),
+        (16, 2000),
+        (2000, 16),
+        (33, 33),
+        (1, 97),
+        (97, 1),
+    ];
+    // 256 is the clamp floor the viewer applies to the display area; the rest
+    // are plausible panel sizes on different monitors and DPI scales.
+    let targets = [256u32, 300, 512, 640, 800, 980, 1024, 1920, 3840, 4096];
+
+    for linear in [true, false] {
+        for (w, h) in shapes {
+            let data = mk(w, h);
+            for target in targets {
+                let out = with_linear_resample(linear, || {
+                    image_viewer::downscale_image(&data, target)
+                });
+                let want = (out.width as usize) * (out.height as usize) * 4;
+                assert_eq!(
+                    out.rgba.len(),
+                    want,
+                    "linear={linear} {w}x{h} @ {target} -> {}x{}: buffer is {}, \
+                     ColorImage::from_rgba_unmultiplied would assert",
+                    out.width,
+                    out.height,
+                    out.rgba.len()
+                );
+                assert!(
+                    out.width > 0 && out.height > 0,
+                    "linear={linear} {w}x{h} @ {target} produced a zero dimension"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_preview_load_survives_gamma_space_resize() {
+    // End-to-end version of the same bug, through the real decode entry point
+    // the viewer uses, with linear-light downsampling off.
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("6.png");
+    // The reported file's exact dimensions.
+    let mut img = image::RgbaImage::new(980, 552);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        *px = image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]);
+    }
+    image::DynamicImage::ImageRgba8(img)
+        .save(&p)
+        .expect("write fixture");
+
+    for target in [256u32, 300, 512, 800, 980, 1024] {
+        let r = with_linear_resample(false, || {
+            image_viewer::load_image_preview_full(&p, target)
+        })
+        .unwrap_or_else(|e| panic!("{p:?} @ {target} failed to load: {e}"));
+        for (label, d) in [("preview", &r.preview), ("full", r.full.as_ref().unwrap())] {
+            assert_eq!(
+                d.rgba.len(),
+                (d.width as usize) * (d.height as usize) * 4,
+                "{label} of {p:?} @ {target}: {}x{} but {} bytes",
+                d.width,
+                d.height,
+                d.rgba.len()
+            );
         }
     }
 }

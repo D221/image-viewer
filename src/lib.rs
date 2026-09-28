@@ -783,7 +783,9 @@ pub fn set_linear_resample(on: bool) {
     LINEAR_RESAMPLE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn linear_resample_enabled() -> bool {
+/// Is linear-light downsampling on? Public so tests can save/restore it
+/// around assertions that only hold on one of the two filter paths.
+pub fn linear_resample_enabled() -> bool {
     LINEAR_RESAMPLE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -917,21 +919,47 @@ pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
         (data.width as f32 * scale).max(1.0) as u32,
         (data.height as f32 * scale).max(1.0) as u32,
     );
-    let rgba = if linear_resample_enabled() {
-        linear_resize(data, new_w, new_h)
+    let out = if linear_resample_enabled() {
+        ImageData {
+            width: new_w,
+            height: new_h,
+            rgba: linear_resize(data, new_w, new_h),
+            load_time: data.load_time, // keep original decode time
+        }
     } else {
         let img = DynamicImage::ImageRgba8(
             RgbaImage::from_raw(data.width, data.height, data.rgba.clone()).unwrap(),
         );
-        let resized = img.resize(new_w, new_h, image::imageops::FilterType::Triangle);
-        resized.to_rgba8().into_raw()
+        // **Report the size the library actually produced, not the size we asked
+        // for.** `DynamicImage::resize` runs `resize_dimensions(fill = false)`,
+        // which *preserves the aspect ratio* (`ratio = min(nw/w, nh/h)`), so it
+        // routinely hands back an image a pixel or two smaller than requested:
+        // 980x552 asked for 300x168 comes back 298x168. Pairing our own
+        // `new_w`/`new_h` with its shorter buffer violated the
+        // width*height*4 == rgba.len() invariant, and
+        // `ColorImage::from_rgba_unmultiplied` asserts on exactly that — so the
+        // worker panicked, the app reported "decoder panicked", and the image was
+        // then poisoned in `failed` for the rest of the session.
+        //
+        // It only showed up once previews were sized to the display area
+        // (11d778c) instead of a fixed 4096: a small target rounds much harder,
+        // so the aspect-ratio clamp started shaving pixels off. That is also why
+        // it looked machine- and window-dependent, and why only the gamma-space
+        // path failed — `linear_resize` writes its own exact buffer.
+        let resized = img
+            .resize(new_w, new_h, image::imageops::FilterType::Triangle)
+            .to_rgba8();
+        ImageData {
+            width: resized.width(),
+            height: resized.height(),
+            rgba: resized.into_raw(),
+            load_time: data.load_time, // keep original decode time
+        }
     };
-    ImageData {
-        width: new_w,
-        height: new_h,
-        rgba,
-        load_time: data.load_time, // keep original decode time
-    }
+    // Belt and braces: the downstream texture-size assert is unforgiving and a
+    // worker panic there is unrecoverable, so no downscale may escape without
+    // re-establishing the buffer/dimension invariant.
+    normalized(out)
 }
 
 /// `PERF_PHASE=1` prints a per-phase breakdown of `linear_resize`. Cached: this

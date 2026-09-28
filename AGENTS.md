@@ -74,7 +74,19 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - **`test-images/` is gitignored but `tests/standard.rs`, `tests/integration.rs`, and both bench files hardcode `test-images\booklet_front.jpg`.** In a fresh clone `cargo test --test standard` fails with NotFound until that file is supplied. `unit` + `property` tests are fixture-free (`tempfile`) — run those to verify logic-only changes.
 - **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings.
 - **Format handling is content-based, never extension-based.** Magic-byte sniffing picks the decoder (JPEG/PNG/WebP/GIF via the `image` crate; JXL via `jxl-oxide`; HEIC/HEIF/AVIF via the `heic` crate; misnamed files like a PNG saved as `.jpg` must keep loading — regression test exists). `image_dims_bytes` probes header dims per format.
-- **`normalized()` (lib.rs) guards every decode exit.** Decoders can return buffers that disagree with declared dims (truncated files, OneDrive hydration races); without normalization the epaint size assert panics a worker ("decoder panicked"). Keep it.
+- **`normalized()` (lib.rs) guards every decode exit** — and it must guard the
+  *downscale* exit too, not just decode. Two ways a buffer can disagree with its
+  declared dims, both of which abort a worker on
+  `ColorImage::from_rgba_unmultiplied`'s `assert_eq!(size[0]*size[1]*4, rgba.len())`:
+  a decoder that mis-reports its size (truncated files, OneDrive hydration
+  races), and **`DynamicImage::resize` silently returning a smaller image than
+  requested** (it goes through `resize_dimensions(fill = false)`, which
+  preserves the aspect ratio — 980x552 asked for 300x168 comes back 298x168).
+  Report the size the library actually produced, and keep the `normalized()`
+  wrap. This one presented as "decoder panicked" on `6.png`, permanently
+  poisoned the image in `failed`, and looked machine- and window-dependent only
+  because previews are sized to the display area, so a small target rounds hard
+  enough for the aspect-ratio clamp to bite.
 - **EXIF orientation is applied only to JPEGs.** For HEIF/AVIF the `heic` crate already applies container transforms (`irot`/`imir`); applying the EXIF tag on top would double-rotate. Some HEICs in test dumps have no EXIF at all (exiftool-verified) — that's correct, not a bug.
 
 ## Architecture (things that are easy to break)
