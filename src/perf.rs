@@ -33,7 +33,7 @@ pub fn boot() -> Option<std::time::Instant> {
 }
 
 /// Number of latency metrics (see [`METRICS`]).
-const N_METRICS: usize = 15;
+const N_METRICS: usize = 16;
 /// Samples retained per metric.
 const CAP: usize = 256;
 
@@ -54,6 +54,12 @@ pub const JOB_PREVIEW_MS: usize = 11;
 pub const JOB_FULL_MS: usize = 12;
 pub const JOB_THUMB_MS: usize = 13;
 pub const JOB_EXIF_MS: usize = 14;
+/// Wall-clock gap between consecutive frames. The *spread* is the signal, not
+/// the value: a tight cluster around a constant period means something outside
+/// the app is pacing presentation (vsync / compositor / remote display), while
+/// a wide spread means the app is the one asking for frames as fast as it can
+/// build them. Those need opposite fixes.
+pub const FRAME_INTERVAL_US: usize = 15;
 
 const NAMES: [&str; N_METRICS] = [
     "startup -> first frame",
@@ -71,6 +77,7 @@ const NAMES: [&str; N_METRICS] = [
     "worker: full decode",
     "worker: thumbnail decode",
     "worker: exif",
+    "frame interval",
 ];
 
 /// Cheap counters, always recorded.
@@ -87,8 +94,12 @@ pub const C_STALL: usize = 8; // times an image took absurdly long to appear
 /// denominator for "CPU per frame": a config can look cheap simply by
 /// repainting less often.
 pub const C_FRAMES: usize = 9;
+/// Frames that arrived carrying winit events. Against `C_FRAMES` this
+/// separates "the user is driving" from "something is asking for frames by
+/// itself" — the question to ask before concluding the app burns CPU idly.
+pub const C_FRAMES_WITH_EVENTS: usize = 10;
 
-const N_COUNTERS: usize = 10;
+const N_COUNTERS: usize = 11;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
@@ -100,6 +111,8 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "worker decode panics",
     "stalls (>5s to first pixels)",
     "frames built",
+
+    "frames with input events",
 ];
 
 struct Metric {
@@ -144,6 +157,44 @@ impl Metric {
 static METRIC: [Metric; N_METRICS] = [const { Metric::new() }; N_METRICS];
 static COUNTERS: [AtomicU64; N_COUNTERS] = [const { AtomicU64::new(0) }; N_COUNTERS];
 static ENABLED: AtomicU32 = AtomicU32::new(0);
+
+/// `file:line` of every `request_repaint` egui saw, counted.
+///
+/// egui tags each repaint request with the call site that made it, so this
+/// answers "why is this app building frames when nothing is happening?" without
+/// guessing. It is how the two repaint sources in this app were told apart: the
+/// 2 s folder rescan, and GIF playback.
+///
+/// Only collected when sampling is enabled — it allocates and formats a string
+/// per request, which is not something to pay for on a frame hot path.
+static REPAINT_CAUSES: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+    std::sync::Mutex::new(None);
+
+/// Tally one repaint request. Pass egui's `RepaintCause` straight through.
+pub fn count_repaint_cause(cause: &egui::RepaintCause) {
+    if !enabled() {
+        return;
+    }
+    let mut guard = REPAINT_CAUSES.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    let key = if cause.reason.is_empty() {
+        format!("{}:{}", cause.file, cause.line)
+    } else {
+        format!("{}:{} ({})", cause.file, cause.line, cause.reason)
+    };
+    *map.entry(key).or_insert(0) += 1;
+}
+
+/// The repaint tallies, most-requested first. Empty unless sampling is on.
+pub fn repaint_causes() -> Vec<(String, u64)> {
+    let guard = REPAINT_CAUSES.lock().unwrap();
+    let Some(map) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let mut v: Vec<(String, u64)> = map.iter().map(|(k, n)| (k.clone(), *n)).collect();
+    v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    v
+}
 
 /// Turn latency sampling on/off. Off by default; `--perf` or `PERF=1` turns it
 /// on. Counters are always recorded regardless.
@@ -239,6 +290,13 @@ pub fn report() -> String {
             COUNTER_NAMES[i],
             c.load(Relaxed)
         ));
+    }
+    let causes = repaint_causes();
+    if !causes.is_empty() {
+        out.push_str("\n  who asked for a repaint (egui call site, most requests first)\n");
+        for (k, n) in causes.iter().take(12) {
+            out.push_str(&format!("    {:<8} {}\n", n, k));
+        }
     }
     out
 }

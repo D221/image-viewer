@@ -839,6 +839,8 @@ struct MyApp {
     lat: Latency,
     /// First frame's timestamp, for startup latency.
     t_boot: Option<Instant>,
+    /// Start of the previous frame, for the frame-interval metric.
+    t_prev_frame: Option<Instant>,
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
@@ -867,8 +869,10 @@ impl MyApp {
         let config_path = Config::default_path();
         let config = Config::load(&config_path);
 
-        // Optional CLI argument: a file or a folder ("Open with…").
-        let arg = std::env::args_os().nth(1).map(PathBuf::from);
+        // Optional CLI argument: a file or a folder ("Open with…"). Must be the
+        // first *non-flag* argument: `nth(1)` would take `--perf` as the path
+        // and silently open the persisted folder instead.
+        let arg = image_viewer::path_arg(std::env::args().skip(1));
         let explicit_file = arg.as_ref().is_some_and(|a| a.is_file());
         // An archive argument is extracted up front and opened as its temp dir.
         let mut zip_archive: Option<PathBuf> = None;
@@ -980,6 +984,7 @@ impl MyApp {
             grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
             t_boot: perf::boot(),
+            t_prev_frame: None,
             pending_advance: None,
             zip_archive,
             zip_temp,
@@ -2475,6 +2480,16 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
         // starts, so this is where "first visible pixels" is honestly known.
         self.lat.commit_frame();
         perf::count(perf::C_FRAMES, 1);
+        // Frames that arrived carrying winit events. Compared against
+        // `C_FRAMES` this separates "the user is driving" from "something is
+        // asking for frames by itself", which is the question you have to ask
+        // before concluding the app is burning CPU.
+        if ctx.input(|i| !i.events.is_empty()) {
+            perf::count(perf::C_FRAMES_WITH_EVENTS, 1);
+        }
+        if let Some(prev) = self.t_prev_frame.replace(Instant::now()) {
+            perf::record_since(perf::FRAME_INTERVAL_US, prev);
+        }
         if let Some(t) = self.t_boot.take() {
             perf::record_since(perf::STARTUP_TO_FIRST_FRAME, t);
         }
@@ -3229,5 +3244,12 @@ impl eframe::App for MyApp {
             .show(ui, |ui| {
                 self.central(ui);
             });
+
+        // Who is asking for these repaints? egui tags every request with the
+        // call site, so this names the culprit instead of guessing. No-op
+        // unless sampling is on.
+        for c in ctx.repaint_causes() {
+            perf::count_repaint_cause(&c);
+        }
     }
 }

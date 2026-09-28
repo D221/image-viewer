@@ -949,6 +949,49 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
 }
 
 #[test]
+fn test_path_arg_skips_flags() {
+    use image_viewer::path_arg;
+
+    // The plain case: one positional path.
+    assert_eq!(
+        path_arg(["C:\\photos"]).as_deref(),
+        Some(std::path::Path::new("C:\\photos"))
+    );
+
+    // Regression: `--perf` is a flag, not a path. `args().nth(1)` took it as one,
+    // it matched neither file nor dir, and the app silently fell back to the
+    // persisted folder. That is the exact invocation AGENTS.md documents
+    // (`cargo run -- --perf <folder>`), and it produced a perf report for the
+    // *wrong folder* — which is how a wrong performance conclusion survived
+    // long enough to be committed.
+    assert_eq!(
+        path_arg(["--perf", "C:\\photos"]).as_deref(),
+        Some(std::path::Path::new("C:\\photos"))
+    );
+    assert_eq!(
+        path_arg(["--perf", "C:\\photos", "extra"]).as_deref(),
+        Some(std::path::Path::new("C:\\photos"))
+    );
+    assert_eq!(
+        path_arg(["--register", "--perf", "C:\\photos"]).as_deref(),
+        Some(std::path::Path::new("C:\\photos"))
+    );
+
+    // A flag with no path at all is None, not a bogus path.
+    assert_eq!(path_arg(["--perf"]), None);
+    assert_eq!(path_arg(Vec::<String>::new()), None);
+
+    // A bare flag is still None, so the resume path is taken.
+    assert_eq!(path_arg(["--unregister"]), None);
+
+    // A path that merely contains a dash is not a flag.
+    assert_eq!(
+        path_arg(["--perf", "C:\\my-photos\\a-b.jpg"]).as_deref(),
+        Some(std::path::Path::new("C:\\my-photos\\a-b.jpg"))
+    );
+}
+
+#[test]
 fn test_fit_scale_no_upscale_centres_thumbnails() {
     use image_viewer::fit_scale_no_upscale;
     let area = (150.0_f32, 150.0_f32);

@@ -194,6 +194,29 @@ pub fn grid_cols(panel_w: f32) -> usize {
     ((panel_w / (GRID_CELL + 8.0)).floor() as usize).clamp(1, 24)
 }
 
+/// The file or folder to open, taken from the command line: the first argument
+/// that is not a flag.
+///
+/// This exists because taking `args().nth(1)` is wrong the moment a flag can
+/// come first, and it fails *silently and expensively*: `--perf` is not a path,
+/// so it fell through to the persisted/default folder and the app quietly
+/// measured or displayed the wrong thing. That cost a wrong performance
+/// conclusion before it was caught, because `--perf <folder>` is the exact
+/// invocation AGENTS.md documents.
+///
+/// An argument is treated as a flag when it starts with `-`. On Windows that is
+/// safe for real paths; if it ever is not, `.\-name.jpg` still works.
+pub fn path_arg<I, S>(args: I) -> Option<std::path::PathBuf>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .map(|s| s.as_ref().to_string())
+        .find(|s| !s.starts_with('-') && !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 /// Scale factor that fits an image of `natural` size into an `area`, keeping
 /// the aspect ratio and never upscaling (1.0 means "draw at native size").
 ///
