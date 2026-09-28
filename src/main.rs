@@ -2474,6 +2474,7 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
         // The previous frame has been presented by the time the next one
         // starts, so this is where "first visible pixels" is honestly known.
         self.lat.commit_frame();
+        perf::count(perf::C_FRAMES, 1);
         if let Some(t) = self.t_boot.take() {
             perf::record_since(perf::STARTUP_TO_FIRST_FRAME, t);
         }

@@ -83,8 +83,12 @@ pub const C_PREVIEW_REUSED: usize = 5; // previews served without a new decode
 pub const C_RESIZE_REDECODES: usize = 6; // resize-driven re-decodes of stale textures
 pub const C_DECODE_PANICS: usize = 7; // worker panics caught (usually OOM)
 pub const C_STALL: usize = 8; // times an image took absurdly long to appear
+/// Frames actually built. Repaints are on demand, so this is also the honest
+/// denominator for "CPU per frame": a config can look cheap simply by
+/// repainting less often.
+pub const C_FRAMES: usize = 9;
 
-const N_COUNTERS: usize = 9;
+const N_COUNTERS: usize = 10;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
@@ -95,6 +99,7 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "resize-driven re-decodes",
     "worker decode panics",
     "stalls (>5s to first pixels)",
+    "frames built",
 ];
 
 struct Metric {
