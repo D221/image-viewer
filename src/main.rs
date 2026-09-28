@@ -25,10 +25,9 @@ mod fileassoc;
 use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use nom_exif::{read_exif, ExifTag};
 use std::collections::{HashMap, HashSet};
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use image_viewer::perf;
@@ -63,11 +62,8 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Highest zoom, in screen points per source pixel.
 const MAX_SCALE: f32 = 32.0;
 
-// Job priorities (lower runs first).
-const PRIO_CURRENT_PREVIEW: u32 = 0;
-const PRIO_CURRENT_EXIF: u32 = 5;
-const PRIO_FULL: u32 = 15;
-const PRIO_THUMB: u32 = 45;
+// Job priorities (lower runs first) live in the library, next to `plan_jobs`,
+// so the planner and its priorities cannot drift apart.
 
 fn main() -> eframe::Result<()> {
     // CLI: `--register` / `--unregister` manage file associations and exit;
@@ -195,14 +191,14 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
 // ---------------------------------------------------------------------------
 // Background loader: a tiny priority queue served by a few worker threads
 // ---------------------------------------------------------------------------
+//
+// `Kind`, `Job` and `Loader` live in the library (see `lib.rs`, "Load
+// scheduling") so the queue can be tested directly. The stranding bug that
+// emptied this queue lived in the interaction between the plan and the queue,
+// and neither half could be reached from a test while it lived in a binary.
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Kind {
-    Preview,
-    Full,
-    Exif,
-    Thumb,
-}
+use image_viewer::{Job, Kind, Loader, PRIO_THUMB_BASE};
+const PRIO_THUMB: u32 = PRIO_THUMB_BASE;
 
 /// Long side of grid thumbnails.
 const THUMB_DIM: u32 = 256;
@@ -212,20 +208,6 @@ const THUMB_CACHE_CAP: usize = 512;
 /// placeholder). Enough for transient failures, bounded so a corrupt file
 /// can't keep the worker pool busy.
 const THUMB_TRIES: u8 = 3;
-
-struct Job {
-    path: PathBuf,
-    kind: Kind,
-    prio: u32,
-    /// Display target long side in physical pixels (preview jobs only).
-    target_dim: u32,
-}
-
-#[derive(Default)]
-struct QueueState {
-    jobs: Vec<Job>,
-    busy: HashSet<(PathBuf, Kind)>,
-}
 
 /// File name as a lossy string, the key `last_by_folder` resume stores.
 fn file_name_of(p: &Path) -> String {
@@ -413,116 +395,27 @@ enum Msg {
     },
 }
 
-struct Loader {
-    shared: Arc<(Mutex<QueueState>, Condvar)>,
+/// Start the worker pool for this app: real decoding, real panic capture, and
+/// a repaint request when something arrives.
+fn new_loader(ctx: &Context, tx: Sender<Msg>) -> image_viewer::Loader {
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 4);
+    let wake_ctx = ctx.clone();
+    image_viewer::Loader::spawn(
+        workers,
+        tx,
+        run_job,
+        fail_msg,
+        move || wake_ctx.request_repaint(),
+    )
 }
 
-impl Loader {
-    /// Queue a job without dropping existing queued work (used by the grid for
-    /// on-demand thumbnail requests). A job that is already queued or in
-    /// flight is left alone — this dedup is the *only* one the grid needs.
-    ///
-    /// Note `push` does not survive `replace()`: `schedule()` calls `replace()`
-    /// to drop stale work, which throws queued thumbnails away mid-grid. The
-    /// grid therefore re-requests every frame instead of keeping a
-    /// "requested" set, which could desync from the queue and strand a cell as
-    /// a permanent placeholder.
-    fn push(&self, job: Job) {
-        let (lock, cv) = &*self.shared;
-        let mut q = lock.lock().unwrap();
-        if q.busy.contains(&(job.path.clone(), job.kind)) {
-            return;
-        }
-        if q.jobs.iter().any(|j| j.path == job.path && j.kind == job.kind) {
-            return;
-        }
-        q.jobs.push(job);
-        cv.notify_all();
-    }
-
-    fn new(ctx: &Context, tx: Sender<Msg>) -> Self {
-        let shared: Arc<(Mutex<QueueState>, Condvar)> =
-            Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
-        let workers = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(2)
-            .clamp(2, 4);
-
-        for _ in 0..workers {
-            let shared = shared.clone();
-            let tx = tx.clone();
-            let ctx = ctx.clone();
-            std::thread::spawn(move || loop {
-                let job = {
-                    let (lock, cv) = &*shared;
-                    let mut q = lock.lock().unwrap();
-                    loop {
-                        let best = q
-                            .jobs
-                            .iter()
-                            .enumerate()
-                            .min_by_key(|(_, j)| j.prio)
-                            .map(|(i, _)| i);
-                        if let Some(i) = best {
-                            let job = q.jobs.swap_remove(i);
-                            q.busy.insert((job.path.clone(), job.kind));
-                            break job;
-                        }
-                        q = cv.wait(q).unwrap();
-                    }
-                };
-
-                // A decoder panic on a corrupt file must not kill the worker.
-                let msg = match std::panic::catch_unwind(AssertUnwindSafe(|| run_job(&job))) {
-                    Ok(m) => m,
-                    Err(payload) => {
-                        // Keep the message: a bare "decoder panicked" hid the
-                        // most likely cause (allocation failure under memory
-                        // pressure) behind an unreproducible symptom.
-                        perf::count(perf::C_DECODE_PANICS, 1);
-                        let detail = payload
-                            .downcast_ref::<&str>()
-                            .map(|s| (*s).to_string())
-                            .or_else(|| payload.downcast_ref::<String>().cloned())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        fail_msg(&job, format!("decoder panicked: {detail}"))
-                    }
-                };
-
-                let alive = tx.send(msg).is_ok();
-                shared.0.lock().unwrap().busy.remove(&(job.path, job.kind));
-                if !alive {
-                    return; // UI is gone
-                }
-                ctx.request_repaint();
-            });
-        }
-        Self { shared }
-    }
-
-    /// Replace everything that is still *queued* with `jobs` (in-flight work is left
-    /// alone and de-duplicated). This is what makes stale requests disappear when
-    /// the user navigates quickly.
-    fn replace(&self, jobs: Vec<Job>) {
-        let (lock, cv) = &*self.shared;
-        let mut q = lock.lock().unwrap();
-        let busy = q.busy.clone();
-        let before = q.jobs.len();
-        q.jobs = jobs
-            .into_iter()
-            .filter(|j| !busy.contains(&(j.path.clone(), j.kind)))
-            .collect();
-        // Coalescing: how much queued work a navigation threw away. High values
-        // mean the user outran the decoder, which is the thing to tune.
-        if before > q.jobs.len() {
-            perf::count(perf::C_JOBS_DROPPED, (before - q.jobs.len()) as u64);
-        }
-        cv.notify_all();
-    }
-}
-
-fn fail_msg(job: &Job, err: String) -> Msg {
-    match job.kind {
+/// A failure is still a *delivered* result: it gets reported and remembered,
+/// so the loader must not treat it as work left undone.
+fn fail_msg(job: &Job, err: String) -> (Msg, bool) {
+    let msg = match job.kind {
         Kind::Preview => Msg::Preview {
             path: job.path.clone(),
             result: Err(err),
@@ -539,12 +432,17 @@ fn fail_msg(job: &Job, err: String) -> Msg {
             path: job.path.clone(),
             info: None,
         },
-    }
+    };
+    (msg, true)
 }
 
-fn run_job(job: &Job) -> Msg {
+/// Decode one job. Always `delivered = true` today: every job runs to
+/// completion, so there is no "gave up without a result" case yet. That is the
+/// hook reintroduced cancellation will use, and the reason the loader re-queues
+/// a wanted job on abandonment rather than on completion.
+fn run_job(job: &Job) -> (Msg, bool) {
     let path = job.path.clone();
-    match job.kind {
+    let msg = match job.kind {
         Kind::Preview => Msg::Preview {
             result: decode_preview(&path, job.target_dim),
             path,
@@ -563,7 +461,8 @@ fn run_job(job: &Job) -> Msg {
             info: extract_exif(&path),
             path,
         },
-    }
+    };
+    (msg, true)
 }
 
 /// Decode a preview sized for the current display area (in physical pixels).
@@ -973,7 +872,7 @@ impl MyApp {
         }
 
         let (tx, rx) = mpsc::channel();
-        let loader = Loader::new(ctx, tx);
+        let loader = new_loader(ctx, tx);
 
         // Taken before `gallery` is moved into the struct below.
         let all_files = gallery.files.clone();
@@ -1162,20 +1061,6 @@ impl MyApp {
     }
 
     fn schedule(&mut self) {
-        let mut jobs = Vec::new();
-        let files = &self.gallery.files;
-        let n = files.len();
-        if n == 0 {
-            self.loader.replace(jobs);
-            return;
-        }
-        let i = self.gallery.index.min(n - 1);
-        let cur = &files[i];
-
-        let need_preview = |p: &PathBuf| {
-            !self.previews.contains_key(p) && !self.failed.contains(&(p.clone(), Kind::Preview))
-        };
-
         // Preview texture target: the display area in physical pixels, so the
         // texture is exactly as sharp as the screen can show.
         let target_dim = self
@@ -1184,48 +1069,24 @@ impl MyApp {
             .unwrap_or(PREVIEW_TEXTURE_DIM)
             .clamp(256, PREVIEW_TEXTURE_DIM);
 
-        if need_preview(cur) {
-            jobs.push(Job {
-                path: cur.clone(),
-                kind: Kind::Preview,
-                prio: PRIO_CURRENT_PREVIEW,
+        let cached: HashSet<PathBuf> = self.previews.keys().cloned().collect();
+        let i = self.gallery.index.min(self.gallery.files.len().saturating_sub(1));
+        let cur = self.gallery.files.get(i).cloned();
+        // The plan is computed by the library so it can be tested; all this does
+        // is describe the current state to it.
+        let jobs = match &cur {
+            None => Vec::new(),
+            Some(cur) => image_viewer::plan_jobs(&image_viewer::Plan {
+                files: &self.gallery.files,
+                index: i,
+                cached: &cached,
+                failed: &self.failed,
+                wants_exif: self.exif_loading,
+                wants_full: self.full_due.is_none() && self.needs_full(cur),
                 target_dim,
-            });
-        }
-        if self.exif_loading {
-            jobs.push(Job {
-                path: cur.clone(),
-                kind: Kind::Exif,
-                prio: PRIO_CURRENT_EXIF,
-                target_dim: 0,
-            });
-        }
-        if self.full_due.is_none() && self.needs_full(cur) {
-            jobs.push(Job {
-                path: cur.clone(),
-                kind: Kind::Full,
-                prio: PRIO_FULL,
-                target_dim: 0,
-            });
-        }
-
-        // Neighbours: "next" slightly ahead of "previous" at each distance.
-        let mut seen: HashSet<usize> = HashSet::from([i]);
-        for d in 1..=PRELOAD_RADIUS {
-            for (idx, prio) in [
-                ((i + d) % n, 10 + 2 * d as u32),
-                ((i + n - d % n) % n, 11 + 2 * d as u32),
-            ] {
-                if seen.insert(idx) && need_preview(&files[idx]) {
-                    jobs.push(Job {
-                        path: files[idx].clone(),
-                        kind: Kind::Preview,
-                        prio,
-                        target_dim,
-                    });
-                }
-            }
-        }
+                radius: PRELOAD_RADIUS,
+            }),
+        };
         self.loader.replace(jobs);
     }
 

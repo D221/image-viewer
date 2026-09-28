@@ -401,6 +401,340 @@ pub struct ImageData {
 }
 
 // ---------------------------------------------------------------------------
+// Load scheduling: what to decode, and the worker pool that decodes it
+// ---------------------------------------------------------------------------
+//
+// This is the machinery that caused "random images never load", so it lives
+// here rather than in `main.rs` where it cannot be tested. `main.rs` keeps the
+// egui shell (textures, panels) and hands this module a decode function; a test
+// hands it a trivial one and can drive the queue through any interleaving.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, Mutex};
+
+/// What a decode job is for.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Kind {
+    Preview,
+    Full,
+    Exif,
+    Thumb,
+}
+
+/// One unit of decoding work.
+#[derive(Clone, Debug)]
+pub struct Job {
+    pub path: PathBuf,
+    pub kind: Kind,
+    /// Lower runs first. The current image is 0 and every prefetch is >= 10, so
+    /// prefetch can never starve it.
+    pub prio: u32,
+    /// Display target long side in physical pixels (preview jobs only).
+    pub target_dim: u32,
+}
+
+/// Shared queue state. Public only so tests can assert on it.
+#[derive(Default)]
+pub struct QueueState {
+    pub jobs: Vec<Job>,
+    pub busy: HashSet<(PathBuf, Kind)>,
+    /// The viewer's current desired set, as of the last `replace`, held *whole*
+    /// so a re-queue can preserve priority and target size.
+    ///
+    /// This is the fix for the stranding bug, and getting it right took two
+    /// attempts. The naive version remembered only those wanted jobs that
+    /// happened to be *running* at the instant `replace` was called, which is
+    /// not enough: a job that was merely queued then, and abandoned later, was
+    /// still lost. The only correct question on a job finishing is "is this
+    /// still wanted?", not "was this wanted and running a moment ago?".
+    ///
+    /// The earlier bug was `replace` filtering wanted-but-busy jobs out of the
+    /// queue and forgetting them. That is harmless while every job runs to
+    /// completion — the running one delivers. It becomes fatal as soon as a job
+    /// can give up: the re-request is already discarded, and `schedule` only
+    /// re-runs on a step, the current image's preview arriving, a dwell expiry
+    /// or a resize, so a stranded *neighbour* is never asked for again.
+    wanted: HashMap<(PathBuf, Kind), Job>,
+}
+
+/// Priority queue served by a small pool of worker threads.
+pub struct Loader {
+    shared: Arc<(Mutex<QueueState>, Condvar)>,
+}
+
+impl Loader {
+    /// Start the pool.
+    ///
+    /// `run` does the work for one job and returns `(message, delivered)`.
+    /// `delivered` is false only when the job gave up *without producing a
+    /// result* — today that never happens, and it is the hook that makes
+    /// abandoning work safe: a job that gave up is re-queued if it was still
+    /// wanted, and a job that delivered is not re-run.
+    ///
+    /// `panic_msg` turns a caught panic back into a message so a corrupt file
+    /// cannot kill a worker, and keeps the payload — a bare "decoder panicked"
+    /// once hid OOM, the most likely cause, behind an unreproducible symptom.
+    /// `wake` is called on the thread that received a result, to ask for a
+    /// repaint.
+    pub fn spawn<M, R, P, W>(
+        workers: usize,
+        tx: Sender<M>,
+        run: R,
+        panic_msg: P,
+        wake: W,
+    ) -> Self
+    where
+        M: Send + 'static,
+        R: Fn(&Job) -> (M, bool) + Send + Sync + 'static,
+        P: Fn(&Job, String) -> (M, bool) + Send + Sync + 'static,
+        W: Fn() + Send + Sync + 'static,
+    {
+        let shared: Arc<(Mutex<QueueState>, Condvar)> =
+            Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
+        let run = Arc::new(run);
+        let panic_msg = Arc::new(panic_msg);
+        let wake = Arc::new(wake);
+        for _ in 0..workers.max(1) {
+            let shared = shared.clone();
+            let tx = tx.clone();
+            let run = run.clone();
+            let panic_msg = panic_msg.clone();
+            let wake = wake.clone();
+            std::thread::spawn(move || loop {
+                let job = {
+                    let (lock, cv) = &*shared;
+                    let mut q = lock.lock().unwrap();
+                    loop {
+                        let best = q
+                            .jobs
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, j)| j.prio)
+                            .map(|(i, _)| i);
+                        if let Some(i) = best {
+                            let job = q.jobs.swap_remove(i);
+                            q.busy.insert((job.path.clone(), job.kind));
+                            break job;
+                        }
+                        q = cv.wait(q).unwrap();
+                    }
+                };
+
+                let (msg, delivered) =
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&job))) {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            perf::count(perf::C_DECODE_PANICS, 1);
+                            let detail = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            // A panicking decode is still a *delivered* failure:
+                            // it is reported and remembered, not retried here.
+                            panic_msg(&job, format!("decoder panicked: {detail}"))
+                        }
+                    };
+
+                let alive = tx.send(msg).is_ok();
+                // Free the slot, then honour anything still waiting on it.
+                let (lock, cv) = &*shared;
+                let mut q = lock.lock().unwrap();
+                let key = (job.path.clone(), job.kind);
+                q.busy.remove(&key);
+                if !delivered {
+                    // Gave up without producing anything. If it is still wanted,
+                    // ask again — this is the whole safety property, and it is
+                    // why the wanted set is kept rather than inferred.
+                    if let Some(wanted) = q.wanted.get(&key).cloned() {
+                        if !q.jobs.iter().any(|j| (j.path.clone(), j.kind) == key) {
+                            q.jobs.push(wanted);
+                            cv.notify_all();
+                        }
+                    }
+                }
+                drop(q);
+                if !alive {
+                    return; // UI is gone
+                }
+                wake();
+            });
+        }
+        Self { shared }
+    }
+
+    /// Queue a job without disturbing existing queued work (the grid's
+    /// on-demand thumbnail requests). Already queued or already running is
+    /// left alone.
+    pub fn push(&self, job: Job) {
+        let (lock, cv) = &*self.shared;
+        let mut q = lock.lock().unwrap();
+        if q.busy.contains(&(job.path.clone(), job.kind)) {
+            return;
+        }
+        if q.jobs.iter().any(|j| j.path == job.path && j.kind == job.kind) {
+            return;
+        }
+        q.jobs.push(job);
+        cv.notify_all();
+    }
+
+    /// Make the queued work match `jobs` exactly. In-flight work is not
+    /// disturbed; a wanted job that is already running is remembered in
+    /// `pending` and re-queued when it finishes, so nothing wanted is lost.
+    pub fn replace(&self, jobs: Vec<Job>) {
+        let (lock, cv) = &*self.shared;
+        let mut q = lock.lock().unwrap();
+        let before = q.jobs.len();
+        q.wanted.clear();
+        let mut keep = Vec::with_capacity(jobs.len());
+        for j in jobs {
+            let key = (j.path.clone(), j.kind);
+            // `wanted` is recorded either way, and is what makes losing the job
+            // safe: a job that is already running is not queued twice, and a job
+            // that is queued can still be re-queued if it gives up later.
+            let running = q.busy.contains(&key);
+            q.wanted.insert(key, j.clone());
+            if !running {
+                keep.push(j);
+            }
+        }
+        q.jobs = keep;
+        // Coalescing: how much queued work a navigation threw away. High values
+        // mean the user outran the decoder, which is the thing to tune.
+        if before > q.jobs.len() {
+            perf::count(perf::C_JOBS_DROPPED, (before - q.jobs.len()) as u64);
+        }
+        cv.notify_all();
+    }
+
+    /// Queued + running, for tests and diagnostics.
+    pub fn outstanding(&self) -> usize {
+        let q = self.shared.0.lock().unwrap();
+        q.jobs.len() + q.busy.len()
+    }
+
+    /// Jobs waiting to be picked up.
+    pub fn queued(&self) -> usize {
+        self.shared.0.lock().unwrap().jobs.len()
+    }
+
+    /// Jobs a worker is currently running.
+    pub fn running(&self) -> usize {
+        self.shared.0.lock().unwrap().busy.len()
+    }
+
+    /// Wanted jobs that are neither queued nor running. Once the loader is idle
+    /// this must be zero: non-zero means the viewer wants a picture that nobody
+    /// is going to fetch, which is the "random images never load" failure.
+    pub fn wanted_but_idle(&self) -> usize {
+        let q = self.shared.0.lock().unwrap();
+        q.wanted
+            .keys()
+            .filter(|k| {
+                !q.busy.contains(*k)
+                    && !q.jobs.iter().any(|j| (j.path.clone(), j.kind) == **k)
+            })
+            .count()
+    }
+}
+
+/// Inputs to [`plan_jobs`]. Everything the planner needs, and nothing it does
+/// not, so the plan is a pure function of observable state.
+pub struct Plan<'a> {
+    pub files: &'a [PathBuf],
+    pub index: usize,
+    /// Paths that already have a cached preview.
+    pub cached: &'a HashSet<PathBuf>,
+    /// `(path, kind)` pairs known to be undecodable this session.
+    pub failed: &'a HashSet<(PathBuf, Kind)>,
+    /// Exif for the current image has not been fetched yet.
+    pub wants_exif: bool,
+    /// The current image still needs a full-resolution decode.
+    pub wants_full: bool,
+    /// Preview texture long side, physical pixels.
+    pub target_dim: u32,
+    pub radius: usize,
+}
+
+/// Priority of the current image's preview. Every prefetch is >= 10, so
+/// prefetch can never starve it.
+pub const PRIO_CURRENT_PREVIEW: u32 = 0;
+/// Priority of the current image's full-resolution decode.
+pub const PRIO_FULL: u32 = 15;
+/// Priority of the current image's exif read.
+pub const PRIO_CURRENT_EXIF: u32 = 5;
+/// Grid thumbnail priorities start here.
+pub const PRIO_THUMB_BASE: u32 = 45;
+
+/// The work the viewer wants for the current position, as a job list.
+///
+/// Pure on purpose: the stranding bug lived in the interaction between this
+/// function and a queue that discarded wanted-but-busy jobs, and neither half
+/// was testable. Now the plan can be asserted directly.
+///
+/// "Next" is queued slightly ahead of "previous" at each distance, so a step
+/// forward is favoured — that is the fixed asymmetric window, not
+/// direction-aware, which is a later change and must be measured separately.
+pub fn plan_jobs(p: &Plan) -> Vec<Job> {
+    let mut jobs = Vec::new();
+    let n = p.files.len();
+    if n == 0 {
+        return jobs;
+    }
+    let i = p.index.min(n - 1);
+    let cur = &p.files[i];
+
+    let need_preview = |path: &PathBuf| {
+        !p.cached.contains(path) && !p.failed.contains(&(path.clone(), Kind::Preview))
+    };
+
+    if need_preview(cur) {
+        jobs.push(Job {
+            path: cur.clone(),
+            kind: Kind::Preview,
+            prio: PRIO_CURRENT_PREVIEW,
+            target_dim: p.target_dim,
+        });
+    }
+    if p.wants_exif {
+        jobs.push(Job {
+            path: cur.clone(),
+            kind: Kind::Exif,
+            prio: PRIO_CURRENT_EXIF,
+            target_dim: 0,
+        });
+    }
+    if p.wants_full {
+        jobs.push(Job {
+            path: cur.clone(),
+            kind: Kind::Full,
+            prio: PRIO_FULL,
+            target_dim: 0,
+        });
+    }
+
+    let mut seen: HashSet<usize> = HashSet::from([i]);
+    for d in 1..=p.radius {
+        for (idx, prio) in [
+            ((i + d) % n, 10 + 2 * d as u32),
+            ((i + n - d % n) % n, 11 + 2 * d as u32),
+        ] {
+            if seen.insert(idx) && need_preview(&p.files[idx]) {
+                jobs.push(Job {
+                    path: p.files[idx].clone(),
+                    kind: Kind::Preview,
+                    prio,
+                    target_dim: p.target_dim,
+                });
+            }
+        }
+    }
+    jobs
+}
+
+// ---------------------------------------------------------------------------
 // Colour profile detection (read-only, no transformation)
 // ---------------------------------------------------------------------------
 //

@@ -149,6 +149,32 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   only difference worth noting: 0.36 draws at 60 fps (vsync-locked) where 0.27
   drew at 30, i.e. two draw calls per animation frame. That is a small waste,
   not a defect, and being vsync-locked is arguably the better behaviour.
+- **The loader and the job plan live in `lib.rs`, and `tests/flip_through.rs`
+  drives them.** They used to be in `main.rs`, which is why the stranding bug
+  went uncaught. `Loader` is generic over its message type (it takes a `run`
+  closure and a `panic_msg` closure), `plan_jobs` is a pure function of a `Plan`,
+  and job priorities live beside the planner so they cannot drift.
+- **The queue keeps a `wanted` set, and that is what makes abandoning work.**
+  `replace()` records what the viewer wants; if a job then finishes *without
+  producing a result* and is still wanted, it is re-queued. Do not "simplify"
+  this to re-queue on completion — a job that already delivered would be decoded
+  forever. Do not reimplement it by remembering only the wanted-but-*running*
+  jobs either: that was the first attempt and it is wrong, because a job that
+  was merely *queued* at the time and abandoned later is then lost. The only
+  correct question on finish is "is this still wanted?".
+- **Why that matters here:** `schedule()` only re-runs on a step, when the
+  *current* image's preview arrives, on a dwell expiry, or on a resize. A
+  stranded *neighbour* triggers none of those, so it stays stranded for the
+  session — the "random images never load" report. `tests/flip_through.rs`
+  pins this: it ends with a single final `replace` while a wanted job is in
+  flight and then never prompts again, and asserts the plan for the current
+  position is empty. Reinstating the old `replace` makes it fail; note that
+  looping until convergence instead of stopping makes it *pass*, so do not
+  "fix" a failure by adding re-asks.
+- **A result is sent before its worker frees the busy slot.** So a queue that
+  looks idle can still have an unread message, and a test that checks state
+  after waiting for idle must drain once more or it will report a strand for a
+  picture that was in fact delivered. This cost two false failures.
 - **`--perf <folder>` used to open the wrong folder, silently.** `MyApp::new`
   took the path as `args_os().nth(1)` while `main` scanned the whole list for
   flags, so `--perf` was taken as the path, matched nothing, and the app fell
