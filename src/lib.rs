@@ -136,8 +136,16 @@ impl Config {
 }
 
 /// Supported image extensions for gallery scanning.
-pub const SUPPORTED_EXTENSIONS: [&str; 9] = [
-    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif",
+///
+/// Purely a *listing* filter — decoding is chosen from the file's magic bytes
+/// (`is_jpeg_bytes` and friends), so a misnamed file still opens whatever it
+/// really is. Anything missed here simply never appears in a folder scan; it
+/// can still be opened by passing the path on the command line.
+pub const SUPPORTED_EXTENSIONS: [&str; 15] = [
+    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", // 9
+    "tif", "tiff", // TIFF
+    "bmp", "dib", // Windows bitmap
+    "ico", "cur", // Windows icon / cursor (one container format)
 ];
 
 /// Scan a directory for supported image files, sorted alphabetically.
@@ -1765,8 +1773,55 @@ pub struct PreviewAndFull {
 
 
 /// True if the bytes look like a GIF (magic bytes).
-fn is_gif_bytes(bytes: &[u8]) -> bool {
+pub fn is_gif_bytes(bytes: &[u8]) -> bool {
     bytes.starts_with(b"GIF8")
+}
+
+/// True if the bytes look like a Windows bitmap (magic bytes).
+///
+/// `BM` plus a plausible 14-byte file header. There is no other format that
+/// starts `BM`, so the length check is only there to keep a two-byte file from
+/// being accepted.
+pub fn is_bmp_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 26 && bytes.starts_with(b"BM")
+}
+
+/// True if the bytes look like a Windows icon or cursor (magic bytes).
+///
+/// The container is shared: reserved word 0, type 1 (icon) or 2 (cursor), then
+/// a count. Both `.ico` and `.cur` are the same format, and both hold a mixture
+/// of PNG-compressed and BMP-compressed entries — which the decoder handles, so
+/// nothing here looks inside.
+pub fn is_ico_bytes(bytes: &[u8]) -> bool {
+    // Layout: reserved u16 (0), type u16 (1 = icon, 2 = cursor), count u16.
+    bytes.len() >= 6
+        && bytes[0..2] == [0, 0]
+        && matches!(bytes[2], 1 | 2)
+        && u16::from_le_bytes([bytes[4], bytes[5]]) != 0
+}
+
+/// True if the bytes look like a TIFF (magic bytes).
+///
+/// Both byte orders, and both the classic and BigTIFF headers: `II*\0` /
+/// `MM\0*` (42) and `II+\0` / `MM\0+` (43). Only the 42 forms are common, but
+/// a BigTIFF header is just as unambiguous and rejecting it would mean a large
+/// file failing for no reason.
+pub fn is_tiff_bytes(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    let order = &bytes[0..2];
+    let le = order == [0x49, 0x49];
+    let be = order == [0x4D, 0x4D];
+    if !le && !be {
+        return false;
+    }
+    let tag = if le {
+        u16::from_le_bytes([bytes[2], bytes[3]])
+    } else {
+        u16::from_be_bytes([bytes[2], bytes[3]])
+    };
+    tag == 42 || tag == 43
 }
 
 /// Caps for animation decoding: stop when either limit is hit.

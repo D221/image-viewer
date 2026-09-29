@@ -190,45 +190,66 @@ texture uploads, graceful exit 0 — but that is one folder on one machine.
 
 ---
 
-## 5. Resize re-decodes once per frame  ← plausible, but UNMEASURED
+## 5. ~~Resize re-decodes once per frame~~  ← **done**, commit `9b09879`
 
-The one speed item from the reverted set that looks like it has no downside, so
-it is the one worth attempting. The current code drops every `below_target`
-preview and re-decodes whenever the display area grows by even one physical
-pixel, so dragging a window edge re-decodes repeatedly and blanks the picture
-each time. Deferring the refine until the size stops moving keeps the existing
-texture on screen and decodes once.
+Settled differently from what is written below, and better. The design is now:
 
-Two costs, so it is not free: the picture is briefly soft after a resize instead
-of being sharp immediately, and a drag that ends is only detected if another
-frame arrives.
+```
+resize -> the existing texture is re-fitted on this frame (free)
+       -> a sharper decode is issued in the background
+```
 
-**Measured: nothing.** An attempt measured "8-11 re-decodes for one drag" and a
-deferral that only got it to 9 — but every one of those numbers was taken over
-RDP, which coalesces and delays window-resize events. A debounce is sensitive to
-exactly that cadence, so the comparison is meaningless and the diagnosis built on
-it ("frames are ~850 ms apart, so a wall-clock timer expires between every pair
-of them") is probably an artifact. Only the per-decode cost (~800 ms for a
-28 MP preview) survived; that is CPU-bound and is real.
+So there is no softness window at all — the picture is as sharp as the last
+decode *immediately*, and sharpens when the new one lands. Deferring the
+refine (what the note below proposed) would have made the picture briefly soft
+after every resize; this does not. The old cost that remains is only the CPU of
+the decode, and `bench_resize.rs` measures it:
 
-**What to do when a local session is available.** Drive a real drag with
-`SetWindowPos` (that part works over RDP) and read the app's own
-`resize-driven re-decodes` counter. Note that a *wall-clock* settle is likely the
-wrong design here for a reason worth keeping: a large preview takes ~800 ms to
-decode, so frames are ~800 ms apart and a timer shorter than that expires
-between every pair of them. "The size did not change since the previous frame"
-is frame-based and immune to that. But check it locally — under RDP, coalesced
-events could make a same-size pair appear mid-drag and cause a spurious refine,
-which is exactly what would make the frame-based version look worse than it is.
+| drag | old | new |
+|---|---|---|
+| 20-step drag, 1900 → 2600 | 147 decodes | 1 |
+| 40-step drag, 1200 → 3800 | 287 | 2 |
+| one-step snap / maximise | 14 | 1 |
+| source smaller than the display | 287 | 0 |
 
-The predicate to extract and test when this is picked up is
-`needs_refine(old, new, floor) -> bool` — pure, and it belongs in `lib.rs` next
-to `plan_jobs` so it can be tested at all. (It was written and then reverted along
-with the rest of the attempt; there is no `needs_refine` in the tree today.)
+Kept from the original investigation, because it is still the reason the settle
+is frame-based: a large preview takes ~800 ms to decode, so frames are ~800 ms
+apart, and a wall-clock timer shorter than that expires between every pair of
+them and never fires. The test is "the size did not change since the previous
+frame".
+
+Staleness is a pure function of the cache — `needs_refine(texture_px,
+source_px, decoded_for_target, display_target, floor)` — so no flag has to be
+kept in sync, and the `below_target` flag it replaced could not tell a source
+that is simply smaller than the display from one worth re-decoding.
+
+The RDP caveat below still stands for anything involving *frame rate*; it does
+not apply here, because decodes-per-drag is a logical count and does not depend
+on how the display delivers events.
 
 ---
 
-## 6. Smaller known items
+## 6. Multi-page TIFF page navigation  ← opened by adding TIFF support
+
+TIFF, BMP and ICO decode now. A multi-page TIFF shows **page 1 only**, with no
+indication that more pages exist, and a document scan is the main reason people
+have TIFFs.
+
+Not tested, and that is a real gap rather than an oversight: `image` 0.25's
+`TiffEncoder` starts a *new* TIFF stream per instance, so writing a second page
+with a second encoder produces two concatenated headers and a file that no
+decoder will read. There is no way to synthesise a valid multi-page TIFF with
+the crate already in the tree, so a test would have to hand-build the IFD chain.
+
+The `Tiff` walker in `lib.rs` (written for the embedded-thumbnail work) already
+resolves IFD0's next-IFD pointer, which is exactly the page chain — so a
+`pages(path) -> Vec<usize>` helper is mostly already there.
+
+Until then it is a caveat in the README rather than a feature.
+
+---
+
+## 7. Smaller known items
 
 - ~~**`exif_orientation` re-reads the whole file.**~~ **Measured: not worth
   doing.** It does re-open the file (`nom_exif::read_exif(path)`) even though
@@ -249,7 +270,7 @@ with the rest of the attempt; there is no `needs_refine` in the tree today.)
 
 ---
 
-## 7. What the test suite cannot reach — be suspicious here
+## 8. What the test suite cannot reach — be suspicious here
 
 `main.rs` is a binary, so none of these are testable today. Each has already cost
 time, and moving logic into `lib.rs` is the fix.

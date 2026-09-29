@@ -23,6 +23,7 @@ saved as `.jpg` is fine).
 |---|---|
 | JPEG | `turbojpeg`, with a DCT-scaled fast path for large images |
 | PNG, WebP, GIF | `image` crate (animated GIFs included) |
+| TIFF, BMP, ICO | `image` crate |
 | JPEG XL | `jxl-oxide` |
 | HEIC, HEIF, AVIF | `heic` |
 
@@ -166,7 +167,7 @@ image-viewer.exe --unregister
 ```
 
 `--register` writes a per-user (HKCU) ProgID and `OpenWithProgids` entries for
-all nine extensions. It deliberately does **not** claim the default-handler
+all fifteen extensions. It deliberately does **not** claim the default-handler
 role — Windows requires the user to confirm that themselves.
 
 ### Environment variables
@@ -275,6 +276,15 @@ images and is `#[ignore]`d because it takes seconds.
 
 ## Known caveats
 
+- **Multi-page TIFF shows the first page only.** Page navigation is not
+  implemented, so a 20-page document scan opens as one image with no indication
+  that more exist. The `image` crate's TIFF *encoder* cannot emit a multi-page
+  file, so this is not covered by a test — it is the library's documented
+  first-page behaviour.
+- **ICO needs an RGBA PNG entry or a BMP entry.** Windows writes the large sizes
+  as RGBA PNGs and the small ones as BMP, both of which decode. A PNG-compressed
+  entry that is *not* RGBA is rejected, which is a limitation of the underlying
+  decoder rather than a choice here.
 - **Wide-gamut images look flat.** The colour space is *detected* and shown in
   the metadata panel, but the pipeline is 8-bit sRGB end to end, so a Display P3
   photo is displayed without conversion and reads duller than it should.
