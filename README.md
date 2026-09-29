@@ -55,9 +55,12 @@ double-rotate).
 - Neighbour preloading in both directions
 - Animated GIF playback with per-frame delays
 - Transparency checkerboard backdrop
-- **Rotate ⟲ / ⟳** — quarter turns, re-fits each time. A view transform by
-  default: nothing is written to the file. `Ctrl+S` writes a new file beside the
-  original with the rotation baked in, losslessly (see below)
+- **Rotate ⟲ / ⟳** — quarter turns, **per image**, re-fitting each time. Turning
+  one photo does not turn the next, and going back finds yours still turned — the
+  behaviour every real viewer has. A view transform by default: nothing is
+  written to the file. **Save rotated…** (next to the rotate buttons, or
+  `Ctrl+S`) writes a new file beside the original with the rotation baked in,
+  losslessly (see below)
 - Folder watcher: new and deleted files are picked up automatically (every 2s)
 
 ### Gallery grid (`G`)
@@ -381,8 +384,10 @@ images and is `#[ignore]`d because it takes seconds.
 - The **preview cache keeps a few images either side of the current one**, so
   jumping far away discards the old previews; scrolling back re-decodes.
 - **Rotation is display-only by default.** It is not written to the file and not
-  carried into copies, clipboard or wallpaper. Only `Ctrl+S` writes anything,
-  and it writes a new file rather than modifying the original.
+  carried into copies, clipboard or wallpaper. Only **Save rotated…** /
+  `Ctrl+S` writes anything, and it writes a new file rather than modifying the
+  original. Rotations are per image and last for the session only; they are not
+  persisted across restarts.
 - **A rotated JPEG can lose up to one 16 px block off an edge.** Lossless
   transforms move whole 8×8 DCT blocks, so a width or height that is not a
   multiple of the MCU block size leaves partial blocks that cannot reach the new

@@ -58,6 +58,7 @@ const RESIZE_SETTLE_REPAINT: std::time::Duration = std::time::Duration::from_mil
 /// `icon::render` produces for the `.ico`, and a taskbar button wants 24-32 even
 /// on a HiDPI display, so there is nothing to gain from generating larger.
 const WINDOW_ICON_PX: u32 = 256;
+
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
 const PREVIEW_CACHE_CAP: usize = 16;
 /// Full-res tile edge in source pixels.
@@ -1001,8 +1002,11 @@ struct MyApp {
     grid_sel: usize,
     /// Columns the grid last laid out with; Up/Down move by this much.
     grid_cols: usize,
-    /// Quarter turns clockwise applied to the shown image (0..4).
-    rot: u8,
+    /// Quarter turns clockwise applied per image, for this session. Keyed by path
+    /// because a rotation belongs to a *picture*: turning one photo must not turn
+    /// the next one, and returning to a rotated photo must still find it turned.
+    /// Lives in `lib.rs` so the rule can be tested — see [`image_viewer::Rotations`].
+    rotations: image_viewer::Rotations,
     /// Selection index the grid's scroll offset was last set for. The offset is
     /// written only when this differs, so manual scrolling is never fought.
     grid_sel_scrolled: usize,
@@ -1157,7 +1161,7 @@ impl MyApp {
             waiting_load: false,
             grid_sel: 0,
             grid_cols: 1,
-            rot: 0,
+            rotations: image_viewer::Rotations::default(),
             grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
             t_boot: perf::boot(),
@@ -2072,7 +2076,7 @@ impl MyApp {
             self.error = Some("Cannot save an animation rotated: it has many frames".into());
             return;
         }
-        let quarters = self.rot;
+        let quarters = self.current_rotation();
         match image_viewer::save_rotated(&p, quarters) {
             Ok(dest) => {
                 let name = dest
@@ -2196,8 +2200,8 @@ impl MyApp {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
             // Show the dimensions as displayed once rotated, so the readout
             // matches what is on screen.
-            if self.rot & 3 != 0 {
-                let (w, h) = rotated_footprint(pv.orig.0 as f32, pv.orig.1 as f32, self.rot);
+            if self.current_rotation() != 0 {
+                let (w, h) = rotated_footprint(pv.orig.0 as f32, pv.orig.1 as f32, self.current_rotation());
                 s += &format!(" (rotated {}x{})", w as u32, h as u32);
             }
             if let Some(anim) = &pv.anim {
@@ -2342,7 +2346,7 @@ impl MyApp {
         let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
         // Quarter turns clockwise. Only 90° steps, so the image stays
         // axis-aligned and 1:1 stays pixel-sharp.
-        let quarter = self.rot & 3;
+        let quarter = self.current_rotation();
         // What the image *occupies* on screen: odd quarter turns swap the axes.
         let (dw, dh) = rotated_footprint(img_px.x, img_px.y, quarter);
         let display_px = Vec2::new(dw, dh);
@@ -2668,13 +2672,30 @@ impl MyApp {
 
     /// Turn the shown image by `steps` quarter turns clockwise (negative =
     /// counter-clockwise). Re-fits afterwards, since the footprint changes
-    /// shape. Temporary UI: the rotation is a view transform only — nothing is
-    /// written back to the file.
+    /// shape.
+    ///
+    /// **Per image, not per app.** This used to be a single `u8` on `MyApp`, so
+    /// turning one photo turned every photo you then navigated to, and coming
+    /// back showed the original at whatever the current rotation happened to be.
+    /// That is not how any real viewer behaves — Windows Photos, FastStone,
+    /// IrfanView and Preview all keep it per image and keep your edit when you
+    /// return — and for an app whose whole job is showing a picture faithfully
+    /// it is worse than wrong, because you cannot tell "I rotated this" from
+    /// "this is broken".
+    ///
+    /// Still a view transform: nothing is written until `save_rotated_copy`.
     fn rotate(&mut self, steps: i32, ctx: &Context) {
-        self.rot = (self.rot as i32 + steps).rem_euclid(4) as u8;
+        if let Some(p) = self.cur.clone() {
+            self.rotations.turn(&p, steps);
+        }
         self.view.fit = true;
         self.view.offset = Vec2::ZERO;
         ctx.request_repaint();
+    }
+
+    /// The rotation of the image currently shown.
+    fn current_rotation(&self) -> u8 {
+        self.cur.as_deref().map_or(0, |p| self.rotations.get(p))
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
@@ -3290,6 +3311,19 @@ impl eframe::App for MyApp {
                     }
                     if ui.button("Rotate ⟳").clicked() {
                         self.rotate(1, ctx);
+                    }
+                    // Sits with the rotate buttons because that is the only
+                    // thing it saves: without this the app's one writing action
+                    // was reachable only by remembering a chord.
+                    if ui
+                        .add_enabled(self.cur.is_some(), egui::Button::new("Save rotated… (Ctrl+S)"))
+                        .on_hover_text(
+                            "Write a new file beside this one, with its rotation baked in.\n\
+                             The original is not modified.",
+                        )
+                        .clicked()
+                    {
+                        self.save_rotated_copy();
                     }
                     if ui.button("Panels (I)").clicked() {
                         self.suppress_resize_redecode = true;

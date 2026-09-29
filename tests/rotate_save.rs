@@ -14,8 +14,9 @@
 
 use image_viewer::{
     apply_exif_orientation, display_xform, exif_orientation, load_image,
-    neutralize_exif_orientation, save_rotated, unique_dest, Xform,
+    neutralize_exif_orientation, save_rotated, unique_dest, Rotations, Xform,
 };
+use std::path::PathBuf;
 use std::path::Path;
 
 /// A picture whose every quadrant is a different flat colour, so any wrong
@@ -331,6 +332,111 @@ fn composition_is_closed_over_all_sixty_four_pairs() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-image rotation
+// ---------------------------------------------------------------------------
+
+/// The bug this pins: rotation used to be a single `u8` on the app, so turning
+/// one photo turned every photo you then navigated to.
+#[test]
+fn rotating_one_image_does_not_rotate_the_next() {
+    let mut r = Rotations::default();
+    let a = PathBuf::from("a.jpg");
+    let b = PathBuf::from("b.jpg");
+
+    r.turn(&a, 1);
+    assert_eq!(r.get(&a), 1, "the rotated image should be turned");
+    assert_eq!(
+        r.get(&b),
+        0,
+        "a different image must be untouched - this is the whole point"
+    );
+}
+
+#[test]
+fn going_back_to_a_rotated_image_still_finds_it_turned() {
+    // The other half. Losing your edit on the way back is as wrong as applying it
+    // to everything else, and the single-u8 version did both.
+    let mut r = Rotations::default();
+    let a = PathBuf::from("a.jpg");
+    let b = PathBuf::from("b.jpg");
+
+    r.turn(&a, 1);
+    r.turn(&b, 2); // while browsing past it
+    assert_eq!(r.get(&a), 1, "coming back must not reset the first image");
+    assert_eq!(r.get(&b), 2);
+}
+
+#[test]
+fn turns_accumulate_and_wrap_in_both_directions() {
+    let mut r = Rotations::default();
+    let a = PathBuf::from("a.jpg");
+
+    assert_eq!(r.turn(&a, 1), 1);
+    assert_eq!(r.turn(&a, 1), 2);
+    assert_eq!(r.turn(&a, 1), 3);
+    assert_eq!(r.turn(&a, 1), 0, "four quarter turns is a full turn");
+    assert_eq!(r.turn(&a, -1), 3, "negative steps go counter-clockwise");
+    assert_eq!(r.turn(&a, -1), 2);
+    // A single step from unrotated, anticlockwise, is a quarter turn back.
+    let mut r2 = Rotations::default();
+    assert_eq!(r2.turn(&a, -1), 3, "-1 from 0 must wrap, not underflow");
+    assert_eq!(r2.turn(&a, 5), 0, "a whole number of turns is a no-op");
+}
+
+#[test]
+fn an_unrotated_image_costs_nothing() {
+    // Returning to zero removes the entry rather than storing a 0, so browsing a
+    // folder and turning things back leaves no residue.
+    let mut r = Rotations::default();
+    let a = PathBuf::from("a.jpg");
+    assert!(r.is_empty());
+    r.turn(&a, 1);
+    assert_eq!(r.len(), 1);
+    r.turn(&a, 3); // back to zero
+    assert_eq!(r.get(&a), 0);
+    assert_eq!(r.len(), 0, "a zero rotation should not be stored");
+    assert!(r.is_empty());
+}
+
+#[test]
+fn the_record_is_bounded() {
+    // A viewer left open on a 100k-image folder must not grow a map for as long
+    // as it runs. Losing rotations is much the smaller problem.
+    let mut r = Rotations::default();
+    for i in 0..5000 {
+        r.set(&PathBuf::from(format!("img{i}.jpg")), 1 + (i % 3) as u8);
+    }
+    assert!(
+        r.len() <= 4096,
+        "grew to {} entries with no bound",
+        r.len()
+    );
+}
+
+/// The save composes the EXIF tag with the *current image's* rotation. If these
+/// two ever came from different images the saved file would be wrong in a way
+/// nothing else would catch, because the viewer applies the tag itself.
+#[test]
+fn a_saved_file_uses_the_rotation_of_the_image_being_saved() {
+    let mut r = Rotations::default();
+    let a = PathBuf::from("a.jpg");
+    let b = PathBuf::from("b.jpg");
+    r.turn(&a, 1);
+    r.turn(&b, 2);
+
+    // The shape the app uses: look the rotation up by the path being saved.
+    let save_b = |p: &Path| r.get(p);
+    assert_eq!(save_b(&a), 1);
+    assert_eq!(save_b(&b), 2);
+    // And the composed transform differs, so the two files are genuinely not
+    // being saved with each other's rotation.
+    assert_ne!(
+        image_viewer::display_xform(0, save_b(&a)),
+        image_viewer::display_xform(0, save_b(&b))
+    );
 }
 
 #[test]

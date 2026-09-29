@@ -1522,6 +1522,79 @@ pub fn neutralize_exif_orientation(jpeg: &mut [u8]) -> bool {
 const EXIF_TAG_ORIENTATION: u16 = 0x0112;
 
 // ---------------------------------------------------------------------------
+// Per-image rotation
+// ---------------------------------------------------------------------------
+
+/// Quarter turns clockwise, per image, for the current session.
+///
+/// **Per image, not per app**, which is the whole point. This used to be a single
+/// `u8` on the app struct, so turning one photo turned every photo you then
+/// navigated to, and navigating back showed the original at whatever rotation
+/// happened to be current. No real viewer does that — Windows Photos, FastStone,
+/// IrfanView and Preview all keep a rotation per image and keep your edit when you
+/// return — and for an app whose job is showing a picture faithfully it is worse
+/// than merely wrong, because there is no way to tell "I rotated this" from "this
+/// is broken".
+///
+/// Not persisted: a rotation is a view transform until it is saved, and it is
+/// lost on restart like every other view state.
+#[derive(Debug, Clone)]
+pub struct Rotations {
+    map: std::collections::HashMap<std::path::PathBuf, u8>,
+    cap: usize,
+}
+
+impl Default for Rotations {
+    fn default() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            cap: 4096,
+        }
+    }
+}
+
+impl Rotations {
+    /// Quarter turns applied to `path`, 0..=3.
+    pub fn get(&self, path: &Path) -> u8 {
+        self.map.get(path).copied().unwrap_or(0) & 3
+    }
+
+    /// Set `path`'s rotation. Zero removes the entry rather than storing a zero,
+    /// so an unrotated image costs nothing.
+    pub fn set(&mut self, path: &Path, quarters: u8) {
+        let quarters = quarters & 3;
+        if quarters == 0 {
+            self.map.remove(path);
+        } else {
+            if self.map.len() >= self.cap {
+                // Wholesale rather than evicting one entry: the map is a record
+                // of a session's view state, and a viewer left open on a very
+                // large folder must not grow it without bound. Losing rotations
+                // is a far smaller problem than unbounded growth.
+                self.map.clear();
+            }
+            self.map.insert(path.to_path_buf(), quarters);
+        }
+    }
+
+    /// `path`'s rotation after turning it by `steps` quarter turns, stored.
+    pub fn turn(&mut self, path: &Path, steps: i32) -> u8 {
+        let next = (self.get(path) as i32 + steps).rem_euclid(4) as u8;
+        self.set(path, next);
+        next
+    }
+
+    /// How many images currently carry a rotation. For tests and diagnostics.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Colour profile detection (read-only, no transformation)
 // ---------------------------------------------------------------------------
 //
