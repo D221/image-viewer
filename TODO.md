@@ -230,10 +230,14 @@ with the rest of the attempt; there is no `needs_refine` in the tree today.)
 
 ## 6. Smaller known items
 
-- **`exif_orientation` re-reads the whole file.** It calls
-  `nom_exif::read_exif(path)` even though `load_image_preview_full` already has
-  the bytes in memory. The new `Tiff` walker reads Orientation for free, so this
-  is a cheap win if decode time ever matters again.
+- ~~**`exif_orientation` re-reads the whole file.**~~ **Measured: not worth
+  doing.** It does re-open the file (`nom_exif::read_exif(path)`) even though
+  `load_image_preview_full` already holds the bytes, and the `Tiff` walker could
+  read Orientation for free instead. But measured on the five largest JPEGs in
+  `test-images`, `read_exif` costs **0.1-0.2 ms** against a 10-17 ms `fs::read`:
+  1-2%. The second read is served from the OS page cache, so there is no I/O
+  storm to save, and against a ~800 ms preview decode it is ~0.02%. The
+  "re-reads the whole file" framing is what made this look like a win.
 - **Large scans are the grid's real bottleneck now.** The three ~25 MB booklet
   JPEGs have no embedded thumbnail and take ~800 ms each even via the turbojpeg
   DCT path, which still decompresses every coefficient. Embedded EXIF thumbnails

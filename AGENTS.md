@@ -184,6 +184,20 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   `main.rs`, so a test can see it; `main.rs` being a binary is why this
   survived). **If you add a CLI flag, add it to `path_arg` and its test.** The
   tell that it bit: a run of a *one-file* folder reporting 7 decode calls.
+- **Check the session is not remote before trusting any frame rate — and treat
+  that as covering input and resize events too, not just fps.** This has now
+  cost three wrong conclusions in one session: a GIF frame-rate "regression" that
+  was the remote display adapter, and a resize debounce whose before/after
+  comparison (11 vs 9 re-decodes) was meaningless because RDP coalesces and
+  delays window-resize events. Separately, synthetic key injection
+  (`keybd_event`/`SetForegroundWindow` from another process) silently does
+  nothing in an RDP session — `frames with input events` stays 0, which is how to
+  notice. `quser` reporting `console` rather than `rdp-tcp#N` is the check.
+- **A second read of a file you just read is free.** `exif_orientation` calls
+  `nom_exif::read_exif(path)` although the bytes are already in memory, which
+  reads like an obvious win. Measured: 0.1-0.2 ms against a 10-17 ms `fs::read`,
+  because the page cache has it. Don't do this "optimisation" — it is ~0.02% of a
+  preview decode.
 - **A frame count does not mean the app is spinning.** Frame rate can be set by
   the presentation pipeline rather than by demand for frames; a 20x smaller
   window produced the same cadence here, which is what gave it away. Before
