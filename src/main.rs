@@ -21,8 +21,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod fileassoc;
-#[cfg(windows)]
-mod winicon;
 
 use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use nom_exif::{read_exif, ExifTag};
@@ -54,6 +52,12 @@ const PRELOAD_RADIUS: usize = 3;
 /// decide whether a drag has stopped. One frame is enough — the test is whether
 /// the size is unchanged since the previous frame, not how long it has been.
 const RESIZE_SETTLE_REPAINT: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Source size for the window icon, in pixels. winit scales this to whatever the
+/// shell asks for, so this only sets the ceiling: 256 is the largest size
+/// `icon::render` produces for the `.ico`, and a taskbar button wants 24-32 even
+/// on a HiDPI display, so there is nothing to gain from generating larger.
+const WINDOW_ICON_PX: u32 = 256;
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
 const PREVIEW_CACHE_CAP: usize = 16;
 /// Full-res tile edge in source pixels.
@@ -163,7 +167,29 @@ fn main() -> eframe::Result<()> {
     // but loses the in-memory preview cache and has to decode again.
     loop {
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1280.0, 800.0])
+                // The window icon, set at creation rather than afterwards.
+                //
+                // This is the whole fix, and it took four attempts to find the
+                // obvious API. Everything before it was the icon reaching the
+                // window *late*: `WM_SETICON` only works if the window procedure
+                // forwards it to `DefWindowProc` (winit's does not, and it serves
+                // icons from its own state instead), and DWM caches the title
+                // bar's icon when the non-client area is built — which is before
+                // any of our code runs. Setting it here is the only point where
+                // the window does not exist yet, so nothing has to be corrected
+                // afterwards.
+                //
+                // `icon::render` is the same generator that produces
+                // `assets/app.ico` for the embedded resource, so the window icon
+                // and the icon in the exe are the same artwork by construction
+                // rather than by two files agreeing.
+                .with_icon(std::sync::Arc::new(egui::IconData {
+                    rgba: image_viewer::icon::render(WINDOW_ICON_PX).into_raw(),
+                    width: WINDOW_ICON_PX,
+                    height: WINDOW_ICON_PX,
+                })),
             wgpu_options: wgpu_options(backend),
             ..Default::default()
         };
@@ -940,11 +966,6 @@ struct MyApp {
     /// letting the loop build a new one.
     renderer: image_viewer::WgpuBackend,
     restart: RestartSlot,
-    /// Frames left in which to keep trying to set the window icon. The window may
-    /// not exist on the first frame, so this retries briefly and then gives up
-    /// permanently — an app that never manages it should not pay for it forever.
-    #[cfg(windows)]
-    icon_attempts: u8,
 
     loader: Loader,
     rx: Receiver<Msg>,
@@ -1021,14 +1042,6 @@ impl MyApp {
         // The launch loop already resolved this (probing if it needed to), and
         // the answer is in the config, so reading it back keeps the two in step.
         let renderer = config.renderer.resolve(None);
-
-        // Icon first, before anything can paint. A title bar caches its icon
-        // when the non-client area is created, so setting it later — even a few
-        // frames later — can leave the title bar drawing the shell default
-        // indefinitely. The retry in `frame_prelude` still runs for the case
-        // where the window genuinely is not up yet.
-        #[cfg(windows)]
-        winicon::apply();
 
         // Optional CLI argument: a file or a folder ("Open with…"). Must be the
         // first *non-flag* argument: `nth(1)` would take `--perf` as the path
@@ -1140,9 +1153,7 @@ impl MyApp {
             resize: image_viewer::ResizeTracker::new(),
             renderer,
             restart,
-            #[cfg(windows)]
-            icon_attempts: 30,
-                        suppress_resize_redecode: false,
+            suppress_resize_redecode: false,
             waiting_load: false,
             grid_sel: 0,
             grid_cols: 1,
@@ -2713,31 +2724,6 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
         // starts, so this is where "first visible pixels" is honestly known.
         self.lat.commit_frame();
         perf::count(perf::C_FRAMES, 1);
-
-        // The taskbar reads the *window's* icon, and neither embedding the icon
-        // in the exe nor registering a DefaultIcon gives the window one — see
-        // `winicon`. Retried for the first few frames because the window may not
-        // exist yet on the first one, and each attempt is a no-op if it does
-        // not. Cheap: two lookups, and it stops for good once it succeeds.
-        #[cfg(windows)]
-        {
-            if self.icon_attempts > 0 {
-                self.icon_attempts -= 1;
-                let applied = winicon::apply();
-                // Report the *state*, not the return value, once, and only under
-                // --perf: whether the window's own icon slot took is not visible
-                // from outside the process, and this is the only place it can be
-                // seen. Measured: the class icon takes, GWL_HICON does not.
-                if perf::enabled() && self.icon_attempts == 0 {
-                    eprintln!(
-                        "window icon: applied={applied} big={:?} class={} err={:?}",
-                        winicon::big_icon_size(),
-                        winicon::class_has_big_icon(),
-                        winicon::last_error()
-                    );
-                }
-            }
-        }
         // Frames that arrived carrying winit events. Compared against
         // `C_FRAMES` this separates "the user is driving" from "something is
         // asking for frames by itself", which is the question you have to ask
