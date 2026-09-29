@@ -21,6 +21,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod fileassoc;
+#[cfg(windows)]
+mod winicon;
 
 use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use nom_exif::{read_exif, ExifTag};
@@ -929,6 +931,11 @@ struct MyApp {
     /// letting the loop build a new one.
     renderer: image_viewer::WgpuBackend,
     restart: RestartSlot,
+    /// Frames left in which to keep trying to set the window icon. The window may
+    /// not exist on the first frame, so this retries briefly and then gives up
+    /// permanently — an app that never manages it should not pay for it forever.
+    #[cfg(windows)]
+    icon_attempts: u8,
 
     loader: Loader,
     rx: Receiver<Msg>,
@@ -1116,6 +1123,8 @@ impl MyApp {
             resize: image_viewer::ResizeTracker::new(),
             renderer,
             restart,
+            #[cfg(windows)]
+            icon_attempts: 30,
                         suppress_resize_redecode: false,
             waiting_load: false,
             grid_sel: 0,
@@ -2687,6 +2696,31 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
         // starts, so this is where "first visible pixels" is honestly known.
         self.lat.commit_frame();
         perf::count(perf::C_FRAMES, 1);
+
+        // The taskbar reads the *window's* icon, and neither embedding the icon
+        // in the exe nor registering a DefaultIcon gives the window one — see
+        // `winicon`. Retried for the first few frames because the window may not
+        // exist yet on the first one, and each attempt is a no-op if it does
+        // not. Cheap: two lookups, and it stops for good once it succeeds.
+        #[cfg(windows)]
+        {
+            if self.icon_attempts > 0 {
+                self.icon_attempts -= 1;
+                let applied = winicon::apply();
+                // Report the *state*, not the return value, once, and only under
+                // --perf: whether the window's own icon slot took is not visible
+                // from outside the process, and this is the only place it can be
+                // seen. Measured: the class icon takes, GWL_HICON does not.
+                if perf::enabled() && self.icon_attempts == 0 {
+                    eprintln!(
+                        "window icon: applied={applied} big={:?} class={} err={:?}",
+                        winicon::big_icon_size(),
+                        winicon::class_has_big_icon(),
+                        winicon::last_error()
+                    );
+                }
+            }
+        }
         // Frames that arrived carrying winit events. Compared against
         // `C_FRAMES` this separates "the user is driving" from "something is
         // asking for frames by itself", which is the question you have to ask
