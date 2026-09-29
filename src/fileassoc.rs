@@ -253,8 +253,8 @@ pub fn declare_taskbar_identity() -> R<()> {
     // two whenever both are used, which is the exact instability a fixed
     // AppUserModelID exists to prevent. The icon is the same artwork either way.
     //
-    // The one exception is a path that no longer exists, so moving the exe
-    // self-heals instead of leaving the shell pointing at nothing.
+    // Two things force a rewrite: a path that no longer exists, so moving the exe
+    // self-heals; and a *quoted* value, which an earlier version wrote.
     let stored_icon = hkcu
         .open_subkey_with_flags(&sub, KEY_READ)
         .ok()
@@ -262,17 +262,23 @@ pub fn declare_taskbar_identity() -> R<()> {
     let stale = match stored_icon.as_deref() {
         None => true,
         Some(uri) => {
-            let path = uri.trim_matches('"');
-            !std::path::Path::new(path).exists()
+            !std::path::Path::new(uri.trim_matches('"')).exists() || uri.starts_with('"')
         }
     };
 
     if stale {
         let (k, _) = io(hkcu.create_subkey(&sub))?;
         io(k.set_value("DisplayName", &"Image Viewer"))?;
-        // A bare exe path is a valid IconUri: the shell extracts the icon from
-        // the file. Quoted, because the path very often contains spaces.
-        io(k.set_value("IconUri", &format!("\"{exe_str}\"")))?;
+        // **A bare path, not a quoted one.** Microsoft's documentation shows
+        // `"IconUri" = "C:\...\app.exe"`, where the quotes are JSON syntax and are
+        // not part of the value. Quoting it makes the shell fail to resolve the
+        // icon, and the symptom is oddly specific rather than total: a *pinned*
+        // taskbar button still shows the right icon, because pinning builds its
+        // own reference to the executable, while the running window's button
+        // resolves through this value and falls back to the shell default.
+        // Restarting Explorer does not help, because it just re-reads the same
+        // unparseable value.
+        io(k.set_value("IconUri", &exe_str))?;
     }
 
     // The process half, and it only sticks if it happens before the first window.
