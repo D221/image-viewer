@@ -226,6 +226,14 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   reads like an obvious win. Measured: 0.1-0.2 ms against a 10-17 ms `fs::read`,
   because the page cache has it. Don't do this "optimisation" — it is ~0.02% of a
   preview decode.
+- **Never debounce a resize with a wall-clock timer here.** Coalesce by
+  comparing with the *previous frame* instead. A large preview takes ~800 ms to
+  decode, so while one is in flight frames are ~800 ms apart — and a timer
+  shorter than that expires between every pair of them and never fires. A
+  reverted attempt used `RESIZE_SETTLE = 140 ms` and made almost no difference
+  for exactly this reason. The test is "the size did not change since the last
+  frame"; one of those frames is requested explicitly, or the *final* size of a
+  drag is never examined because nothing else asks for a repaint.
 - **A frame count does not mean the app is spinning.** Frame rate can be set by
   the presentation pipeline rather than by demand for frames; a 20x smaller
   window produced the same cadence here, which is what gave it away. Before

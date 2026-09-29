@@ -4,6 +4,13 @@ Deferred work, with the investigation already done so it does not have to be
 repeated. Each item states what is *known* (verified), what is *undecided*
 (needs a human), and what is *untested by the suite* (honest gaps).
 
+Completed work is not kept here — it is in the git history, and the durable
+lessons from it are in `AGENTS.md`, which is where a trap belongs. Several
+sections that used to live here were removed once the work landed, and the traps
+they recorded (the remote-session measurement errors, the wall-clock resize
+debounce, the `glow`→`wgpu` backend swap, the second-read-is-free measurement)
+are all in `AGENTS.md` instead.
+
 `PLAN.md` is a separate, stale early-project feature list — most of it is already
 implemented. Do not add to either from the other; AGENTS.md already warns that
 `PLAN.md` does not describe current behaviour.
@@ -81,158 +88,10 @@ is how a wide-gamut HEIC looks flat and nobody notices, because everything
 
 ---
 
-## 3. ~~egui 0.27 → 0.36.2~~ ← **done**, see the commit
+## 3. Multi-page TIFF page navigation
 
-**Landed.** `egui`/`eframe` are 0.36.2, as its own commit with nothing else in
-it. What the notes below predicted is what actually cost the time, and one
-prediction was wrong in an interesting way:
-
-- `App::update` → `App::ui(&mut self, ui: &mut Ui, frame: &mut Frame)`. The
-  `&Context` parameter is gone; our `update()` opens with `ui.ctx().clone()`.
-  Because panels are now shown on a parent `Ui`, the whole panel sequence nests
-  under the `Ui` instead of being rooted at the `Context`.
-- **`SidePanel` and `TopBottomPanel` were merged into one `egui::Panel`**
-  (`Panel::left/right/top/bottom`). The "cannot find `TopBottomPanel` in `egui`"
-  error is real, not a cascade. Defaults are unchanged: `top`/`bottom` are still
-  not resizable, `left`/`right` still default to 200 px.
-- `Ui::child_ui(rect, layout)` is gone. The migration target is
-  **`Ui::new_child(UiBuilder)`**, *not* `Ui::scope_builder(..)` — see the trap
-  in AGENTS.md, it is silent and it changes the layout.
-- `Frame::none()` → `Frame::new()` (documented as identical to `Frame::NONE`).
-- `ComboBox::from_id_source` → **`from_id_salt`**, and note `ComboBox::new(id, "")`
-  is *not* the same thing: it stores `label: Some("")` and renders an empty label
-  widget, which shifts the settings panel.
-- `Context::wants_keyboard_input` → `egui_wants_keyboard_input`. `Painter::rect`
-  gained a `StrokeKind`. `ColorImage` gained `source_size`. `Label::truncate(true)`
-  → `truncate()`. `DroppedFile::path` is a method. `on_exit` lost its glow param.
-- `wgpu 0.19 → 30`, `winit 0.29 → 0.30`, `glow 0.13 → 0.17`.
-
-**The rendering backend changed underneath, as predicted — and that turned out to
-be the only thing that actually broke.** eframe 0.27's `default` features enabled
-`glow`; 0.36's enable `wgpu`. So the upgrade silently swapped OpenGL for wgpu,
-and on this machine the unpinned wgpu default **access-violates
-(`0xC0000005`) before the window opens**. Root cause: wgpu enumerates *all*
-backends during adapter discovery, and this machine has a Vulkan loader with
-**zero registered ICDs** (`HKLM\SOFTWARE\Khronos\Vulkan\Drivers` is empty — an
-Intel UHD 620 plus a Microsoft Remote Display Adapter, i.e. an RDP/VM session).
-Enumerating that empty Vulkan stack crashes wgpu-native rather than returning
-"no devices". Verified by isolating each backend:
-
-| config | result |
-|---|---|
-| 0.27 (glow) | runs |
-| 0.36, default (all backends) | `0xC0000005` |
-| 0.36, `WGPU_BACKEND=dx12` | runs |
-| 0.36, `WGPU_BACKEND=vulkan` | `0xC0000005` |
-| 0.36, `WGPU_BACKEND=opengl` | runs |
-| 0.36, DX12 pinned in code | runs |
-
-Fix is `wgpu_options()` in `main.rs`: **DX12 always, Vulkan only when explicitly
-asked** via `IV_WGPU_BACKEND=vulkan`. wgpu offers no "try this else that" —
-`backends` filters enumeration *before* any adapter selector runs, so the set
-has to be decided before instance creation.
-
-An intermediate version gated Vulkan on whether `Khronos\Vulkan\Drivers` had an
-ICD. That was wrong, and only measurable on a real (non-RDP) display: the
-registry key is **absent** on this machine while `vulkaninfo` reports a healthy
-Intel UHD 620 at API 1.2.187, and wgpu + Vulkan still crashes 3/3. Vulkan
-working does not imply wgpu-on-Vulkan working, and the only way to learn that is
-to crash, so the probe was deleted rather than kept as a "usually right"
-heuristic that can silently pick a crashing backend.
-
-### What the upgrade actually cost and gained
-
-Verified on the **console** session (not RDP), release build, 60 s with a
-visible window:
-
-| | idle CPU%, static photo | animation fps (30 fps GIF) |
-|---|---|---|
-| 0.27 + glow *(before)* | 6.5 | 30 |
-| 0.36 + glow | 5.4 | 30 |
-| 0.36 + wgpu DX12 *(now)* | **4.6** | 30 |
-
-Net win: lower idle CPU than the build it replaced, and animated GIFs play at
-exactly the right rate on every configuration. The one behavioural difference is
-that 0.36 draws at 60 fps (vsync-locked) where 0.27 drew at 30 — two draw calls
-per animation frame. That is minor waste, not a defect.
-
-**An earlier version of this section claimed egui 0.36 cost ~3.2x more CPU per
-frame and that DX12 halved animation frame rate. Both were wrong, both measured
-over an RDP session.** Retracted rather than left to be re-derived.
-
----
-
-## 4. ~~Animated GIFs are choppy on DX12~~  ← was an RDP artifact, no defect
-
-Retained only because the reasoning error is the useful part.
-
-`test-images/MouseUtils.gif` is **147 frames, delays cycling 30/30/40 ms, total
-4900 ms — a 30 fps animation**. (An earlier claim that it was 4 frames came from
-a hand-rolled GIF parser that desynchronised on the sub-block skip; the `image`
-crate's decoder is the authority, and the frame count matters when computing
-advancement — ignoring the loop wrap makes the animation look like it is running
-at half speed when it is not.)
-
-The reported defect was that DX12 drew ~12 fps against OpenGL's ~21, and that
-`SurfaceConfig::LOW_LATENCY` made it worse still (9.3 fps). On the console
-session both vanish: every renderer draws 60 fps and advances the animation at
-30 fps, including `LOW_LATENCY`. Nothing was wrong with the renderer, the
-scheduling, or the frame-delay logic, and no code change was warranted.
-
-The lesson is in AGENTS.md: check `quser` for `console` and the video adapter
-list before believing a frame rate. This cost two full investigations in one
-session, and one of them was committed as fact before it was caught.
-
-**Still unverified by the suite** (see §5): nothing about rendering is covered by
-tests, and a 20 s `--perf` run is the only end-to-end evidence. It reported
-`display-gap frames 0`, `stalls 0`, `worker decode panics 0`, 7 decodes / 7 GPU
-texture uploads, graceful exit 0 — but that is one folder on one machine.
-
----
-
-## 5. ~~Resize re-decodes once per frame~~  ← **done**, commit `9b09879`
-
-Settled differently from what is written below, and better. The design is now:
-
-```
-resize -> the existing texture is re-fitted on this frame (free)
-       -> a sharper decode is issued in the background
-```
-
-So there is no softness window at all — the picture is as sharp as the last
-decode *immediately*, and sharpens when the new one lands. Deferring the
-refine (what the note below proposed) would have made the picture briefly soft
-after every resize; this does not. The old cost that remains is only the CPU of
-the decode, and `bench_resize.rs` measures it:
-
-| drag | old | new |
-|---|---|---|
-| 20-step drag, 1900 → 2600 | 147 decodes | 1 |
-| 40-step drag, 1200 → 3800 | 287 | 2 |
-| one-step snap / maximise | 14 | 1 |
-| source smaller than the display | 287 | 0 |
-
-Kept from the original investigation, because it is still the reason the settle
-is frame-based: a large preview takes ~800 ms to decode, so frames are ~800 ms
-apart, and a wall-clock timer shorter than that expires between every pair of
-them and never fires. The test is "the size did not change since the previous
-frame".
-
-Staleness is a pure function of the cache — `needs_refine(texture_px,
-source_px, decoded_for_target, display_target, floor)` — so no flag has to be
-kept in sync, and the `below_target` flag it replaced could not tell a source
-that is simply smaller than the display from one worth re-decoding.
-
-The RDP caveat below still stands for anything involving *frame rate*; it does
-not apply here, because decodes-per-drag is a logical count and does not depend
-on how the display delivers events.
-
----
-
-## 6. Multi-page TIFF page navigation  ← opened by adding TIFF support
-
-TIFF, BMP and ICO decode now. A multi-page TIFF shows **page 1 only**, with no
-indication that more pages exist, and a document scan is the main reason people
+TIFF, BMP, ICO and QOI decode now. A multi-page TIFF shows **page 1 only**, with
+no indication that more pages exist, and a document scan is the main reason people
 have TIFFs.
 
 Not tested, and that is a real gap rather than an oversight: `image` 0.25's
@@ -249,39 +108,35 @@ Until then it is a caveat in the README rather than a feature.
 
 ---
 
-## 7. Smaller known items
+## 4. Smaller known items
 
-- ~~**`exif_orientation` re-reads the whole file.**~~ **Measured: not worth
-  doing.** It does re-open the file (`nom_exif::read_exif(path)`) even though
-  `load_image_preview_full` already holds the bytes, and the `Tiff` walker could
-  read Orientation for free instead. But measured on the five largest JPEGs in
-  `test-images`, `read_exif` costs **0.1-0.2 ms** against a 10-17 ms `fs::read`:
-  1-2%. The second read is served from the OS page cache, so there is no I/O
-  storm to save, and against a ~800 ms preview decode it is ~0.02%. The
-  "re-reads the whole file" framing is what made this look like a win.
 - **Large scans are the grid's real bottleneck now.** The three ~25 MB booklet
   JPEGs have no embedded thumbnail and take ~800 ms each even via the turbojpeg
   DCT path, which still decompresses every coefficient. Embedded EXIF thumbnails
-  (landed in `914bc42`) took the other files 15-40x faster; these are the residue
-  and need a different approach.
+  took the other files 15-40x faster; these are the residue and need a different
+  approach.
 - **Consider a `--icc-scan <folder>` CLI mode.** Stage 1 detection exists but is
   only reachable from the EXIF panel, so auditing a library means clicking
   through it. The classifier is already a cheap per-file call.
 
 ---
 
-## 8. What the test suite cannot reach — be suspicious here
+## 5. What the test suite cannot reach — be suspicious here
 
 `main.rs` is a binary, so none of these are testable today. Each has already cost
-time, and moving logic into `lib.rs` is the fix.
+time, and moving logic into `lib.rs` is the fix — which is what was done for the
+job planner, the resize policy and the rotation algebra, all now in `lib.rs` with
+tests.
 
 - **The file-change watcher** (`check_changed`, `invalidate_path`). Needs a real
   app and a real editor. Check: change a file on disk, confirm it reloads within
   a few seconds, *including while it is mid-write* — that case is the one that
   would poison the file if `invalidate_path` stopped clearing `failed`.
 - **Everything in `eframe::App::ui`** (keys, panels, Esc precedence).
-- **Rendering behaviour** after the egui 0.36 upgrade. The backend swap is the
-  one part of that commit no test touches; §3 has the one run that was done.
+- **Rendering behaviour**, including the `glow`→`wgpu` backend swap. No test
+  touches it; the one end-to-end run that was done is recorded in `AGENTS.md`,
+  and it has to be a visible window on a *console* session or the numbers are
+  wrong.
 - **Colour correctness** — see decision 2 above. There is no ground truth.
 
 ---
