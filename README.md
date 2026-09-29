@@ -41,8 +41,9 @@ double-rotate).
 - Neighbour preloading in both directions
 - Animated GIF playback with per-frame delays
 - Transparency checkerboard backdrop
-- **Rotate ⟲ / ⟳** — quarter turns, re-fits each time (view transform only,
-  nothing is written to the file)
+- **Rotate ⟲ / ⟳** — quarter turns, re-fits each time. A view transform by
+  default: nothing is written to the file. `Ctrl+S` writes a new file beside the
+  original with the rotation baked in, losslessly (see below)
 - Folder watcher: new and deleted files are picked up automatically (every 2s)
 
 ### Gallery grid (`G`)
@@ -114,9 +115,40 @@ clickable **Open in Google Maps** link.
 - Remembers the last image you were on, per folder
 - Optional per-user file-type registration
 
----
+### Saving a rotation (`Ctrl+S`)
 
-## Keyboard
+Rotation is a view transform by default, so nothing you do to an image touches
+the disk. `Ctrl+S` is the one action that writes, and it writes a **new file
+beside the original** — `photo.jpg` becomes `photo_rotated.jpg`, or
+`photo_rotated2.jpg` if that exists. The original is never modified, so the
+action is reversible and saving twice accumulates instead of compounding.
+
+The saved file is the picture exactly as you see it: the camera's EXIF
+orientation *and* your rotation, combined, baked into the pixels, with the
+orientation tag reset so nothing applies it a second time.
+
+For JPEG this is genuinely lossless. Rather than decode and re-encode, the
+rotation is applied to the **DCT coefficients** — the compressed data itself is
+moved, not recompressed. Measured on generated images at quality 90:
+
+| image | lossless | decode + re-encode | size in → out |
+|---|---|---|---|
+| 1920×1080 | 42 ms | 67 ms | 1.02× |
+| 4000×3000 | 185 ms | 384 ms | 1.00× |
+| 6000×4000 | 381 ms | 911 ms | 1.00× |
+
+The size column is the point: a re-encode makes a fresh rate-distortion decision
+per block and comes out a different size, while a coefficient transform lands
+within a percent. It is also about 2.4× faster, because it never fully
+decompresses.
+
+PNG, BMP and TIFF are also saved losslessly, by decoding and re-encoding into
+their own containers — those formats have no lossy step, so nothing is lost.
+**WebP, GIF, HEIC and JXL are refused** with a message rather than re-encoded:
+that would be a second generation of compression, and a button that says "save"
+should not quietly do that.
+
+
 
 | Key | Action |
 |---|---|
@@ -133,6 +165,7 @@ clickable **Open in Google Maps** link.
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |
 | `Del` `M` `C` `E` `W` `R` | Triage, see above |
 | `Ctrl+C` | Copy image to clipboard |
+| `Ctrl+S` | Save a new file beside the current one, rotation baked in losslessly |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Previous / next image |
 | Drag & drop | Open a file, folder or archive |
@@ -255,6 +288,8 @@ cargo test --no-fail-fast  # ... without stopping at the first failing target
 cargo bench                # criterion benchmarks (the only thing needing test-images/)
 
 cargo test --release --test bench_browse -- --ignored --nocapture   # browsing benchmark
+cargo test --release --test bench_resize -- --ignored --nocapture    # decodes per window drag
+cargo test --release --test bench_rotate_save -- --ignored --nocapture  # lossless save, size ratio
 cargo test --release --test pathological -- --ignored --nocapture   # 40/60 MP timings
 ```
 
@@ -295,8 +330,14 @@ images and is `#[ignore]`d because it takes seconds.
   another image for the change to show everywhere.
 - The **preview cache keeps a few images either side of the current one**, so
   jumping far away discards the old previews; scrolling back re-decodes.
-- **Rotation is display-only.** It is not written to the file and not carried
-  into copies, clipboard or wallpaper.
+- **Rotation is display-only by default.** It is not written to the file and not
+  carried into copies, clipboard or wallpaper. Only `Ctrl+S` writes anything,
+  and it writes a new file rather than modifying the original.
+- **A rotated JPEG can lose up to one 16 px block off an edge.** Lossless
+  transforms move whole 8×8 DCT blocks, so a width or height that is not a
+  multiple of the MCU block size leaves partial blocks that cannot reach the new
+  edge. Rather than leave a visible strip, the save discards them. This is a
+  no-op when the dimensions already align, which is the common case.
 - **Comics (`.cbz`/`.zip`) are read-only** — triage actions are refused, and
   wallpaper support copies the member out to `%APPDATA%` first.
 - Preview texture size follows the window: resizing larger re-decodes so the

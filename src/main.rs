@@ -1789,6 +1789,39 @@ impl MyApp {
     }
 
     /// Copy the current image (full-res when in memory) to the clipboard.
+    /// Write a new file beside the current one with the on-screen rotation baked
+    /// in (Ctrl+S).
+    ///
+    /// Always a *new* file: the original is never modified, so the action is
+    /// reversible and re-rotating accumulates rather than compounding. The
+    /// view-only rotation stays a view transform — this is the one path that
+    /// touches the disk, and it does so only when asked.
+    fn save_rotated_copy(&mut self) {
+        let Some(p) = self.cur.clone() else {
+            return;
+        };
+        if self.anim.as_ref().is_some_and(|a| a.path == p) {
+            self.error = Some("Cannot save an animation rotated: it has many frames".into());
+            return;
+        }
+        let quarters = self.rot;
+        match image_viewer::save_rotated(&p, quarters) {
+            Ok(dest) => {
+                let name = dest
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                self.notice = Some(if quarters == 0 {
+                    format!("Saved {name}")
+                } else {
+                    format!("Saved {name} (rotated {quarters}×90°, lossless)")
+                });
+            }
+            Err(e) => self.error = Some(format!("Save failed: {e}")),
+        }
+    }
+
     fn copy_image_to_clipboard(&mut self) {
         let Some(p) = self.cur.clone() else {
             return;
@@ -2833,7 +2866,7 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::Enter),
             )
         });
-        let (del, move_f, copy_f, explore, reload, clip_img, wall) = ctx.input(|i| {
+        let (del, move_f, copy_f, explore, reload, clip_img, wall, save_rot) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
                 i.key_pressed(egui::Key::M),
@@ -2842,6 +2875,7 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::R),
                 i.key_pressed(egui::Key::C) && i.modifiers.ctrl,
                 i.key_pressed(egui::Key::W) && !i.modifiers.any(),
+                i.key_pressed(egui::Key::S) && i.modifiers.ctrl,
             )
         });
         // Mouse side buttons: back = previous image, forward = next image.
@@ -2910,6 +2944,8 @@ impl eframe::App for MyApp {
                 self.rescan(ctx, true);
             } else if clip_img {
                 self.copy_image_to_clipboard();
+            } else if save_rot {
+                self.save_rotated_copy();
             } else if wall {
                 self.set_wallpaper();
             } else if mouse_back {

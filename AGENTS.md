@@ -31,6 +31,34 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   full-resolution source; a reciprocal **division inside the inner loop cost more
   than everything else combined**; the vertical pass needs its running column
   accumulator or it misses cache on every pixel.
+- **A saved rotation is only correct if it is *composed*, and the composition is
+  the whole problem.** "Save what I see" is two transforms, not one: the EXIF
+  orientation the camera wrote, and the quarter turns the user pressed since.
+  Getting the order or the sign wrong produces a mirrored or double-rotated
+  file — and it is **invisible in this viewer**, because the viewer applies the
+  EXIF tag itself and so cancels the error out. It is glaring in every other
+  program. `Xform::then` is in `lib.rs` for that reason: the tests compare a save
+  against `apply_exif_orientation` plus the viewer's own turns, over all 9 tags x
+  4 turns, so the two cannot drift.
+- **Never transcribe a transform table by hand.** `Xform::Transverse` was
+  written as `(h-1-oy, w-1-ox)` and should be `(w-1-oy, h-1-ox)`; it compiles,
+  it type-checks, and it underflows the moment the image is wider than it is
+  tall. `Xform::then` composes by *probing* — substitute a point through both ops
+  and find which of the eight matches — rather than by a multiplication table,
+  and `composition_is_closed_over_all_sixty_four_pairs` checks the result against
+  real pixels.
+- **The orientation tag must be neutralised when pixels are baked in.** A saved
+  file whose pixels are already in display orientation must report orientation
+  1, or every other viewer double-rotates it. Only overwrite bytes that already
+  exist: `neutralize_exif_orientation` sets the tag and zeroes IFD0's next-IFD
+  pointer (which unlinks the now-stale thumbnail) and never reserialises the
+  APP1 segment, because a malformed EXIF block is worse than an unreferenced
+  thumbnail.
+- **"Lossless" has to be demonstrated, not asserted.** `bench_rotate_save.rs`
+  reports the output/input size ratio: 1.00-1.02x. A re-encode makes a fresh
+  rate-distortion decision per block and moves that number; a DCT-coefficient
+  transform does not. That ratio is the only evidence the claim is true, and it
+  is a property of the output, so nothing in the code can assert it.
 - **Decoding is never interrupted, and nothing is ever abandoned.**
   A job runs to completion even if the user has navigated away. An earlier
   design published a set of "wanted" paths from `schedule()` and cancelled any

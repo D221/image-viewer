@@ -876,6 +876,465 @@ impl ResizeTracker {
 }
 
 // ---------------------------------------------------------------------------
+// Lossless rotation: the transform algebra
+// ---------------------------------------------------------------------------
+
+/// One of the eight square-lattice symmetries — the complete set that both an
+/// EXIF orientation tag and a lossless JPEG transform can express.
+///
+/// This exists because "rotate the saved file to match the screen" is a
+/// *composition* of two of them: the EXIF tag the camera wrote, and the quarter
+/// turns the user has since pressed. Composing them by hand is how you get a
+/// save that is mirrored, or transposed, or applied twice.
+///
+/// A value maps output pixels back to input pixels, so composing is
+/// substitution: where does the final output pixel come from, through the
+/// second transform and then the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Xform {
+    Identity,
+    /// 90 degrees clockwise.
+    Rot90,
+    Rot180,
+    /// 90 degrees counter-clockwise.
+    Rot270,
+    FlipH,
+    FlipV,
+    /// Mirror along the top-left to bottom-right axis.
+    Transpose,
+    /// Mirror along the top-right to bottom-left axis.
+    Transverse,
+}
+
+impl Xform {
+    pub const ALL: [Xform; 8] = [
+        Xform::Identity,
+        Xform::Rot90,
+        Xform::Rot180,
+        Xform::Rot270,
+        Xform::FlipH,
+        Xform::FlipV,
+        Xform::Transpose,
+        Xform::Transverse,
+    ];
+
+    /// Do the axes swap? True for everything that turns the picture on its side.
+    pub fn swaps_axes(self) -> bool {
+        matches!(
+            self,
+            Xform::Rot90 | Xform::Rot270 | Xform::Transpose | Xform::Transverse
+        )
+    }
+
+    /// Dimensions of the result, given the input.
+    pub fn out_dims(self, w: u32, h: u32) -> (u32, u32) {
+        if self.swaps_axes() {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+
+    /// Which input pixel ends up at output pixel `(ox, oy)`.
+    pub fn map(self, ox: u32, oy: u32, w: u32, h: u32) -> (u32, u32) {
+        match self {
+            Xform::Identity => (ox, oy),
+            // Output is h x w. A CW turn takes the input's left edge to the top.
+            Xform::Rot90 => (oy, h - 1 - ox),
+            Xform::Rot180 => (w - 1 - ox, h - 1 - oy),
+            Xform::Rot270 => (w - 1 - oy, ox),
+            Xform::FlipH => (w - 1 - ox, oy),
+            Xform::FlipV => (ox, h - 1 - oy),
+            Xform::Transpose => (oy, ox),
+            // Anti-diagonal mirror. The output is h x w, so `ox` ranges over
+            // [0, h) and indexes the *height*: getting this pair the wrong way
+            // round underflows as soon as the image is wider than it is tall.
+            Xform::Transverse => (w - 1 - oy, h - 1 - ox),
+        }
+    }
+
+    /// The transform an EXIF orientation tag describes, or `None` for 0 and for
+    /// tags outside 1-=8.
+    ///
+    /// The mapping is not invented here: it is checked against
+    /// [`apply_exif_orientation`] by a test, so the two cannot drift.
+    pub fn from_exif(tag: u16) -> Option<Xform> {
+        Some(match tag {
+            1 => Xform::Identity,
+            2 => Xform::FlipH,
+            3 => Xform::Rot180,
+            4 => Xform::FlipV,
+            5 => Xform::Transpose,
+            6 => Xform::Rot90,
+            7 => Xform::Transverse,
+            8 => Xform::Rot270,
+            _ => return None,
+        })
+    }
+
+    /// `turns` quarter turns clockwise — what the rotate buttons produce.
+    pub fn quarters_cw(turns: u8) -> Xform {
+        match turns & 3 {
+            0 => Xform::Identity,
+            1 => Xform::Rot90,
+            2 => Xform::Rot180,
+            _ => Xform::Rot270,
+        }
+    }
+
+    /// `self` first, then `next`.
+    ///
+    /// Found by *probing* rather than by transcribing a multiplication table: the
+    /// eight ops form a group, so the composition is whichever single op maps the
+    /// output to the same input pixels. Working this out structurally is four
+    /// pages of sign analysis and gets it wrong in a way that only shows up as a
+    /// mirrored saved photo; this is twenty lines and a test proves it.
+    pub fn then(self, next: Xform) -> Xform {
+        // Deliberately not square, so a transpose cannot masquerade as a
+        // rotation: both preserve an area but swap the axes, and only the
+        // corners tell them apart on a square.
+        let (iw, ih) = (7u32, 5u32);
+        let (mw, mh) = self.out_dims(iw, ih); // `self`'s output = `next`'s input
+        let (ow, oh) = next.out_dims(mw, mh); // the composition's output
+        // `map` takes the *input* dimensions, which is the easy thing to get
+        // wrong here and produces underflow rather than a wrong answer.
+        let probe = |ox: u32, oy: u32| {
+            let (bx, by) = next.map(ox, oy, mw, mh);
+            self.map(bx, by, iw, ih)
+        };
+        let mut found = None;
+        for cand in Xform::ALL {
+            if cand.out_dims(iw, ih) != (ow, oh) {
+                continue;
+            }
+            if cand.map(0, 0, iw, ih) == probe(0, 0)
+                && cand.map(ow - 1, oh - 1, iw, ih) == probe(ow - 1, oh - 1)
+                && cand.map(0, oh - 1, iw, ih) == probe(0, oh - 1)
+                && cand.map(ow - 1, 0, iw, ih) == probe(ow - 1, 0)
+            {
+                debug_assert!(found.is_none(), "two transforms match one composition");
+                found = Some(cand);
+            }
+        }
+        found.expect("the eight transforms are closed under composition")
+    }
+
+    /// The same operation as a TurboJPEG lossless transform.
+    pub fn as_turbojpeg(self) -> turbojpeg::TransformOp {
+        match self {
+            Xform::Identity => turbojpeg::TransformOp::None,
+            Xform::Rot90 => turbojpeg::TransformOp::Rot90,
+            Xform::Rot180 => turbojpeg::TransformOp::Rot180,
+            Xform::Rot270 => turbojpeg::TransformOp::Rot270,
+            Xform::FlipH => turbojpeg::TransformOp::Hflip,
+            Xform::FlipV => turbojpeg::TransformOp::Vflip,
+            Xform::Transpose => turbojpeg::TransformOp::Transpose,
+            Xform::Transverse => turbojpeg::TransformOp::Transverse,
+        }
+    }
+
+    /// Apply to an RGBA buffer. Only for the formats that have to be re-encoded.
+    pub fn apply_rgba(self, w: u32, h: u32, rgba: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+        let (ow, oh) = self.out_dims(w, h);
+        let want_in = (w as usize) * (h as usize) * 4;
+        let want_out = (ow as usize) * (oh as usize) * 4;
+        if rgba.len() != want_in {
+            return None;
+        }
+        let mut out = vec![0u8; want_out];
+        for oy in 0..oh {
+            for ox in 0..ow {
+                let (ix, iy) = self.map(ox, oy, w, h);
+                let src = ((iy as usize) * (w as usize) + ix as usize) * 4;
+                let dst = ((oy as usize) * (ow as usize) + ox as usize) * 4;
+                out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+            }
+        }
+        Some((ow, oh, out))
+    }
+}
+
+/// The transform that takes a file's *stored* pixels to what the viewer shows:
+/// the EXIF orientation applied at decode, then the quarter turns the user has
+/// pressed since.
+pub fn display_xform(exif_tag: u16, user_quarters: u8) -> Xform {
+    Xform::from_exif(exif_tag)
+        .unwrap_or(Xform::Identity)
+        .then(Xform::quarters_cw(user_quarters))
+}
+
+/// Why a rotation could not be saved, when it could not.
+///
+/// Deliberately has *no* `#[from] std::io::Error`: reading and writing are
+/// different failures to the user, and collapsing them into one variant loses
+/// which half of the operation went wrong.
+#[derive(Debug, thiserror::Error)]
+pub enum SaveError {
+    #[error("could not read the file: {0}")]
+    Read(std::io::Error),
+    #[error("decoding failed: {0}")]
+    Decode(String),
+    #[error("{0} would have to be re-encoded, which is lossy — this only saves losslessly")]
+    Lossy(String),
+    #[error("writing failed: {0}")]
+    Write(std::io::Error),
+}
+
+/// Human name for a format, for the "cannot save this" message.
+fn format_name(bytes: &[u8]) -> &'static str {
+    if is_jpeg_bytes(bytes) {
+        "JPEG"
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "PNG"
+    } else if is_gif_bytes(bytes) {
+        "GIF"
+    } else if is_tiff_bytes(bytes) {
+        "TIFF"
+    } else if is_bmp_bytes(bytes) {
+        "BMP"
+    } else if is_ico_bytes(bytes) {
+        "ICO"
+    } else if is_jxl_bytes(bytes) {
+        "JPEG XL"
+    } else if is_heif_bytes(bytes) {
+        "HEIF/AVIF"
+    } else {
+        "this format"
+    }
+}
+
+/// A lossless re-encode target for `bytes`, if there is one.
+///
+/// Only formats that can hold the rotated pixels *without* recompression. A
+/// WebP, GIF, HEIC or JXL would have to be decoded and re-encoded, which is a
+/// second generation of compression — and this is a button that says "save", so
+/// it must never quietly do that.
+fn lossless_raster(bytes: &[u8]) -> Option<image::ImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(image::ImageFormat::Png)
+    } else if is_tiff_bytes(bytes) {
+        Some(image::ImageFormat::Tiff)
+    } else if is_bmp_bytes(bytes) {
+        Some(image::ImageFormat::Bmp)
+    } else {
+        None
+    }
+}
+
+/// Write `src` to a new file beside it, with the rotation baked in, and return
+/// the path written.
+///
+/// **The original is never touched.** This writes `photo_rotated.jpg` next to
+/// `photo.jpg`, or `photo_rotated2.jpg` and onwards if that exists, so the edit
+/// is reversible and re-rotating accumulates instead of compounding. There is no
+/// undo for an in-place write, and a wrong transform is exactly the kind of
+/// mistake you notice after closing the app.
+///
+/// JPEG goes through `tjTransform`, which operates on the DCT coefficients, so
+/// the result is the same compressed data rearranged — no second generation,
+/// and typically faster than decoding the file. PNG, BMP and TIFF are decoded
+/// and re-encoded into their own lossless containers, which is lossless because
+/// those formats have no lossy step.
+///
+/// The output's EXIF orientation is set to 1, because the pixels now *are* the
+/// display orientation. See [`neutralize_exif_orientation`].
+pub fn save_rotated(src: &Path, user_quarters: u8) -> Result<PathBuf, SaveError> {
+    let bytes = std::fs::read(src).map_err(SaveError::Read)?;
+    let exif_tag = if is_jpeg_bytes(&bytes) { exif_orientation(src) } else { 0 };
+    let xform = display_xform(exif_tag, user_quarters);
+
+    let mut out = bytes.clone();
+    if is_jpeg_bytes(&bytes) {
+        if xform != Xform::Identity {
+            let mut t = turbojpeg::Transform::op(xform.as_turbojpeg());
+            // Lossless transforms move whole MCU blocks, so a dimension that is
+            // not a multiple of the block size leaves partial blocks that cannot
+            // reach the new edge. Left in place they show as strips; `trim`
+            // discards them instead, costing at most one block (16 px) off an
+            // edge. It is a no-op when the image is already aligned, so there is
+            // nothing to give up in the common case.
+            t.trim = true;
+            out = turbojpeg::transform(&t, &bytes)
+                .map_err(|e| SaveError::Decode(format!("lossless transform failed: {e}")))?
+                .to_vec();
+
+        }
+        // The pixels are the display orientation now, so the tag must not fight them.
+        neutralize_exif_orientation(&mut out);
+    } else if let Some(fmt) = lossless_raster(&bytes) {
+        let img = image::load_from_memory(&bytes).map_err(|e| SaveError::Decode(format!("{e}")))?;
+        let (w, h) = (img.width(), img.height());
+        let rgba = img.to_rgba8();
+        let (ow, oh, px) = xform
+            .apply_rgba(w, h, &rgba)
+            .ok_or_else(|| SaveError::Decode("buffer did not match its dimensions".into()))?;
+        let out_img = image::RgbaImage::from_raw(ow, oh, px)
+            .ok_or_else(|| SaveError::Decode("rotated buffer was malformed".into()))?;
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(out_img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), fmt)
+            .map_err(|e| SaveError::Decode(format!("re-encoding failed: {e}")))?;
+        out = buf;
+    } else {
+        return Err(SaveError::Lossy(format_name(&bytes).to_owned()));
+    }
+
+    let dest = unique_dest(src);
+    std::fs::write(&dest, &out).map_err(SaveError::Write)?;
+    Ok(dest)
+}
+
+/// `photo.jpg` -> `photo_rotated.jpg`, or `photo_rotated2.jpg`, `...3` and so on
+/// if that already exists. Never overwrites.
+pub fn unique_dest(src: &Path) -> PathBuf {
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned());
+    let ext = src.extension().map(|s| s.to_string_lossy().into_owned());
+    let (Some(stem), Some(ext)) = (stem, ext) else {
+        return numbered_sibling(src, parent);
+    };
+    for n in 1..1000u32 {
+        let name = if n == 1 {
+            format!("{stem}_rotated.{ext}")
+        } else {
+            format!("{stem}_rotated{n}.{ext}")
+        };
+        let cand = parent.join(name);
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    numbered_sibling(src, parent)
+}
+
+fn numbered_sibling(src: &Path, parent: &Path) -> PathBuf {
+    let base = src.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    for n in 1..1000u32 {
+        let cand = parent.join(format!("{base}_rotated{n}.bin"));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    parent.join(format!("{base}_rotated.bin"))
+}
+
+/// Rewrite a JPEG's EXIF after a lossless rotation: set the orientation tag to 1
+/// and unlink the embedded thumbnail.
+///
+/// The pixels are now already in display orientation, so any orientation tag
+/// left in place gets applied *on top* of them — the classic double-rotate,
+/// and the sort of thing that is invisible in this viewer because it applies the
+/// tag itself and so cancels out, and obvious everywhere else.
+///
+/// Two edits, both of which only overwrite bytes that already exist:
+///  * the orientation tag's value becomes 1, and
+///  * IFD0's next-IFD pointer is zeroed, so the thumbnail in IFD1 stops being
+///    reachable.
+///
+/// Leaving IFD1 in place but unreferenced is deliberate. Removing it properly
+/// means reserialising the whole APP1 segment and every offset inside it, and a
+/// malformed EXIF block is worse than a thumbnail nothing points at. Conformant
+/// readers follow the pointer, and both Explorer and the browsers do.
+///
+/// Returns what was changed, for the caller to report. `false` with no EXIF at
+/// all is not a failure: a file with no orientation tag is already correct once
+/// the pixels are rotated. The buffer is never grown or shrunk, so no offset
+/// inside the segment can go stale — and every offset is bounds-checked against
+/// the segment's end, exactly as the reader is, because these bytes come from
+/// the file and are about to be handed to other programs.
+pub fn neutralize_exif_orientation(jpeg: &mut [u8]) -> bool {
+    /// Read a `u16` at `at`, inside `base..end`, in the given byte order.
+    fn rd16(b: &[u8], at: usize, end: usize, le: bool) -> Option<u16> {
+        if at.checked_add(2)? > end || end > b.len() {
+            return None;
+        }
+        let v = [b[at], b[at + 1]];
+        Some(if le { u16::from_le_bytes(v) } else { u16::from_be_bytes(v) })
+    }
+    fn wr16(b: &mut [u8], at: usize, v: u16, le: bool) {
+        let v = if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        b[at] = v[0];
+        b[at + 1] = v[1];
+    }
+    fn rd32(b: &[u8], at: usize, end: usize, le: bool) -> Option<u32> {
+        if at.checked_add(4)? > end || end > b.len() {
+            return None;
+        }
+        let v = [b[at], b[at + 1], b[at + 2], b[at + 3]];
+        Some(if le { u32::from_le_bytes(v) } else { u32::from_be_bytes(v) })
+    }
+    fn wr32(b: &mut [u8], at: usize, v: u32, le: bool) {
+        let v = if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        b[at..at + 4].copy_from_slice(&v);
+    }
+
+    let Some((base, end)) = exif_tiff_span(jpeg) else {
+        return false;
+    };
+    if end > jpeg.len() || base + 4 > end {
+        return false;
+    }
+    let le = match &jpeg[base..base + 2] {
+        [0x49, 0x49] => true,
+        [0x4D, 0x4D] => false,
+        _ => return false,
+    };
+
+    let Some(off) = rd32(jpeg, base + 4, end, le) else {
+        return false;
+    };
+    let ifd0 = match base.checked_add(off as usize) {
+        Some(v) if v + 2 <= end => v,
+        _ => return false,
+    };
+    let Some(count) = rd16(jpeg, ifd0, end, le) else {
+        return false;
+    };
+    // Capped exactly as the reader caps it: a corrupt count must not make us
+    // walk attacker-controlled offsets across the whole buffer.
+    let count = usize::from(count.min(64));
+
+    // Locate the orientation entry's value field, and the next-IFD pointer.
+    let mut orientation_at = None;
+    for i in 0..count {
+        let Some(e) = ifd0.checked_add(2 + i * 12) else {
+            break;
+        };
+        if e + 12 > end {
+            break;
+        }
+        match rd16(jpeg, e, end, le) {
+            Some(EXIF_TAG_ORIENTATION) => {
+                orientation_at = Some(e + 8);
+                break;
+            }
+            _ => {}
+        }
+    }
+    // The next-IFD pointer sits after the entry table.
+    let next_at = ifd0 + 2 + count * 12;
+
+    let mut changed = false;
+    if let Some(at) = orientation_at {
+        if at + 2 <= end {
+            wr16(jpeg, at, 1, le);
+            changed = true;
+        }
+    }
+    if next_at + 4 <= end {
+        // Only bother if it actually pointed somewhere.
+        if rd32(jpeg, next_at, end, le).is_some_and(|v| v != 0) {
+            wr32(jpeg, next_at, 0, le);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Tag 0x0112, the orientation.
+const EXIF_TAG_ORIENTATION: u16 = 0x0112;
+
+// ---------------------------------------------------------------------------
 // Colour profile detection (read-only, no transformation)
 // ---------------------------------------------------------------------------
 //
@@ -1325,7 +1784,7 @@ pub enum LoadError {
 
 /// EXIF orientation tag (1-8) of a JPEG file, or 0 when absent/unreadable.
 /// Only JPEG carries the tag in practice; callers gate on content sniffing.
-fn exif_orientation(path: &Path) -> u16 {
+pub fn exif_orientation(path: &Path) -> u16 {
     nom_exif::read_exif(path)
         .ok()
         .and_then(|exif| exif.get(nom_exif::ExifTag::Orientation).and_then(|v| v.as_u16()))
