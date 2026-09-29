@@ -1022,6 +1022,14 @@ impl MyApp {
         // the answer is in the config, so reading it back keeps the two in step.
         let renderer = config.renderer.resolve(None);
 
+        // Icon first, before anything can paint. A title bar caches its icon
+        // when the non-client area is created, so setting it later — even a few
+        // frames later — can leave the title bar drawing the shell default
+        // indefinitely. The retry in `frame_prelude` still runs for the case
+        // where the window genuinely is not up yet.
+        #[cfg(windows)]
+        winicon::apply();
+
         // Optional CLI argument: a file or a folder ("Open with…"). Must be the
         // first *non-flag* argument: `nth(1)` would take `--perf` as the path
         // and silently open the persisted folder instead.

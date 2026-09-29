@@ -35,6 +35,11 @@ const SM_CXICON: i32 = 11;
 const SM_CXSMICON: i32 = 49;
 const SM_CXSMICON2: i32 = 50;
 const WM_SETICON: u32 = 0x0080_0002;
+const WM_SETFRAMEICON: u32 = 0x0460;
+const RDW_INVALIDATE: u32 = 0x0001;
+const RDW_FRAME: u32 = 0x0400;
+const RDW_ALLCHILDREN: u32 = 0x0080;
+const RDW_UPDATENOW: u32 = 0x0100;
 const ICON_SMALL: usize = 0;
 const ICON_BIG: usize = 1;
 const ICON_SMALL2: usize = 2;
@@ -82,6 +87,12 @@ extern "system" {
     ) -> *mut c_void;
     fn GetIconInfo(i: *mut c_void, info: *mut ICONINFO) -> i32;
     fn GetSystemMetrics(i: i32) -> i32;
+    fn RedrawWindow(
+        h: *mut c_void,
+        rect: *mut c_void,
+        rgn: *mut c_void,
+        flags: u32,
+    ) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -279,9 +290,29 @@ pub fn apply() -> bool {
         }
     }
 
-    // Confirm rather than assume: the taskbar reads ICON_BIG, and every step
-    // above can fail silently on its own. `GetWindowLongPtr(GWL_HICON)` is the
-    // same value `WM_GETICON(ICON_BIG)` reports, read directly.
+    // A title bar does not re-read its icon when one arrives late. The non-client
+    // area is built once, when the window is first shown, and caches what it
+    // found then — which, this early in a launch, is the shell default. So the
+    // icon has to be set *and* the frame has to be told to redraw, or the title
+    // bar keeps drawing the old one no matter how correct the handle is.
+    //
+    // `WM_SETFRAMEICON` is the message specifically about the frame's icon, and
+    // is what a title bar consults in preference to the plain window icon.
+    if let Some(b) = big {
+        unsafe { SendMessageW(hwnd, WM_SETFRAMEICON, ICON_BIG, b) };
+    }
+    if let Some(s) = small {
+        unsafe { SendMessageW(hwnd, WM_SETFRAMEICON, ICON_SMALL, s) };
+    }
+    unsafe {
+        RedrawWindow(
+            hwnd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            RDW_FRAME | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW,
+        );
+    }
+
     has_big_icon()
 }
 
