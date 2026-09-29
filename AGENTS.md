@@ -337,7 +337,29 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   `assets/app-icon-preview.png` after changing it.** Also: to verify a bug fix,
   `Copy-Item` restores the *backup's* old timestamp, so cargo skips the rebuild
   and you test a stale binary — `touch` the file or the green run is a lie.
-- **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings. It also embeds `assets/app.ico`; a running viewer locks the exe and the build silently fails to replace it.
+- **The window icon is `ViewportBuilder::with_icon`. Do not reach for `WM_SETICON`.**
+  Four attempts went into this before the obvious API turned up, and every earlier
+  one was the icon arriving *too late*: `WM_SETICON` only works if the window
+  procedure forwards it to `DefWindowProc` (winit's does not — it serves icons from
+  its own state, so `GWL_HICON` reads 0 while `WM_GETICON` does not, and reading
+  the long as authoritative is how you conclude the icon is missing when it is
+  not); DWM caches the title bar's icon when the non-client area is built, before
+  any of our code runs, and a later `WM_SETICON` plus `RedrawWindow` does not
+  displace it; and setting the window *class* icon works and still is not enough.
+  `with_icon` is the only moment the window does not exist yet. **Check for a
+  framework API before writing a P/Invoke module** — there is no `winicon.rs` here
+  any more, and that is the point.
+- **Explorer and the taskbar get the icon by different routes.** Explorer reads
+  the registered `DefaultIcon`; the title bar and the running taskbar button read
+  the *window*. Fixing one tells you nothing about the other, which is why
+  "Explorer looks right, the taskbar does not" is not a contradiction.
+- **An AppUserModelID's `IconUri` must be a bare path.** Quoting it (the quotes
+  in Microsoft's examples are JSON syntax, not part of the value) makes the shell
+  fail to resolve the icon, with a very confusing symptom: a *pinned* taskbar
+  button still shows the right icon, because pinning builds its own reference to
+  the exe, while the running window's button falls back to the default. Restarting
+  Explorer does not help — it re-reads the same unparseable value.
+- **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings. It also embeds `assets/app.ico`; a running viewer locks the exe and the build fails to replace it.
 - **Format handling is content-based, never extension-based.** Magic-byte sniffing picks the decoder (JPEG/PNG/WebP/GIF/TIFF/BMP/ICO/QOI via the `image` crate; JXL via `jxl-oxide`; HEIC/HEIF/AVIF via the `heic` crate; misnamed files like a PNG saved as `.jpg` must keep loading — regression test exists). `image_dims_bytes` probes header dims per format. This is also why several `image` crate decoders are deliberately left disabled, most sharply **Targa, which has no signature at all** and is therefore unidentifiable here — `a_targa_cannot_be_identified_from_its_content` demonstrates that with a hand-built valid Targa instead of asserting it. Do not "fix" it by passing the extension into the decode path. Full list with reasons: `IMAGE_CRATE_DECODERS_WE_SKIP` in `lib.rs`.
 - **A registered file type needs a `DefaultIcon`, and must NOT have a `ShellEx\ThumbnailHandler`.** Without the first, Explorer shows the generic *application* icon — which is what happens once the viewer is the default, because the ProgID has no icon and the exe has no embedded one either. `build.rs` embeds `assets/app.ico` via `winresource`; an `.ico` beside the binary is not consulted, because the shell reads the exe's *resources*. Without the second, WIC keeps supplying real photo thumbnails — claiming that key would displace WIC and replace actual thumbnails with an icon, which is strictly worse. Icon and thumbnail are separate concerns; fix only the icon. Explorer caches icons per user, so a registration change needs `ie4uinit.exe -show` to become visible.
 - **`normalized()` (lib.rs) guards every decode exit** — and it must guard the
