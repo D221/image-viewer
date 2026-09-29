@@ -33,3 +33,6 @@ zip = "2"
 criterion = "0.5"
 proptest = "1"
 tempfile = "3"
+
+[build-dependencies]
+winresource = "0.1.31"

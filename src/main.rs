@@ -84,6 +84,14 @@ fn main() -> eframe::Result<()> {
             return match fileassoc::register() {
                 Ok(id) => {
                     println!("Registered as '{id}'. Use Explorer's 'Open with > Choose another app' to set it as default.");
+                    // Explorer caches icons per user and does not notice a
+                    // changed registration on its own, so without this the
+                    // obvious conclusion is that the fix did not work.
+                    match fileassoc::default_icon() {
+                        Some(icon) => println!("Icon: {icon}"),
+                        None => println!("Warning: no DefaultIcon was registered; files will show a generic icon."),
+                    }
+                    println!("If icons have not changed, run: ie4uinit.exe -show  (then restart Explorer).");
                     Ok(())
                 }
                 Err(e) => {
@@ -3187,6 +3195,19 @@ impl eframe::App for MyApp {
                 let registered = fileassoc::is_registered();
                 if registered {
                     ui.label(format!("Registered as '{}'", fileassoc::progid()));
+                    // A missing icon is invisible here and only shows up as a
+                    // generic application icon in a file list, so say so.
+                    match fileassoc::default_icon() {
+                        Some(icon) => {
+                            ui.small(format!("Icon: {icon}"));
+                        }
+                        None => {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                "No icon registered — files will show a generic icon",
+                            );
+                        }
+                    }
                     if ui.button("Unregister file types").clicked() {
                         match fileassoc::unregister() {
                             Ok(_) => self.notice = Some("File associations removed".into()),

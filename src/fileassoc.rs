@@ -47,6 +47,75 @@ fn open_key(sub: &str, writable: bool) -> R<winreg::RegKey> {
     io(hkcu.open_subkey_with_flags(sub, access))
 }
 
+/// The `DefaultIcon` value to register, and where it came from.
+///
+/// A ProgID with no icon is what makes Explorer show the *generic application
+/// icon* for every file it handles: the shell resolves the icon through the
+/// default handler, finds nothing, and falls back to the executable. This is
+/// worth fixing rather than arguing about, because a file list is mostly icons.
+///
+/// Two sources, in order of preference:
+///  * the icon embedded in our own exe, which `build.rs` puts there, and
+///  * a system picture icon, so an un-embedded build still shows a picture
+///    rather than a generic application.
+///
+/// Note what is *not* registered: a `ShellEx\ThumbnailHandler`. The Windows
+/// Imaging Component already provides real photo thumbnails for image types, and
+/// claiming that key would displace WIC and replace actual thumbnails with our
+/// icon — strictly worse. Leaving it alone is what keeps the preview pane
+/// working.
+fn icon_value(exe: &std::path::Path) -> (String, &'static str) {
+    if exe_has_icon(exe) {
+        (
+            format!("\"{}\",0", exe.to_string_lossy()),
+            "the icon in the exe",
+        )
+    } else {
+        (
+            format!(r"%SystemRoot%\System32\imageres.dll,-102"),
+            "a system picture icon (this build has no embedded icon)",
+        )
+    }
+}
+
+/// True if the exe carries an icon resource at all.
+///
+/// Checked with `ExtractIconExW` rather than assumed, so the fallback is used
+/// only when it is actually needed, and so a build that loses the embedded
+/// resource degrades to a sensible icon instead of the generic one.
+fn exe_has_icon(exe: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    extern "system" {
+        fn ExtractIconExW(
+            file: *const u16,
+            index: i32,
+            large: *mut *mut core::ffi::c_void,
+            small: *mut *mut core::ffi::c_void,
+            count: u32,
+        ) -> u32;
+        fn DestroyIcon(icon: *mut core::ffi::c_void) -> i32;
+    }
+    let mut wide: Vec<u16> = exe.as_os_str().encode_wide().collect();
+    wide.push(0);
+    // A negative index asks "how many?", which needs no icon out.
+    let n = unsafe { ExtractIconExW(wide.as_ptr(), -1, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
+    if n == 0 {
+        return false;
+    }
+    // Now actually extract one, so a malformed resource cannot pass the count.
+    let mut large: *mut core::ffi::c_void = core::ptr::null_mut();
+    let mut small: *mut core::ffi::c_void = core::ptr::null_mut();
+    let got = unsafe { ExtractIconExW(wide.as_ptr(), 0, &mut large, &mut small, 1) };
+    if !large.is_null() {
+        unsafe { DestroyIcon(large) };
+    }
+    if !small.is_null() {
+        unsafe { DestroyIcon(small) };
+    }
+    got > 0
+}
+
 /// Register the ProgID and add it to OpenWithProgids for all extensions.
 /// Returns the ProgID on success.
 pub fn register() -> R<String> {
@@ -64,6 +133,10 @@ pub fn register() -> R<String> {
     let (key, _) = io(hkcu.create_subkey(format!(r"Software\Classes\{id}")))?;
     io(key.set_value("", &"Image Viewer"))?;
     io(key.set_value("FriendlyTypeName", &"Image Viewer"))?;
+    // Without this the shell has no icon for the type and shows the generic
+    // application icon instead of a picture.
+    let (icon, _source) = icon_value(&exe);
+    io(key.set_value("DefaultIcon", &icon))?;
     let (shell, _) = io(key.create_subkey(r"shell\open\command"))?;
     io(shell.set_value("", &format!("\"{exe_str}\" \"%1\"")))?;
 
@@ -82,6 +155,19 @@ pub fn register() -> R<String> {
         io(ext_key.set_value(&id, &""))?;
     }
     Ok(id)
+}
+
+/// The registered `DefaultIcon` value, or `None`.
+///
+/// `DefaultIcon` is a *value on the ProgID key*, not a subkey — which is the
+/// easy mistake here, and it fails silently: the write succeeds, the read finds
+/// nothing, and the conclusion drawn is that registration is broken when it is
+/// only the reader.
+pub fn default_icon() -> Option<String> {
+    open_key(&format!(r"Software\Classes\{}", progid()), false)
+        .ok()
+        .and_then(|k| io(k.get_value::<String, _>("DefaultIcon")).ok())
+        .filter(|v| !v.trim().is_empty())
 }
 
 /// Remove the ProgID and its OpenWithProgids entries. Returns true if the
@@ -111,5 +197,57 @@ pub fn is_registered() -> bool {
         .ok()
         .and_then(|k| io(k.get_value::<String, _>(r"shell\open\command")).ok())
         .is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deliberately does *not* touch the registry. A test that registers and
+    /// unregisters would rewrite the user's real file associations, and a test
+    /// that fails halfway through would leave them broken. So this covers the
+    /// decision, and the registry effect is checked by running `--register` and
+    /// reading the key back.
+    #[test]
+    fn the_icon_value_is_always_something_the_shell_can_resolve() {
+        let exe = std::env::current_exe().unwrap();
+        let (value, source) = icon_value(&exe);
+        assert!(!value.trim().is_empty(), "empty DefaultIcon");
+        let resolves = value.contains("imageres.dll") || value.contains(".exe");
+        assert!(resolves, "unrecognised DefaultIcon {value:?} ({source})");
+    }
+
+    /// The whole reason this code exists. Run under `cargo test --bin
+    /// image-viewer`; `build.rs` embeds the icon, so this binary has one and the
+    /// registered value must point at it rather than at the fallback.
+    #[test]
+    fn an_embedded_icon_is_detected_and_preferred() {
+        let exe = std::env::current_exe().unwrap();
+        if !cfg!(windows) {
+            return;
+        }
+        assert!(
+            exe_has_icon(&exe),
+            "no icon resource in the exe - build.rs should have embedded assets/app.ico"
+        );
+        let (value, source) = icon_value(&exe);
+        assert!(
+            value.contains(".exe"),
+            "should have used the exe's own icon, got {value:?} ({source})"
+        );
+    }
+
+    /// A file that cannot have an icon must be reported as having none, or the
+    /// fallback never gets used.
+    #[test]
+    fn a_file_with_no_icon_is_reported_as_such() {
+        if !cfg!(windows) {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("image-viewer-not-an-exe.txt");
+        std::fs::write(&tmp, b"hello").unwrap();
+        assert!(!exe_has_icon(&tmp), "a text file reported an icon");
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
