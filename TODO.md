@@ -190,7 +190,45 @@ texture uploads, graceful exit 0 — but that is one folder on one machine.
 
 ---
 
-## 4. Smaller known items
+## 5. Resize re-decodes once per frame  ← plausible, but UNMEASURED
+
+The one speed item from the reverted set that looks like it has no downside, so
+it is the one worth attempting. The current code drops every `below_target`
+preview and re-decodes whenever the display area grows by even one physical
+pixel, so dragging a window edge re-decodes repeatedly and blanks the picture
+each time. Deferring the refine until the size stops moving keeps the existing
+texture on screen and decodes once.
+
+Two costs, so it is not free: the picture is briefly soft after a resize instead
+of being sharp immediately, and a drag that ends is only detected if another
+frame arrives.
+
+**Measured: nothing.** An attempt measured "8-11 re-decodes for one drag" and a
+deferral that only got it to 9 — but every one of those numbers was taken over
+RDP, which coalesces and delays window-resize events. A debounce is sensitive to
+exactly that cadence, so the comparison is meaningless and the diagnosis built on
+it ("frames are ~850 ms apart, so a wall-clock timer expires between every pair
+of them") is probably an artifact. Only the per-decode cost (~800 ms for a
+28 MP preview) survived; that is CPU-bound and is real.
+
+**What to do when a local session is available.** Drive a real drag with
+`SetWindowPos` (that part works over RDP) and read the app's own
+`resize-driven re-decodes` counter. Note that a *wall-clock* settle is likely the
+wrong design here for a reason worth keeping: a large preview takes ~800 ms to
+decode, so frames are ~800 ms apart and a timer shorter than that expires
+between every pair of them. "The size did not change since the previous frame"
+is frame-based and immune to that. But check it locally — under RDP, coalesced
+events could make a same-size pair appear mid-drag and cause a spurious refine,
+which is exactly what would make the frame-based version look worse than it is.
+
+The predicate to extract and test when this is picked up is
+`needs_refine(old, new, floor) -> bool` — pure, and it belongs in `lib.rs` next
+to `plan_jobs` so it can be tested at all. (It was written and then reverted along
+with the rest of the attempt; there is no `needs_refine` in the tree today.)
+
+---
+
+## 6. Smaller known items
 
 - **`exif_orientation` re-reads the whole file.** It calls
   `nom_exif::read_exif(path)` even though `load_image_preview_full` already has
@@ -207,7 +245,7 @@ texture uploads, graceful exit 0 — but that is one folder on one machine.
 
 ---
 
-## 5. What the test suite cannot reach — be suspicious here
+## 7. What the test suite cannot reach — be suspicious here
 
 `main.rs` is a binary, so none of these are testable today. Each has already cost
 time, and moving logic into `lib.rs` is the fix.
