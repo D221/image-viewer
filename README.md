@@ -19,11 +19,25 @@ cargo run --release
 Content-based detection by magic bytes, so misnamed files still open (a PNG
 saved as `.jpg` is fine).
 
+Not every format the `image` crate can decode is enabled, and the reasons are
+worth stating because they are not all "we forgot":
+
+| Skipped | Why |
+|---|---|
+| Targa (`.tga`) | **No magic bytes at all.** Detection here is by content, so a Targa is unidentifiable — it fails as `Unknown`. Supporting it would mean putting the file extension back into the decode path, which is the one thing this design avoids |
+| DDS | Decode-only in the crate, so no fixture can be generated with the crate that decodes it — untestable with it. Also a game-texture container |
+| OpenEXR, Radiance HDR | Linear-light floating point. Through an 8-bit sRGB surface with no tone mapping they come out washed out and blown out, which is *worse* than refusing: the file is fine and the viewer is wrong, and you cannot tell which |
+| PNM (`.pbm`/`.pgm`/`.ppm`/`.pam`), farbfeld | A bitmap-mask family and a format that mostly lives in Rust demos. They would pad the file-association list for no real use |
+| AVIF (via `image`) | Already handled, and better, by the `heic` crate, which also reads the container's `colr` box. A second, weaker decoder for a format already covered |
+
+The line is not "can the crate decode it" but "can we display it *correctly*, and
+can we still test it". QOI clears both.
+
 | Format | Decoder |
 |---|---|
 | JPEG | `turbojpeg`, with a DCT-scaled fast path for large images |
 | PNG, WebP, GIF | `image` crate (animated GIFs included) |
-| TIFF, BMP, ICO | `image` crate |
+| TIFF, BMP, ICO, QOI | `image` crate |
 | JPEG XL | `jxl-oxide` |
 | HEIC, HEIF, AVIF | `heic` |
 
@@ -200,8 +214,16 @@ image-viewer.exe --unregister
 ```
 
 `--register` writes a per-user (HKCU) ProgID and `OpenWithProgids` entries for
-all fifteen extensions. It deliberately does **not** claim the default-handler
+all sixteen extensions. It deliberately does **not** claim the default-handler
 role — Windows requires the user to confirm that themselves.
+
+Registration includes a `DefaultIcon` pointing at the icon embedded in the exe,
+which is what makes Explorer show a picture rather than the generic application
+icon for these types. It deliberately does **not** register a
+`ShellEx\ThumbnailHandler`: the Windows Imaging Component already supplies real
+photo thumbnails, and claiming that key would displace WIC and replace actual
+thumbnails with an icon. Explorer caches icons per user, so if nothing appears to
+change, run `ie4uinit.exe -show` (or restart Explorer).
 
 ### Environment variables
 

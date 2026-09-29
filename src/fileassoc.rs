@@ -32,7 +32,7 @@ fn sanitize(s: &str) -> String {
 fn exts() -> &'static [&'static str] {
     &[
         "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif",
-    "tif", "tiff", "bmp", "dib", "ico", "cur",
+    "tif", "tiff", "bmp", "dib", "ico", "cur", "qoi",
     ]
 }
 

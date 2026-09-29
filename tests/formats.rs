@@ -6,7 +6,7 @@
 //! named files is a sniffer that will one day pick the wrong decoder.
 
 use image_viewer::{
-    image_dims_bytes, is_bmp_bytes, is_ico_bytes, is_tiff_bytes, load_image, load_image_preview_full,
+    image_dims_bytes, is_bmp_bytes, is_ico_bytes, is_qoi_bytes, is_tiff_bytes, load_image, load_image_preview_full,
     scan_folder, SUPPORTED_EXTENSIONS,
 };
 use std::path::Path;
@@ -62,7 +62,7 @@ fn bmp_in_ico(w: u32, h: u32) -> Vec<u8> {
     bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
     bmp.extend_from_slice(&(w * h * 4).to_le_bytes());
     bmp.extend_from_slice(&[0u8; 16]); // resolution + palette
-    for i in 0..(w * h) {
+    for _ in 0..(w * h) {
         bmp.extend_from_slice(&[0, 0, 255, 255]); // BGRA, opaque blue
     }
     let row_bytes = ((w + 31) / 32) * 4;
@@ -79,6 +79,145 @@ fn bmp_in_ico(w: u32, h: u32) -> Vec<u8> {
     ico.extend_from_slice(&22u32.to_le_bytes()); // offset: 6 + 16
     ico.extend_from_slice(&bmp);
     ico
+}
+
+#[test]
+fn qoi_decodes_at_its_real_dimensions() {
+    // The one format added beyond the obvious set. It has real magic bytes, it
+    // round-trips through the crate (so a test can generate a fixture), and it
+    // is lossless, so there is nothing to display wrong.
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write_as(tmp.path(), "a.qoi", &sample(), image::ImageFormat::Qoi);
+    let bytes = std::fs::read(&p).unwrap();
+    assert!(is_qoi_bytes(&bytes), "qoif header not recognised");
+    assert_eq!(image_dims_bytes(&bytes), Some((96, 48)));
+
+    let d = load_image(&p, 4096).unwrap_or_else(|e| panic!("QOI failed: {e:?}"));
+    assert_eq!((d.width, d.height), (96, 48));
+    assert_eq!(d.rgba.len(), 96 * 48 * 4);
+
+    // Lossless, so the pixels must match the source exactly.
+    let want = sample().to_rgba8();
+    assert_eq!(d.rgba, want.into_raw(), "QOI is lossless; pixels must be identical");
+}
+
+#[test]
+fn a_qoi_survives_a_lying_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write_as(tmp.path(), "actually_qoi.jpg", &sample(), image::ImageFormat::Qoi);
+    let d = load_image(&p, 4096).unwrap_or_else(|e| panic!("failed: {e:?}"));
+    assert_eq!((d.width, d.height), (96, 48));
+}
+
+#[test]
+fn the_qoi_sniffer_does_not_fire_on_other_formats() {
+    // A sniffer that fires on the wrong file picks the wrong decoder and
+    // produces a plausible wrong-sized image rather than an error.
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, format) in [
+        ("a.qoi", image::ImageFormat::Qoi),
+        ("a.png", image::ImageFormat::Png),
+        ("a.jpg", image::ImageFormat::Jpeg),
+        ("a.bmp", image::ImageFormat::Bmp),
+        ("a.tiff", image::ImageFormat::Tiff),
+        ("a.gif", image::ImageFormat::Gif),
+    ] {
+        let p = write_as(tmp.path(), name, &sample(), format);
+        let bytes = std::fs::read(&p).unwrap();
+        assert_eq!(
+            is_qoi_bytes(&bytes),
+            name.ends_with(".qoi"),
+            "is_qoi_bytes wrong for {name}"
+        );
+    }
+    // A too-short buffer must not read past the end.
+    for n in 0..20usize {
+        let b = vec![b'q'; n];
+        assert!(!is_qoi_bytes(&b) || n >= 14, "is_qoi_bytes over-read at len {n}");
+    }
+}
+
+/// A valid uncompressed 32-bit Targa, hand-built.
+///
+/// The `image` crate can *decode* Targa but not *encode* it, so this is the only
+/// way to have a real one — and having a real one is what turns "Targa has no
+/// magic bytes" from a claim into a demonstration.
+fn build_tga(w: u32, h: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(18 + (w * h * 4) as usize);
+    v.push(0); // id length
+    v.push(0); // no colour map
+    v.push(2); // image type 2 = uncompressed true-colour
+    v.extend_from_slice(&0u16.to_le_bytes()); // colour map origin
+    v.extend_from_slice(&0u16.to_le_bytes()); // colour map length
+    v.push(0); // colour map depth
+    v.extend_from_slice(&0u16.to_le_bytes()); // x origin
+    v.extend_from_slice(&0u16.to_le_bytes()); // y origin
+    v.extend_from_slice(&(w as u16).to_le_bytes());
+    v.extend_from_slice(&(h as u16).to_le_bytes());
+    v.push(32); // bits per pixel
+    v.push(8); // 8 alpha bits, top-to-bottom row order
+    for y in 0..h {
+        for x in 0..w {
+            // BGRA
+            v.extend_from_slice(&[(x * 3) as u8, (y * 5) as u8, 200, 255]);
+        }
+    }
+    v
+}
+
+/// The `image` crate decoders this app skips, each with a stated reason.
+#[test]
+fn the_skipped_crate_decoders_all_have_a_stated_reason() {
+    for (ext, why) in image_viewer::IMAGE_CRATE_DECODERS_WE_SKIP {
+        assert!(!why.trim().is_empty(), "{ext} has no reason recorded");
+    }
+    // The one that matters structurally: a format we cannot detect from content
+    // must not be advertised in a list that is built on content detection.
+    assert!(
+        !SUPPORTED_EXTENSIONS.contains(&"tga"),
+        "tga is listed as supported but has no signature to detect it by"
+    );
+}
+
+#[test]
+fn a_targa_cannot_be_identified_from_its_content() {
+    // The reason `tga` is skipped, proved rather than asserted. A real,
+    // hand-built, structurally valid Targa — and content sniffing cannot see it,
+    // because Targa has no signature.
+    //
+    // (The `tga` crate feature is deliberately not enabled, so this does not
+    // claim the crate can decode one. The claim is narrower and is what actually
+    // blocks us: our path never gets far enough to ask.)
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("pic.tga");
+    let bytes = build_tga(40, 24);
+    std::fs::write(&p, &bytes).unwrap();
+
+    // The header we wrote is the Targa 2.0 header, so this is a real file.
+    assert_eq!(bytes[2], 2, "image type 2 = uncompressed true-colour");
+    assert_eq!(u16::from_le_bytes([bytes[12], bytes[13]]), 40, "declared width");
+    assert_eq!(u16::from_le_bytes([bytes[14], bytes[15]]), 24, "declared height");
+    assert_eq!(bytes.len(), 18 + 40 * 24 * 4);
+
+    // And content sniffing genuinely cannot identify it.
+    let sniffed = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.format());
+    assert!(
+        sniffed.is_none(),
+        "Targa is now identifiable from content ({sniffed:?}) - revisit IMAGE_CRATE_DECODERS_WE_SKIP"
+    );
+    assert_eq!(image_dims_bytes(&bytes), None, "our header probe must not guess either");
+
+    // Which is exactly why our own path fails, and must keep failing loudly
+    // rather than guessing from the extension.
+    let err = load_image(&p, 4096).expect_err("a Targa should not decode here");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.to_lowercase().contains("unknown"),
+        "expected an unrecognised-format error, got {msg}"
+    );
 }
 
 #[test]

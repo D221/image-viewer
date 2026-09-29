@@ -141,11 +141,53 @@ impl Config {
 /// (`is_jpeg_bytes` and friends), so a misnamed file still opens whatever it
 /// really is. Anything missed here simply never appears in a folder scan; it
 /// can still be opened by passing the path on the command line.
-pub const SUPPORTED_EXTENSIONS: [&str; 15] = [
+pub const SUPPORTED_EXTENSIONS: [&str; 16] = [
     "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", // 9
     "tif", "tiff", // TIFF
     "bmp", "dib", // Windows bitmap
     "ico", "cur", // Windows icon / cursor (one container format)
+    "qoi", // Quite OK Image: lossless, modern, and detectable
+];
+
+/// Decoders the `image` crate offers that this app does not use, each with the
+/// reason.
+///
+/// Not a wish list, and not a claim about what the app *cannot* open — `avif` is
+/// in that list and is very much supported, just not by this crate. The reasons
+/// are not all the same kind:
+///
+///  * **Targa (`tga`)** — has *no magic bytes*. Decoding goes through
+///    `image::load_from_memory`, which identifies by content, so a Targa cannot
+///    be recognised at all. Making it work would mean passing the file extension
+///    into the decode path, which is exactly the extension-based dispatch this
+///    codebase is built to avoid — and the reason a PNG saved as `.jpg` keeps
+///    working. `a_targa_cannot_be_identified_from_its_content` demonstrates this
+///    with a real hand-built Targa rather than asserting it.
+///  * **DDS** — decode-only in the crate, so a fixture cannot be generated with
+///    the crate that decodes it, and it is a game-texture container rather than
+///    something anyone keeps photographs in.
+///  * **OpenEXR and Radiance HDR** — linear-light floating point. Rendered
+///    through an 8-bit sRGB surface with no tone mapping they come out washed
+///    out and blown out, which is worse than refusing them: the user cannot tell
+///    the file is fine and the viewer is wrong. Belongs with the P3 → sRGB work
+///    in `TODO.md` §1, as part of a real colour-management story.
+///  * **PNM (pbm/pgm/ppm/pam)** and **farbfeld** — four more extensions of a
+///    bitmap-mask family and a format that exists mostly inside Rust demos. They
+///    would pad the file-association list for close to no real use.
+///  * **AVIF** — already decoded, and better, by the `heic` crate, which also
+///    reads the container's `colr` box. The `image` crate's AVIF support would be
+///    a second, weaker decoder for a format already handled.
+///
+/// The line is not "can the crate decode it" but "can we show it *correctly*,
+/// and can we still test it". QOI clears both; the rest do not.
+pub const IMAGE_CRATE_DECODERS_WE_SKIP: &[(&str, &str)] = &[
+    ("tga", "no magic bytes; content-based detection cannot see it"),
+    ("dds", "decode-only in the crate, so untestable with it"),
+    ("exr", "linear float; would display wrong without tone mapping"),
+    ("hdr", "high dynamic range; same, and would look plausible but be wrong"),
+    ("pnm", "bitmap-mask family; no real use in a photo viewer"),
+    ("ff", "farbfeld; a demo format"),
+    ("avif", "already handled, and better, by the heic crate"),
 ];
 
 /// Scan a directory for supported image files, sorted alphabetically.
@@ -1094,6 +1136,8 @@ fn format_name(bytes: &[u8]) -> &'static str {
         "BMP"
     } else if is_ico_bytes(bytes) {
         "ICO"
+    } else if is_qoi_bytes(bytes) {
+        "QOI"
     } else if is_jxl_bytes(bytes) {
         "JPEG XL"
     } else if is_heif_bytes(bytes) {
@@ -2234,6 +2278,13 @@ pub struct PreviewAndFull {
 /// True if the bytes look like a GIF (magic bytes).
 pub fn is_gif_bytes(bytes: &[u8]) -> bool {
     bytes.starts_with(b"GIF8")
+}
+
+/// True if the bytes look like a QOI image (magic bytes).
+///
+/// `"qoif"` at offset 0, followed by a big-endian width and height.
+pub fn is_qoi_bytes(bytes: &[u8]) -> bool {
+    bytes.len() >= 14 && bytes.starts_with(b"qoif")
 }
 
 /// True if the bytes look like a Windows bitmap (magic bytes).
