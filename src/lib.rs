@@ -653,6 +653,9 @@ pub struct Plan<'a> {
     pub wants_exif: bool,
     /// The current image still needs a full-resolution decode.
     pub wants_full: bool,
+    /// The current image *has* a cached preview, but it is softer than the
+    /// display can show, so it must be re-decoded anyway. See [`needs_refine`].
+    pub current_stale: bool,
     /// Preview texture long side, physical pixels.
     pub target_dim: u32,
     pub radius: usize,
@@ -690,7 +693,12 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
         !p.cached.contains(path) && !p.failed.contains(&(path.clone(), Kind::Preview))
     };
 
-    if need_preview(cur) {
+    // A stale preview is cached *and* still wanted: the texture stays on screen
+    // (so the display never blanks) while a sharper one is decoded behind it.
+    // Deliberately current-image-only — refining the whole preload window costs
+    // one decode per neighbour, which is the difference between 1 and 7 decodes
+    // after a drag.
+    if need_preview(cur) || (p.current_stale && !p.failed.contains(&(cur.clone(), Kind::Preview))) {
         jobs.push(Job {
             path: cur.clone(),
             kind: Kind::Preview,
@@ -732,6 +740,131 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
         }
     }
     jobs
+}
+
+// ---------------------------------------------------------------------------
+// Resize refinement
+// ---------------------------------------------------------------------------
+
+/// Long side of the preview texture for a display area, in physical pixels.
+pub fn preview_target(panel_px: (u32, u32)) -> u32 {
+    panel_px
+        .0
+        .max(panel_px.1)
+        .clamp(256, PREVIEW_TEXTURE_DIM)
+}
+
+/// How much the display must grow before a sharper decode is worth issuing, in
+/// physical pixels. Below this the extra sharpness is invisible but the decode
+/// costs as much as any other, and a window drag produces a stream of these.
+pub const RESIZE_PX_FLOOR: u32 = 8;
+
+/// True when the cached preview is softer than the display can now show *and* a
+/// re-decode at `now_target` would actually be sharper.
+///
+/// Pure, and in `lib.rs` so the rule can be tested without a window — this
+/// replaces "drop the preview on resize", which blanked the picture and
+/// re-decoded once per frame of a drag.
+///
+/// * `preview_long` — long side of the texture on screen.
+/// * `source_long` — long side of the source, so a source that is *already*
+///   smaller than the target is never re-decoded (that is the loop guard: the
+///   target keeps growing while no decode can ever be sharper).
+/// * `decoded_for` — the target the cached preview was decoded for, not its
+///   pixel size. Comparing pixels would re-decode forever on a source smaller
+///   than the display; comparing targets converges after one decode.
+/// * `floor` — [`RESIZE_PX_FLOOR`].
+pub fn needs_refine(
+    preview_long: u32,
+    source_long: u32,
+    decoded_for: u32,
+    now_target: u32,
+    floor: u32,
+) -> bool {
+    // Not enough growth to be worth a decode.
+    if now_target <= decoded_for.saturating_add(floor) {
+        return false;
+    }
+    // Only if the texture is genuinely soft for the display now, and the source
+    // has more to give.
+    preview_long < now_target && source_long > preview_long
+}
+
+/// What the viewer should do about one frame of a resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeAction {
+    /// Nothing to do: either the texture is sharp enough, or a refine is
+    /// already in flight.
+    Idle,
+    /// The size is still moving. Ask for one more frame and decide then —
+    /// without that, the *final* size of a drag is never examined, because
+    /// nothing else would ask for a repaint.
+    Wait,
+    /// A sharper decode is wanted. Issue it once; do not ask again until it
+    /// lands.
+    Refine,
+}
+
+/// The resize state machine, as a pure value.
+///
+/// This is the coalescing. A window drag delivers a stream of sizes and one
+/// decode costs the same whatever the size, so the rule is "issue once the size
+/// stops moving" — tested by *comparing with the previous frame*, not with a
+/// wall-clock timer, because a large preview takes ~800 ms to decode and frames
+/// are then ~800 ms apart, so any timer shorter than that expires between every
+/// pair of them and never fires.
+///
+/// In `lib.rs` next to `plan_jobs` for the same reason the planner is: the
+/// decisions that once lived in a binary were the ones that could not be tested,
+/// and the bug they caused ("random images never load") was invisible for
+/// exactly that reason.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResizeTracker {
+    /// A refine has been issued and has not landed. Sticky, so a drag costs one
+    /// decode rather than one per frame.
+    pending: bool,
+    prev_target: Option<u32>,
+}
+
+impl ResizeTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Is a refine in flight?
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+
+    /// One frame of the resize path. `target` is the display's long side in
+    /// physical pixels; `needs_refine` is [`needs_refine`] for the texture
+    /// currently on screen.
+    pub fn frame(&mut self, target: u32, needs_refine: bool) -> ResizeAction {
+        let settled = self.prev_target == Some(target);
+        self.prev_target = Some(target);
+        if self.pending || !needs_refine {
+            return ResizeAction::Idle;
+        }
+        if settled {
+            self.pending = true;
+            ResizeAction::Refine
+        } else {
+            ResizeAction::Wait
+        }
+    }
+
+    /// The refined preview arrived. Clears the pending flag; the next frame
+    /// re-evaluates, so a resize that grew again while this was decoding asks
+    /// for one more rather than being served a texture that is still soft.
+    pub fn landed(&mut self) {
+        self.pending = false;
+    }
+
+    /// The display changed for a reason that must not re-decode — a panel
+    /// toggle or F11. Consume the transition silently.
+    pub fn suppress(&mut self) {
+        self.pending = false;
+    }
 }
 
 // ---------------------------------------------------------------------------

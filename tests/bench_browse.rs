@@ -271,6 +271,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
             failed: &failed,
             wants_exif: false,
             wants_full: false,
+        current_stale: false,
             target_dim: PREVIEW_DIM,
             radius: RADIUS,
         });

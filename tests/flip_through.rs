@@ -155,6 +155,7 @@ fn plan<'a>(
         failed,
         wants_exif: false,
         wants_full: false,
+        current_stale: false,
         target_dim: 1024,
         radius: 3,
     }
@@ -583,6 +584,7 @@ fn the_plan_wraps_around_a_short_folder() {
         failed: &failed,
         wants_exif: false,
         wants_full: false,
+        current_stale: false,
         target_dim: 1024,
         radius: 3,
     });
@@ -592,4 +594,169 @@ fn the_plan_wraps_around_a_short_folder() {
     }
     assert_eq!(jobs.len(), 3, "3 images, each once");
     assert_eq!(jobs[0].path, f[0], "current image still first");
+}
+
+// ---------------------------------------------------------------------------
+// Resize refinement
+// ---------------------------------------------------------------------------
+//
+// The rule that replaced dropping the preview on resize. Two properties matter
+// and both are easy to get wrong:
+//
+//  1. It must converge. A source smaller than the display can never be sharper,
+//     so growing the window must cost at most one decode. Comparing the
+//     *returned pixels* to the target instead of the target that was asked for
+//     re-decodes on every resize, forever.
+//  2. It must not fire for growth too small to see, nor for a source that has
+//     nothing more to give.
+
+/// preview_long, source_long, decoded_for, now_target -> refine?
+fn refine(preview: u32, source: u32, decoded_for: u32, now: u32) -> bool {
+    image_viewer::needs_refine(preview, source, decoded_for, now, image_viewer::RESIZE_PX_FLOOR)
+}
+
+#[test]
+fn resize_refines_when_the_display_outgrew_the_texture() {
+    // A 1600px texture decoded for a 1600px display; the window is now 2400px
+    // and the source is big enough to fill it. This is the case that matters.
+    assert!(refine(1600, 4000, 1600, 2400));
+}
+
+#[test]
+fn resize_does_not_refine_when_the_texture_already_fills_the_display() {
+    // Same window growth, but the texture is already 2400px: a re-decode would
+    // produce an identical picture for a full decode's cost.
+    assert!(!refine(2400, 4000, 1600, 2400));
+}
+
+#[test]
+fn resize_does_not_refine_when_the_source_has_nothing_more_to_give() {
+    // The convergence guard. A 1200px source on a 4000px display returns 1200px
+    // whatever target it is asked for, so a pixels-vs-target rule re-decodes on
+    // every resize, forever.
+    assert!(!refine(1200, 1200, 1600, 4000));
+    assert!(!refine(1200, 1200, 1600, 8000), "and it stays quiet as it grows");
+}
+
+#[test]
+fn resize_ignores_growth_below_the_floor() {
+    // A drag delivers a stream of 1-2px growths. One decode costs the same
+    // whatever the size, so only growth past the floor is worth anything.
+    let t = 1600;
+    assert!(!refine(t, 4000, t, t + image_viewer::RESIZE_PX_FLOOR - 1));
+    assert!(refine(t, 4000, t, t + image_viewer::RESIZE_PX_FLOOR + 1));
+}
+
+#[test]
+fn resize_does_not_refine_when_the_display_shrank() {
+    // Shrinking never makes the picture softer, and must not cost a decode.
+    assert!(!refine(2400, 4000, 2400, 1600));
+}
+
+#[test]
+fn resize_refine_stops_at_the_source_limit_and_never_restarts() {
+    // A drag that keeps growing, against a source that eventually runs out.
+    // Each settled size is a real growth and earns a decode, so the count is
+    // not expected to be 1 — what must hold is that it *stops* at the source
+    // limit and stays stopped, which is what stops a resize from turning into
+    // an unbounded decode loop.
+    let source = 5000u32;
+    let mut preview = 1600u32;
+    let mut decoded_for = 1600u32;
+    let mut decodes = 0;
+    let mut at_limit = None;
+
+    for target in [2000u32, 2400, 3000, 4000, 5000, 6000, 7000, 8000] {
+        if refine(preview, source, decoded_for, target) {
+            decodes += 1;
+            decoded_for = target;
+            preview = target.min(source); // what the decode actually returns
+            if preview == source && at_limit.is_none() {
+                at_limit = Some(decodes);
+            }
+        }
+    }
+    assert!(at_limit.is_some(), "test setup: never reached the source limit");
+    assert_eq!(
+        decodes,
+        at_limit.unwrap(),
+        "no decode may happen once the texture is as large as the source allows"
+    );
+    assert_eq!(preview, source);
+}
+
+#[test]
+fn a_source_smaller_than_the_display_is_never_re_decoded() {
+    // The extreme of the same guard: a 1200px source, already sharp for the
+    // display, on a window that grows to 6000px. Every step is free, because no
+    // decode could ever return more than the 1200px already on screen.
+    let source = 1200u32;
+    let mut decoded_for = 1600u32;
+    let mut decodes = 0;
+    for target in [2000u32, 3000, 4000, 5000, 6000] {
+        if refine(source, source, decoded_for, target) {
+            decodes += 1;
+            decoded_for = target;
+        }
+    }
+    assert_eq!(decodes, 0, "nothing to gain, so nothing to pay for");
+}
+
+#[test]
+fn stale_current_is_planned_even_though_it_is_cached() {
+    // The point of the redesign: the preview stays on screen, so it is *in* the
+    // cache, and the plan must still ask for a sharper one.
+    let files: Vec<PathBuf> = ["a.jpg", "b.jpg", "c.jpg"].iter().map(PathBuf::from).collect();
+    let cached: HashSet<PathBuf> = files.iter().cloned().collect();
+    let failed: HashSet<(PathBuf, Kind)> = HashSet::new();
+
+    let plan = |stale: bool| Plan {
+        files: &files,
+        index: 0,
+        cached: &cached,
+        failed: &failed,
+        wants_exif: false,
+        wants_full: false,
+        current_stale: stale,
+        target_dim: 2400,
+        radius: 0,
+    };
+
+    assert!(
+        plan_jobs(&plan(false)).is_empty(),
+        "everything cached and nothing stale means no work"
+    );
+    let jobs = plan_jobs(&plan(true));
+    assert_eq!(jobs.len(), 1, "one job: the current image");
+    assert_eq!(jobs[0].path, files[0]);
+    assert_eq!(jobs[0].kind, Kind::Preview);
+    assert_eq!(jobs[0].target_dim, 2400, "at the new, larger target");
+    assert_eq!(
+        jobs[0].prio,
+        image_viewer::PRIO_CURRENT_PREVIEW,
+        "still top priority, or a prefetch could delay it"
+    );
+}
+
+#[test]
+fn a_stale_current_is_not_planned_when_it_failed() {
+    // A poisoned image must not be re-requested on every resize. `failed` is
+    // permanent for the session, so honouring it is what stops a resize turning
+    // into an endless retry loop on a file that will never decode.
+    let files: Vec<PathBuf> = vec![PathBuf::from("bad.jpg")];
+    let cached: HashSet<PathBuf> = files.iter().cloned().collect();
+    let mut failed: HashSet<(PathBuf, Kind)> = HashSet::new();
+    failed.insert((files[0].clone(), Kind::Preview));
+    let jobs = plan_jobs(&Plan {
+        files: &files,
+        index: 0,
+        cached: &cached,
+        failed: &failed,
+        wants_exif: false,
+        wants_full: false,
+        current_stale: true,
+        target_dim: 2400,
+        radius: 0,
+    });
+    assert!(jobs.is_empty(), "a failed image is not retried by a resize");
 }

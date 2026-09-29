@@ -47,6 +47,11 @@ const THRESH_WHEEL: f32 = 60.0;
 
 /// How many images on each side of the current one get their preview preloaded.
 const PRELOAD_RADIUS: usize = 3;
+
+/// How long to wait for a follow-up frame after the display size changed, to
+/// decide whether a drag has stopped. One frame is enough — the test is whether
+/// the size is unchanged since the previous frame, not how long it has been.
+const RESIZE_SETTLE_REPAINT: std::time::Duration = std::time::Duration::from_millis(16);
 /// Max cached preview textures (each is at most ~8192 px wide, typically ~4K).
 const PREVIEW_CACHE_CAP: usize = 16;
 /// Full-res tile edge in source pixels.
@@ -372,8 +377,10 @@ struct PreviewData {
     anim: Option<Arc<Animation>>,
     // Any pixel is translucent (draw checkerboard behind it).
     has_alpha: bool,
-    // Texture is below source density (re-decode if display grows).
-    below_target: bool,
+    // The `target_dim` this decode was asked for. Kept so staleness can be
+    // judged against what we *asked for* rather than the pixels we got back —
+    // comparing pixels re-decodes forever on a source smaller than the display.
+    target: u32,
 }
 
 enum Msg {
@@ -486,7 +493,7 @@ fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
         full: r.full.map(Arc::new),
         anim: r.anim.map(Arc::new),
         has_alpha: buffer_has_alpha(&r.preview.rgba),
-        below_target: r.below_target,
+        target: target_dim,
     })
 }
 
@@ -691,8 +698,15 @@ struct Preview {
     anim: Option<Arc<Animation>>,
     // Any pixel is translucent (draw checkerboard behind it).
     has_alpha: bool,
-    // Texture is below source density (re-decode if display grows).
-    below_target: bool,
+    // The `target_dim` this texture was decoded for. With `px` and `orig` this
+    // is everything `needs_refine` needs, so staleness is a pure function of the
+    // cache and the current display size — no bookkeeping to keep in sync.
+    // (This replaces the old `below_target` flag, which could only say "the
+    // source is bigger than what we asked for" and so could not tell a source
+    // that is simply smaller than the display from one worth re-decoding.)
+    target: u32,
+    // Pixel dimensions of the texture, for the same check.
+    px: (u32, u32),
 }
 
 /// Playback state for the animation currently on screen.
@@ -753,6 +767,9 @@ struct MyApp {
     checker: Option<TextureHandle>, // transparency backdrop
     display_dim: Option<(u32, u32)>, // central panel size in physical px
     suppress_resize_redecode: bool, // panel toggle must not re-decode
+    /// Resize coalescing: issues one sharper decode per settled size instead of
+    /// one per frame, and never blanks the picture. See `ResizeTracker`.
+    resize: image_viewer::ResizeTracker,
     waiting_load: bool, // block_while_loading: current image not decoded yet
     /// Index highlighted in the grid (G). Browsing the grid does *not* change
     /// the shown image — only Enter or a click does — so arrowing around a
@@ -906,6 +923,7 @@ impl MyApp {
             next_scan: Instant::now() + RESCAN_INTERVAL,
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
+            resize: image_viewer::ResizeTracker::new(),
                         suppress_resize_redecode: false,
             waiting_load: false,
             grid_sel: 0,
@@ -1065,9 +1083,8 @@ impl MyApp {
         // texture is exactly as sharp as the screen can show.
         let target_dim = self
             .display_dim
-            .map(|(w, h)| w.max(h))
-            .unwrap_or(PREVIEW_TEXTURE_DIM)
-            .clamp(256, PREVIEW_TEXTURE_DIM);
+            .map(image_viewer::preview_target)
+            .unwrap_or(PREVIEW_TEXTURE_DIM);
 
         let cached: HashSet<PathBuf> = self.previews.keys().cloned().collect();
         let i = self.gallery.index.min(self.gallery.files.len().saturating_sub(1));
@@ -1083,11 +1100,27 @@ impl MyApp {
                 failed: &self.failed,
                 wants_exif: self.exif_loading,
                 wants_full: self.full_due.is_none() && self.needs_full(cur),
+                current_stale: self.resize.pending(),
                 target_dim,
                 radius: PRELOAD_RADIUS,
             }),
         };
         self.loader.replace(jobs);
+    }
+
+    /// True when the image on screen has a cached preview that is softer than
+    /// the display can now show, and a re-decode would actually be sharper.
+    fn current_needs_refine(&self, target: u32) -> bool {
+        let Some(pv) = self.cur.as_ref().and_then(|p| self.previews.get(p)) else {
+            return false;
+        };
+        image_viewer::needs_refine(
+            pv.px.0.max(pv.px.1),
+            pv.orig.0.max(pv.orig.1),
+            pv.target,
+            target,
+            image_viewer::RESIZE_PX_FLOOR,
+        )
     }
 
     // ---- results from workers --------------------------------------------
@@ -1104,6 +1137,7 @@ impl MyApp {
                 Msg::Preview { path, result } => match result {
                     Ok(p) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let px = (p.image.size[0] as u32, p.image.size[1] as u32);
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         perf::count(perf::C_TEXTURE_UPLOADS, 1);
                         perf::record(perf::JOB_PREVIEW_MS, p.load_ms * 1000);
@@ -1121,10 +1155,18 @@ impl MyApp {
                                 full: p.full,
                                 anim: p.anim,
                                 has_alpha: p.has_alpha,
-                                below_target: p.below_target,
+                                target: p.target,
+                                px,
                             },
                         );
-                                                                        resched |= Some(&path) == self.cur.as_ref();
+                        // A refine that lands clears the pending flag. If the
+                        // display grew again while it was decoding, the next
+                        // frame re-arms it, so a resize is never left served by
+                        // a texture that is still soft.
+                        if Some(&path) == self.cur.as_ref() {
+                            self.resize.landed();
+                        }
+                        resched |= Some(&path) == self.cur.as_ref();
                         // "Wait for load" mode: arrived preview for the
                         // current image unblocks; if the key is still held,
                         // queue one more advance — consumed next frame so the
@@ -1894,31 +1936,40 @@ impl MyApp {
             (panel.width() * ppp).round() as u32,
             (panel.height() * ppp).round() as u32,
         );
+        // Resize. The texture is re-fitted to the new area by the drawing code
+        // below, which happens on this very frame and costs nothing — so the
+        // picture is never blanked and never soft *as a choice*. The only thing
+        // a resize needs to decide is whether to decode something sharper
+        // behind the existing texture.
+        //
+        // A window drag delivers a stream of sizes, and one decode costs the
+        // same whatever the size, so the refine is issued only once the size
+        // stops moving: "unchanged since the previous frame", not a wall-clock
+        // settle. A large preview takes ~800ms to decode, which means frames
+        // are ~800ms apart, and any timer shorter than that expires between
+        // every pair of them and never fires.
+        let target = image_viewer::preview_target(panel_px);
         if self.display_dim != Some(panel_px) {
-            let grew = self
-                .display_dim
-                .map_or(true, |(w, h)| panel_px.0.max(panel_px.1) > w.max(h));
             self.display_dim = Some(panel_px);
             // Hiding/showing panels resizes the display area but must not
             // reload the image: consume exactly one transition silently.
             if self.suppress_resize_redecode {
                 self.suppress_resize_redecode = false;
-            } else if grew {
-                let stale: Vec<PathBuf> = self
-                    .previews
-                    .iter()
-                    .filter(|(_, pv)| pv.below_target)
-                    .map(|(p, _)| p.clone())
-                    .collect();
-                if !stale.is_empty() {
-                    perf::count(perf::C_RESIZE_REDECODES, 1);
-                    for p in &stale {
-                        self.previews.remove(p);
-                        self.failed.remove(&(p.clone(), Kind::Preview));
-                    }
-                    self.schedule();
-                }
+                self.resize.suppress();
             }
+        }
+        match self.resize.frame(target, self.current_needs_refine(target)) {
+            image_viewer::ResizeAction::Refine => {
+                perf::count(perf::C_RESIZE_REDECODES, 1);
+                self.schedule();
+            }
+            image_viewer::ResizeAction::Wait => {
+                // Still moving. Ask for one more frame so the decision gets made
+                // once it stops; without this the final size of a drag would
+                // never be examined, because nothing else asks for a repaint.
+                ctx.request_repaint_after(RESIZE_SETTLE_REPAINT);
+            }
+            image_viewer::ResizeAction::Idle => {}
         }
 
         // Gallery grid view (G): scrollable thumbnail grid, click to open.
