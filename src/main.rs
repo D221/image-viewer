@@ -119,72 +119,126 @@ fn main() -> eframe::Result<()> {
         _ => {}
     }
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
-        wgpu_options: wgpu_options(),
-        ..Default::default()
-    };
-    // eframe 0.36 (unlike 0.27) defaults the renderer to `wgpu`, so the
-    // rendering backend changed as a side effect of the version bump. See
-    // `dx12_only_wgpu` for why the backend set is narrowed.
-    eframe::run_native(
-        "Image Viewer",
-        options,
-        Box::new(|cc| Ok(Box::new(MyApp::new(cc)) as Box<dyn eframe::App>)),
-    )
+    // `--probe-renderer <name>` is the child half of the backend probe: it does
+    // adapter enumeration for one backend and exits, so that a driver which
+    // access-violates takes this process down and nothing else. Never reached
+    // unless the parent asked for it.
+    if let Some(i) = args.iter().position(|a| a == "--probe-renderer") {
+        let name = args.get(i + 1).and_then(|s| image_viewer::WgpuBackend::parse(s));
+        let Some(backend) = name else {
+            eprintln!("--probe-renderer needs a backend name (dx12, gl, vulkan)");
+            std::process::exit(2);
+        };
+        std::process::exit(probe_one(backend));
+    }
+
+    // The renderer can change while the app is running, which means re-entering
+    // the eframe event loop. The app cannot hand that back through its return
+    // value, so it leaves a request in this slot on its way out and the loop
+    // below picks it up.
+    let restart: RestartSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+    let config_path = image_viewer::Config::default_path();
+    let mut config = image_viewer::Config::load(&config_path);
+    let (mut backend, probed) = resolve_renderer(&config.renderer);
+    if let Some(p) = probed {
+        // Remember the answer so the next launch does not probe again.
+        config.renderer.probed = Some(p);
+        let _ = config.save(&config_path);
+    }
+
+    // One iteration per renderer the user runs. The app is rebuilt from the
+    // config each time, so a restart keeps the folder, sort mode and settings
+    // but loses the in-memory preview cache and has to decode again.
+    loop {
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+            wgpu_options: wgpu_options(backend),
+            ..Default::default()
+        };
+        let slot = restart.clone();
+        let result = eframe::run_native(
+            "Image Viewer",
+            options,
+            Box::new(move |cc| {
+                Ok(Box::new(MyApp::new_with_renderer(cc, slot)) as Box<dyn eframe::App>)
+            }),
+        );
+
+        // Whatever happened, get the request out before deciding. The perf
+        // report is written by `on_exit`, not here: that is the clean-exit path,
+        // and writing it from both places would produce it twice.
+        let requested = restart.lock().ok().and_then(|mut s| s.take());
+
+        match (result, requested) {
+            (_, Some(next)) if next != backend => {
+                eprintln!("Restarting with the {} backend...", next.name());
+                backend = next;
+                // Loop, rather than fall through: the user asked for this
+                // backend and has not been shown it yet.
+            }
+            (Ok(_), _) => return Ok(()),
+            (Err(e), _) => {
+                eprintln!("Failed to start the viewer: {e}");
+                return Err(e.into());
+            }
+        }
+    }
 }
 
-/// wgpu configuration for this machine.
+/// Where a running app leaves "restart me with this backend" on its way out.
 ///
-/// eframe 0.27 defaulted the renderer to `glow` (OpenGL); 0.36 defaults to
-/// `wgpu`, so upgrading silently switched the rendering backend. That is the
-/// right direction, and wgpu's own backend preference is fine on a machine
-/// where wgpu's Vulkan backend works.
+/// A `run_native` loop cannot see inside the `App` it is handed, and a hard
+/// crash is not something to recover from in-process, so the only two channels
+/// available are a process exit code (too coarse) and shared state. This is the
+/// shared state.
+type RestartSlot = std::sync::Arc<std::sync::Mutex<Option<image_viewer::WgpuBackend>>>;
+
+/// wgpu configuration, pinned to exactly one backend.
 ///
-/// The problem is that wgpu enumerates every enabled backend during adapter
-/// discovery, before it has picked anything, and on this machine that
-/// enumeration is fatal. Measured, not assumed:
+/// **One backend per process, and that is not a simplification — it is the whole
+/// design.** wgpu enumerates every backend in the set during adapter discovery,
+/// *before* it has chosen anything, and on some drivers that enumeration is a
+/// hard access violation (`0xC0000005`) before any window exists. Measured, not
+/// assumed, on the development machine:
 ///
-/// - `vulkaninfo` reports a healthy device — Intel UHD 620, API 1.2.187,
-///   integrated GPU, Intel driver. So **Vulkan itself works.**
-/// - wgpu with `Backends::VULKAN | DX12` access-violates (`0xC0000005`) before
-///   the window opens. 3/3 trials, and on the previous RDP session too. Nothing
-///   on stderr.
-/// - wgpu with `Backends::DX12` starts every time.
+/// - `vulkaninfo` reports a healthy device — Intel UHD 620, API 1.2.187. So
+///   **Vulkan itself works.**
+/// - wgpu with `VULKAN | DX12` access-violates, 3/3 trials, nothing on stderr.
+/// - wgpu with `DX12` alone starts every time.
 ///
-/// So Vulkan being installed does not imply wgpu-on-Vulkan working, and the only
-/// way to find out is to crash. Hence: **DX12 by default, Vulkan opt-in** with
-/// `IV_WGPU_BACKEND=vulkan`. A registry probe for
-/// `Khronos\Vulkan\Drivers` was tried and is a false signal in both directions —
-/// the key is *absent* on this machine while Vulkan works (the loader finds the
-/// Intel ICD with no `Drivers` key and no `VK_*` variables set), and a key being
-/// present does not mean wgpu can use the driver behind it. Deleted rather than
-/// kept as a "usually right" heuristic.
+/// So "try DX12, and fall back to Vulkan if it fails" cannot be written in one
+/// process: enabling Vulkan is what kills it. Hence the probe in a *child*
+/// process, which is the only place a hard crash can be survived. See
+/// `probe_backends`.
 ///
-/// The chosen set is printed so a crash is never a mystery.
-fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+/// A registry probe for `Khronos\Vulkan\Drivers` was tried and is a false signal
+/// in both directions — the key is *absent* on this machine while Vulkan works
+/// (the loader finds the Intel ICD with no `Drivers` key and no `VK_*` variables
+/// set), and a key being present does not mean wgpu can use the driver behind it.
+///
+/// The chosen backend is printed so a crash is never a mystery.
+fn wgpu_options(backend: image_viewer::WgpuBackend) -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{
         wgpu::{Backends, InstanceDescriptor},
         WgpuSetup, WgpuSetupCreateNew,
     };
-    use image_viewer::{wgpu_backend_set, WgpuBackend};
 
-    let requested = std::env::var("IV_WGPU_BACKEND")
-        .ok()
-        .and_then(|v| WgpuBackend::parse(&v))
-        .unwrap_or(WgpuBackend::Auto);
-    let (vulkan, dx12) = wgpu_backend_set(requested);
-    let mut backends = Backends::empty();
-    if vulkan {
-        backends |= Backends::VULKAN;
-    }
-    if dx12 {
-        backends |= Backends::DX12;
-    }
-    eprintln!("wgpu backends: {backends:?} (requested {requested:?})");
+    // The bit values live in `lib.rs` so the policy is testable without pulling
+    // wgpu into the library; the conversion to the real flags happens here.
+    let bits = image_viewer::wgpu_backend_set(backend);
+    let backends = match backend {
+        image_viewer::WgpuBackend::Gl => Backends::GL,
+        image_viewer::WgpuBackend::Vulkan => Backends::VULKAN,
+        // `Auto` is resolved before it gets here, and falls back to DX12.
+        _ => Backends::DX12,
+    };
+    debug_assert_eq!(bits, backends.bits(), "backend bit value drifted from lib.rs");
 
     let mut instance = InstanceDescriptor::new_without_display_handle();
     instance.backends = backends;
+    eprintln!("wgpu backend: {backends:?} ({} requested)", backend.name());
+
     eframe::egui_wgpu::WgpuConfiguration {
         // `surface` is deliberately left at the default (HIGH_THROUGHPUT, frame
         // latency 2). `SurfaceConfig::LOW_LATENCY` is documented as the right
@@ -192,13 +246,131 @@ fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
         // like a free improvement — but it was tried and could not be shown to be
         // one. Don't flip it on the strength of the docs: re-measure on a *local
         // console* session first. An earlier attempt at this produced a confident
-        // wrong answer by measuring over RDP; see TODO.md.
+        // wrong answer by measuring over RDP.
         wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
             instance_descriptor: instance,
             ..WgpuSetupCreateNew::without_display_handle()
         }),
         ..Default::default()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Backend probing
+// ---------------------------------------------------------------------------
+
+/// Probe one backend, in *this* process. Prints a verdict and returns the exit
+/// code the parent reads.
+///
+/// This is the child half of [`probe_backends`]. It does the minimum that
+/// actually crashes: create the instance and enumerate adapters. No window, no
+/// surface, no app — because a failure later than adapter enumeration would not
+/// tell us anything useful about the driver, and a window would flash.
+fn probe_one(backend: image_viewer::WgpuBackend) -> i32 {
+    use eframe::egui_wgpu::wgpu::{
+        Backends, DeviceDescriptor, Instance, InstanceDescriptor, RequestAdapterOptions,
+    };
+
+    let backends = match backend {
+        image_viewer::WgpuBackend::Gl => Backends::GL,
+        image_viewer::WgpuBackend::Vulkan => Backends::VULKAN,
+        _ => Backends::DX12,
+    };
+    let mut desc = InstanceDescriptor::new_without_display_handle();
+    desc.backends = backends;
+
+    // As far as the driver as possible, and no further: instance, adapter, then
+    // **a device**. Enumerating adapters alone is not enough and this is not
+    // hypothetical — the first version of this probe stopped at enumeration and
+    // reported Vulkan as working, on a machine where starting the app on Vulkan
+    // access-violates. Enumeration walks the loader's list; the crash is further
+    // in, where the driver is actually initialised.
+    //
+    // A surface is deliberately not created: that needs a window, and a probe
+    // that flashes a window is worse than one that is slightly less thorough.
+    // The consequence is real and worth stating — a backend that fails only on
+    // surface creation will still pass this probe.
+    let verdict = pollster::block_on(async {
+        let instance = Instance::new(desc);
+        let adapter = match instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => return Err(format!("no adapter: {e}")),
+        };
+        let info = adapter.get_info();
+        match adapter
+            .request_device(&DeviceDescriptor {
+                label: None,
+                required_features: eframe::egui_wgpu::wgpu::Features::empty(),
+                // Downlevel defaults so a weak or software adapter is not
+                // rejected for limits this app never uses.
+                required_limits: eframe::egui_wgpu::wgpu::Limits::downlevel_defaults(),
+                experimental_features: eframe::egui_wgpu::wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: eframe::egui_wgpu::wgpu::MemoryHints::Performance,
+                trace: eframe::egui_wgpu::wgpu::Trace::Off,
+            })
+            .await
+        {
+            Ok(_) => Ok(format!("{} / {}", info.name, info.driver)),
+            Err(e) => Err(format!("no device: {e}")),
+        }
+    });
+
+    match verdict {
+        Ok(what) => {
+            println!("ok {} {what}", backend.name());
+            0
+        }
+        Err(why) => {
+            println!("fail {} {why}", backend.name());
+            1
+        }
+    }
+}
+
+/// Probe each candidate in its own process and return what worked.
+///
+/// A backend that *crashes* is contained by the child: the parent sees an exit
+/// code that is not 0 and moves on. That is the only mechanism that works here,
+/// because the failure is an access violation rather than an error return, and a
+/// process that has access-violated cannot catch its own way out of it.
+fn probe_backends() -> Vec<(image_viewer::WgpuBackend, bool)> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    image_viewer::PROBE_ORDER
+        .iter()
+        .map(|&backend| {
+            let out = std::process::Command::new(&exe)
+                .arg("--probe-renderer")
+                .arg(backend.name())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // A missing exe, or a non-zero exit for any reason including a
+            // crash, both count as "this one does not work".
+            (backend, matches!(out, Ok(s) if s.success()))
+        })
+        .collect()
+}
+
+/// Resolve the backend to use at launch, probing only if the preference needs
+/// it. Returns the backend and, if a probe ran and found something, the answer
+/// to cache in the config.
+fn resolve_renderer(pref: &image_viewer::RendererPref) -> (image_viewer::WgpuBackend, Option<image_viewer::WgpuBackend>) {
+    if !pref.needs_probe() {
+        return (pref.resolve(None), None);
+    }
+    eprintln!("Probing for a working graphics backend...");
+    let results = probe_backends();
+    for (b, ok) in &results {
+        eprintln!("  {:>7}: {}", b.name(), if *ok { "works" } else { "unavailable" });
+    }
+    let picked = image_viewer::pick_probed(&results);
+    (picked, Some(picked))
 }
 
 // ---------------------------------------------------------------------------
@@ -751,6 +923,13 @@ struct MyApp {
     config: Config,
     config_path: PathBuf,
 
+    /// The backend actually in use, and where to leave a "restart with this one"
+    /// request for the launch loop. The app cannot return a value to
+    /// `run_native`, so changing the renderer means closing the window and
+    /// letting the loop build a new one.
+    renderer: image_viewer::WgpuBackend,
+    restart: RestartSlot,
+
     loader: Loader,
     rx: Receiver<Msg>,
 
@@ -819,10 +998,13 @@ struct MyApp {
 }
 
 impl MyApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new_with_renderer(cc: &eframe::CreationContext<'_>, restart: RestartSlot) -> Self {
         let ctx = &cc.egui_ctx;
         let config_path = Config::default_path();
         let config = Config::load(&config_path);
+        // The launch loop already resolved this (probing if it needed to), and
+        // the answer is in the config, so reading it back keeps the two in step.
+        let renderer = config.renderer.resolve(None);
 
         // Optional CLI argument: a file or a folder ("Open with…"). Must be the
         // first *non-flag* argument: `nth(1)` would take `--perf` as the path
@@ -932,6 +1114,8 @@ impl MyApp {
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
             resize: image_viewer::ResizeTracker::new(),
+            renderer,
+            restart,
                         suppress_resize_redecode: false,
             waiting_load: false,
             grid_sel: 0,
@@ -1804,6 +1988,45 @@ impl MyApp {
     /// reversible and re-rotating accumulates rather than compounding. The
     /// view-only rotation stays a view transform — this is the one path that
     /// touches the disk, and it does so only when asked.
+    /// Ask the launch loop to rebuild the window with a different backend.
+    ///
+    /// Saves first, so the choice survives even if the new backend turns out to
+    /// crash — the config is the way back. `None` clears the probe cache, so
+    /// switching back to Automatic re-probes rather than trusting an answer
+    /// obtained before the user had an opinion.
+    fn request_renderer_restart(&mut self, ctx: &Context, backend: image_viewer::WgpuBackend) {
+        if backend == self.renderer && self.config.renderer.choice != image_viewer::WgpuBackend::Auto
+        {
+            return;
+        }
+        self.config.renderer.choice = backend;
+        self.config.renderer.probed = None;
+        let _ = self.config.save(&self.config_path);
+        if let Ok(mut slot) = self.restart.lock() {
+            *slot = Some(backend);
+        }
+        self.notice = Some(format!("Switching to {}…", backend.label()));
+        // Closing the viewport is what returns control to the launch loop;
+        // there is no other way for the app to ask for a new event loop.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Run the backend probe and report what it found, without changing
+    /// anything. Useful when Automatic picked something surprising.
+    fn probe_renderer_now(&mut self, ctx: &Context) {
+        self.notice = Some("Probing graphics backends…".into());
+        ctx.request_repaint();
+        let results = probe_backends();
+        let mut lines = Vec::new();
+        for (b, ok) in &results {
+            lines.push(format!("{}: {}", b.name(), if *ok { "works" } else { "unavailable" }));
+        }
+        // Reuse the launch-time decision so there is one implementation of
+        // "which one do we pick".
+        let picked = image_viewer::pick_probed(&results);
+        self.notice = Some(format!("{} — would use {}", lines.join(", "), picked.name()));
+    }
+
     fn save_rotated_copy(&mut self) {
         let Some(p) = self.cur.clone() else {
             return;
@@ -3097,6 +3320,46 @@ impl eframe::App for MyApp {
             let mut refilter = false;
             egui::Panel::right("settings").show(ui, |ui| {
                 ui.heading("Settings");
+
+                // ---- renderer ------------------------------------------------
+                // Deliberately the first row: it is the only setting that can
+                // make the app fail to start at all, so it should not be
+                // something you have to go looking for.
+                ui.horizontal(|ui| {
+                    ui.label("Graphics:");
+                    let mut choice = self.config.renderer.choice;
+                    let mut changed = false;
+                    egui::ComboBox::from_id_salt("renderer")
+                        .selected_text(choice.label())
+                        .show_ui(ui, |ui| {
+                            for b in [
+                                image_viewer::WgpuBackend::Auto,
+                                image_viewer::WgpuBackend::Dx12,
+                                image_viewer::WgpuBackend::Gl,
+                                image_viewer::WgpuBackend::Vulkan,
+                            ] {
+                                changed |= ui
+                                    .selectable_value(&mut choice, b, b.label())
+                                    .clicked();
+                            }
+                        });
+                    if changed {
+                        self.request_renderer_restart(ui.ctx(), choice);
+                    }
+                });
+                ui.small(format!("In use: {}", self.renderer.label()));
+                if self.config.renderer.choice == image_viewer::WgpuBackend::Auto {
+                    ui.small(
+                        "Automatic probes each backend in its own process and keeps the \
+                         first that starts, because a driver that fails does so by \
+                         crashing rather than by returning an error.",
+                    );
+                }
+                if ui.button("Probe backends now").clicked() {
+                    self.probe_renderer_now(ui.ctx());
+                }
+                ui.add_space(6.0);
+
                 if ui
                     .checkbox(
                         &mut self.config.load_all_on_startup,

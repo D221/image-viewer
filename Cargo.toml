@@ -27,6 +27,7 @@ arboard = "3"
 wallpaper = "3"
 winreg = "0.52"
 zip = "2"
+pollster = "1.0.1"
 
 
 [dev-dependencies]

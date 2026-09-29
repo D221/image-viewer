@@ -949,36 +949,38 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
 }
 
 #[test]
-fn test_wgpu_backend_set_defaults_to_dx12_and_never_drops_it() {
+fn test_wgpu_backend_set_enables_exactly_one_backend() {
     use image_viewer::{wgpu_backend_set, WgpuBackend};
 
-    // Default is DX12 only. Not "Vulkan when a driver is registered": on this
-    // machine `vulkaninfo` reports a healthy device and wgpu still crashes, and
-    // the registry key is absent while Vulkan works, so there is no signal to
-    // condition on. A crash is not a thing you can probe your way out of.
-    assert_eq!(wgpu_backend_set(WgpuBackend::Auto), (false, true));
-    assert_eq!(wgpu_backend_set(WgpuBackend::Dx12), (false, true));
-
-    // Vulkan is opt-in, and DX12 stays enabled alongside it as the fallback.
-    assert_eq!(wgpu_backend_set(WgpuBackend::Vulkan), (true, true));
-
-    // DX12 is never dropped in any mode: it is the only backend verified to
-    // work here, and without it there could be no adapter at all.
-    for req in [WgpuBackend::Auto, WgpuBackend::Vulkan, WgpuBackend::Dx12] {
-        assert!(
-            wgpu_backend_set(req).1,
-            "DX12 must always be enabled ({req:?})"
+    // The contract changed, and deliberately. This used to return
+    // `(vulkan, dx12)` and kept DX12 enabled *alongside* Vulkan as a fallback.
+    // That is not a fallback: wgpu enumerates every backend in the set during
+    // adapter discovery and access-violates on this machine when Vulkan is in
+    // it, so a two-backend set is a way to crash rather than a way to recover.
+    //
+    // One bit, always. Which one is the launch loop's decision, made by probing
+    // each in a child process; see `tests/renderer.rs` for the policy.
+    for b in [WgpuBackend::Auto, WgpuBackend::Dx12, WgpuBackend::Gl, WgpuBackend::Vulkan] {
+        assert_eq!(
+            wgpu_backend_set(b).count_ones(),
+            1,
+            "{b:?} enabled more than one backend"
         );
     }
+    // `Auto` is resolved before it reaches here, but must not produce an empty
+    // set — that fails with a much more confusing error than a wrong backend.
+    assert_eq!(wgpu_backend_set(WgpuBackend::Auto), wgpu_backend_set(WgpuBackend::Dx12));
 
     // Parsing: an unrecognised value must not silently select something, and
-    // callers treat `None` as the default.
+    // callers treat `None` as the default. "opengl" used to be rejected and is
+    // now a real backend.
     assert_eq!(WgpuBackend::parse("auto"), Some(WgpuBackend::Auto));
     assert_eq!(WgpuBackend::parse("  DX12 "), Some(WgpuBackend::Dx12));
     assert_eq!(WgpuBackend::parse("vulkan"), Some(WgpuBackend::Vulkan));
     assert_eq!(WgpuBackend::parse("vk"), Some(WgpuBackend::Vulkan));
     assert_eq!(WgpuBackend::parse("d3d12"), Some(WgpuBackend::Dx12));
-    assert_eq!(WgpuBackend::parse("opengl"), None);
+    assert_eq!(WgpuBackend::parse("opengl"), Some(WgpuBackend::Gl));
+    assert_eq!(WgpuBackend::parse("gl"), Some(WgpuBackend::Gl));
     assert_eq!(WgpuBackend::parse("nonsense"), None);
 }
 

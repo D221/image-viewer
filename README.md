@@ -129,6 +129,39 @@ clickable **Open in Google Maps** link.
 - Remembers the last image you were on, per folder
 - Optional per-user file-type registration
 
+### Graphics backend
+
+Settings → **Graphics** picks the wgpu backend: **Automatic**, **DirectX 12**,
+**OpenGL** or **Vulkan**. Changing it restarts the renderer immediately — the
+window closes and reopens on the new backend, which keeps your folder, sort mode
+and settings but starts with an empty preview cache. **There is no Direct3D 11
+option**, because wgpu removed its DX11 backend upstream; DX12 and OpenGL are
+what it offers on Windows.
+
+Automatic probes each backend and keeps the first that works, **in a separate
+process for each**. That is not ceremony: wgpu enumerates every backend in the
+enabled set during adapter discovery, and on some drivers that fails by
+**access-violating** — `0xC0000005`, before any window exists, with nothing on
+stderr. A process that has crashed cannot catch its own way out, so "try DX12
+and fall back to Vulkan" is not writable inside one process. Probing costs one
+child launch per candidate, and the answer is cached, so it only happens on the
+first run after you change the setting. **Probe backends now** re-runs it on
+demand.
+
+The probe drives the driver as far as an adapter and a **device**, not just
+adapter enumeration — enumeration only walks the loader's list, and a probe that
+stopped there reported Vulkan as working on a machine where the app crashes on
+it. It does not create a window, so a backend that fails only at surface
+creation would still pass.
+
+Measured on the development machine (Intel UHD 620, driver 30.0.100.9865):
+
+```
+dx12    works    Intel(R) UHD Graphics 620 / 30.0.100.9865
+gl      works    Intel(R) UHD Graphics 620
+vulkan  unavailable   (0xC0000005)
+```
+
 ### Saving a rotation (`Ctrl+S`)
 
 Rotation is a view transform by default, so nothing you do to an image touches
@@ -229,16 +262,11 @@ change, run `ie4uinit.exe -show` (or restart Explorer).
 
 | Variable | Effect |
 |---|---|
-| `IV_WGPU_BACKEND=vulkan` | Render with Vulkan instead of the default DX12. The chosen set is printed at startup |
 | `PERF=1` | Turn on the latency report without passing `--perf` a folder |
 | `PERF_PHASE=1` | Per-phase timing inside the linear-light resampler (development) |
 
-The renderer is **wgpu on DX12**. DX12 is not a preference — wgpu enumerates
-every backend you enable *before* choosing one, and letting it probe Vulkan on a
-machine where wgpu's Vulkan path faults takes the process down during adapter
-discovery, before the window ever opens. So Vulkan is opt-in only. If a machine
-genuinely has no DX12, set `IV_WGPU_BACKEND=vulkan` and check the printed
-backend line.
+The renderer is **wgpu**, and which backend it uses is a setting (below). The
+backend is printed at startup.
 
 ---
 

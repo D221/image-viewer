@@ -2249,6 +2249,7 @@ dependencies = [
  "jxl-oxide",
  "nom-exif",
  "open",
+ "pollster 1.0.1",
  "proptest",
  "rayon",
  "rfd",

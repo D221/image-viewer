@@ -133,9 +133,37 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   machine that enumeration is a hard `0xC0000005` before the window opens, with
   nothing on stderr. wgpu offers no "try this, else that" —
   `native_adapter_selector` still filters enumeration by `backends` first — so
-  the set must be decided up front. `wgpu_options()` therefore enables **DX12
-  always**, plus Vulkan only when asked: `IV_WGPU_BACKEND=vulkan` (unrecognised
-  values fall back to the default; the chosen set is printed at startup).
+  the set must be decided up front. `wgpu_backend_set()` therefore returns
+  **exactly one bit, always**, and `wgpu_options()` pins it. Never make it return
+  a set: two backends is not a fallback, it is a way to crash.
+- **"Automatic" probing is per-backend child processes, and it must reach
+  `request_device`.** The failure is an access violation, not an error return, so
+  nothing in-process can survive it — the only place a crash can be contained is
+  a child whose exit code the parent reads. The first version of the probe
+  stopped at `enumerate_adapters` and reported **Vulkan as working** on the very
+  machine where the app access-violates on it, which would have made Automatic
+  crash the app on every launch. Enumeration walks the loader's list; the failure
+  is further in, where the driver initialises. Probe as far as an adapter **and a
+  device**; a surface is not probed because that needs a window, so a
+  surface-only failure still passes. Order is `PROBE_ORDER` (DX12, GL, Vulkan)
+  and must match `WgpuBackend::CHOICES`; the policy itself is pure and lives in
+  `pick_probed` so it is testable at all.
+- **Changing the renderer restarts the renderer, and the app cannot ask for
+  that itself.** `run_native` only returns when the window closes, so the app
+  writes a request into a shared `RestartSlot` and sends
+  `ViewportCommand::Close`; the launch loop re-enters the event loop. The app is
+  rebuilt from the config each time, so a restart keeps folder, sort and
+  settings but loses the preview cache. If you add another thing that needs the
+  event loop restarted, use the slot.
+- **`WgpuBackend` serialises as lowercase, and that is load-bearing.** Without
+  `#[serde(rename_all = "lowercase")]` the config file gets `"Dx12"` while
+  `name()` and `parse()` say `"dx12"`, so a hand-edited config using the
+  documented spelling fails to load. Found by reading a file the app had just
+  written; `the_config_file_uses_the_same_spellings_as_parse_and_name` pins it.
+- **There is no DX11 backend and there cannot be one.** wgpu removed its
+  Direct3D 11 backend upstream; it is absent from `Backends` in wgpu 22+. Do not
+  add a `Dx11` variant to satisfy a request for it — the answer is a documented
+  "no", not a stub.
 - **"Is Vulkan installed" is the wrong question, and the registry is a liar.**
   Do not reintroduce a `Khronos\Vulkan\Drivers` probe. Measured here: `vulkaninfo`
   reports a healthy Intel UHD 620 at API 1.2.187 with a clean environment, while
