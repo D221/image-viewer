@@ -3,6 +3,10 @@
 
 pub mod perf;
 
+/// The application icon, drawn in code rather than committed as a binary.
+/// See the module docs for why it lives here and not in `examples/`.
+pub mod icon;
+
 use nom_exif::{ExifTag, URational};
 use serde::{Deserialize, Serialize};
 use rayon::prelude::*;

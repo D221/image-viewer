@@ -286,7 +286,22 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   `cargo test --no-fail-fast` when you want the whole picture, and note that
   `--lib` (the in-crate `perf` tests) is a target that the per-target commands in
   this file never run.
-- **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings.
+- **The icon is generated code, and its look is asserted, not reviewed.** It
+  lives in `src/icon.rs` (not `examples/`) precisely so `tests/icon.rs` can check
+  it. Two bugs got through a working build, a working `ExtractIconExW` and a
+  passing registration test, because generated artwork is not a diff anyone reads:
+  the badge had a **half-extent of 0.22 in a 1×1 canvas**, so the icon filled
+  **44%** of its own bitmap and read as a stamp in an empty box; and the artwork's
+  local coordinates divided by the badge *width* (`2*HALF`) instead of its
+  half-extent, so `lx` only reached ±0.53, which squeezed everything inboard and
+  pushed the sun under the rounded corner. `coverage()` and
+  `local_coordinates_really_span_minus_one_to_one` exist for exactly this — and
+  both were verified to *fail* with the bug reintroduced, because a test that
+  passes on the broken code is decoration. **Look at
+  `assets/app-icon-preview.png` after changing it.** Also: to verify a bug fix,
+  `Copy-Item` restores the *backup's* old timestamp, so cargo skips the rebuild
+  and you test a stale binary — `touch` the file or the green run is a lie.
+- **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings. It also embeds `assets/app.ico`; a running viewer locks the exe and the build silently fails to replace it.
 - **Format handling is content-based, never extension-based.** Magic-byte sniffing picks the decoder (JPEG/PNG/WebP/GIF/TIFF/BMP/ICO/QOI via the `image` crate; JXL via `jxl-oxide`; HEIC/HEIF/AVIF via the `heic` crate; misnamed files like a PNG saved as `.jpg` must keep loading — regression test exists). `image_dims_bytes` probes header dims per format. This is also why several `image` crate decoders are deliberately left disabled, most sharply **Targa, which has no signature at all** and is therefore unidentifiable here — `a_targa_cannot_be_identified_from_its_content` demonstrates that with a hand-built valid Targa instead of asserting it. Do not "fix" it by passing the extension into the decode path. Full list with reasons: `IMAGE_CRATE_DECODERS_WE_SKIP` in `lib.rs`.
 - **A registered file type needs a `DefaultIcon`, and must NOT have a `ShellEx\ThumbnailHandler`.** Without the first, Explorer shows the generic *application* icon — which is what happens once the viewer is the default, because the ProgID has no icon and the exe has no embedded one either. `build.rs` embeds `assets/app.ico` via `winresource`; an `.ico` beside the binary is not consulted, because the shell reads the exe's *resources*. Without the second, WIC keeps supplying real photo thumbnails — claiming that key would displace WIC and replace actual thumbnails with an icon, which is strictly worse. Icon and thumbnail are separate concerns; fix only the icon. Explorer caches icons per user, so a registration change needs `ie4uinit.exe -show` to become visible.
 - **`normalized()` (lib.rs) guards every decode exit** — and it must guard the
