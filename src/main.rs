@@ -134,6 +134,15 @@ fn main() -> eframe::Result<()> {
         std::process::exit(probe_one(backend));
     }
 
+    // The taskbar keys its icon cache on an AppUserModelID, and caches whatever
+    // it found the first time. Declared here, before any window exists, because
+    // after the window is created the call is ignored. See
+    // `fileassoc::declare_taskbar_identity` for why neither the embedded icon
+    // resource nor `WM_SETICON` is sufficient on its own.
+    if let Err(e) = fileassoc::declare_taskbar_identity() {
+        eprintln!("note: could not declare a taskbar identity: {e}");
+    }
+
     // The renderer can change while the app is running, which means re-entering
     // the eframe event loop. The app cannot hand that back through its return
     // value, so it leaves a request in this slot on its way out and the loop

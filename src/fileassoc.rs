@@ -199,6 +199,98 @@ pub fn is_registered() -> bool {
         .is_some()
 }
 
+/// The taskbar's name for this app, as an AppUserModelID.
+///
+/// A **stable** string, deliberately not derived from the exe folder the way
+/// `progid()` is. The taskbar caches a window's icon against this identity, so
+/// a value that changes between builds (or between `debug` and `release`) makes
+/// a fresh cache entry every time and the button flickers between icons. Two
+/// copies of the viewer grouping under one taskbar entry is the correct outcome
+/// anyway; the ProgID is where collision-avoidance actually matters, and it
+/// already handles that.
+///
+/// The dotted shape is Microsoft's: `Company.Product.SubProduct.AppID`.
+pub const APP_USER_MODEL_ID: &str = "ImageViewer.Desktop.Photo";
+
+/// Declare this process's taskbar identity, and give the shell an icon to use.
+///
+/// **This is the fix for the taskbar showing a generic icon**, and neither of the
+/// obvious approaches is:
+///
+///  * Embedding the icon in the exe fixes *Explorer* — that path goes through
+///    the registered `DefaultIcon` — and does nothing for the taskbar.
+///  * Setting `WM_SETICON` on the window does not stick here, because the window
+///    procedure is winit's and does not forward it to `DefWindowProc`.
+///    (Measured: `GWL_HICON` stays 0 through both `WM_SETICON` and
+///    `SetWindowLongPtrW`.)
+///
+/// What is left is that the taskbar keys its icon cache on the AppUserModelID.
+/// With none set, Windows derives one from the exe *path* and caches whatever it
+/// found the first time — so a taskbar button keeps showing "no icon" from
+/// before the exe had an icon resource, and no amount of setting the window's
+/// icon will dislodge it. A brand-new ID is a cache miss, and `IconUri` says
+/// where the icon is rather than leaving it to guess.
+///
+/// Also what makes the taskbar group windows correctly and what "Pin to taskbar"
+/// uses. It must be called before the first window exists.
+///
+/// Idempotent and cheap: the registry key is only written when it is missing or
+/// stale, because a write on every launch is a surprising thing for a viewer to
+/// do. Errors are non-fatal — without this the app still runs, it just shows the
+/// default taskbar icon, which is the behaviour we are trying to improve on.
+pub fn declare_taskbar_identity() -> R<()> {
+    use winreg::enums::*;
+
+    // The registry half first: the shell reads it when it sees the ID.
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_str = exe.to_string_lossy().to_string();
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let sub = format!(r"Software\Classes\AppUserModelId\{APP_USER_MODEL_ID}");
+
+    // Write once, then leave it alone. `IconUri` necessarily comes from
+    // `current_exe()`, and the debug and release builds live at different paths —
+    // so rewriting it on every launch would make the taskbar flip between the
+    // two whenever both are used, which is the exact instability a fixed
+    // AppUserModelID exists to prevent. The icon is the same artwork either way.
+    //
+    // The one exception is a path that no longer exists, so moving the exe
+    // self-heals instead of leaving the shell pointing at nothing.
+    let stored_icon = hkcu
+        .open_subkey_with_flags(&sub, KEY_READ)
+        .ok()
+        .and_then(|k| k.get_value::<String, _>("IconUri").ok());
+    let stale = match stored_icon.as_deref() {
+        None => true,
+        Some(uri) => {
+            let path = uri.trim_matches('"');
+            !std::path::Path::new(path).exists()
+        }
+    };
+
+    if stale {
+        let (k, _) = io(hkcu.create_subkey(&sub))?;
+        io(k.set_value("DisplayName", &"Image Viewer"))?;
+        // A bare exe path is a valid IconUri: the shell extracts the icon from
+        // the file. Quoted, because the path very often contains spaces.
+        io(k.set_value("IconUri", &format!("\"{exe_str}\"")))?;
+    }
+
+    // The process half, and it only sticks if it happens before the first window.
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> i32;
+    }
+    let mut wide: Vec<u16> = APP_USER_MODEL_ID.encode_utf16().collect();
+    wide.push(0);
+    let hr = unsafe { SetCurrentProcessExplicitAppUserModelID(wide.as_ptr()) };
+    if hr != 0 {
+        // S_OK is 0. Anything else is cosmetic, so report it rather than failing
+        // a launch over it.
+        eprintln!("note: taskbar identity was not accepted (hr=0x{hr:08X})");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
