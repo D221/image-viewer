@@ -50,6 +50,12 @@ A scrollable thumbnail grid of everything in the current folder or archive.
 
 - Thumbnails decode lazily, only for cells that are actually visible, at the
   lowest job priority — scrolling a 2000-image folder stays responsive
+- Where the camera wrote an **embedded EXIF thumbnail**, that is used instead of
+  decoding the file at all — measured **16–40× faster** on real JPEGs
+  (631 ms → 16 ms). The embedded copy is ~160 px, so cells are marginally softer
+  than a real decode, which is the trade every photo browser makes. Files whose
+  thumbnail rotation can't be determined from the aspect ratio just decode
+  normally, rather than risk showing sideways photos
 - **Arrows** move a selection (Left/Right by one cell, Up/Down by one row,
   Home/End to the ends); **Enter** opens the highlighted image; a click opens
   whatever you clicked
@@ -58,6 +64,18 @@ A scrollable thumbnail grid of everything in the current folder or archive.
 - The selection scrolls itself into view only when it would otherwise be
   off-screen
 - `Esc` closes the grid
+
+### Filtering (`/`)
+
+Press `/` to focus a filter box and narrow the folder to matching file names — a
+case-insensitive substring match, and the folder is scanned flat, so there is no
+path component to match. `Esc` clears it. The filter applies to **the whole
+viewer, not just the grid** — next/previous walk only what is left, so a filtered
+folder is a gallery of its own. Single-key shortcuts stand down while you type,
+so `g` in the filter box types a `g` rather than opening the grid.
+
+The filter is deliberately **not** remembered between sessions. One that
+silently survived a restart would hide files with no obvious way back.
 
 ### Archives
 
@@ -109,8 +127,9 @@ clickable **Open in Google Maps** link.
 | `F` | Fit to window |
 | `1` | 100% (1 image pixel = 1 screen pixel) |
 | `I` | Toggle the side and bottom panels |
+| `/` | Focus the filter box |
 | `F11` | Fullscreen |
-| `Esc` | Close the grid → leave fullscreen → close the window |
+| `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |
 | `Del` `M` `C` `E` `W` `R` | Triage, see above |
 | `Ctrl+C` | Copy image to clipboard |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
@@ -126,11 +145,12 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Setting | Default | Meaning |
 |---|---|---|
 | Load all images in folder | on | Build the queue from the whole folder on startup |
-| Sort mode | Name | Name (natural order) / Date / Size / Random |
 | Linear-light downsampling | on | Resample in linear light instead of gamma space — noticeably cleaner on line art |
 | Downscale filter | Hermite | Hermite / Catrom / Lanczos3, applied live |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
 | Mouse wheel flips images | off | Wheel pages instead of zooming (`Ctrl`+wheel still zooms) |
+| Loop back at folder ends | on | Wrapping past the last image returns to the first. On by default so older configs keep their existing behaviour |
+| Sort mode | Name | Name (natural order) / Date / Size / Random |
 
 The downscale filter and sort mode re-decode immediately; the linear-light
 toggle applies to newly decoded images (see the known caveat below).
@@ -148,6 +168,21 @@ image-viewer.exe --unregister
 `--register` writes a per-user (HKCU) ProgID and `OpenWithProgids` entries for
 all nine extensions. It deliberately does **not** claim the default-handler
 role — Windows requires the user to confirm that themselves.
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `IV_WGPU_BACKEND=vulkan` | Render with Vulkan instead of the default DX12. The chosen set is printed at startup |
+| `PERF=1` | Turn on the latency report without passing `--perf` a folder |
+| `PERF_PHASE=1` | Per-phase timing inside the linear-light resampler (development) |
+
+The renderer is **wgpu on DX12**. DX12 is not a preference — wgpu enumerates
+every backend you enable *before* choosing one, and letting it probe Vulkan on a
+machine where wgpu's Vulkan path faults takes the process down during adapter
+discovery, before the window ever opens. So Vulkan is opt-in only. If a machine
+genuinely has no DX12, set `IV_WGPU_BACKEND=vulkan` and check the printed
+backend line.
 
 ---
 
@@ -172,6 +207,11 @@ role — Windows requires the user to confirm that themselves.
   last. Thumbnail requests re-arm every frame, so they survive the queue being
   rebuilt while you navigate. A job that has started always runs to
   completion — nothing is abandoned halfway.
+- **Nothing gets stranded.** The queue keeps the set of paths the viewer wants,
+  so a job superseded while in flight is re-queued rather than dropped.
+  Cancelling in-flight decodes looks faster and is not: dropping them was the
+  cause of images that silently never loaded, because the event that would have
+  asked for them again had already gone by. `tests/flip_through.rs` pins this.
 - **Bounded memory.** Preview cache capped at 16 textures, tile cache at 64
   (≈256 MB), thumbnails LRU-capped at 512, animated GIFs at 240 frames /
   256 MB.
@@ -191,28 +231,55 @@ blank frames, dropped jobs, GPU uploads, decode panics and stalls. A release
 build has no console, so the report is written to
 `%TEMP%\image-viewer-perf.txt`.
 
+It measures the *app*. For the *pipeline* there is a benchmark that drives the
+loader directly with no GUI at all:
+
+```
+cargo test --release --test bench_browse -- --ignored --nocapture
+```
+
+It flips through a generated folder at several press rates and prints
+time-to-first-pixels, wasted decode share, peak MB and cache-hit rate, so any
+change to the queue, the preloading window or the cache policy has a number to
+move. `IV_BENCH_N` sets the image count, `IV_BENCH_RUNS` the repetitions.
+
 ---
 
 ## Building and testing
 
 ```
 cargo build --release      # the exe users run
-cargo test                 # unit + property + integration
-cargo bench                # criterion benchmarks
+cargo test                 # unit + property + integration + flip-through
+cargo test --no-fail-fast  # ... without stopping at the first failing target
+cargo bench                # criterion benchmarks (the only thing needing test-images/)
+
+cargo test --release --test bench_browse -- --ignored --nocapture   # browsing benchmark
 cargo test --release --test pathological -- --ignored --nocapture   # 40/60 MP timings
 ```
 
 Requires the MSVC toolchain and CMake (turbojpeg builds libjpeg-turbo from
-source). Tests are fixture-free — they build their own images in a temp dir —
-and fast. `test-images/` is gitignored, so `cargo test --test standard` needs
-`test-images\booklet_front.jpg` supplied locally; the `unit` and `property`
-suites do not. The `pathological` suite generates its own 40/60 MP images and is
-`#[ignore]`d because it takes seconds.
+source).
+
+Every suite is **fixture-free** — each builds the images it needs in a temp
+directory — so a fresh clone passes with no setup at all. `test-images/` is
+gitignored and no `cargo test` suite reads it. The two `cargo bench` targets are
+the deliberate exception: they measure a real large photo, so they pick the
+biggest JPEG in `test-images/` and print a "drop a photo in to benchmark"
+message rather than failing.
+
+`cargo test` stops at the first failing target, so pass `--no-fail-fast` when
+you want the whole picture. The `pathological` suite generates its own 40/60 MP
+images and is `#[ignore]`d because it takes seconds.
 
 ---
 
 ## Known caveats
 
+- **Wide-gamut images look flat.** The colour space is *detected* and shown in
+  the metadata panel, but the pipeline is 8-bit sRGB end to end, so a Display P3
+  photo is displayed without conversion and reads duller than it should.
+  HEIC/AVIF/JXL report their colour space as "not inspected" rather than
+  guessing. `TODO.md` records the investigation and the two open decisions.
 - Toggling **linear-light downsampling** does not re-decode images that are
   already in the preview cache — the filter dropdown does. Restart or move to
   another image for the change to show everywhere.
