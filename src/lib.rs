@@ -333,31 +333,35 @@ impl WgpuBackend {
 
 /// The order `Auto` probes in, most-likely-to-work first.
 ///
-/// **GL leads, and that is a measured reversal.** It used to be DX12, on the
-/// reasonable grounds that DX12 is the native Windows backend and the only one
-/// verified to work on the development machine. Then it was measured, with
-/// `examples/bare_eframe.rs` as the control — an eframe window and a label, no
-/// viewer code at all, so the number is the renderer's and not ours:
+/// GL leads because it is measurably the cheaper backend on this machine.
+///
+/// The order was DX12, then GL, on the reasonable grounds that DX12 is the native
+/// Windows backend. Then it was measured, with `examples/bare_eframe.rs` as the
+/// control — an eframe window and a label, no viewer code at all, so the number is
+/// the renderer's and not ours:
 ///
 /// | | working set | private |
 /// |---|---|---|
 /// | bare eframe 0.36, DX12 | 321 MB | 289 MB |
 /// | bare eframe 0.36, GL | **84 MB** | **21 MB** |
 /// | this viewer, DX12 | 343 MB | 312 MB |
-/// | this viewer, GL | **153 MB** | 90 MB |
+/// | this viewer, GL | **189 MB** | 90 MB |
 /// | Oculante 0.9.2 (glow, not wgpu) | 118 MB | 78 MB |
 ///
-/// So 237 MB of the footprint is eframe's, not ours, and all of it is the backend.
-/// Adapter + device creation alone measures 455 ms on DX12 against 186 ms on GL.
-/// **DX12 is now second**, kept because it goes through a different driver stack
-/// and so is the one most likely to work where GL does not.
+/// So 237 MB of the footprint is eframe's, and all of it is the backend. Adapter
+/// plus device creation alone measures 455 ms on DX12 against 186 ms on GL.
 ///
-/// The caveat, which is the whole reason this is a `const` anyone can revert in one
-/// line: **frame rate has not been measured.** DX12 may well render faster, and
-/// frame rate cannot be measured over RDP — this project has drawn two wrong
-/// conclusions from that before. What *is* measured is memory and device-creation
-/// time, and both favour GL unambiguously. For a photo viewer the first pixels are
-/// the thing you wait for; animation is the only case where throughput shows.
+/// **Frame rate is equal, which is what this reversal was missing.** It could not
+/// be measured for two commits — frame rate over RDP is meaningless, and this
+/// project has drawn two wrong conclusions from that before — and DX12 might well
+/// have been faster. It is not: on a console session, interleaved A/B, four 20 s
+/// rounds on an animation, **76.8 fps on both**, interval p50 16.6 ms on both, GL
+/// 0.03% slower. Same speed, 154 MB less, 269 ms cheaper to create. See
+/// `tests/bench_framerate.ps1`, which refuses to run over RDP.
+///
+/// **DX12 is second**, kept because it goes through a different driver stack and so
+/// is the one most likely to work where GL does not — which is the entire reason
+/// the other two still exist at all.
 ///
 /// Vulkan is last *because it is the one that crashes*: on the development machine
 /// wgpu access-violates during adapter enumeration 3 times out of 3 even though
@@ -3550,37 +3554,57 @@ fn load_animation(
     }
 }
 
-/// How many frames this file actually has, or `None` if it is not one of the
-/// animated formats — without decoding any pixels.
+/// Whether this file has more than one frame, without decoding more than two of
+/// them.
 ///
-/// This is the cheap gate. A still WebP passed to `into_frames` yields one
-/// *decoded* frame, and the caller then discards it and decodes the file again, so
-/// asking first is the difference between one decode and two. A plain PNG yields
-/// zero frames from `ApngDecoder` (upstream documents this), which is already
-/// cheap, but the count is asked for anyway so all three formats behave alike.
-pub fn animation_frame_count(bytes: &[u8], format: AnimatedFormat) -> Option<usize> {
+/// This is the cheap gate, and it is the difference between one decode and two: a
+/// still WebP handed to `into_frames` yields one *decoded* frame which the caller
+/// throws away and then decodes the file again.
+///
+/// **It asks for two frames, not for the count, and both of those words are load
+/// bearing.**
+///
+/// *Asking for two* rather than counting: the first version of this was
+/// `into_frames().count()`, which decodes the whole animation and then the real
+/// decode does it again — so a 240-frame GIF was decoded twice before the first
+/// pixel appeared. The answer only needs to be "more than one?".
+///
+/// *Two* rather than "iterate": a **truncated** GIF makes `into_frames` yield `Err`
+/// and then keep yielding it, and `count()` never stops — so a 7.9 MB GIF that is
+/// missing its last byte hung the worker forever. The image never painted, the
+/// stall watchdog fired at 6 s, and the app sat there with six neighbour previews
+/// decoded and none of the one you asked for. It is in the benchmark folder, so
+/// this was not hypothetical. `take(2)` cannot hang whatever the file does.
+///
+/// PNG and WebP do not need the frames at all: both answer from the header.
+pub fn is_animated(bytes: &[u8], format: AnimatedFormat) -> bool {
     use image::AnimationDecoder;
     let cur = std::io::Cursor::new(bytes);
-    let count = match format {
-        AnimatedFormat::Gif => image::codecs::gif::GifDecoder::new(cur).ok()?.into_frames().count(),
+    match format {
+        AnimatedFormat::Gif => {
+            let Ok(dec) = image::codecs::gif::GifDecoder::new(cur) else {
+                return false;
+            };
+            two_ok_frames(dec.into_frames())
+        }
         AnimatedFormat::Png => {
-            let png = image::codecs::png::PngDecoder::new(cur).ok()?;
-            // Only an APNG reports an animation; a plain PNG must not be
-            // mistaken for a one-frame animation, which would decode it twice.
-            if !png.is_apng().ok()? {
-                return None;
-            }
-            png.apng().ok()?.into_frames().count()
+            // `is_apng` is a header read. A plain PNG must not be mistaken for a
+            // one-frame animation, which would decode it twice.
+            let Ok(png) = image::codecs::png::PngDecoder::new(cur) else {
+                return false;
+            };
+            png.is_apng().unwrap_or(false)
         }
-        AnimatedFormat::Webp => {
-            let webp = image::codecs::webp::WebPDecoder::new(cur).ok()?;
-            if !webp.has_animation() {
-                return None;
-            }
-            webp.into_frames().count()
-        }
-    };
-    Some(count)
+        AnimatedFormat::Webp => image::codecs::webp::WebPDecoder::new(cur)
+            .map(|d| d.has_animation())
+            .unwrap_or(false),
+    }
+}
+
+/// True when the first two frames both decode. Two `next` calls and no loop, so it
+/// terminates on any input including a file whose frame data runs out.
+fn two_ok_frames<'a, I: Iterator<Item = image::ImageResult<image::Frame>>>(mut it: I) -> bool {
+    matches!(it.next(), Some(Ok(_))) && matches!(it.next(), Some(Ok(_)))
 }
 
 /// Shared body of [`load_animation`], generic over the three decoders because
@@ -3768,13 +3792,12 @@ pub fn load_page_preview_full(
     //
     // GIF, APNG and animated WebP all land here, and all three used to be handled
     // differently — in fact APNG and animated WebP were not handled at all, and
-    // showed their first frame forever, silently. The frame count is asked for
-    // first because it is a header parse, and because a still image of an
-    // animated format must not be decoded twice: once as a "one frame animation"
-    // and again by the normal path below.
+    // showed their first frame forever, silently. Whether it is an animation at
+    // all is asked first, because a still image of an animated format must not be
+    // decoded twice: once as a "one frame animation" and again by the normal path
+    // below.
     if let Some(fmt) = animated_format(&bytes) {
-        let frames = animation_frame_count(&bytes, fmt).unwrap_or(0);
-        if frames > 1 {
+        if is_animated(&bytes, fmt) {
             if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start, fmt) {
                 if anim.frames.len() > 1 {
                     let dims = (anim.frames[0].width, anim.frames[0].height);

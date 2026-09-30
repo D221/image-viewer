@@ -40,14 +40,50 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
   `PROBE_ORDER` now puts **GL first** and DX12 second. This is a deliberate
   reversal of the original order (DX12 first, on the grounds that it is the native
-  Windows backend), and the reason is the table above. Three renderer tests changed
-  with it. The caveat, and the reason it stays a one-line revert: **frame rate was
-  not measured.** DX12 may render faster, and frame rate cannot be measured over
-  RDP - this project has drawn two wrong conclusions from that before. What *is*
-  measured is memory and device-creation time, and both favour GL unambiguously.
-  For a photo viewer the first pixels are what you wait for; animation is the only
-  case where throughput shows. Check it on a console session and flip
-  `PROBE_ORDER` back if GL is worse.
+  Windows backend), and the reason is the table above.
+
+  **The frame rate was measured afterwards, on a console session, and there is none
+  to report** — that caveat stood for two commits and is now closed.
+  `tests/bench_framerate.ps1`, interleaved A/B, 4 rounds of 20 s on a 14 KB
+  animation, visible window, 6 s settle:
+
+  | | frames/run | interval p50 |
+  |---|---|---|
+  | gl | 1533 1536 1537 1539 | 16.6 ms |
+  | dx12 | 1534 1536 1537 1540 | 16.6 ms |
+
+  **76.8 fps on both; GL 0.03% slower, which is noise.** So GL is the same speed
+  for 154 MB less and a device that is 269 ms cheaper to create. Three renderer
+  tests changed with the order. Note the script refuses to run over RDP and checks
+  both `quser` and the video adapter, because that is the mistake this project has
+  made before.
+
+- **`into_frames().count()` hangs on a truncated GIF, and it hung one.** The frame
+  count has one job — "is this more than one?" — and the version that used
+  `count()` did it by decoding the entire animation, then letting the real decode
+  do it again. Worse, `count()` has no reason to stop: a GIF whose frame data runs
+  out yields `Err` and then **keeps yielding `Err`**, so the worker never
+  answered. `image` itself handles the same file in 0.2 s.
+
+  The symptom was not a crash and not an error, which is what made it worth
+  writing down: the app sat with **six neighbour previews decoded and none of the
+  one you asked for**, `shown=None`, `display-gap frames 0`, `panics 0`, and the
+  stall watchdog correctly firing at 6 s with a state that read as impossible. It
+  needed a real truncated 7.9 MB GIF from the phone backup to find, and a console
+  session to reach.
+
+  Now `is_animated`, which reads a header for PNG and WebP and takes **two**
+  frames for GIF. Two `next` calls and no loop cannot hang on any input.
+  `a_truncated_gif_still_decodes_and_does_not_hang` is verified to hang with
+  `count()` put back, which is the only way to test a hang: a test that merely
+  asserted the answer could not tell "returned false" from "never returned".
+
+- **A frame's own decode is not the thing to time when something hangs.** Isolating
+  it took three probes: the harness said "first frame 204 ms" (which is the *worker
+  message* arriving, not pixels painted), then `gifcount` said the raw decoder did
+  11 frames in 0.2 s, and only a per-step timer inside the viewer localised it to
+  `animation_frame_count`. The lesson is the one already recorded for the RDP work:
+  measure the step you suspect, not the step you can see.
 
 - **The backend probe used to cost ~1456 ms of the *first* launch, and almost all
   of it was waste.** `probe_backends` ran one child process per backend, in

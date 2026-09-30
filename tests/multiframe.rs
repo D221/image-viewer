@@ -13,7 +13,7 @@
 //! animation and decoded twice) and that the file reaches the animation code at
 //! all. See `TODO.md`.
 
-use image_viewer::{animated_format, animation_frame_count, load_image_preview_full, AnimatedFormat};
+use image_viewer::{animated_format, load_image_preview_full, AnimatedFormat};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -168,23 +168,87 @@ fn four_colours() -> Vec<Rgba> {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_apng_is_recognised_from_its_bytes_and_counted() {
+fn an_apng_is_recognised_from_its_bytes_and_judged_animated() {
     let dir = tempfile::tempdir().unwrap();
     let bytes = apng(&four_colours(), 120);
     let p = write(dir.path(), "four.apng", &bytes);
 
     assert_eq!(animated_format(&bytes), Some(AnimatedFormat::Png));
-    assert_eq!(animation_frame_count(&bytes, AnimatedFormat::Png), Some(4));
-    assert_eq!(
-        animation_frame_count(&std::fs::read(&p).unwrap(), AnimatedFormat::Png),
-        Some(4)
+    assert!(image_viewer::is_animated(&bytes, AnimatedFormat::Png));
+    assert!(image_viewer::is_animated(
+        &std::fs::read(&p).unwrap(),
+        AnimatedFormat::Png
+    ));
+}
+
+/// The bug that cost the most to find, and it was only reachable with a real
+/// file: **a truncated GIF hangs `into_frames().count()` forever**.
+///
+/// `count()` has no reason to stop, and a GIF whose frame data runs out yields
+/// `Err` and then keeps yielding it. On a worker thread that is not an error, it is
+/// a hang: the image never paints, the stall watchdog fires at 6 s, and the app
+/// sits there with six *neighbour* previews decoded and none of the one you asked
+/// for. The file is real — `IMG_2896.gif` in the phone backup, 7.9 MB, 800x1422,
+/// truncated at frame 11 — and `image` itself handles it in 0.2 s.
+///
+/// So: a still image is not animated, and a *truncated* animation still is, and
+/// asking the question returns at all. The last one is the one that hangs, and a
+/// test that only asserts the answer cannot tell "returned false" from "never
+/// returned".
+#[test]
+fn a_truncated_gif_still_decodes_and_does_not_hang() {
+    let dir = tempfile::tempdir().unwrap();
+    // Twelve frames, so that cutting the tail leaves several intact — the real file
+    // failed at frame 11 of 12, and a 3-frame fixture cut in the same proportion
+    // loses the *second* frame, which is not the case being pinned.
+    let good = {
+        let mut bytes = Vec::new();
+        {
+            use image::{Delay, Frame};
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut bytes);
+            let frames: Vec<Frame> = (0..12)
+                .map(|i| {
+                    let v = (i * 21) as u8;
+                    Frame::from_parts(
+                        Rgba::solid(64, 48, [v, 255 - v, v / 2]).to_rgba_image(),
+                        0,
+                        0,
+                        Delay::from_numer_denom_ms(80, 1),
+                    )
+                })
+                .collect();
+            enc.encode_frames(frames).unwrap();
+        }
+        bytes
+    };
+    // Cut the tail: the trailer goes, and so does part of the last frame's pixel
+    // data, which is what makes the frame iterator start failing.
+    let truncated = &good[..good.len() * 9 / 10];
+
+    assert_eq!(animated_format(truncated), Some(AnimatedFormat::Gif));
+    assert!(
+        image_viewer::is_animated(truncated, AnimatedFormat::Gif),
+        "the first two frames are intact, so it is an animation"
     );
+
+    let p = write(dir.path(), "cut.gif", truncated);
+    let anim = image_viewer::load_image_preview_full(&p, 512)
+        .expect("a truncated GIF must still decode")
+        .anim
+        .expect("and still be an animation");
+    assert!(
+        anim.frames.len() >= 2,
+        "at least the two intact frames, got {}",
+        anim.frames.len()
+    );
+    assert_eq!(decoded_corner(&anim.frames[0]), [0, 255, 0]);
+    assert_eq!(decoded_corner(&anim.frames[1]), [21, 234, 10]);
 }
 
 #[test]
 fn a_plain_png_is_not_an_animation() {
-    // The whole reason `animation_frame_count` exists rather than just calling
-    // `into_frames` and counting: `ApngDecoder` over a still PNG yields *zero*
+    // The whole reason `is_animated` exists rather than just calling `into_frames`
+    // and seeing what comes back: `ApngDecoder` over a still PNG yields *zero*
     // frames (upstream documents this), and a still WebP yields *one decoded
     // frame*, which the caller would throw away and then decode a second time.
     let dir = tempfile::tempdir().unwrap();
@@ -198,7 +262,7 @@ fn a_plain_png_is_not_an_animation() {
     // The container is a PNG, so the format is recognised...
     assert_eq!(animated_format(&bytes), Some(AnimatedFormat::Png));
     // ...but it is not an animation, so nothing tries to play it.
-    assert_eq!(animation_frame_count(&bytes, AnimatedFormat::Png), None);
+    assert!(!image_viewer::is_animated(&bytes, AnimatedFormat::Png));
     assert!(image_viewer::image_dims_bytes(&bytes).is_some(), "and it is a valid image");
     let _ = p;
 }
@@ -213,10 +277,9 @@ fn a_still_webp_is_recognised_as_webp_but_not_as_an_animation() {
         .expect("the image crate writes lossless still WebP");
 
     assert_eq!(animated_format(&bytes), Some(AnimatedFormat::Webp));
-    assert_eq!(
-        animation_frame_count(&bytes, AnimatedFormat::Webp),
-        None,
-        "a still WebP must report no animation, or it gets decoded twice"
+    assert!(
+        !image_viewer::is_animated(&bytes, AnimatedFormat::Webp),
+        "a still WebP must not be treated as an animation, or it is decoded twice"
     );
     let _ = write(dir.path(), "still.webp", &bytes);
 }
