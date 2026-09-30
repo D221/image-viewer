@@ -918,6 +918,28 @@ fn an_edit_says_what_it_did() {
     .is_identity());
 }
 
+/// `Gallery::empty` exists so start-up can skip a directory walk whose result it
+/// throws away. It has to be genuinely empty — anything left in it would be a
+/// gallery the user sees populate itself a moment later.
+#[test]
+fn an_empty_gallery_is_empty_and_can_still_be_filled() {
+    use image_viewer::Gallery;
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["a.jpg", "b.png", "notes.txt"] {
+        std::fs::write(tmp.path().join(name), b"x").unwrap();
+    }
+
+    let mut g = Gallery::empty();
+    assert!(g.is_empty(), "empty() must not scan the folder");
+    assert_eq!(g.index, 0);
+    assert_eq!(g.len(), 0);
+
+    // And the path it is used on still works: filling it finds the images and
+    // leaves the non-image alone.
+    g.load_all_from_folder(tmp.path());
+    assert_eq!(g.len(), 2, "should find the two images and skip notes.txt");
+}
+
 // --- helpers for the crop tests -------------------------------------------
 
 /// The stored picture turned the way the viewer shows it.

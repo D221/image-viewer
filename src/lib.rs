@@ -3970,6 +3970,20 @@ impl Gallery {
         }
     }
 
+    /// An empty gallery.
+    ///
+    /// For the path where the caller is about to install its own list — start-up
+    /// with `load_all_on_startup` calls [`scan_folder_sorted`] immediately after.
+    /// [`Self::new`] would walk the directory and have the result thrown away,
+    /// which on a 1001-image folder is ~50 ms before the window is even up.
+    pub fn empty() -> Self {
+        Self {
+            files: Vec::new(),
+            index: 0,
+            loop_back: true,
+        }
+    }
+
     /// Create a gallery containing a single file.
     pub fn from_file(path: PathBuf) -> Self {
         Self {

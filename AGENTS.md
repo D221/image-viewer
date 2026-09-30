@@ -9,6 +9,9 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
 - `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
 - `cargo test --release --test bench_browse -- --ignored --nocapture` — **browsing benchmark**; flips through a generated folder at several press rates and prints time-to-first-pixels, wasted decode share, peak MB, cache-hit rate. Median of 3 (`IV_BENCH_RUNS`), 24 images by default (`IV_BENCH_N`). This is the number to move when changing the queue, the preloading window or the cache policy
+- `powershell -File tests/bench_launch.ps1 -Runs 5` — **launch benchmark against JPEGView_L**; both apps started on the same folder, reporting ms-to-window, ms-to-idle, peak MB and CPU. Two numbers, because they answer different questions: *to window* is pure start-up (config, scan, window, renderer) and *to idle* adds the first decode, which is what a person actually waits for
+- `powershell -File tests/bench_launch_ab.ps1 -Runs 9` — **A/B two builds**, interleaved, using the app's own `--perf` report. This is the one to trust for "did my change help"; see the case-insensitive-`$a` trap above
+- `cargo test --release --test bench_startup -- --ignored --nocapture` — where start-up time goes, broken down per candidate (`IV_BENCH_FOLDER` to pick the folder; an env var, because `args().nth(2)` picks up `--nocapture`)
 - `cargo run -- --perf <folder>` — turn on latency sampling; the report prints on exit and is written to `%TEMP%\image-viewer-perf.txt` (a release build has no console, so the file is the real output)
 - `PERF_PHASE=1` — per-phase timing inside the linear-light resampler
 - `cargo run` — launch the GUI viewer; `cargo run -- --register` / `--unregister` manage file-type registration (HKCU, no admin) and exit
@@ -16,6 +19,43 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Performance (the core goal — read before touching the pipeline)
 
+- **Start-up cost is the renderer, not the folder.** Measured against JPEGView_L
+  on a 1001-image folder, and the decisive experiment is that **5 images take the
+  same time as 1001** — it is all fixed cost. We get a *window* in ~50 ms
+  (JPEGView_L: ~200 ms), but reaching first frame costs ~737 ms, and the backend is
+  most of it:
+
+  | backend | to first frame | peak working set |
+  |---|---|---|
+  | dx12 (first in probe order, so `auto` picks it) | 737 ms | 343 MB |
+  | gl | **267 ms** | **153 MB** |
+
+  So `auto` currently picks the **slowest** backend on this machine, by 470 ms and
+  190 MB. Adapter+device creation alone measures 455 ms on dx12 against 186 ms on
+  gl. **This is not a free change**: dx12 may well render faster, and the one axis
+  that would settle it — frame rate — cannot be measured over RDP (see the RDP
+  notes above). It is left as a setting, not changed by default, until someone has
+  checked it on a console session. The config field is **`renderer.choice`**, *not*
+  `wgpu_backend`; and a `Set-Content` of a property that does not exist fails
+  **silently** on `ConvertFrom-Json` output, which produced a three-block benchmark
+  in which all three blocks silently ran the same setting.
+- **Start-up walked the folder three times.** `Gallery::new` scans,
+  `load_all_from_folder` scans again, and `scan_folder_sorted` scans a third time
+  — and the middle one's result was overwritten on the very next line. Now one scan,
+  via `Gallery::empty()` on the start-up path. Worth **71 ms median (7.8%)** over 9
+  interleaved A/B pairs, 8 of 9 favouring it.
+- **`bench_launch_ab.ps1` is the instrument, and two earlier versions of it were
+  wrong in ways that had nothing to do with the app.** Both are recorded because
+  the failure mode is a *plausible number* rather than a crash. (1) Measuring all of
+  build A and then all of build B let machine drift invent a 120 ms regression —
+  JPEGView_L's own CPU time moved 828 → 1250 ms across the same window. It
+  interleaves now. (2) PowerShell variable names are **case-insensitive**, so the
+  loop variable `$a` overwrote the parameter `$A` and the second iteration ran
+  `Start-Process -FilePath 809.4`, which reports *"The system cannot find the file
+  specified"* — indistinguishable from a missing binary, and it sent me hunting for
+  a Windows pending-delete race that never happened. The parameters are `$PathA` /
+  `$PathB`. Prefer **min** over median for launch timings; the median on this
+  machine is ±100 ms when it is loaded.
 - **Measure, don't guess.** `src/perf.rs` samples 15 latency metrics into fixed
   256-entry atomic rings (p50/p95/p99) plus 9 always-on counters. Enable with
   `--perf` or `PERF=1`. "First visible pixels" is committed in `frame_prelude`,
