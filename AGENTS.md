@@ -449,6 +449,16 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   actually moved — and `step()` skips `goto()` when it did not, which avoids
   resetting the full-res dwell timer and re-planning the queue for an image that
   did not change. The grid's own selection already clamped and never wrapped.
+- **`shown` and `cur` are different images, and the draw path must use `shown` for
+  everything.** `cur` is the wanted image, set by `goto()` on a keypress;
+  `shown` only advances once the preview has actually been adopted by
+  `sync_shown`. Between them they name different pictures. `quarter` (the
+  rotation) was read from `cur` while the texture, `orig` and the fit all came from
+  `shown`, so a picture got drawn under another picture's transform — a visible
+  flicker on every navigation into or out of a rotated image, and *silent* when
+  neither is rotated. Key the transform off the image being painted
+  (`shown_rotation`), not the one being wanted. `current_rotation` is still right
+  for **saving**, which is about `cur` even when it is not up yet.
 - **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳ and **Save rotated…** are bottom-panel buttons only. Rotation is a view transform, re-fits after each turn, and is **per image** (`Rotations` in `lib.rs`, keyed by path — a single app-wide `u8` is the bug this replaced, since it turned every photo you navigated to and lost your edit on the way back). It composes with the EXIF tag when saved, so look the rotation up *by the path being saved*.
 
 ## Gotchas by feature

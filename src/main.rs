@@ -2200,8 +2200,9 @@ impl MyApp {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
             // Show the dimensions as displayed once rotated, so the readout
             // matches what is on screen.
-            if self.current_rotation() != 0 {
-                let (w, h) = rotated_footprint(pv.orig.0 as f32, pv.orig.1 as f32, self.current_rotation());
+            let shown_rot = self.shown_rotation();
+            if shown_rot != 0 {
+                let (w, h) = rotated_footprint(pv.orig.0 as f32, pv.orig.1 as f32, shown_rot);
                 s += &format!(" (rotated {}x{})", w as u32, h as u32);
             }
             if let Some(anim) = &pv.anim {
@@ -2346,7 +2347,7 @@ impl MyApp {
         let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
         // Quarter turns clockwise. Only 90° steps, so the image stays
         // axis-aligned and 1:1 stays pixel-sharp.
-        let quarter = self.current_rotation();
+        let quarter = self.shown_rotation();
         // What the image *occupies* on screen: odd quarter turns swap the axes.
         let (dw, dh) = rotated_footprint(img_px.x, img_px.y, quarter);
         let display_px = Vec2::new(dw, dh);
@@ -2696,6 +2697,22 @@ impl MyApp {
     /// The rotation of the image currently shown.
     fn current_rotation(&self) -> u8 {
         self.cur.as_deref().map_or(0, |p| self.rotations.get(p))
+    }
+
+    /// The rotation of the image actually *on screen*.
+    ///
+    /// Deliberately keyed on `shown`, not `cur`. Those are different images
+    /// whenever the wanted one's preview has not been adopted yet, and the draw
+    /// path paints `shown`'s texture — so reading the rotation from `cur` drew one
+    /// picture under another picture's transform. Whichever way the two get out of
+    /// step, that is a visible flicker: with `cur` ahead you see the stale image
+    /// briefly turned, and with it behind you see the new one arrive unrotated and
+    /// then jump.
+    ///
+    /// `current_rotation` is still what the *save* uses, because saving is about
+    /// `cur` — the image the user last asked for — even if it is not up yet.
+    fn shown_rotation(&self) -> u8 {
+        self.shown.as_deref().map_or(0, |p| self.rotations.get(p))
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
