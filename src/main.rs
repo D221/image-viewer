@@ -1075,7 +1075,10 @@ impl MyApp {
         // first *non-flag* argument: `nth(1)` would take `--perf` as the path
         // and silently open the persisted folder instead.
         let arg = image_viewer::path_arg(std::env::args().skip(1));
-        let explicit_file = arg.as_ref().is_some_and(|a| a.is_file());
+        // Which file, if any, the user named. Taken before the `match` below
+        // consumes `arg`, and excluding archives because those are extracted to a
+        // temp folder and opened as a directory instead.
+        let named_file: Option<PathBuf> = arg.clone().filter(|a| a.is_file() && !is_archive_path(a));
         // An archive argument is extracted up front and opened as its temp dir.
         let mut zip_archive: Option<PathBuf> = None;
         let mut zip_temp: Option<PathBuf> = None;
@@ -1128,24 +1131,15 @@ impl MyApp {
             // this line - ~100 ms of directory walking to produce a list nobody
             // read.
             //
-            // Sort per config (natural name order by default) and resume the
-            // last-viewed image for this folder — but only when the user
-            // didn't explicitly open a file; an explicit file wins.
+            // Sort per config (natural name order by default) and pick what to show.
+            // The rule itself lives in `image_viewer::startup_index` so it can be
+            // tested; see its doc comment for the bug it fixes.
             let files = scan_folder_sorted(&folder, config.sort);
-            if !explicit_file {
-                if let Some(last) = config.last_by_folder.get(&folder.to_string_lossy().to_string()) {
-                    // Stored as a file name (so archives and folders share the
-                    // format); match on the name.
-                    let last = Path::new(last).file_name().map(|n| n.to_string_lossy().into_owned());
-                    if let Some(i) = last.and_then(|name| {
-                        files.iter().position(|f| {
-                            f.file_name().map(|n| n.to_string_lossy().into_owned()) == Some(name.clone())
-                        })
-                    }) {
-                        gallery.index = i;
-                    }
-                }
-            }
+            gallery.index = image_viewer::startup_index(
+                &files,
+                named_file.as_deref(),
+                config.last_by_folder.get(&folder.to_string_lossy().to_string()).map(|s| s.as_str()),
+            );
             gallery.files = files;
         }
 

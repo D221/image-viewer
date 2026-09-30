@@ -918,6 +918,48 @@ fn an_edit_says_what_it_did() {
     .is_identity());
 }
 
+#[test]
+fn a_named_file_beats_the_resume_point() {
+    use image_viewer::startup_index;
+    let files: Vec<PathBuf> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+        .iter()
+        .map(|n| PathBuf::from("/photos").join(n))
+        .collect();
+
+    // A file was named: that file, whatever the resume point says.
+    assert_eq!(startup_index(&files, Some(&files[2]), Some("a.jpg")), 2);
+    // Even when the resume point is the first file and the named one is last.
+    assert_eq!(startup_index(&files, Some(&files[3]), Some("a.jpg")), 3);
+    // And with no resume point at all.
+    assert_eq!(startup_index(&files, Some(&files[1]), None), 1);
+}
+
+#[test]
+fn without_a_named_file_the_resume_point_wins() {
+    use image_viewer::startup_index;
+    let files: Vec<PathBuf> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+        .iter()
+        .map(|n| PathBuf::from("/photos").join(n))
+        .collect();
+    assert_eq!(startup_index(&files, None, Some("c.jpg")), 2, "resume must still work");
+    // The resume entry is a bare file name, so a path stored in it still matches.
+    assert_eq!(startup_index(&files, None, Some("/elsewhere/c.jpg")), 2);
+}
+
+#[test]
+fn an_unmatched_named_or_resume_falls_back_to_the_first_image() {
+    use image_viewer::startup_index;
+    let files: Vec<PathBuf> = ["a.jpg", "b.jpg"].iter().map(|n| PathBuf::from("/p").join(n)).collect();
+    // A named file that is not in the listing - deleted, or a filter hid it.
+    assert_eq!(startup_index(&files, Some(&PathBuf::from("/p/gone.jpg")), None), 0);
+    // A resume point naming something that is gone.
+    assert_eq!(startup_index(&files, None, Some("gone.jpg")), 0);
+    // Nothing at all.
+    assert_eq!(startup_index(&files, None, None), 0);
+    // And an empty listing must not panic.
+    assert_eq!(startup_index(&[], Some(&PathBuf::from("/p/a.jpg")), Some("a.jpg")), 0);
+}
+
 /// `Gallery::empty` exists so start-up can skip a directory walk whose result it
 /// throws away. It has to be genuinely empty — anything left in it would be a
 /// gallery the user sees populate itself a moment later.
