@@ -2959,6 +2959,22 @@ impl MyApp {
         ))
     }
 
+    /// Enter or leave crop mode. Leaving it throws the frame away.
+    ///
+    /// The frame is cleared rather than kept so that crop mode is a single,
+    /// reversible gesture: press `C`, drag, press `C` and you are back to where you
+    /// were. Keeping a stale frame that reappears next time you crop is how you end
+    /// up saving a crop you framed for a different picture and forgot about.
+    fn toggle_crop_mode(&mut self, ctx: &Context) {
+        self.crop_mode = !self.crop_mode;
+        if !self.crop_mode {
+            if let Some(p) = self.cur.clone() {
+                self.edits.clear_crop(&p);
+            }
+        }
+        ctx.request_repaint();
+    }
+
     /// The transform of the image the user last asked for.
     fn current_xform(&self) -> Xform {
         self.cur
@@ -3542,8 +3558,7 @@ impl eframe::App for MyApp {
             } else if save_rot {
                 self.save_transformed_copy();
             } else if crop_key {
-                self.crop_mode = !self.crop_mode;
-                ctx.request_repaint();
+                self.toggle_crop_mode(ctx);
             } else if wall {
                 self.set_wallpaper();
             } else if mouse_back {
@@ -3678,8 +3693,7 @@ impl eframe::App for MyApp {
                         .on_hover_text("Drag on the image to frame")
                         .clicked()
                     {
-                        self.crop_mode = !self.crop_mode;
-                        ctx.request_repaint();
+                        self.toggle_crop_mode(ctx);
                     }
                     let has_crop = self.cur.as_deref().is_some_and(|p| self.edits.crop(p).is_some());
                     if ui

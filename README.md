@@ -71,7 +71,8 @@ double-rotate).
   where a lossless crop can actually land — you get up to one block of *extra*
   picture rather than up to one block cut off the edge you framed, and the frame
   you see is the frame that gets saved. **Clear crop** removes it and keeps any
-  rotation. While crop mode is on, dragging pans no longer
+  rotation, and so does leaving crop mode — press `C`, drag, press `C`, and you are
+  back where you were. While crop mode is on, dragging pans no longer
 - Folder watcher: new and deleted files are picked up automatically (every 2s)
 
 ### Gallery grid (`G`)
