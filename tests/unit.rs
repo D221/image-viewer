@@ -1155,29 +1155,53 @@ fn test_grid_thumbnail_is_centred_and_textured() {
 }
 
 #[test]
-fn test_rotated_footprint_swaps_on_odd_quarters() {
-    use image_viewer::rotated_footprint;
+fn test_xformed_footprint_only_swaps_when_the_transform_does() {
+    use image_viewer::{xformed_footprint, Xform};
     let (w, h) = (4000.0_f32, 3000.0_f32);
-    // Even quarters: unchanged. Odd: axes swapped.
-    assert_eq!(rotated_footprint(w, h, 0), (w, h));
-    assert_eq!(rotated_footprint(w, h, 1), (h, w));
-    assert_eq!(rotated_footprint(w, h, 2), (w, h));
-    assert_eq!(rotated_footprint(w, h, 3), (h, w));
-    // Out-of-range quarters wrap (rot uses rem_euclid, but be safe here).
-    assert_eq!(rotated_footprint(w, h, 4), (w, h));
-    assert_eq!(rotated_footprint(w, h, 5), (h, w));
+    // The four turns and two of the four mirrors leave the shape alone; the two
+    // diagonal mirrors swap it, because a diagonal reflection *is* a quarter turn
+    // plus a flip.
+    for (xf, swaps) in [
+        (Xform::Identity, false),
+        (Xform::Rot90, true),
+        (Xform::Rot180, false),
+        (Xform::Rot270, true),
+        (Xform::FlipH, false),
+        (Xform::FlipV, false),
+        (Xform::Transpose, true),
+        (Xform::Transverse, true),
+    ] {
+        assert_eq!(
+            xformed_footprint(w, h, xf),
+            if swaps { (h, w) } else { (w, h) },
+            "{xf:?}: wrong footprint"
+        );
+        // And the library's own idea of the output size must agree, because the
+        // fit, the pan limits and the tile grid are all computed from these two.
+        assert_eq!(
+            xf.out_dims(4000, 3000),
+            (xformed_footprint(w, h, xf).0 as u32, xformed_footprint(w, h, xf).1 as u32),
+            "{xf:?}: footprint and out_dims disagree"
+        );
+    }
 }
 
 #[test]
-fn test_quarter_turn_mesh_covers_the_swapped_footprint() {
-    // The rotate buttons paint the image by rotating its rect about the rect
-    // centre (see `paint_tex`). That only keeps the image centred if a 90°
-    // turn of an axis-aligned rect lands exactly on the axis-swapped
-    // footprint — which is what fit/pan clamping is computed against. If this
-    // premise were wrong, rotating would swing the image off-centre.
+fn test_transformed_mesh_covers_the_swapped_footprint() {
+    // The rotate and mirror buttons paint the image by moving its rect's mesh
+    // vertices about the rect centre (see `paint_tex`). That only keeps the image
+    // centred if the transform lands exactly on the footprint that fit and pan
+    // clamping were computed against. If this premise were wrong, turning a photo
+    // would swing it off-centre or leave a gap.
+    //
+    // Uses `Xform::paint_matrix` — the same matrix `paint_tex` uses — rather than
+    // restating the transform here, because a copy of the mechanism in the test
+    // would keep passing after the shipping code broke. (What the matrix *means*
+    // is pinned separately, in `tests/rotate_save.rs`.)
     use egui::{Color32, Rect, Vec2};
+    use image_viewer::Xform;
 
-    for quarter in 0..4u8 {
+    for xform in Xform::ALL {
         let src = Vec2::new(300.0, 100.0);
         let scale = 0.5;
         let centre = egui::Pos2::new(400.0, 300.0);
@@ -1189,14 +1213,17 @@ fn test_quarter_turn_mesh_covers_the_swapped_footprint() {
             Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
             Color32::WHITE,
         );
-        if quarter & 3 != 0 {
-            mesh.rotate(
-                egui::emath::Rot2::from_angle(quarter as f32 * std::f32::consts::FRAC_PI_2),
-                rect.center(),
-            );
+        if xform != Xform::Identity {
+            let m = xform.paint_matrix();
+            let origin = rect.center();
+            for v in &mut mesh.vertices {
+                let d = v.pos - origin;
+                v.pos = origin
+                    + Vec2::new(m[0][0] * d.x + m[0][1] * d.y, m[1][0] * d.x + m[1][1] * d.y);
+            }
         }
 
-        let (dw, dh) = image_viewer::rotated_footprint(src.x * scale, src.y * scale, quarter);
+        let (dw, dh) = image_viewer::xformed_footprint(src.x * scale, src.y * scale, xform);
         let want = Rect::from_center_size(centre, Vec2::new(dw, dh));
 
         let xs: Vec<f32> = mesh.vertices.iter().map(|v| v.pos.x).collect();
@@ -1216,12 +1243,12 @@ fn test_quarter_turn_mesh_covers_the_swapped_footprint() {
                 && (got.min.y - want.min.y).abs() < 0.01
                 && (got.max.x - want.max.x).abs() < 0.01
                 && (got.max.y - want.max.y).abs() < 0.01,
-            "quarter {quarter}: rotated image {got:?} must fill the footprint {want:?}"
+            "{xform:?}: transformed image {got:?} must fill the footprint {want:?}"
         );
-        // And it must stay centred where the unrotated image was.
+        // And it must stay centred where the untransformed image was.
         assert!(
             (got.center() - centre).x.abs() < 0.01 && (got.center() - centre).y.abs() < 0.01,
-            "quarter {quarter}: rotation must not move the centre"
+            "{xform:?}: the transform must not move the centre"
         );
     }
 }

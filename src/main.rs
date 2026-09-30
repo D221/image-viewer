@@ -33,9 +33,9 @@ use std::time::{Duration, Instant};
 use image_viewer::perf;
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
-    load_image_preview_full, rotated_footprint, set_downscale_filter, set_linear_resample,
-    scan_folder_sorted, Animation, Config, DownscaleFilter, Gallery, ImageData, SortMode,
-    GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    load_image_preview_full, set_downscale_filter, set_linear_resample,
+    scan_folder_sorted, xformed_footprint, Animation, Config, DownscaleFilter, Gallery, ImageData,
+    SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -1002,11 +1002,11 @@ struct MyApp {
     grid_sel: usize,
     /// Columns the grid last laid out with; Up/Down move by this much.
     grid_cols: usize,
-    /// Quarter turns clockwise applied per image, for this session. Keyed by path
-    /// because a rotation belongs to a *picture*: turning one photo must not turn
-    /// the next one, and returning to a rotated photo must still find it turned.
-    /// Lives in `lib.rs` so the rule can be tested — see [`image_viewer::Rotations`].
-    rotations: image_viewer::Rotations,
+    /// Quarter turns and mirrors applied per image, for this session. Keyed by path
+    /// because a transform belongs to a *picture*: turning one photo must not turn
+    /// the next one, and returning to a turned photo must still find it turned.
+    /// Lives in `lib.rs` so the rule can be tested — see [`image_viewer::ImageTransforms`].
+    transforms: image_viewer::ImageTransforms,
     /// Selection index the grid's scroll offset was last set for. The offset is
     /// written only when this differs, so manual scrolling is never fought.
     grid_sel_scrolled: usize,
@@ -1161,7 +1161,7 @@ impl MyApp {
             waiting_load: false,
             grid_sel: 0,
             grid_cols: 1,
-            rotations: image_viewer::Rotations::default(),
+            transforms: image_viewer::ImageTransforms::default(),
             grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
             t_boot: perf::boot(),
@@ -2022,12 +2022,12 @@ impl MyApp {
     }
 
     /// Copy the current image (full-res when in memory) to the clipboard.
-    /// Write a new file beside the current one with the on-screen rotation baked
+    /// Write a new file beside the current one with the on-screen transform baked
     /// in (Ctrl+S).
     ///
     /// Always a *new* file: the original is never modified, so the action is
-    /// reversible and re-rotating accumulates rather than compounding. The
-    /// view-only rotation stays a view transform — this is the one path that
+    /// reversible and saving twice accumulates rather than compounding. The
+    /// view-only transform stays a view transform — this is the one path that
     /// touches the disk, and it does so only when asked.
     /// Ask the launch loop to rebuild the window with a different backend.
     ///
@@ -2068,26 +2068,26 @@ impl MyApp {
         self.notice = Some(format!("{} — would use {}", lines.join(", "), picked.name()));
     }
 
-    fn save_rotated_copy(&mut self) {
+    fn save_transformed_copy(&mut self) {
         let Some(p) = self.cur.clone() else {
             return;
         };
         if self.anim.as_ref().is_some_and(|a| a.path == p) {
-            self.error = Some("Cannot save an animation rotated: it has many frames".into());
+            self.error = Some("Cannot save a transformed animation: it has many frames".into());
             return;
         }
-        let quarters = self.current_rotation();
-        match image_viewer::save_rotated(&p, quarters) {
+        let xform = self.current_xform();
+        match image_viewer::save_transformed(&p, xform) {
             Ok(dest) => {
                 let name = dest
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                self.notice = Some(if quarters == 0 {
+                self.notice = Some(if xform == Xform::Identity {
                     format!("Saved {name}")
                 } else {
-                    format!("Saved {name} (rotated {quarters}×90°, lossless)")
+                    format!("Saved {name} ({} , lossless)", xform.label())
                 });
             }
             Err(e) => self.error = Some(format!("Save failed: {e}")),
@@ -2198,12 +2198,12 @@ impl MyApp {
         );
         if let Some(pv) = self.shown.as_ref().and_then(|p| self.previews.get(p)) {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
-            // Show the dimensions as displayed once rotated, so the readout
+            // Show the dimensions as displayed once turned, so the readout
             // matches what is on screen.
-            let shown_rot = self.shown_rotation();
-            if shown_rot != 0 {
-                let (w, h) = rotated_footprint(pv.orig.0 as f32, pv.orig.1 as f32, shown_rot);
-                s += &format!(" (rotated {}x{})", w as u32, h as u32);
+            let shown_xf = self.shown_xform();
+            if shown_xf != Xform::Identity {
+                let (w, h) = xformed_footprint(pv.orig.0 as f32, pv.orig.1 as f32, shown_xf);
+                s += &format!(" ({} {}x{})", shown_xf.label(), w as u32, h as u32);
             }
             if let Some(anim) = &pv.anim {
                 s += &format!(" - anim {} frames", anim.frames.len());
@@ -2345,11 +2345,11 @@ impl MyApp {
         };
 
         let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
-        // Quarter turns clockwise. Only 90° steps, so the image stays
-        // axis-aligned and 1:1 stays pixel-sharp.
-        let quarter = self.shown_rotation();
-        // What the image *occupies* on screen: odd quarter turns swap the axes.
-        let (dw, dh) = rotated_footprint(img_px.x, img_px.y, quarter);
+        // Quarter turns and mirrors, clockwise. Only the eight lattice symmetries,
+        // so the image stays axis-aligned and 1:1 stays pixel-sharp.
+        let xform = self.shown_xform();
+        // What the image *occupies* on screen: four of the eight swap the axes.
+        let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
         let display_px = Vec2::new(dw, dh);
         let fit_scale = (panel.width() / display_px.x)
             .min(panel.height() / display_px.y)
@@ -2427,7 +2427,7 @@ impl MyApp {
         }
 
         // Keep the image from being lost off-screen; centre it on axes where it fits.
-        // Uses the *rotated* footprint, so panning limits and fit are correct
+        // Uses the *transformed* footprint, so panning limits and fit are correct
         // whichever way up the image is.
         let size = display_px * scale;
         let max_off = ((size - panel.size()) * 0.5).max(Vec2::ZERO);
@@ -2465,10 +2465,10 @@ impl MyApp {
                     Pos2::ZERO,
                     Pos2::new(src_size.x / 32.0, src_size.y / 32.0),
                 );
-                paint_tex(&painter, checker.id(), rect, uv, quarter);
+                paint_tex(&painter, checker.id(), rect, uv, xform);
             }
         }
-        paint_tex(&painter, tex_id, rect, uv, quarter);
+        paint_tex(&painter, tex_id, rect, uv, xform);
         // The wanted image is now on screen. The *latency* is committed next
         // frame, once this one has actually been presented.
         if self.cur.as_ref() == Some(&shown) {
@@ -2519,7 +2519,7 @@ impl MyApp {
                                     rect.min + Vec2::new(px as f32, py as f32) * scale,
                                     Vec2::new(tw as f32, th as f32) * scale,
                                 );
-                                paint_tex(&painter, tile.tex.id(), r, uv, quarter);
+                                paint_tex(&painter, tile.tex.id(), r, uv, xform);
                             }
                         }
                     }
@@ -2684,35 +2684,81 @@ impl MyApp {
     /// it is worse than wrong, because you cannot tell "I rotated this" from
     /// "this is broken".
     ///
-    /// Still a view transform: nothing is written until `save_rotated_copy`.
+    /// Still a view transform: nothing is written until `save_transformed_copy`.
     fn rotate(&mut self, steps: i32, ctx: &Context) {
+        self.apply_to_current(|r, p| r.turn(p, steps), ctx);
+    }
+
+    /// Mirror the shown image left-to-right or top-to-bottom.
+    ///
+    /// Goes through the same store as `rotate`, so a mirror and a rotation
+    /// compose instead of living in two counters. That matters: rotating and then
+    /// mirroring is a *diagonal* mirror, and two independent counters would have
+    /// the save work that out at the last moment, where a sign error is invisible
+    /// because the viewer re-applies the same mistake to the file it just wrote.
+    fn mirror(&mut self, horizontal: bool, ctx: &Context) {
+        self.apply_to_current(
+            |r, p| {
+                if horizontal {
+                    r.mirror_horizontal(p)
+                } else {
+                    r.mirror_vertical(p)
+                }
+            },
+            ctx,
+        );
+    }
+
+    /// Back to the file's own orientation, discarding the view transform.
+    fn reset_transform(&mut self, ctx: &Context) {
+        self.apply_to_current(|r, p| {
+            r.reset(p);
+            Xform::Identity
+        }, ctx);
+    }
+
+    /// Shared tail for every view-transform button: re-fit and repaint.
+    ///
+    /// `view.fit` is reset because four of the eight transforms change the
+    /// footprint's shape. A mirror does not, so re-fitting there is harmless but
+    /// not required — and doing it anyway is the same code path for all of them,
+    /// which is worth more than saving the reset on two buttons.
+    fn apply_to_current(
+        &mut self,
+        f: impl FnOnce(&mut image_viewer::ImageTransforms, &std::path::Path) -> Xform,
+        ctx: &Context,
+    ) {
         if let Some(p) = self.cur.clone() {
-            self.rotations.turn(&p, steps);
+            f(&mut self.transforms, &p);
         }
         self.view.fit = true;
         self.view.offset = Vec2::ZERO;
         ctx.request_repaint();
     }
 
-    /// The rotation of the image currently shown.
-    fn current_rotation(&self) -> u8 {
-        self.cur.as_deref().map_or(0, |p| self.rotations.get(p))
+    /// The transform of the image the user last asked for.
+    fn current_xform(&self) -> Xform {
+        self.cur
+            .as_deref()
+            .map_or(Xform::Identity, |p| self.transforms.get(p))
     }
 
-    /// The rotation of the image actually *on screen*.
+    /// The transform of the image actually *on screen*.
     ///
     /// Deliberately keyed on `shown`, not `cur`. Those are different images
     /// whenever the wanted one's preview has not been adopted yet, and the draw
-    /// path paints `shown`'s texture — so reading the rotation from `cur` drew one
+    /// path paints `shown`'s texture — so reading the transform from `cur` drew one
     /// picture under another picture's transform. Whichever way the two get out of
     /// step, that is a visible flicker: with `cur` ahead you see the stale image
     /// briefly turned, and with it behind you see the new one arrive unrotated and
     /// then jump.
     ///
-    /// `current_rotation` is still what the *save* uses, because saving is about
+    /// `current_xform` is still what the *save* uses, because saving is about
     /// `cur` — the image the user last asked for — even if it is not up yet.
-    fn shown_rotation(&self) -> u8 {
-        self.shown.as_deref().map_or(0, |p| self.rotations.get(p))
+    fn shown_xform(&self) -> Xform {
+        self.shown
+            .as_deref()
+            .map_or(Xform::Identity, |p| self.transforms.get(p))
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
@@ -3007,31 +3053,43 @@ fn set_clipboard_rgba(d: &ImageData) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-/// Paint a texture into `rect`, rotated by `quarter` (0..4) 90° steps clockwise
-/// about the rect's centre.
+/// Paint a texture into `rect`, turned by `xform` about the rect's centre.
 ///
-/// `painter.image` cannot rotate, so build a mesh and rotate it — the same
+/// `painter.image` cannot rotate, so build a mesh and move its vertices — the same
 /// trick egui's own `Image::paint_at` uses for `ImageOptions::rotation`. A
 /// quarter turn keeps everything axis-aligned, so 1:1 stays pixel-sharp and
 /// the caller can keep working in unrotated image space.
+///
+/// The matrix comes from [`Xform::paint_matrix`], i.e. it is derived from the same
+/// `Xform::map` that decides what the *saved* file contains. That is the point:
+/// a hand-written rotation matrix here is a second, independent statement of what
+/// the transform is, and the day the two disagree the screen shows one picture and
+/// the saved file contains another, with nothing to notice. Going through `map`
+/// makes that impossible.
+///
+/// `Mesh::transform` is no use — `TSTransform` is a scale and a translation, with
+/// no room for a rotation or a reflection. The vertices are moved directly, which
+/// is what `Mesh::rotate` does internally anyway.
 fn paint_tex(
     painter: &egui::Painter,
     tex_id: egui::TextureId,
     rect: egui::Rect,
     uv: egui::Rect,
-    quarter: u8,
+    xform: Xform,
 ) {
-    let quarter = quarter & 3;
-    if quarter == 0 {
+    if xform == Xform::Identity {
         painter.image(tex_id, rect, uv, Color32::WHITE);
         return;
     }
+    let m = xform.paint_matrix();
+    let origin = rect.center();
     let mut mesh = egui::epaint::Mesh::with_texture(tex_id);
     mesh.add_rect_with_uv(rect, uv, Color32::WHITE);
-    mesh.rotate(
-        egui::emath::Rot2::from_angle(quarter as f32 * std::f32::consts::FRAC_PI_2),
-        rect.center(),
-    );
+    for v in &mut mesh.vertices {
+        let d = v.pos - origin;
+        v.pos = origin
+            + Vec2::new(m[0][0] * d.x + m[0][1] * d.y, m[1][0] * d.x + m[1][1] * d.y);
+    }
     painter.add(egui::Shape::mesh(mesh));
 }
 
@@ -3251,7 +3309,7 @@ impl eframe::App for MyApp {
             } else if clip_img {
                 self.copy_image_to_clipboard();
             } else if save_rot {
-                self.save_rotated_copy();
+                self.save_transformed_copy();
             } else if wall {
                 self.set_wallpaper();
             } else if mouse_back {
@@ -3329,18 +3387,61 @@ impl eframe::App for MyApp {
                     if ui.button("Rotate ⟳").clicked() {
                         self.rotate(1, ctx);
                     }
-                    // Sits with the rotate buttons because that is the only
+                    // Mirrors are here for the same reason the rotate buttons are:
+                    // a photo shot with a wrong orientation tag, or a scan that
+                    // came out the wrong way round, is a one-press fix and there is
+                    // no other way to get it. They compose with the turns rather
+                    // than replacing them, so turn-then-mirror is a diagonal
+                    // mirror and mirror-twice is back to where it started.
+                    let xform = self.current_xform();
+                    let any = xform != Xform::Identity;
+                    if ui
+                        .add_enabled(
+                            self.cur.is_some(),
+                            egui::Button::new("⇋ Mirror").shortcut_text(""),
+                        )
+                        .on_hover_text("Mirror left-to-right")
+                        .clicked()
+                    {
+                        self.mirror(true, ctx);
+                    }
+                    if ui
+                        .add_enabled(
+                            self.cur.is_some(),
+                            egui::Button::new("⇅ Mirror").shortcut_text(""),
+                        )
+                        .on_hover_text("Mirror top-to-bottom")
+                        .clicked()
+                    {
+                        self.mirror(false, ctx);
+                    }
+                    if ui
+                        .add_enabled(
+                            any,
+                            egui::Button::new("Reset turn")
+                                .shortcut_text("")
+                                .min_size(Vec2::new(74.0, 0.0)),
+                        )
+                        .on_hover_text("Back to the file's own orientation")
+                        .clicked()
+                    {
+                        self.reset_transform(ctx);
+                    }
+                    // Sits with the transform buttons because that is the only
                     // thing it saves: without this the app's one writing action
                     // was reachable only by remembering a chord.
                     if ui
-                        .add_enabled(self.cur.is_some(), egui::Button::new("Save rotated… (Ctrl+S)"))
+                        .add_enabled(
+                            self.cur.is_some(),
+                            egui::Button::new("Save transformed… (Ctrl+S)"),
+                        )
                         .on_hover_text(
-                            "Write a new file beside this one, with its rotation baked in.\n\
+                            "Write a new file beside this one, with its rotation and mirroring baked in.\n\
                              The original is not modified.",
                         )
                         .clicked()
                     {
-                        self.save_rotated_copy();
+                        self.save_transformed_copy();
                     }
                     if ui.button("Panels (I)").clicked() {
                         self.suppress_resize_redecode = true;

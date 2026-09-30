@@ -55,12 +55,15 @@ double-rotate).
 - Neighbour preloading in both directions
 - Animated GIF playback with per-frame delays
 - Transparency checkerboard backdrop
-- **Rotate ⟲ / ⟳** — quarter turns, **per image**, re-fitting each time. Turning
-  one photo does not turn the next, and going back finds yours still turned — the
-  behaviour every real viewer has. A view transform by default: nothing is
-  written to the file. **Save rotated…** (next to the rotate buttons, or
-  `Ctrl+S`) writes a new file beside the original with the rotation baked in,
-  losslessly (see below)
+- **Rotate ⟲ / ⟳**, **⇋ / ⇅ Mirror**, **Reset turn** — quarter turns and mirrors,
+  **per image**, re-fitting each time. Turning one photo does not turn the next,
+  and going back finds yours still turned — the behaviour every real viewer has.
+  Turn and mirror *compose* rather than living in separate counters, because they
+  do not commute: turning then mirroring is a diagonal mirror, which is neither
+  operation. Mirroring twice gets you back where you started. A view transform by
+  default: nothing is written to the file. **Save transformed…** (next to the
+  buttons, or `Ctrl+S`) writes a new file beside the original with the transform
+  baked in, losslessly (see below)
 - Folder watcher: new and deleted files are picked up automatically (every 2s)
 
 ### Gallery grid (`G`)
@@ -165,32 +168,42 @@ gl      works    Intel(R) UHD Graphics 620
 vulkan  unavailable   (0xC0000005)
 ```
 
-### Saving a rotation (`Ctrl+S`)
+### Saving a transform (`Ctrl+S`)
 
-Rotation is a view transform by default, so nothing you do to an image touches
-the disk. `Ctrl+S` is the one action that writes, and it writes a **new file
-beside the original** — `photo.jpg` becomes `photo_rotated.jpg`, or
+Turning and mirroring are a view transform by default, so nothing you do to an
+image touches the disk. `Ctrl+S` is the one action that writes, and it writes a
+**new file beside the original** — `photo.jpg` becomes `photo_rotated.jpg`, or
 `photo_rotated2.jpg` if that exists. The original is never modified, so the
 action is reversible and saving twice accumulates instead of compounding.
 
 The saved file is the picture exactly as you see it: the camera's EXIF
-orientation *and* your rotation, combined, baked into the pixels, with the
-orientation tag reset so nothing applies it a second time.
+orientation *and* your turn and mirrors, combined, baked into the pixels, with
+the orientation tag reset so nothing applies it a second time. The two edits are
+composed into a single transform on the way in, so there is no case where the
+save has to work out "a turn and a flip" at the last moment.
 
 For JPEG this is genuinely lossless. Rather than decode and re-encode, the
-rotation is applied to the **DCT coefficients** — the compressed data itself is
-moved, not recompressed. Measured on generated images at quality 90:
+transform is applied to the **DCT coefficients** — the compressed data itself is
+moved, not recompressed. Measured on generated images at quality 90, and
+reported per transform because a mirror is not obviously cheaper than a turn and
+that is worth seeing rather than assuming:
 
-| image | lossless | decode + re-encode | size in → out |
-|---|---|---|---|
-| 1920×1080 | 42 ms | 67 ms | 1.02× |
-| 4000×3000 | 185 ms | 384 ms | 1.00× |
-| 6000×4000 | 381 ms | 911 ms | 1.00× |
+| image | transform | lossless | decode + re-encode | size in → out |
+|---|---|---|---|---|
+| 1920×1080 | rotated 90° CW | 43 ms | 84 ms | 1.02× |
+| 1920×1080 | mirrored left-right | 33 ms | 84 ms | 1.00× |
+| 4000×3000 | rotated 90° CW | 212 ms | 466 ms | 1.00× |
+| 4000×3000 | mirrored left-right | 166 ms | 466 ms | 1.00× |
+| 6000×4000 | rotated 90° CW | 456 ms | 1041 ms | 1.00× |
+| 6000×4000 | mirrored left-right | 362 ms | 1041 ms | 1.00× |
+| 6000×4000 | transversed | 546 ms | 1041 ms | 1.00× |
+
+All seven transforms are in the same cost class, and about 2.4× faster than the
+obvious alternative, because it never fully decompresses.
 
 The size column is the point: a re-encode makes a fresh rate-distortion decision
 per block and comes out a different size, while a coefficient transform lands
-within a percent. It is also about 2.4× faster, because it never fully
-decompresses.
+within a percent.
 
 PNG, BMP and TIFF are also saved losslessly, by decoding and re-encoding into
 their own containers — those formats have no lossy step, so nothing is lost.
@@ -215,7 +228,7 @@ should not quietly do that.
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |
 | `Del` `M` `C` `E` `W` `R` | Triage, see above |
 | `Ctrl+C` | Copy image to clipboard |
-| `Ctrl+S` | Save a new file beside the current one, rotation baked in losslessly |
+| `Ctrl+S` | Save a new file beside the current one, transform baked in losslessly |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Previous / next image |
 | Drag & drop | Open a file, folder or archive |
@@ -383,11 +396,11 @@ images and is `#[ignore]`d because it takes seconds.
   another image for the change to show everywhere.
 - The **preview cache keeps a few images either side of the current one**, so
   jumping far away discards the old previews; scrolling back re-decodes.
-- **Rotation is display-only by default.** It is not written to the file and not
-  carried into copies, clipboard or wallpaper. Only **Save rotated…** /
-  `Ctrl+S` writes anything, and it writes a new file rather than modifying the
-  original. Rotations are per image and last for the session only; they are not
-  persisted across restarts.
+- **Turning and mirroring are display-only by default.** They are not written to
+  the file and not carried into copies, clipboard or wallpaper. Only **Save
+  transformed…** / `Ctrl+S` writes anything, and it writes a new file rather than
+  modifying the original. Transforms are per image and last for the session only;
+  they are not persisted across restarts.
 - **A rotated JPEG can lose up to one 16 px block off an edge.** Lossless
   transforms move whole 8×8 DCT blocks, so a width or height that is not a
   multiple of the MCU block size leaves partial blocks that cannot reach the new

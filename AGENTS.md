@@ -452,14 +452,41 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - **`shown` and `cur` are different images, and the draw path must use `shown` for
   everything.** `cur` is the wanted image, set by `goto()` on a keypress;
   `shown` only advances once the preview has actually been adopted by
-  `sync_shown`. Between them they name different pictures. `quarter` (the
-  rotation) was read from `cur` while the texture, `orig` and the fit all came from
-  `shown`, so a picture got drawn under another picture's transform — a visible
-  flicker on every navigation into or out of a rotated image, and *silent* when
-  neither is rotated. Key the transform off the image being painted
-  (`shown_rotation`), not the one being wanted. `current_rotation` is still right
-  for **saving**, which is about `cur` even when it is not up yet.
-- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳ and **Save rotated…** are bottom-panel buttons only. Rotation is a view transform, re-fits after each turn, and is **per image** (`Rotations` in `lib.rs`, keyed by path — a single app-wide `u8` is the bug this replaced, since it turned every photo you navigated to and lost your edit on the way back). It composes with the EXIF tag when saved, so look the rotation up *by the path being saved*.
+  `sync_shown`. Between them they name different pictures. The transform was read
+  from `cur` while the texture, `orig` and the fit all came from `shown`, so a
+  picture got drawn under another picture's transform — a visible flicker on every
+  navigation into or out of a turned image, and *silent* when neither is turned.
+  Key the transform off the image being painted (`shown_xform`), not the one being
+  wanted. `current_xform` is still right for **saving**, which is about `cur` even
+  when it is not up yet.
+- **The store holds a whole `Xform`, not a turn count, and it must keep doing
+  so.** A turn and a mirror are the same *kind* of edit and they do not commute:
+  turn-then-mirror is a diagonal mirror, which is neither operation. `ImageTransforms`
+  composes on the way in (`compose`), so the map only ever contains finished
+  transforms and there is exactly one value for the display, the lossless save and
+  the tests to read. Two independent counters would push that composition to the
+  last moment, where a sign error is invisible *in this viewer* (it re-applies the
+  same mistake to the file it just wrote) and glaring in every other program.
+  `a_quarter_turn_then_a_mirror_is_a_diagonal_mirror` exists to keep the two
+  orders distinguishable — they must not collapse into the same value.
+- **`Xform::paint_matrix` is the input→output direction; `Xform::map` is the other
+  way round.** `map` answers "which input pixel is this output pixel", which is
+  what a *sampler* wants; drawing needs the opposite. The matrix is derived by
+  probing `map` and transposing (every one of the eight is a signed permutation, so
+  the inverse is the transpose) rather than transcribed, which is what stops the
+  screen and the saved file from becoming two independent statements of what the
+  transform is. `Mesh::transform` is no help — `TSTransform` is a scale and a
+  translation with no room for a reflection — so `paint_tex` moves the vertices
+  itself. **Getting the direction backwards is invisible to the eye**: a rotation
+  still looks like a rotation, just the wrong way. It happened while writing
+  `the_paint_matrix_puts_each_pixel_where_map_says_it_belongs`, which is why that
+  test walks *input → output* (the direction the code runs) instead of the
+  direction that seemed obvious.
+- **A mirror does not change the footprint, and anything that assumed "a turn
+  count implies a possible axis swap" is now wrong.** `xformed_footprint` asks
+  `Xform::swaps_axes`; four of the eight swap and four do not, and the two diagonal
+  mirrors *do* swap because a diagonal reflection is a quarter turn plus a flip.
+- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳, Mirror ⇋/⇅, Reset turn and **Save transformed…** are bottom-panel buttons only — no keys, deliberately: `Ctrl+S` is the one chord, because an undiscoverable shortcut is worse than no shortcut. The transform is a view transform, re-fits after each edit, and is **per image** (`ImageTransforms` in `lib.rs`, keyed by path — a single app-wide `u8` is the bug this replaced, since it turned every photo you navigated to and lost your edit on the way back). It composes with the EXIF tag when saved, so look the transform up *by the path being saved*.
 
 ## Gotchas by feature
 

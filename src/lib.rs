@@ -481,12 +481,14 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
     (area.0 / w).min(area.1 / h).min(1.0)
 }
 
-/// Footprint `(width, height)` an image of `w x h` occupies after `quarter`
-/// quarter turns clockwise. Odd quarter turns swap the axes; only whole
-/// quarter turns are supported, so the result stays axis-aligned (and 1:1
-/// stays pixel-sharp).
-pub fn rotated_footprint(w: f32, h: f32, quarter: u8) -> (f32, f32) {
-    if quarter & 1 == 1 {
+/// Footprint `(width, height)` an image of `w x h` occupies once `xform` has been
+/// applied to it.
+///
+/// Only the four axis-swapping transforms change the shape; a mirror does not,
+/// which is why this is asked of the transform rather than derived from a turn
+/// count. All eight keep the result axis-aligned, so 1:1 stays pixel-sharp.
+pub fn xformed_footprint(w: f32, h: f32, xform: Xform) -> (f32, f32) {
+    if xform.swaps_axes() {
         (h, w)
     } else {
         (w, h)
@@ -1061,7 +1063,7 @@ impl ResizeTracker {
 }
 
 // ---------------------------------------------------------------------------
-// Lossless rotation: the transform algebra
+// Lossless transform: the algebra of the eight lattice symmetries
 // ---------------------------------------------------------------------------
 
 /// One of the eight square-lattice symmetries — the complete set that both an
@@ -1135,6 +1137,53 @@ impl Xform {
             // [0, h) and indexes the *height*: getting this pair the wrong way
             // round underflows as soon as the image is wider than it is tall.
             Xform::Transverse => (w - 1 - oy, h - 1 - ox),
+        }
+    }
+
+    /// The linear part of the **input -> output** map, row-major, for painting.
+    ///
+    /// [`Self::map`] goes the other way (output pixel -> input pixel), which is
+    /// what a sampler wants; drawing a texture needs the opposite, and taking the
+    /// transpose is the whole of the difference. Every one of the eight is a
+    /// *signed permutation* — entries in `{0, +-1}` with one per row and column —
+    /// so the inverse is the transpose, and no division or inversion is involved.
+    ///
+    /// Derived by probing `map` and transposing, for the same reason `then` is:
+    /// transcribing this by hand is eight matrices of sign errors, and each sign
+    /// error produces a picture that looks plausible. Because it comes from `map`,
+    /// the screen and the saved file cannot disagree about what the transform is —
+    /// `the_paint_matrix_reproduces_the_old_quarter_turn_behaviour` pins the four
+    /// rotations against the `Rot2` this replaced.
+    pub fn paint_matrix(self) -> [[f32; 2]; 2] {
+        // Any dimensions work: the differences are taken before the axes matter.
+        // Two pixels of slack in each axis is all `map` needs.
+        let (w, h) = (9u32, 5u32);
+        let p0 = self.map(0, 0, w, h);
+        let px = self.map(1, 0, w, h);
+        let py = self.map(0, 1, w, h);
+        // `map` is output -> input, so these two differences are the *columns* of
+        // that matrix.
+        let cx = (px.0 as i64 - p0.0 as i64, px.1 as i64 - p0.1 as i64);
+        let cy = (py.0 as i64 - p0.0 as i64, py.1 as i64 - p0.1 as i64);
+        let a = [
+            [cx.0 as f32, cy.0 as f32], // row 0
+            [cx.1 as f32, cy.1 as f32], // row 1
+        ];
+        // Transposed: input -> output.
+        [[a[0][0], a[1][0]], [a[0][1], a[1][1]]]
+    }
+
+    /// A human-readable name, for the save confirmation and the status readout.
+    pub fn label(self) -> &'static str {
+        match self {
+            Xform::Identity => "no transform",
+            Xform::Rot90 => "rotated 90° CW",
+            Xform::Rot180 => "rotated 180°",
+            Xform::Rot270 => "rotated 270° CW",
+            Xform::FlipH => "mirrored left-right",
+            Xform::FlipV => "mirrored top-bottom",
+            Xform::Transpose => "transposed",
+            Xform::Transverse => "transversed",
         }
     }
 
@@ -1240,15 +1289,21 @@ impl Xform {
 }
 
 /// The transform that takes a file's *stored* pixels to what the viewer shows:
-/// the EXIF orientation applied at decode, then the quarter turns the user has
-/// pressed since.
-pub fn display_xform(exif_tag: u16, user_quarters: u8) -> Xform {
+/// the EXIF orientation applied at decode, then whatever the user has done since.
+///
+/// The user's part is a whole [`Xform`], not a turn count, because a mirror and a
+/// rotation are the same kind of edit — a quarter turn then a mirror is a
+/// *diagonal* mirror, and keeping two independent counters would mean the save had
+/// to work out that composition at the last moment. Composing it as it is pressed
+/// means there is only ever one thing to store, one thing to display, and one
+/// thing to hand TurboJPEG.
+pub fn display_xform(exif_tag: u16, user: Xform) -> Xform {
     Xform::from_exif(exif_tag)
         .unwrap_or(Xform::Identity)
-        .then(Xform::quarters_cw(user_quarters))
+        .then(user)
 }
 
-/// Why a rotation could not be saved, when it could not.
+/// Why a transform could not be saved, when it could not.
 ///
 /// Deliberately has *no* `#[from] std::io::Error`: reading and writing are
 /// different failures to the user, and collapsing them into one variant loses
@@ -1292,7 +1347,7 @@ fn format_name(bytes: &[u8]) -> &'static str {
 
 /// A lossless re-encode target for `bytes`, if there is one.
 ///
-/// Only formats that can hold the rotated pixels *without* recompression. A
+/// Only formats that can hold the transformed pixels *without* recompression. A
 /// WebP, GIF, HEIC or JXL would have to be decoded and re-encoded, which is a
 /// second generation of compression — and this is a button that says "save", so
 /// it must never quietly do that.
@@ -1308,7 +1363,7 @@ fn lossless_raster(bytes: &[u8]) -> Option<image::ImageFormat> {
     }
 }
 
-/// Write `src` to a new file beside it, with the rotation baked in, and return
+/// Write `src` to a new file beside it, with the transform baked in, and return
 /// the path written.
 ///
 /// **The original is never touched.** This writes `photo_rotated.jpg` next to
@@ -1325,10 +1380,10 @@ fn lossless_raster(bytes: &[u8]) -> Option<image::ImageFormat> {
 ///
 /// The output's EXIF orientation is set to 1, because the pixels now *are* the
 /// display orientation. See [`neutralize_exif_orientation`].
-pub fn save_rotated(src: &Path, user_quarters: u8) -> Result<PathBuf, SaveError> {
+pub fn save_transformed(src: &Path, user: Xform) -> Result<PathBuf, SaveError> {
     let bytes = std::fs::read(src).map_err(SaveError::Read)?;
     let exif_tag = if is_jpeg_bytes(&bytes) { exif_orientation(src) } else { 0 };
-    let xform = display_xform(exif_tag, user_quarters);
+    let xform = display_xform(exif_tag, user);
 
     let mut out = bytes.clone();
     if is_jpeg_bytes(&bytes) {
@@ -1356,7 +1411,7 @@ pub fn save_rotated(src: &Path, user_quarters: u8) -> Result<PathBuf, SaveError>
             .apply_rgba(w, h, &rgba)
             .ok_or_else(|| SaveError::Decode("buffer did not match its dimensions".into()))?;
         let out_img = image::RgbaImage::from_raw(ow, oh, px)
-            .ok_or_else(|| SaveError::Decode("rotated buffer was malformed".into()))?;
+            .ok_or_else(|| SaveError::Decode("transformed buffer was malformed".into()))?;
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgba8(out_img)
             .write_to(&mut std::io::Cursor::new(&mut buf), fmt)
@@ -1522,29 +1577,36 @@ pub fn neutralize_exif_orientation(jpeg: &mut [u8]) -> bool {
 const EXIF_TAG_ORIENTATION: u16 = 0x0112;
 
 // ---------------------------------------------------------------------------
-// Per-image rotation
+// Per-image transform
 // ---------------------------------------------------------------------------
 
-/// Quarter turns clockwise, per image, for the current session.
+/// The view transform the user has applied to each image, for the current session.
 ///
 /// **Per image, not per app**, which is the whole point. This used to be a single
 /// `u8` on the app struct, so turning one photo turned every photo you then
 /// navigated to, and navigating back showed the original at whatever rotation
 /// happened to be current. No real viewer does that — Windows Photos, FastStone,
-/// IrfanView and Preview all keep a rotation per image and keep your edit when you
-/// return — and for an app whose job is showing a picture faithfully it is worse
-/// than merely wrong, because there is no way to tell "I rotated this" from "this
-/// is broken".
+/// IrfanView and Preview all keep the edit per image and keep it when you return —
+/// and for an app whose job is showing a picture faithfully it is worse than
+/// merely wrong, because there is no way to tell "I rotated this" from "this is
+/// broken".
 ///
-/// Not persisted: a rotation is a view transform until it is saved, and it is
-/// lost on restart like every other view state.
+/// The value is a whole [`Xform`] rather than a turn count, because a mirror is
+/// the same *kind* of edit as a rotation and the two do not commute: turn a photo
+/// then mirror it and you have asked for a diagonal mirror, which is neither
+/// operation. Composing on the way in means this map only ever holds finished
+/// transforms, so display, the lossless save and the tests all read one value and
+/// there is no second place for the two halves to disagree.
+///
+/// Not persisted: this is a view transform until it is saved, and it is lost on
+/// restart like every other view state.
 #[derive(Debug, Clone)]
-pub struct Rotations {
-    map: std::collections::HashMap<std::path::PathBuf, u8>,
+pub struct ImageTransforms {
+    map: std::collections::HashMap<std::path::PathBuf, Xform>,
     cap: usize,
 }
 
-impl Default for Rotations {
+impl Default for ImageTransforms {
     fn default() -> Self {
         Self {
             map: std::collections::HashMap::new(),
@@ -1553,38 +1615,63 @@ impl Default for Rotations {
     }
 }
 
-impl Rotations {
-    /// Quarter turns applied to `path`, 0..=3.
-    pub fn get(&self, path: &Path) -> u8 {
-        self.map.get(path).copied().unwrap_or(0) & 3
+impl ImageTransforms {
+    /// The transform applied to `path`. [`Xform::Identity`] when untouched.
+    pub fn get(&self, path: &Path) -> Xform {
+        self.map.get(path).copied().unwrap_or(Xform::Identity)
     }
 
-    /// Set `path`'s rotation. Zero removes the entry rather than storing a zero,
-    /// so an unrotated image costs nothing.
-    pub fn set(&mut self, path: &Path, quarters: u8) {
-        let quarters = quarters & 3;
-        if quarters == 0 {
+    /// Set `path`'s transform. Identity removes the entry rather than storing it,
+    /// so an untransformed image costs nothing.
+    pub fn set(&mut self, path: &Path, xform: Xform) {
+        if xform == Xform::Identity {
             self.map.remove(path);
         } else {
             if self.map.len() >= self.cap {
                 // Wholesale rather than evicting one entry: the map is a record
                 // of a session's view state, and a viewer left open on a very
-                // large folder must not grow it without bound. Losing rotations
-                // is a far smaller problem than unbounded growth.
+                // large folder must not grow it without bound. Losing edits is a
+                // far smaller problem than unbounded growth.
                 self.map.clear();
             }
-            self.map.insert(path.to_path_buf(), quarters);
+            self.map.insert(path.to_path_buf(), xform);
         }
     }
 
-    /// `path`'s rotation after turning it by `steps` quarter turns, stored.
-    pub fn turn(&mut self, path: &Path, steps: i32) -> u8 {
-        let next = (self.get(path) as i32 + steps).rem_euclid(4) as u8;
+    /// Compose `extra` onto whatever `path` already has, and store the result.
+    ///
+    /// `extra` goes *first*: the button you just pressed is the innermost edit, so
+    /// pressing rotate-then-mirror really does mean "rotate, then mirror". That
+    /// ordering is invisible in the final picture — both orders are valid pictures
+    /// — but it is what makes the buttons feel like they do what they say, and it
+    /// is why this is written as one function rather than three setters.
+    fn compose(&mut self, path: &Path, extra: Xform) -> Xform {
+        let next = extra.then(self.get(path));
         self.set(path, next);
         next
     }
 
-    /// How many images currently carry a rotation. For tests and diagnostics.
+    /// `path` turned by `steps` quarter turns clockwise (negative = the other way).
+    pub fn turn(&mut self, path: &Path, steps: i32) -> Xform {
+        self.compose(path, Xform::quarters_cw(steps.rem_euclid(4) as u8))
+    }
+
+    /// `path` mirrored left-to-right.
+    pub fn mirror_horizontal(&mut self, path: &Path) -> Xform {
+        self.compose(path, Xform::FlipH)
+    }
+
+    /// `path` mirrored top-to-bottom.
+    pub fn mirror_vertical(&mut self, path: &Path) -> Xform {
+        self.compose(path, Xform::FlipV)
+    }
+
+    /// Forget `path`'s transform entirely, back to [`Xform::Identity`].
+    pub fn reset(&mut self, path: &Path) {
+        self.map.remove(path);
+    }
+
+    /// How many images currently carry a transform. For tests and diagnostics.
     pub fn len(&self) -> usize {
         self.map.len()
     }

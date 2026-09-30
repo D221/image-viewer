@@ -14,7 +14,7 @@
 
 use image_viewer::{
     apply_exif_orientation, display_xform, exif_orientation, load_image,
-    neutralize_exif_orientation, save_rotated, unique_dest, Rotations, Xform,
+    neutralize_exif_orientation, save_transformed, unique_dest, ImageTransforms, Xform,
 };
 use std::path::PathBuf;
 use std::path::Path;
@@ -146,7 +146,7 @@ fn a_saved_rotation_decodes_to_what_was_on_screen() {
             assert_eq!(exif_orientation(&p), exif_tag, "EXIF {exif_tag} did not round-trip");
 
             let want = what_the_viewer_shows(&src, exif_tag, quarters);
-            let dest = save_rotated(&p, quarters)
+            let dest = save_transformed(&p, Xform::quarters_cw(quarters))
                 .unwrap_or_else(|e| panic!("exif={exif_tag} q={quarters}: {e}"));
 
             // The viewer applies the tag itself on the way in, so the saved file
@@ -172,7 +172,7 @@ fn the_original_is_never_touched() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "keepme.jpg", &quadrants(64, 48), 6);
     let before = std::fs::read(&p).unwrap();
-    let dest = save_rotated(&p, 1).unwrap();
+    let dest = save_transformed(&p, Xform::Rot90).unwrap();
     assert_eq!(std::fs::read(&p).unwrap(), before, "the source file changed");
     assert_ne!(dest, p);
     assert!(dest.exists());
@@ -182,8 +182,8 @@ fn the_original_is_never_touched() {
 fn saving_twice_does_not_overwrite_the_first_save() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "shot.jpg", &quadrants(64, 48), 0);
-    let first = save_rotated(&p, 1).unwrap();
-    let second = save_rotated(&p, 1).unwrap();
+    let first = save_transformed(&p, Xform::Rot90).unwrap();
+    let second = save_transformed(&p, Xform::Rot90).unwrap();
     assert_ne!(first, second, "the second save clobbered the first");
     assert!(first.exists() && second.exists());
     assert_eq!(
@@ -197,7 +197,7 @@ fn saving_twice_does_not_overwrite_the_first_save() {
 fn the_new_file_lands_beside_the_original_with_a_readable_name() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "holiday snap.jpg", &quadrants(64, 48), 0);
-    let dest = save_rotated(&p, 1).unwrap();
+    let dest = save_transformed(&p, Xform::Rot90).unwrap();
     assert_eq!(dest.parent(), p.parent(), "not written beside the original");
     assert_eq!(dest.file_name().unwrap(), "holiday snap_rotated.jpg");
 }
@@ -213,7 +213,7 @@ fn a_lossy_format_is_refused_rather_than_silently_re_encoded() {
         let mut b = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut b), fmt).unwrap();
         std::fs::write(&p, &b).unwrap();
-        match save_rotated(&p, 1) {
+        match save_transformed(&p, Xform::Rot90) {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(msg.contains("lossy"), "{name}: unhelpful message {msg:?}");
@@ -239,7 +239,7 @@ fn the_lossless_raster_formats_are_saved_and_come_back_the_right_way_round() {
         src.write_to(&mut std::io::Cursor::new(&mut b), fmt).unwrap();
         std::fs::write(&p, &b).unwrap();
 
-        let dest = save_rotated(&p, 1).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let dest = save_transformed(&p, Xform::Rot90).unwrap_or_else(|e| panic!("{name}: {e}"));
         let got = load_image(&dest, 4096).unwrap_or_else(|e| panic!("{name} reload: {e:?}"));
         assert_eq!(
             (got.width, got.height),
@@ -270,7 +270,7 @@ fn the_transform_algebra_matches_the_viewers_own_rotation() {
     for tag in 1u16..=8 {
         for quarters in 0u8..4 {
             let src = quadrants(40, 24);
-            let xf = display_xform(tag, quarters);
+            let xf = display_xform(tag, Xform::quarters_cw(quarters));
 
             // By the algebra: map through the composed transform.
             let (w, h) = (src.width(), src.height());
@@ -335,79 +335,309 @@ fn composition_is_closed_over_all_sixty_four_pairs() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-image rotation
+// Mirroring
 // ---------------------------------------------------------------------------
 
-/// The bug this pins: rotation used to be a single `u8` on the app, so turning
-/// one photo turned every photo you then navigated to.
+/// The save, for every one of the eight user transforms.
+///
+/// The quarter turns are already covered against the `image` crate above. This
+/// widens that to the four reflections, which the JPEG path can now reach because
+/// `as_turbojpeg` maps them.
+///
+/// Expected pixels come from `Xform::apply_rgba` — real pixels, not a formula —
+/// and `Xform::map` is separately pinned against `apply_exif_orientation` and
+/// against the `image` crate, so the chain from button to file is checked at
+/// every link rather than trusted at one.
+#[test]
+fn a_saved_mirror_decodes_to_what_was_on_screen() {
+    for exif_tag in [0u16, 1, 2, 3, 4, 5, 6, 7, 8] {
+        for xf in Xform::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = quadrants(96, 64);
+            let p = write_jpeg(tmp.path(), "photo.jpg", &src, exif_tag);
+
+            let want = {
+                // stored pixels -> display, exactly as `display_xform` says
+                let xf = image_viewer::display_xform(exif_tag, xf);
+                let (w, h) = (src.width(), src.height());
+                let rgba = src.to_rgba8();
+                let (ow, oh) = xf.out_dims(w, h);
+                let mut out = vec![0u8; (ow * oh * 4) as usize];
+                for oy in 0..oh {
+                    for ox in 0..ow {
+                        let (ix, iy) = xf.map(ox, oy, w, h);
+                        for c in 0..4 {
+                            out[((oy * ow + ox) * 4 + c) as usize] =
+                                rgba.get_pixel(ix, iy)[c as usize];
+                        }
+                    }
+                }
+                image::DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(ow, oh, out).unwrap(),
+                )
+            };
+
+            let dest = save_transformed(&p, xf)
+                .unwrap_or_else(|e| panic!("exif={exif_tag} {xf:?}: {e}"));
+            let got = load_image(&dest, 4096).unwrap();
+            assert_same_pixels(
+                &got,
+                &want,
+                &format!("exif={exif_tag} user={xf:?}"),
+            );
+        }
+    }
+}
+
+/// `Xform::map` is the single source of truth for what a transform *means*, and
+/// everything else — the paint matrix, the save, these tests — is derived from
+/// it. That is only safe if it is right, so check the two reflections against an
+/// implementation that shares no code with it: the `image` crate.
+#[test]
+fn the_mirror_half_of_the_algebra_matches_the_image_crate() {
+    let (w, h) = (17u32, 9u32);
+    let src = image::RgbaImage::from_fn(w, h, |x, y| {
+        image::Rgba([(x * 13) as u8, (y * 29) as u8, (x + y) as u8, 255])
+    });
+
+    for (xf, via_crate) in [
+        (
+            Xform::FlipH,
+            image::imageops::flip_horizontal(&src).into_raw(),
+        ),
+        (
+            Xform::FlipV,
+            image::imageops::flip_vertical(&src).into_raw(),
+        ),
+    ] {
+        let (ow, oh, got) = xf.apply_rgba(w, h, src.as_raw()).unwrap();
+        assert_eq!((ow, oh), (w, h), "{xf:?}: a mirror must not change the shape");
+        assert_eq!(got, via_crate, "{xf:?}: disagrees with the `image` crate");
+    }
+}
+
+/// The paint matrix is a *new* statement of what the transform is, introduced
+/// when mirroring forced a real 2x2 instead of a `Rot2`. It must agree with the
+/// rotation it replaced, or every turned photo in the app silently changed
+/// appearance — a quarter turn CW becoming CCW, say, which looks like a bug
+/// somewhere else entirely.
+#[test]
+fn the_paint_matrix_reproduces_the_old_quarter_turn_behaviour() {
+    for (quarters, xf) in [
+        (0u32, Xform::Identity),
+        (1, Xform::Rot90),
+        (2, Xform::Rot180),
+        (3, Xform::Rot270),
+    ] {
+        // What `paint_tex` used to do: egui's `Rot2::from_angle`.
+        let rot = egui::emath::Rot2::from_angle(quarters as f32 * std::f32::consts::FRAC_PI_2);
+        let m = xf.paint_matrix();
+        for (x, y) in [(1.0f32, 0.0f32), (0.0, 1.0), (3.0, -2.0), (-7.5, 0.25)] {
+            let want = rot * egui::emath::vec2(x, y);
+            let got = egui::emath::vec2(m[0][0] * x + m[0][1] * y, m[1][0] * x + m[1][1] * y);
+            assert!(
+                (got - want).length() < 1e-6,
+                "quarter {quarters} ({xf:?}) on ({x}, {y}): matrix gave {got:?}, Rot2 gives {want:?}"
+            );
+        }
+    }
+}
+
+/// The paint matrix has to be the *inverse direction* of `map`: `map` sends an
+/// output pixel back to its input, and drawing moves an input point forward to
+/// where it lands. Getting those backwards is invisible to the eye — a rotation
+/// still looks like a rotation, just the wrong way — and it is a real mistake,
+/// because this test failed the first time it was written.
+///
+/// So: take each input pixel, move it with the shipping matrix exactly as
+/// `paint_tex` does, and check it arrives on the output pixel that `map` says
+/// should be showing it. That is the whole contract, checked on every pixel of
+/// every one of the eight, in the direction the code runs.
+#[test]
+fn the_paint_matrix_puts_each_pixel_where_map_says_it_belongs() {
+    let (w, h) = (11u32, 6u32);
+    for xf in Xform::ALL {
+        let m = xf.paint_matrix();
+        let (ow, oh) = xf.out_dims(w, h);
+        // Both rects are concentric on the panel, so one centre serves both.
+        let c = egui::emath::vec2(w as f32 / 2.0, h as f32 / 2.0);
+        let out_min = egui::emath::vec2(c.x - ow as f32 / 2.0, c.y - oh as f32 / 2.0);
+        for iy in 0..h {
+            for ix in 0..w {
+                let p_in = egui::emath::vec2(ix as f32 + 0.5, iy as f32 + 0.5);
+                let d = p_in - c;
+                let p_out = c
+                    + egui::emath::vec2(
+                        m[0][0] * d.x + m[0][1] * d.y,
+                        m[1][0] * d.x + m[1][1] * d.y,
+                    );
+                let ox = (p_out.x - out_min.x).floor() as i64;
+                let oy = (p_out.y - out_min.y).floor() as i64;
+                assert!(
+                    (0..ow as i64).contains(&ox) && (0..oh as i64).contains(&oy),
+                    "{xf:?}: input ({ix}, {iy}) painted to ({ox}, {oy}), outside the {ow}x{oh} output"
+                );
+                // The output pixel it landed on must be the one that samples it.
+                let from = xf.map(ox as u32, oy as u32, w, h);
+                assert_eq!(
+                    from,
+                    (ix, iy),
+                    "{xf:?}: input ({ix}, {iy}) painted onto ({ox}, {oy}), but map says that \
+                     output pixel comes from {from:?}"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-image transform
+// ---------------------------------------------------------------------------
+
+/// The bug this pins: the transform used to be a single `u8` on the app, so
+/// turning one photo turned every photo you then navigated to.
 #[test]
 fn rotating_one_image_does_not_rotate_the_next() {
-    let mut r = Rotations::default();
+    let mut r = ImageTransforms::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
 
     r.turn(&a, 1);
-    assert_eq!(r.get(&a), 1, "the rotated image should be turned");
+    assert_eq!(r.get(&a), Xform::Rot90, "the turned image should be turned");
     assert_eq!(
         r.get(&b),
-        0,
+        Xform::Identity,
         "a different image must be untouched - this is the whole point"
     );
 }
 
 #[test]
-fn going_back_to_a_rotated_image_still_finds_it_turned() {
+fn going_back_to_a_turned_image_still_finds_it_turned() {
     // The other half. Losing your edit on the way back is as wrong as applying it
     // to everything else, and the single-u8 version did both.
-    let mut r = Rotations::default();
+    let mut r = ImageTransforms::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
 
     r.turn(&a, 1);
     r.turn(&b, 2); // while browsing past it
-    assert_eq!(r.get(&a), 1, "coming back must not reset the first image");
-    assert_eq!(r.get(&b), 2);
+    assert_eq!(r.get(&a), Xform::Rot90, "coming back must not reset the first image");
+    assert_eq!(r.get(&b), Xform::Rot180);
 }
 
 #[test]
 fn turns_accumulate_and_wrap_in_both_directions() {
-    let mut r = Rotations::default();
+    let mut r = ImageTransforms::default();
     let a = PathBuf::from("a.jpg");
 
-    assert_eq!(r.turn(&a, 1), 1);
-    assert_eq!(r.turn(&a, 1), 2);
-    assert_eq!(r.turn(&a, 1), 3);
-    assert_eq!(r.turn(&a, 1), 0, "four quarter turns is a full turn");
-    assert_eq!(r.turn(&a, -1), 3, "negative steps go counter-clockwise");
-    assert_eq!(r.turn(&a, -1), 2);
-    // A single step from unrotated, anticlockwise, is a quarter turn back.
-    let mut r2 = Rotations::default();
-    assert_eq!(r2.turn(&a, -1), 3, "-1 from 0 must wrap, not underflow");
-    assert_eq!(r2.turn(&a, 5), 0, "a whole number of turns is a no-op");
+    assert_eq!(r.turn(&a, 1), Xform::Rot90);
+    assert_eq!(r.turn(&a, 1), Xform::Rot180);
+    assert_eq!(r.turn(&a, 1), Xform::Rot270);
+    assert_eq!(r.turn(&a, 1), Xform::Identity, "four quarter turns is a full turn");
+    assert_eq!(r.turn(&a, -1), Xform::Rot270, "negative steps go anticlockwise");
+    assert_eq!(r.turn(&a, -1), Xform::Rot180);
+    // A single step from untransformed, anticlockwise, is a quarter turn back.
+    let mut r2 = ImageTransforms::default();
+    assert_eq!(r2.turn(&a, -1), Xform::Rot270, "-1 from 0 must wrap, not underflow");
+    assert_eq!(r2.turn(&a, 5), Xform::Identity, "a whole number of turns is a no-op");
 }
 
 #[test]
-fn an_unrotated_image_costs_nothing() {
-    // Returning to zero removes the entry rather than storing a 0, so browsing a
-    // folder and turning things back leaves no residue.
-    let mut r = Rotations::default();
+fn mirroring_twice_is_back_to_the_start() {
+    // The one property that makes a mirror button safe to press by accident.
+    let mut r = ImageTransforms::default();
+    let a = PathBuf::from("a.jpg");
+
+    r.mirror_horizontal(&a);
+    assert_eq!(r.get(&a), Xform::FlipH);
+    r.mirror_horizontal(&a);
+    assert_eq!(r.get(&a), Xform::Identity, "two mirrors cancel");
+    assert!(r.is_empty(), "and leave nothing stored");
+
+    r.mirror_vertical(&a);
+    assert_eq!(r.get(&a), Xform::FlipV);
+    r.mirror_vertical(&a);
+    assert_eq!(r.get(&a), Xform::Identity);
+}
+
+/// The two edits do not commute, and this is the whole reason the store holds a
+/// transform instead of two counters. Turn-then-mirror is a *diagonal* mirror —
+/// if the app kept a turn count and a flip flag, the save would have to discover
+/// this at the last moment, where a sign error is invisible in this viewer (it
+/// re-applies the same mistake to the file it just wrote) and glaring everywhere
+/// else.
+#[test]
+fn a_quarter_turn_then_a_mirror_is_a_diagonal_mirror() {
+    let mut r = ImageTransforms::default();
+    let a = PathBuf::from("a.jpg");
+
+    r.turn(&a, 1);
+    r.mirror_horizontal(&a);
+    assert_eq!(r.get(&a), Xform::Transverse, "turn-then-mirror is a diagonal mirror");
+
+    // And the other order gives the *other* diagonal, which is a different
+    // picture. That they differ is the point; a sign error here would make them
+    // the same, which is why this is asserted rather than assumed.
+    let mut r2 = ImageTransforms::default();
+    r2.mirror_horizontal(&a);
+    r2.turn(&a, 1);
+    assert_eq!(r2.get(&a), Xform::Transpose);
+    assert_ne!(r.get(&a), r2.get(&a));
+}
+
+/// A mirror must not change the image's shape, or the fit, the panning limits and
+/// the tile grid would all be computed for the wrong footprint.
+#[test]
+fn a_mirror_leaves_the_footprint_alone_but_a_quarter_turn_does_not() {
+    let (w, h) = (96.0f32, 64.0f32);
+    for xf in Xform::ALL {
+        let (dw, dh) = image_viewer::xformed_footprint(w, h, xf);
+        let expected = if xf.swaps_axes() { (h, w) } else { (w, h) };
+        assert_eq!((dw, dh), expected, "{xf:?}: wrong footprint");
+        assert_eq!(xf.out_dims(96, 64), (dw as u32, dh as u32), "{xf:?}: footprint disagrees with out_dims");
+    }
+}
+
+#[test]
+fn an_untransformed_image_costs_nothing() {
+    // Returning to identity removes the entry rather than storing it, so browsing
+    // a folder and undoing your edits leaves no residue.
+    let mut r = ImageTransforms::default();
     let a = PathBuf::from("a.jpg");
     assert!(r.is_empty());
     r.turn(&a, 1);
     assert_eq!(r.len(), 1);
-    r.turn(&a, 3); // back to zero
-    assert_eq!(r.get(&a), 0);
-    assert_eq!(r.len(), 0, "a zero rotation should not be stored");
+    r.turn(&a, 3); // back to identity
+    assert_eq!(r.get(&a), Xform::Identity);
+    assert_eq!(r.len(), 0, "an identity transform should not be stored");
     assert!(r.is_empty());
+}
+
+#[test]
+fn reset_puts_an_image_back_where_it_started() {
+    let mut r = ImageTransforms::default();
+    let a = PathBuf::from("a.jpg");
+    let b = PathBuf::from("b.jpg");
+    r.turn(&a, 1);
+    r.mirror_vertical(&a);
+    r.turn(&b, 1);
+
+    r.reset(&a);
+    assert_eq!(r.get(&a), Xform::Identity, "reset clears the whole transform");
+    assert_eq!(r.len(), 1, "and only that image's entry");
+    assert_eq!(r.get(&b), Xform::Rot90, "another image is untouched");
 }
 
 #[test]
 fn the_record_is_bounded() {
     // A viewer left open on a 100k-image folder must not grow a map for as long
-    // as it runs. Losing rotations is much the smaller problem.
-    let mut r = Rotations::default();
+    // as it runs. Losing edits is much the smaller problem.
+    let mut r = ImageTransforms::default();
     for i in 0..5000 {
-        r.set(&PathBuf::from(format!("img{i}.jpg")), 1 + (i % 3) as u8);
+        r.set(
+            &PathBuf::from(format!("img{i}.jpg")),
+            Xform::ALL[1 + (i % 3)],
+        );
     }
     assert!(
         r.len() <= 4096,
@@ -416,23 +646,23 @@ fn the_record_is_bounded() {
     );
 }
 
-/// The save composes the EXIF tag with the *current image's* rotation. If these
+/// The save composes the EXIF tag with the *current image's* transform. If these
 /// two ever came from different images the saved file would be wrong in a way
 /// nothing else would catch, because the viewer applies the tag itself.
 #[test]
-fn a_saved_file_uses_the_rotation_of_the_image_being_saved() {
-    let mut r = Rotations::default();
+fn a_saved_file_uses_the_transform_of_the_image_being_saved() {
+    let mut r = ImageTransforms::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
     r.turn(&a, 1);
     r.turn(&b, 2);
 
-    // The shape the app uses: look the rotation up by the path being saved.
+    // The shape the app uses: look the transform up by the path being saved.
     let save_b = |p: &Path| r.get(p);
-    assert_eq!(save_b(&a), 1);
-    assert_eq!(save_b(&b), 2);
+    assert_eq!(save_b(&a), Xform::Rot90);
+    assert_eq!(save_b(&b), Xform::Rot180);
     // And the composed transform differs, so the two files are genuinely not
-    // being saved with each other's rotation.
+    // being saved with each other's transform.
     assert_ne!(
         image_viewer::display_xform(0, save_b(&a)),
         image_viewer::display_xform(0, save_b(&b))

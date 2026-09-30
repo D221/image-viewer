@@ -17,7 +17,7 @@
 //! `#[ignore]`d, like the other benches: it builds a large image and prints a
 //! report. Correctness lives in `rotate_save.rs`.
 
-use image_viewer::save_rotated;
+use image_viewer::{save_transformed, Xform};
 use std::time::Instant;
 
 /// A photographic-ish image: smooth gradients plus some structure, because a
@@ -51,7 +51,7 @@ fn lossless_save_vs_the_obvious_alternative() {
     eprintln!("\n  lossless save (tjTransform) vs decode + turn pixels + re-encode\n");
 
     println!(
-        "  {:<14} {:>10} {:>9} {:>10} {:>10} {:>8} {:>7}",
+        "  {:<20} {:>10} {:>9} {:>10} {:>10} {:>8} {:>7}",
         "image", "in", "lossless", "re-encode", "size in", "size out", "ratio"
     );
 
@@ -60,12 +60,6 @@ fn lossless_save_vs_the_obvious_alternative() {
         let p = tmp.path().join(format!("src_{w}x{h}.jpg"));
         write_jpeg(&p, &img, 90);
         let in_bytes = std::fs::metadata(&p).unwrap().len();
-
-        // The real thing. Rotate to a non-identity transform so it does work.
-        let t = Instant::now();
-        let dest = save_rotated(&p, 1).unwrap();
-        let lossless_ms = t.elapsed().as_secs_f64() * 1000.0;
-        let out_bytes = std::fs::metadata(&dest).unwrap().len();
 
         // The obvious alternative, for comparison: what a second generation
         // costs. This is what the JPEG path avoids entirely.
@@ -81,16 +75,31 @@ fn lossless_save_vs_the_obvious_alternative() {
             .unwrap();
         let reencode_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-        eprintln!(
-            "  {:<14} {:>8.1}MB {:>8.0}ms {:>8.0}ms {:>8.1}MB {:>8.1}MB {:>6.2}x",
-            format!("{w}x{h}"),
-            mb(in_bytes),
-            lossless_ms,
-            reencode_ms,
-            mb(in_bytes),
-            mb(out_bytes),
-            out_bytes as f64 / in_bytes as f64,
-        );
+        // The real thing, for every transform that is not the identity. Mirrors
+        // are in here because the question "did adding them cost anything?" has a
+        // number, and because the size ratio is the lossless claim for them too —
+        // nothing about a reflection makes it cheaper or dearer than a turn, and
+        // that is worth seeing rather than assuming.
+        for xform in Xform::ALL {
+            if xform == Xform::Identity {
+                continue;
+            }
+            let t = Instant::now();
+            let dest = save_transformed(&p, xform).unwrap();
+            let lossless_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let out_bytes = std::fs::metadata(&dest).unwrap().len();
+
+            eprintln!(
+                "  {:<20} {:>8.1}MB {:>8.0}ms {:>8.0}ms {:>8.1}MB {:>8.1}MB {:>6.2}x",
+                format!("{w}x{h} {}", xform.label()),
+                mb(in_bytes),
+                lossless_ms,
+                reencode_ms,
+                mb(in_bytes),
+                mb(out_bytes),
+                out_bytes as f64 / in_bytes as f64,
+            );
+        }
     }
     eprintln!("\n  size ratio ~1.00 is the lossless claim: no re-compression happened.");
     eprintln!("  a re-encode would land well under 1.00 (or move a lot) at the same quality.\n");
