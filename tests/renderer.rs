@@ -123,6 +123,108 @@ fn if_nothing_works_we_still_have_to_pick_something() {
     assert_eq!(pick_probed(&[]), WgpuBackend::Gl);
 }
 
+/// The justification for the probe stopping at the first backend that works.
+///
+/// Probing all three cost ~1456 ms of the first launch, because adapter + device
+/// creation is 186 ms on GL, 455 ms on DX12 and 474 ms on Vulkan, run one after
+/// another — and the two after the winner are work whose result is thrown away.
+/// So `probe_backends` shortens the list, and this checks that doing so cannot
+/// change the answer, for **every** combination of which backends work rather than
+/// a couple of hand-picked cases.
+///
+/// What this deliberately does *not* check, having been tried: that the decision is
+/// insensitive to the order results arrive in. A shortened list contains at most
+/// one `true` — everything before the first success is a failure, by construction —
+/// so there is no ordering for `pick_probed` to get wrong, and the check passed
+/// even with `pick_probed` rewritten to trust arrival order. It was decoration, and
+/// proving that is why it is not here. Arrival order is covered where it can
+/// actually fail, by `the_probe_order_beats_the_order_the_results_arrive_in`.
+///
+/// The invariant is "the list ends **at** the first success", not "any prefix
+/// works". A prefix of nothing but failures is a list the probe can never produce,
+/// and truncating to one *does* change the answer — that was the first version of
+/// this test, and its failure looked like a bug in `pick_probed` and was not.
+///
+/// `probe_backends` itself is a binary-side function and cannot be reached from
+/// here, so the early exit itself is pinned against the source text by
+/// `the_probe_stops_at_the_first_backend_that_works`.
+#[test]
+fn a_probe_that_stopped_at_the_first_success_decides_the_same_way() {
+    for mask in 0u8..8 {
+        let full: Vec<(WgpuBackend, bool)> = PROBE_ORDER
+            .iter()
+            .map(|&b| (b, mask & bit(b) != 0))
+            .collect();
+        let expected = pick_probed(&full);
+
+        let stop = full
+            .iter()
+            .position(|(_, ok)| *ok)
+            .map(|i| i + 1)
+            .unwrap_or(full.len());
+        let short = full[..stop].to_vec();
+        assert_eq!(
+            pick_probed(&short),
+            expected,
+            "shortened {short:?} decided differently from full {full:?}"
+        );
+    }
+}
+
+/// The early exit in `probe_backends`, asserted against `src/main.rs` as text.
+///
+/// Normally a weak thing to do, and used here for the same reason
+/// `tests/keybindings.rs` uses it: the function is in a binary, so the alternative
+/// is that "the probe still runs all three backends" is unobservable. It cost
+/// ~1456 ms of the first launch once already, and nothing about the change that
+/// fixed it would fail a test otherwise — the shortened list decides the same way
+/// by construction, which is what makes the optimisation invisible to the rest of
+/// the suite.
+///
+/// Checking the text rather than the behaviour is what makes the claim checkable at
+/// all: a reordering or a `.map().collect()` instead of the loop is a diff, and a
+/// diff is the thing a reviewer reads.
+#[test]
+fn the_probe_stops_at_the_first_backend_that_works() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .expect("src/main.rs");
+
+    let body = src
+        .split("fn probe_backends()")
+        .nth(1)
+        .expect("probe_backends is gone; this test needs updating")
+        .split("\nfn ")
+        .next()
+        .expect("could not delimit the function body");
+
+    assert!(
+        body.contains("if ok {") && body.contains("break;"),
+        "probe_backends no longer breaks on the first success.\n\
+         It runs one child process per backend, and adapter + device creation is \
+         186 ms (GL), 455 ms (DX12), 474 ms (Vulkan) - so probing all three costs \
+         ~1456 ms of the first launch and the losers' results are discarded.\n\
+         Body was:\n{body}"
+    );
+    // The loop form, not an iterator: an iterator cannot stop early without
+    // something like `take_while`, and the rewrite would be easy to miss.
+    assert!(
+        body.contains("for &backend in &image_viewer::PROBE_ORDER"),
+        "probe_backends no longer iterates PROBE_ORDER as a loop.\nBody was:\n{body}"
+    );
+}
+
+/// The bit for a backend inside the `0u8..8` mask above.
+fn bit(b: WgpuBackend) -> u8 {
+    match b {
+        WgpuBackend::Gl => 1,
+        WgpuBackend::Dx12 => 2,
+        WgpuBackend::Vulkan => 4,
+        WgpuBackend::Auto => unreachable!("PROBE_ORDER must not contain Auto"),
+    }
+}
+
 #[test]
 fn an_explicit_choice_overrides_a_probe_and_a_cache() {
     // The user asked for a specific backend; nothing else may override that,

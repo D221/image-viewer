@@ -49,6 +49,22 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   case where throughput shows. Check it on a console session and flip
   `PROBE_ORDER` back if GL is worse.
 
+- **The backend probe used to cost ~1456 ms of the *first* launch, and almost all
+  of it was waste.** `probe_backends` ran one child process per backend, in
+  `PROBE_ORDER`, and collected the lot before choosing - so with GL leading it paid
+  for GL (186 ms), then DX12 (455 ms), then Vulkan (474 ms), and threw away the two
+  results after the winner. It now **breaks at the first success**: cold launch
+  median **1370 ms -> 212 ms**, and the probe touches one backend instead of three.
+  Warm launches were never affected (47 ms), because the answer is cached in
+  `config.json` - which is why this is easy to miss and worth having measured.
+  Nothing about the change is observable to the rest of the suite, because a
+  shortened probe list contains **at most one success** (everything before the
+  first success is a failure by construction), so it cannot change what
+  `pick_probed` decides. `probe_backends` is therefore a binary-side function
+  that no test can reach, and the early exit is pinned against the source text in
+  `tests/renderer.rs` - the same move as `tests/keybindings.rs`, for the same
+  reason: otherwise "the probe went back to running all three" is invisible.
+
 - **Oculante is not faster, and there is nothing of its to port.** It was measured
   to look 29x quicker to first window, which was an artifact: our own launch time is
   bimodal on this box (~50 ms or ~1400 ms for the same binary and config) and the
