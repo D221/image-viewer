@@ -462,6 +462,32 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   a list, so it cannot fall behind; `strip_line_comment` keeps the comment
   explaining the bug from keeping the test red, since that comment has to be able
   to name the glyphs. Verified to fail with `⇋` reintroduced.
+- **TurboJPEG reads a crop region in the transform's DESTINATION space, and
+  refuses it outright for the four axis-swapping operations.** Measured, not
+  assumed: with 16 px labelled blocks, a crop of stored `(48,16,32,32)` comes back
+  from a `rot180` as blocks `x 1..2` — the same rectangle *after* the turn — and
+  `rot90`/`rot270`/`transpose`/`transverse` fail with "Invalid crop request". So a
+  crop and a turn **cannot** share one `Transform`. `save_transformed` does two
+  calls: crop with the identity op (source space == destination space there, so
+  the coordinates are unambiguous), then turn the cropped result. Both rearrange
+  DCT coefficients and neither decompresses to pixels, so it is still lossless —
+  `bench_rotate_save`'s `cropped_save_is_still_lossless` reports the ratio
+  (1.00x, 0.99x at 4000x3000) and that is the only evidence. Do not "optimise"
+  this back into one call; it will pass the identity case and fail every other.
+- **A crop's origin must sit on the MCU grid, and the rectangle is grown to fit
+  rather than shrunk.** 8 px for 4:4:4, 16 px for the usual 4:2:0. Growing means
+  the user gets up to one block of *extra* picture rather than up to one block cut
+  off the edge they framed. The UI must draw the snapped rectangle, not the raw
+  drag, or the frame on screen is not the frame that gets saved.
+- **`Xform::map` takes OUTPUT coordinates plus the INPUT dimensions.** It answers
+  "this output pixel came from which input pixel". So display -> stored is
+  `display.map(coords, stored_dims)` — *not* `display.inverse().map(..)`, which
+  transposes the rectangle, and for a quarter turn that is the difference between
+  cropping the top-left of a photo and the bottom-left. The reverse direction,
+  stored -> display, *does* need the inverse, with the display's dimensions.
+  Getting this backwards is invisible: a valid crop of the wrong part of the
+  picture. `a_display_rect_survives_the_round_trip_through_stored_space` checks
+  both directions against each other over every transform.
 - **`shown` and `cur` are different images, and the draw path must use `shown` for
   everything.** `cur` is the wanted image, set by `goto()` on a keypress;
   `shown` only advances once the preview has actually been adopted by

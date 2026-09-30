@@ -1253,6 +1253,22 @@ impl Xform {
         found.expect("the eight transforms are closed under composition")
     }
 
+    /// The transform that undoes `self`.
+    ///
+    /// Needed because a crop is chosen on the **displayed** picture and applied to
+    /// the **stored** one, so getting from one to the other is an inverse. Each of
+    /// the eight is a bijection, so an inverse exists and is one of the eight; it
+    /// is found by probing, exactly as [`Self::then`] composes, rather than
+    /// transcribed. A sign error here does not corrupt the image — it crops the
+    /// wrong region, which is a perfectly good picture of the wrong part of the
+    /// photo.
+    pub fn inverse(self) -> Xform {
+        Xform::ALL
+            .into_iter()
+            .find(|cand| cand.then(self) == Xform::Identity)
+            .expect("the eight transforms are closed under inversion")
+    }
+
     /// The same operation as a TurboJPEG lossless transform.
     pub fn as_turbojpeg(self) -> turbojpeg::TransformOp {
         match self {
@@ -1285,6 +1301,184 @@ impl Xform {
             }
         }
         Some((ow, oh, out))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cropping
+// ---------------------------------------------------------------------------
+
+/// A crop rectangle in **stored** pixel coordinates — that is, before the EXIF
+/// orientation is applied.
+///
+/// Stored, not display, and that is the whole subtlety. TurboJPEG's crop region
+/// is expressed against the compressed source, so the rectangle has to be
+/// converted from the picture the user dragged on. It is safe to do it in that
+/// order — crop the stored pixels, *then* turn them — because a lattice symmetry
+/// maps a rectangle to a rectangle: `T(crop(src, R'))` is exactly
+/// `crop(T(src), R)` when `R' = T⁻¹(R)`. So the result is the region the user
+/// actually framed, not the same region somewhere else in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Crop {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Crop {
+    /// A validated crop, or `None` for an empty or inverted rectangle.
+    pub fn new(x: u32, y: u32, w: u32, h: u32) -> Option<Crop> {
+        (w > 0 && h > 0).then_some(Crop { x, y, w, h })
+    }
+
+    pub fn right(&self) -> u32 {
+        self.x + self.w
+    }
+
+    pub fn bottom(&self) -> u32 {
+        self.y + self.h
+    }
+
+    /// Does this crop keep every pixel? Then there is nothing to do, and the save
+    /// should behave exactly as it did before cropping existed.
+    pub fn is_full(&self, w: u32, h: u32) -> bool {
+        self.x == 0 && self.y == 0 && self.w >= w && self.h >= h
+    }
+
+    /// Pull the rectangle inside a `w x h` image, shrinking rather than moving,
+    /// and refusing to become empty.
+    pub fn clamped_to(&self, w: u32, h: u32) -> Option<Crop> {
+        if self.x >= w || self.y >= h {
+            return None;
+        }
+        Some(Crop {
+            x: self.x,
+            y: self.y,
+            w: self.w.min(w - self.x),
+            h: self.h.min(h - self.y),
+        })
+    }
+
+    /// Grow the rectangle onto the MCU grid, and clamp it to the image.
+    ///
+    /// TurboJPEG requires a crop's *origin* to sit on an MCU boundary — 8 px for
+    /// 4:4:4, 16 px for the common 4:2:0 — and a size that stops part-way through
+    /// a block leaves a partial block that `trim` then discards. Either way the
+    /// boundary lands somewhere other than where the user asked.
+    ///
+    /// Grown, not shrunk, so nothing inside the selection is ever lost: you get
+    /// up to one block of *extra* picture rather than up to one block cut off the
+    /// edge you framed. The UI draws this rectangle, not the raw drag, so what is
+    /// on screen is what gets saved — the same bargain the rotate trim already
+    /// makes, and the only honest one available at this granularity.
+    pub fn snapped_to_mcu(&self, mcu_w: u32, mcu_h: u32, w: u32, h: u32) -> Option<Crop> {
+        let mcu_w = mcu_w.max(1);
+        let mcu_h = mcu_h.max(1);
+        // The origin moves *down* to the grid, which pushes the far edge out, so
+        // the rectangle only ever grows before the clamp.
+        let snapped = Crop {
+            x: self.x - self.x % mcu_w,
+            y: self.y - self.y % mcu_h,
+            w: self.w + self.x % mcu_w,
+            h: self.h + self.y % mcu_h,
+        };
+        snapped.clamped_to(w, h)
+    }
+
+    /// The rectangle the user framed on the **displayed** picture, expressed in
+    /// stored coordinates.
+    ///
+    /// `rect` is `(x, y, w, h)` in the displayed image's own pixels — not screen
+    /// points; the caller does the scaling. `stored` is the file's `(w, h)`.
+    ///
+    /// The four corners go through [`Xform::inverse`], and the answer is their
+    /// bounding box. A lattice symmetry sends a rectangle to a rectangle, so the
+    /// box is exact rather than an approximation, and going through `map` means
+    /// this cannot disagree with what is drawn on screen.
+    pub fn from_display_rect(
+        exif_tag: u16,
+        user: Xform,
+        rect: (u32, u32, u32, u32),
+        stored: (u32, u32),
+    ) -> Option<Crop> {
+        let (dx, dy, dw, dh) = rect;
+        let (dw, dh) = (dw.checked_sub(1)?, dh.checked_sub(1)?); // to inclusive corners
+        let (sw, sh) = stored;
+        let display = display_xform(exif_tag, user);
+
+        // `Xform::map` takes *output* coordinates plus the *input* dimensions: it
+        // answers "this output pixel came from which input pixel". The displayed
+        // picture is the output here and the stored pixels are the input, so this
+        // is `display.map(..)` with the stored dimensions — no inverse needed.
+        // Passing the inverse here instead transposes the rectangle, which for a
+        // quarter turn is the difference between cropping the top-left of the
+        // photo and the bottom-left.
+        let mut min_x = u32::MAX;
+        let mut min_y = u32::MAX;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        for (cx, cy) in [(dx, dy), (dx + dw, dy), (dx, dy + dh), (dx + dw, dy + dh)] {
+            let (sx, sy) = display.map(cx, cy, sw, sh);
+            min_x = min_x.min(sx);
+            min_y = min_y.min(sy);
+            max_x = max_x.max(sx);
+            max_y = max_y.max(sy);
+        }
+        Crop::new(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)?.clamped_to(sw, sh)
+    }
+
+    /// This stored rectangle expressed in the **displayed** picture's pixels.
+    ///
+    /// The forward direction, and the exact inverse of [`Self::from_display_rect`].
+    /// The UI draws the result of this, so what is framed on screen is what the
+    /// save will cut — and
+    /// `a_display_rect_survives_the_round_trip_through_stored_space` checks the
+    /// two against each other over every transform and a grid of rectangles.
+    ///
+    /// `display` is the full stored -> display transform, i.e. the one from
+    /// [`display_xform`], not the user's part alone. `stored` is the file's
+    /// `(w, h)`, which is what the display's dimensions are derived from.
+    pub fn to_display_rect(&self, display: Xform, stored: (u32, u32)) -> (u32, u32, u32, u32) {
+        let (dw, dh) = display.out_dims(stored.0, stored.1);
+        let inv = display.inverse();
+        let x1 = self.right().saturating_sub(1);
+        let y1 = self.bottom().saturating_sub(1);
+        let mut min_x = u32::MAX;
+        let mut min_y = u32::MAX;
+        let mut max_x = 0u32;
+        let mut max_y = 0u32;
+        for (cx, cy) in [
+            (self.x, self.y),
+            (x1, self.y),
+            (self.x, y1),
+            (x1, y1),
+        ] {
+            let (dx, dy) = inv.map(cx, cy, dw, dh);
+            min_x = min_x.min(dx);
+            min_y = min_y.min(dy);
+            max_x = max_x.max(dx);
+            max_y = max_y.max(dy);
+        }
+        (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+    }
+
+    /// Cut this rectangle out of an RGBA buffer in stored coordinates.
+    pub fn apply_rgba(&self, w: u32, h: u32, rgba: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+        let c = self.clamped_to(w, h)?;
+        let stride = w as usize * 4;
+        let row = c.w as usize * 4;
+        let mut out = Vec::with_capacity(c.w as usize * c.h as usize * 4);
+        for y in c.y..c.bottom() {
+            let start = y as usize * stride + c.x as usize * 4;
+            out.extend_from_slice(rgba.get(start..start + row)?);
+        }
+        Some((c.w, c.h, out))
+    }
+
+    /// A short description for the status line and the save confirmation.
+    pub fn label(&self) -> String {
+        format!("{}×{}", self.w, self.h)
     }
 }
 
@@ -1380,26 +1574,105 @@ fn lossless_raster(bytes: &[u8]) -> Option<image::ImageFormat> {
 ///
 /// The output's EXIF orientation is set to 1, because the pixels now *are* the
 /// display orientation. See [`neutralize_exif_orientation`].
-pub fn save_transformed(src: &Path, user: Xform) -> Result<PathBuf, SaveError> {
+pub fn save_transformed(
+    src: &Path,
+    user: Xform,
+    crop: Option<Crop>,
+) -> Result<PathBuf, SaveError> {
     let bytes = std::fs::read(src).map_err(SaveError::Read)?;
-    let exif_tag = if is_jpeg_bytes(&bytes) { exif_orientation(src) } else { 0 };
+    let is_jpeg = is_jpeg_bytes(&bytes);
+    let exif_tag = if is_jpeg { exif_orientation(src) } else { 0 };
     let xform = display_xform(exif_tag, user);
 
+    // Resolve the crop **once**, up front, rather than inside the JPEG branch.
+    // It has to be settled before the file is named: a crop that keeps every
+    // pixel is not a crop, and if the name were chosen from the caller's value
+    // instead of the resolved one, a no-op crop would produce `photo_cropped.jpg`
+    // for a file that was not cropped. That is the sort of thing that only shows
+    // up when somebody tries it.
+    let crop = match crop {
+        None => None,
+        Some(c) => {
+            if is_jpeg {
+                let mut dec = turbojpeg::Decompressor::new().map_err(|e| {
+                    SaveError::Decode(format!("could not open a decoder: {e}"))
+                })?;
+                let header = dec.read_header(&bytes).map_err(|e| {
+                    SaveError::Decode(format!("could not read the JPEG header: {e}"))
+                })?;
+                let (iw, ih) = (header.width as u32, header.height as u32);
+                if c.is_full(iw, ih) {
+                    None
+                } else {
+                    c.snapped_to_mcu(
+                        header.subsamp.mcu_width() as u32,
+                        header.subsamp.mcu_height() as u32,
+                        iw,
+                        ih,
+                    )
+                }
+            } else {
+                // No block structure outside JPEG, so nothing to snap to; just
+                // refuse one that falls off the image.
+                c.clamped_to(u32::MAX, u32::MAX)
+            }
+        }
+    };
+
     let mut out = bytes.clone();
-    if is_jpeg_bytes(&bytes) {
-        if xform != Xform::Identity {
-            let mut t = turbojpeg::Transform::op(xform.as_turbojpeg());
+    if is_jpeg {
+        // A crop and a turn are done as **two** `tjTransform` calls, not one with
+        // both fields set. That is a measured decision, not a stylistic one, and
+        // the measurement is in `crop_and_turn_take_two_calls_because_one_will_not_do`
+        // in `tests/rotate_save.rs`:
+        //
+        //  * TurboJPEG reads the crop region in the transform's **destination**
+        //    space, not the source. With `rot180` or a flip, a rectangle meant for
+        //    the source lands mirrored in the output — a valid crop of the wrong
+        //    part of the photo.
+        //  * For the four axis-swapping operations it refuses outright:
+        //    "Invalid crop request", because the destination has different
+        //    dimensions from the source.
+        //
+        // So cropping first (with the identity op, where source and destination
+        // are the same space and the coordinates are unambiguous) and turning the
+        // cropped result second is the only formulation that is right for all
+        // eight. Both calls rearrange DCT coefficients and neither decompresses
+        // to pixels, so this is still lossless — the size ratio in
+        // `bench_rotate_save` is the evidence, and it holds.
+        if let Some(c) = crop {
+            let mut t1 = turbojpeg::Transform::op(turbojpeg::TransformOp::None);
             // Lossless transforms move whole MCU blocks, so a dimension that is
             // not a multiple of the block size leaves partial blocks that cannot
             // reach the new edge. Left in place they show as strips; `trim`
             // discards them instead, costing at most one block (16 px) off an
             // edge. It is a no-op when the image is already aligned, so there is
             // nothing to give up in the common case.
+            t1.trim = true;
+            t1.crop = Some(turbojpeg::TransformCrop {
+                x: c.x as usize,
+                y: c.y as usize,
+                width: Some(c.w as usize),
+                height: Some(c.h as usize),
+            });
+            let cropped = turbojpeg::transform(&t1, &bytes)
+                .map_err(|e| SaveError::Decode(format!("lossless crop failed: {e}")))?;
+
+            if xform == Xform::Identity {
+                out = cropped.to_vec();
+            } else {
+                let mut t2 = turbojpeg::Transform::op(xform.as_turbojpeg());
+                t2.trim = true;
+                out = turbojpeg::transform(&t2, &cropped)
+                    .map_err(|e| SaveError::Decode(format!("lossless transform failed: {e}")))?
+                    .to_vec();
+            }
+        } else if xform != Xform::Identity {
+            let mut t = turbojpeg::Transform::op(xform.as_turbojpeg());
             t.trim = true;
             out = turbojpeg::transform(&t, &bytes)
                 .map_err(|e| SaveError::Decode(format!("lossless transform failed: {e}")))?
                 .to_vec();
-
         }
         // The pixels are the display orientation now, so the tag must not fight them.
         neutralize_exif_orientation(&mut out);
@@ -1407,8 +1680,17 @@ pub fn save_transformed(src: &Path, user: Xform) -> Result<PathBuf, SaveError> {
         let img = image::load_from_memory(&bytes).map_err(|e| SaveError::Decode(format!("{e}")))?;
         let (w, h) = (img.width(), img.height());
         let rgba = img.to_rgba8();
+        // Crop the *stored* pixels first, then turn them — the same order
+        // TurboJPEG uses, and the one that makes the result the region the user
+        // framed rather than the same region of the wrong picture.
+        let (cw, ch, cropped) = match crop {
+            Some(c) => c
+                .apply_rgba(w, h, &rgba)
+                .ok_or_else(|| SaveError::Decode("crop fell outside the image".into()))?,
+            None => (w, h, rgba.into_raw()),
+        };
         let (ow, oh, px) = xform
-            .apply_rgba(w, h, &rgba)
+            .apply_rgba(cw, ch, &cropped)
             .ok_or_else(|| SaveError::Decode("buffer did not match its dimensions".into()))?;
         let out_img = image::RgbaImage::from_raw(ow, oh, px)
             .ok_or_else(|| SaveError::Decode("transformed buffer was malformed".into()))?;
@@ -1421,7 +1703,7 @@ pub fn save_transformed(src: &Path, user: Xform) -> Result<PathBuf, SaveError> {
         return Err(SaveError::Lossy(format_name(&bytes).to_owned()));
     }
 
-    let dest = unique_dest(src);
+    let dest = unique_dest_named(src, if crop.is_some() { "cropped" } else { "rotated" });
     std::fs::write(&dest, &out).map_err(SaveError::Write)?;
     Ok(dest)
 }
@@ -1429,6 +1711,16 @@ pub fn save_transformed(src: &Path, user: Xform) -> Result<PathBuf, SaveError> {
 /// `photo.jpg` -> `photo_rotated.jpg`, or `photo_rotated2.jpg`, `...3` and so on
 /// if that already exists. Never overwrites.
 pub fn unique_dest(src: &Path) -> PathBuf {
+    unique_dest_named(src, "rotated")
+}
+
+/// As [`unique_dest`], with the infix chosen by the caller.
+///
+/// `_rotated` or `_cropped`, depending on whether the save actually cropped. A
+/// crop turns the picture too, so `_rotated` would be true and useless; `_cropped`
+/// is the thing the user actually did, and the confirmation line names the
+/// transform as well.
+pub fn unique_dest_named(src: &Path, infix: &str) -> PathBuf {
     let parent = src.parent().unwrap_or_else(|| Path::new("."));
     let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned());
     let ext = src.extension().map(|s| s.to_string_lossy().into_owned());
@@ -1437,9 +1729,9 @@ pub fn unique_dest(src: &Path) -> PathBuf {
     };
     for n in 1..1000u32 {
         let name = if n == 1 {
-            format!("{stem}_rotated.{ext}")
+            format!("{stem}_{infix}.{ext}")
         } else {
-            format!("{stem}_rotated{n}.{ext}")
+            format!("{stem}_{infix}{n}.{ext}")
         };
         let cand = parent.join(name);
         if !cand.exists() {

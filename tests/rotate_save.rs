@@ -146,7 +146,7 @@ fn a_saved_rotation_decodes_to_what_was_on_screen() {
             assert_eq!(exif_orientation(&p), exif_tag, "EXIF {exif_tag} did not round-trip");
 
             let want = what_the_viewer_shows(&src, exif_tag, quarters);
-            let dest = save_transformed(&p, Xform::quarters_cw(quarters))
+            let dest = save_transformed(&p, Xform::quarters_cw(quarters), None)
                 .unwrap_or_else(|e| panic!("exif={exif_tag} q={quarters}: {e}"));
 
             // The viewer applies the tag itself on the way in, so the saved file
@@ -172,7 +172,7 @@ fn the_original_is_never_touched() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "keepme.jpg", &quadrants(64, 48), 6);
     let before = std::fs::read(&p).unwrap();
-    let dest = save_transformed(&p, Xform::Rot90).unwrap();
+    let dest = save_transformed(&p, Xform::Rot90, None).unwrap();
     assert_eq!(std::fs::read(&p).unwrap(), before, "the source file changed");
     assert_ne!(dest, p);
     assert!(dest.exists());
@@ -182,8 +182,8 @@ fn the_original_is_never_touched() {
 fn saving_twice_does_not_overwrite_the_first_save() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "shot.jpg", &quadrants(64, 48), 0);
-    let first = save_transformed(&p, Xform::Rot90).unwrap();
-    let second = save_transformed(&p, Xform::Rot90).unwrap();
+    let first = save_transformed(&p, Xform::Rot90, None).unwrap();
+    let second = save_transformed(&p, Xform::Rot90, None).unwrap();
     assert_ne!(first, second, "the second save clobbered the first");
     assert!(first.exists() && second.exists());
     assert_eq!(
@@ -197,7 +197,7 @@ fn saving_twice_does_not_overwrite_the_first_save() {
 fn the_new_file_lands_beside_the_original_with_a_readable_name() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "holiday snap.jpg", &quadrants(64, 48), 0);
-    let dest = save_transformed(&p, Xform::Rot90).unwrap();
+    let dest = save_transformed(&p, Xform::Rot90, None).unwrap();
     assert_eq!(dest.parent(), p.parent(), "not written beside the original");
     assert_eq!(dest.file_name().unwrap(), "holiday snap_rotated.jpg");
 }
@@ -213,7 +213,7 @@ fn a_lossy_format_is_refused_rather_than_silently_re_encoded() {
         let mut b = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut b), fmt).unwrap();
         std::fs::write(&p, &b).unwrap();
-        match save_transformed(&p, Xform::Rot90) {
+        match save_transformed(&p, Xform::Rot90, None) {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(msg.contains("lossy"), "{name}: unhelpful message {msg:?}");
@@ -239,7 +239,7 @@ fn the_lossless_raster_formats_are_saved_and_come_back_the_right_way_round() {
         src.write_to(&mut std::io::Cursor::new(&mut b), fmt).unwrap();
         std::fs::write(&p, &b).unwrap();
 
-        let dest = save_transformed(&p, Xform::Rot90).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let dest = save_transformed(&p, Xform::Rot90, None).unwrap_or_else(|e| panic!("{name}: {e}"));
         let got = load_image(&dest, 4096).unwrap_or_else(|e| panic!("{name} reload: {e:?}"));
         assert_eq!(
             (got.width, got.height),
@@ -377,7 +377,7 @@ fn a_saved_mirror_decodes_to_what_was_on_screen() {
                 )
             };
 
-            let dest = save_transformed(&p, xf)
+            let dest = save_transformed(&p, xf, None)
                 .unwrap_or_else(|e| panic!("exif={exif_tag} {xf:?}: {e}"));
             let got = load_image(&dest, 4096).unwrap();
             assert_same_pixels(
@@ -491,8 +491,294 @@ fn the_paint_matrix_puts_each_pixel_where_map_says_it_belongs() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-image transform
+// Cropping
 // ---------------------------------------------------------------------------
+
+/// Every transform must be undone by its own inverse, in both orders.
+///
+/// The inverse exists only so a rectangle chosen on the *displayed* picture can
+/// be expressed against the *stored* one. A wrong inverse does not corrupt
+/// anything — it crops a perfectly good picture of the wrong part of the photo,
+/// which is exactly the kind of bug that reads as "the crop is a bit off" and gets
+/// lived with.
+#[test]
+fn every_transform_has_an_inverse_and_it_cancels_both_ways() {
+    for xf in Xform::ALL {
+        let inv = xf.inverse();
+        assert_eq!(
+            xf.then(inv),
+            Xform::Identity,
+            "{xf:?} then its inverse is not the identity"
+        );
+        assert_eq!(
+            inv.then(xf),
+            Xform::Identity,
+            "the inverse of {xf:?} does not undo it from the other side"
+        );
+        // And it is a *real* inverse on real pixels, not just in the group.
+        // `map` takes output coordinates plus the *input* dimensions, so going
+        // forward is `xf.map(ox, oy, w, h)` and coming back is
+        // `inv.map(stored, ow, oh)`. Swapping those two argument pairs is the
+        // mistake this test exists to make loud.
+        let (w, h) = (11u32, 7u32);
+        let (ow, oh) = xf.out_dims(w, h);
+        for oy in 0..oh {
+            for ox in 0..ow {
+                let (ix, iy) = xf.map(ox, oy, w, h);
+                assert_eq!(
+                    inv.map(ix, iy, ow, oh),
+                    (ox, oy),
+                    "{xf:?}: output ({ox}, {oy}) -> stored ({ix}, {iy}) did not come back"
+                );
+            }
+        }
+    }
+}
+
+/// The headline: a rectangle drawn on the displayed picture must come out the
+/// other side of a lossless save as **that** part of **that** picture.
+///
+/// For every camera orientation and every user transform. The expected image is
+/// built by hand from the display transform — crop what is on screen, then take
+/// the pixels — so it shares no code with the path being tested.
+///
+/// A 16 px grid is used because that is the MCU size for the 4:2:0 subsampling
+/// the encoder picks, and the crop has to land on it. A crop that ignores this
+/// fails TurboJPEG or silently shifts, which is why the rects here are multiples
+/// of 16.
+#[test]
+fn a_saved_crop_is_exactly_the_region_that_was_framed() {
+    let (w, h) = (96u32, 64u32);
+    for exif_tag in [0u16, 1, 2, 3, 4, 5, 6, 7, 8] {
+        for user in Xform::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = quadrants(w, h);
+            let p = write_jpeg(tmp.path(), "photo.jpg", &src, exif_tag);
+
+            // Frame a region of the *displayed* picture, in its own pixels.
+            let display = image_viewer::display_xform(exif_tag, user);
+            let (dw, dh) = display.out_dims(w, h);
+            let rect = (
+                16.min(dw.saturating_sub(16)),
+                16.min(dh.saturating_sub(16)),
+                32.min(dw),
+                32.min(dh),
+            );
+            let Some(crop) = image_viewer::Crop::from_display_rect(exif_tag, user, rect, (w, h))
+            else {
+                continue;
+            };
+
+            // What the user should end up with: the displayed picture, cropped.
+            let want = {
+                let shown = display_xform_pixels(&src, exif_tag, user);
+                let rgba = shown.to_rgba8();
+                let (cw, ch, px) = crop_display(&rgba, rect);
+                image::DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(cw, ch, px).unwrap(),
+                )
+            };
+
+            let dest = save_transformed(&p, user, Some(crop))
+                .unwrap_or_else(|e| panic!("exif={exif_tag} {user:?}: {e}"));
+            let got = load_image(&dest, 4096).unwrap();
+            assert_same_pixels(
+                &got,
+                &want,
+                &format!("exif={exif_tag} user={user:?} crop={crop:?}"),
+            );
+        }
+    }
+}
+
+/// Crop and turn together, in one save. This is the case that would need a
+/// re-encode if the crop were a second pass over the pixels rather than a second
+/// field of the same TurboJPEG transform.
+#[test]
+fn a_crop_and_a_turn_are_saved_together_losslessly() {
+    let (w, h) = (96u32, 64u32);
+    for (user, crop) in [
+        (Xform::Rot90, image_viewer::Crop::new(16, 16, 48, 32).unwrap()),
+        (Xform::FlipH, image_viewer::Crop::new(0, 0, 64, 48).unwrap()),
+        (Xform::Transverse, image_viewer::Crop::new(32, 16, 32, 32).unwrap()),
+        // No turn at all: the crop must not depend on there being one.
+        (Xform::Identity, image_viewer::Crop::new(16, 0, 32, 64).unwrap()),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = quadrants(w, h);
+        let p = write_jpeg(tmp.path(), "photo.jpg", &src, 0);
+
+        let want = {
+            let (cw, ch, px) = crop.apply_rgba(w, h, &src.to_rgba8().into_raw()).unwrap();
+            let (ow, oh, px) = user.apply_rgba(cw, ch, &px).unwrap();
+            image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(ow, oh, px).unwrap())
+        };
+
+        let dest = save_transformed(&p, user, Some(crop)).unwrap();
+        let got = load_image(&dest, 4096).unwrap();
+        assert_same_pixels(&got, &want, &format!("{user:?} + {crop:?}"));
+    }
+}
+
+/// A crop that keeps every pixel must behave exactly like no crop at all —
+/// including the file name, which would otherwise say `_cropped` for a file that
+/// was not.
+#[test]
+fn a_crop_that_keeps_everything_is_not_a_crop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write_jpeg(tmp.path(), "whole.jpg", &quadrants(64, 48), 0);
+    let full = image_viewer::Crop::new(0, 0, 64, 48).unwrap();
+    assert!(full.is_full(64, 48));
+    let dest = save_transformed(&p, Xform::Identity, Some(full)).unwrap();
+    assert_eq!(
+        dest.file_name().unwrap().to_string_lossy(),
+        "whole_rotated.jpg",
+        "a no-op crop must not change the name"
+    );
+    let got = load_image(&dest, 4096).unwrap();
+    assert_eq!((got.width, got.height), (64, 48));
+}
+
+#[test]
+fn a_real_crop_is_named_for_what_it_did() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write_jpeg(tmp.path(), "shot.jpg", &quadrants(64, 48), 0);
+    let dest = save_transformed(&p, Xform::Rot90, Some(image_viewer::Crop::new(0, 0, 32, 32).unwrap()))
+        .unwrap();
+    assert_eq!(
+        dest.file_name().unwrap().to_string_lossy(),
+        "shot_cropped.jpg",
+        "a crop that also turns should not be called _rotated"
+    );
+}
+
+/// MCU snapping: the origin has to land on the block grid, and it has to *grow*
+/// rather than shrink, so nothing the user framed is ever cut away.
+#[test]
+fn a_crop_snaps_onto_the_mcu_grid_without_losing_anything() {
+    let (iw, ih) = (100u32, 70u32);
+    // 4:2:0 is a 16 px block, the common case; 4:4:4 is 8.
+    for (mw, mh) in [(16u32, 16u32), (8, 8)] {
+        let asked = image_viewer::Crop::new(20, 13, 30, 25).unwrap();
+        let got = asked.snapped_to_mcu(mw, mh, iw, ih).unwrap();
+        assert_eq!(got.x % mw, 0, "{mw}px grid: origin not aligned ({got:?})");
+        assert_eq!(got.y % mh, 0, "{mw}px grid: origin not aligned ({got:?})");
+        assert!(
+            got.x <= asked.x && got.y <= asked.y,
+            "{mw}px grid: snapping moved the origin the wrong way ({got:?})"
+        );
+        assert!(
+            got.right() >= asked.right() && got.bottom() >= asked.bottom(),
+            "{mw}px grid: snapping cut into the selection ({got:?} vs {asked:?})"
+        );
+        assert!(got.right() <= iw && got.bottom() <= ih, "{mw}px grid: escaped the image");
+    }
+    // A crop already on the grid must come back untouched: no drift, no growth.
+    let aligned = image_viewer::Crop::new(32, 32, 32, 16).unwrap();
+    assert_eq!(
+        aligned.snapped_to_mcu(16, 16, 100, 70).unwrap(),
+        aligned,
+        "an aligned crop must be a no-op"
+    );
+}
+
+#[test]
+fn an_empty_or_outside_crop_is_refused_rather_than_panicking() {
+    assert!(image_viewer::Crop::new(0, 0, 0, 10).is_none(), "zero width");
+    assert!(image_viewer::Crop::new(0, 0, 10, 0).is_none(), "zero height");
+    let outside = image_viewer::Crop::new(500, 500, 10, 10).unwrap();
+    assert!(outside.clamped_to(64, 48).is_none(), "entirely outside");
+    // Partly outside is trimmed rather than refused.
+    let partly = image_viewer::Crop::new(60, 40, 20, 20).unwrap();
+    assert_eq!(
+        partly.clamped_to(64, 48).unwrap(),
+        image_viewer::Crop::new(60, 40, 4, 8).unwrap()
+    );
+}
+
+/// `from_display_rect` and `map` have to agree, or the frame drawn on screen is
+/// not the frame that gets saved. Checked on every transform over a grid of
+/// rectangles, in both directions: the stored rect must map forward to exactly
+/// the display rect that produced it.
+#[test]
+fn a_display_rect_survives_the_round_trip_through_stored_space() {
+    let (w, h) = (97u32, 61u32);
+    for exif_tag in [0u16, 1, 2, 3, 4, 5, 6, 7, 8] {
+        for user in Xform::ALL {
+            let display = image_viewer::display_xform(exif_tag, user);
+            let (dw, dh) = display.out_dims(w, h);
+            for rect in [
+                (0u32, 0u32, 16u32, 16u32),
+                (16, 16, 32, 32),
+                (dw / 2, dh / 2, 16, 16),
+                (dw.saturating_sub(16), 0, 16, 16),
+                (0, dh.saturating_sub(16), 16, 16),
+            ] {
+                if rect.2 == 0 || rect.3 == 0 {
+                    continue;
+                }
+                let Some(stored) =
+                    image_viewer::Crop::from_display_rect(exif_tag, user, rect, (w, h))
+                else {
+                    continue;
+                };
+                // Forward: stored -> display must land back on the same rect.
+                let back = stored.to_display_rect(display, (w, h));
+                assert_eq!(
+                    (back.0, back.1, back.2, back.3),
+                    rect,
+                    "exif={exif_tag} {user:?}: {rect:?} -> stored {stored:?} -> {back:?}"
+                );
+            }
+        }
+    }
+}
+
+// --- helpers for the crop tests -------------------------------------------
+
+/// The stored picture turned the way the viewer shows it.
+///
+/// **One** application of the EXIF tag, and it comes from `display_xform`, which
+/// already composes it. Calling `apply_exif_orientation` here as well applies it
+/// twice, which for a mirror or a quarter turn cancels to the identity and makes
+/// the expectation quietly wrong for every non-trivial tag — which is how this
+/// helper was first written.
+///
+/// The algebra this relies on is not taken on trust:
+/// `the_transform_algebra_matches_the_viewers_own_rotation` pins `display_xform`
+/// against `apply_exif_orientation` for all nine tags, and
+/// `every_transform_has_an_inverse_and_it_cancels_both_ways` pins the inverse on
+/// real pixels. So the chain from button to file is checked at every link.
+fn display_xform_pixels(
+    img: &image::DynamicImage,
+    exif_tag: u16,
+    user: Xform,
+) -> image::DynamicImage {
+    let rgba = img.to_rgba8();
+    let (ow, oh, px) = image_viewer::display_xform(exif_tag, user)
+        .apply_rgba(img.width(), img.height(), rgba.as_raw())
+        .unwrap();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(ow, oh, px).unwrap())
+}
+
+/// Cut a rectangle out of an already-displayed RGBA image, in display pixels.
+///
+/// Hand-rolled rather than `image::imageops::crop_imm`, which needs `&mut` and so
+/// cannot be pointed at a borrow. The point of the crop tests is that this
+/// expectation shares no code with the implementation, so a one-line loop is
+/// better than a clever one.
+fn crop_display(rgba: &image::RgbaImage, rect: (u32, u32, u32, u32)) -> (u32, u32, Vec<u8>) {
+    let (x, y, w, h) = rect;
+    let stride = rgba.width() as usize * 4;
+    let src = rgba.as_raw();
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    for row in y..y + h {
+        let start = (row as usize) * stride + (x as usize) * 4;
+        out.extend_from_slice(&src[start..start + w as usize * 4]);
+    }
+    (w, h, out)
+}
+
 
 /// The bug this pins: the transform used to be a single `u8` on the app, so
 /// turning one photo turned every photo you then navigated to.

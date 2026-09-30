@@ -2077,7 +2077,7 @@ impl MyApp {
             return;
         }
         let xform = self.current_xform();
-        match image_viewer::save_transformed(&p, xform) {
+        match image_viewer::save_transformed(&p, xform, None) {
             Ok(dest) => {
                 let name = dest
                     .file_name()

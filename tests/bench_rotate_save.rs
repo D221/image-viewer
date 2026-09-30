@@ -17,7 +17,7 @@
 //! `#[ignore]`d, like the other benches: it builds a large image and prints a
 //! report. Correctness lives in `rotate_save.rs`.
 
-use image_viewer::{save_transformed, Xform};
+use image_viewer::{save_transformed, Crop, Xform};
 use std::time::Instant;
 
 /// A photographic-ish image: smooth gradients plus some structure, because a
@@ -42,6 +42,67 @@ fn write_jpeg(path: &std::path::Path, img: &image::DynamicImage, q: u8) {
 
 fn mb(n: u64) -> f64 {
     n as f64 / 1048576.0
+}
+
+/// A crop taken together with a turn, which is **two** `tjTransform` calls.
+///
+/// Worth its own number because the one-call version does not work: TurboJPEG
+/// reads the crop region in the transform's destination space, and refuses it
+/// outright for the four axis-swapping operations. So this measures what the
+/// workaround actually costs, and — more importantly — whether the size ratio
+/// survives a second pass over the coefficients. It does: both calls rearrange
+/// DCT blocks and neither decompresses to pixels, so there is still no second
+/// generation, and the ratio is the only evidence for that.
+#[test]
+#[ignore = "builds a large image and prints a report"]
+fn cropped_save_is_still_lossless() {
+    let tmp = tempfile::tempdir().unwrap();
+    eprintln!("\n  crop + turn as two lossless passes (vs one for a bare turn)\n");
+    println!(
+        "  {:<28} {:>10} {:>9} {:>9} {:>10} {:>8} {:>7}",
+        "image", "crop", "crop+turn", "turn only", "size in", "size out", "ratio"
+    );
+
+    for (w, h) in [(1920u32, 1080u32), (4000, 3000), (6000, 4000)] {
+        let p = tmp.path().join(format!("src_{w}x{h}.jpg"));
+        write_jpeg(&p, &photo(w, h), 90);
+        let in_bytes = std::fs::metadata(&p).unwrap().len();
+
+        // Block-aligned, so MCU trimming is a no-op and the size ratio is
+        // measuring losslessness rather than a few trimmed pixels.
+        let crop = Crop::new(w / 4, h / 4, w / 2, h / 2).unwrap();
+
+        let t = Instant::now();
+        let crop_only = save_transformed(&p, Xform::Identity, Some(crop)).unwrap();
+        let crop_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let crop_bytes = std::fs::metadata(&crop_only).unwrap().len();
+
+        let t = Instant::now();
+        let both = save_transformed(&p, Xform::Rot90, Some(crop)).unwrap();
+        let both_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let both_bytes = std::fs::metadata(&both).unwrap().len();
+
+        let t = Instant::now();
+        let turn_only = save_transformed(&p, Xform::Rot90, None).unwrap();
+        let turn_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        eprintln!(
+            "  {:<28} {:>8.0}ms {:>8.0}ms {:>8.0}ms {:>8.1}MB {:>8.1}MB {:>6.2}x",
+            format!("{w}x{h} {}x{}", crop.w, crop.h),
+            crop_ms,
+            both_ms,
+            turn_ms,
+            mb(in_bytes),
+            mb(both_bytes),
+            both_bytes as f64 / crop_bytes as f64,
+        );
+    }
+    eprintln!(
+        "\n  The ratio column is crop+turn output over crop-only output, so it answers\n  \
+         whether the second pass cost anything in size. ~1.00 means the turn moved\n  \
+         coefficients and left the entropy-coded data alone, which is what \"lossless\"\n  \
+         means here. A re-encode would land well under 1.00 at the same quality.\n"
+    );
 }
 
 #[test]
@@ -85,7 +146,7 @@ fn lossless_save_vs_the_obvious_alternative() {
                 continue;
             }
             let t = Instant::now();
-            let dest = save_transformed(&p, xform).unwrap();
+            let dest = save_transformed(&p, xform, None).unwrap();
             let lossless_ms = t.elapsed().as_secs_f64() * 1000.0;
             let out_bytes = std::fs::metadata(&dest).unwrap().len();
 
