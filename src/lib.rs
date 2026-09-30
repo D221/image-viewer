@@ -640,10 +640,52 @@ pub enum Kind {
     Thumb,
 }
 
+/// The identity of a decoded image: a file, and a page within it.
+///
+/// Every cache that holds *decoded pixels* is keyed on this rather than on a
+/// `PathBuf`, because page 1 and page 3 of one document are different pictures.
+/// A path-keyed cache hands back the wrong page — silently, and only for
+/// multi-page files, which is the worst way for it to be wrong.
+///
+/// Caches that describe the *file* rather than its contents stay keyed on the
+/// path: grid thumbnails, the folder watcher's change stamps, and the per-image
+/// edit map. A thumbnail of page 1 is the file's thumbnail, and an edit applies to
+/// the file you save.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImgKey {
+    pub path: PathBuf,
+    /// 0-based. Non-zero only for pages of a multi-page TIFF.
+    pub page: u32,
+}
+
+impl ImgKey {
+    /// The ordinary case: the file's only page.
+    pub fn first(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            page: 0,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::fmt::Display for ImgKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.page == 0 {
+            write!(f, "{}", self.path.display())
+        } else {
+            write!(f, "{}#{}", self.path.display(), self.page + 1)
+        }
+    }
+}
+
 /// One unit of decoding work.
 #[derive(Clone, Debug)]
 pub struct Job {
-    pub path: PathBuf,
+    pub key: ImgKey,
     pub kind: Kind,
     /// Lower runs first. The current image is 0 and every prefetch is >= 10, so
     /// prefetch can never starve it.
@@ -652,11 +694,20 @@ pub struct Job {
     pub target_dim: u32,
 }
 
+impl Job {
+    /// The file this job is for. The *filesystem* half of the identity; the page
+    /// matters to the decoder and to the caches, not to anything that opens, moves
+    /// or deletes the file.
+    pub fn path(&self) -> &Path {
+        self.key.path()
+    }
+}
+
 /// Shared queue state. Public only so tests can assert on it.
 #[derive(Default)]
 pub struct QueueState {
     pub jobs: Vec<Job>,
-    pub busy: HashSet<(PathBuf, Kind)>,
+    pub busy: HashSet<(ImgKey, Kind)>,
     /// The viewer's current desired set, as of the last `replace`, held *whole*
     /// so a re-queue can preserve priority and target size.
     ///
@@ -673,7 +724,7 @@ pub struct QueueState {
     /// can give up: the re-request is already discarded, and `schedule` only
     /// re-runs on a step, the current image's preview arriving, a dwell expiry
     /// or a resize, so a stranded *neighbour* is never asked for again.
-    wanted: HashMap<(PathBuf, Kind), Job>,
+    wanted: HashMap<(ImgKey, Kind), Job>,
 }
 
 /// Priority queue served by a small pool of worker threads.
@@ -732,7 +783,7 @@ impl Loader {
                             .map(|(i, _)| i);
                         if let Some(i) = best {
                             let job = q.jobs.swap_remove(i);
-                            q.busy.insert((job.path.clone(), job.kind));
+                            q.busy.insert((job.key.clone(), job.kind));
                             break job;
                         }
                         q = cv.wait(q).unwrap();
@@ -759,14 +810,14 @@ impl Loader {
                 // Free the slot, then honour anything still waiting on it.
                 let (lock, cv) = &*shared;
                 let mut q = lock.lock().unwrap();
-                let key = (job.path.clone(), job.kind);
+                let key = (job.key.clone(), job.kind);
                 q.busy.remove(&key);
                 if !delivered {
                     // Gave up without producing anything. If it is still wanted,
                     // ask again — this is the whole safety property, and it is
                     // why the wanted set is kept rather than inferred.
                     if let Some(wanted) = q.wanted.get(&key).cloned() {
-                        if !q.jobs.iter().any(|j| (j.path.clone(), j.kind) == key) {
+                        if !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == key) {
                             q.jobs.push(wanted);
                             cv.notify_all();
                         }
@@ -788,10 +839,10 @@ impl Loader {
     pub fn push(&self, job: Job) {
         let (lock, cv) = &*self.shared;
         let mut q = lock.lock().unwrap();
-        if q.busy.contains(&(job.path.clone(), job.kind)) {
+        if q.busy.contains(&(job.key.clone(), job.kind)) {
             return;
         }
-        if q.jobs.iter().any(|j| j.path == job.path && j.kind == job.kind) {
+        if q.jobs.iter().any(|j| j.key == job.key && j.kind == job.kind) {
             return;
         }
         q.jobs.push(job);
@@ -808,7 +859,7 @@ impl Loader {
         q.wanted.clear();
         let mut keep = Vec::with_capacity(jobs.len());
         for j in jobs {
-            let key = (j.path.clone(), j.kind);
+            let key = (j.key.clone(), j.kind);
             // `wanted` is recorded either way, and is what makes losing the job
             // safe: a job that is already running is not queued twice, and a job
             // that is queued can still be re-queued if it gives up later.
@@ -852,7 +903,7 @@ impl Loader {
             .keys()
             .filter(|k| {
                 !q.busy.contains(*k)
-                    && !q.jobs.iter().any(|j| (j.path.clone(), j.kind) == **k)
+                    && !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == **k)
             })
             .count()
     }
@@ -863,10 +914,13 @@ impl Loader {
 pub struct Plan<'a> {
     pub files: &'a [PathBuf],
     pub index: usize,
-    /// Paths that already have a cached preview.
-    pub cached: &'a HashSet<PathBuf>,
-    /// `(path, kind)` pairs known to be undecodable this session.
-    pub failed: &'a HashSet<(PathBuf, Kind)>,
+    /// Page of `files[index]` to decode. 0 for everything but a multi-page TIFF.
+    /// The preload window ignores this and prefetches page 0.
+    pub current_page: u32,
+    /// Images that already have a cached preview.
+    pub cached: &'a HashSet<ImgKey>,
+    /// `(key, kind)` pairs known to be undecodable this session.
+    pub failed: &'a HashSet<(ImgKey, Kind)>,
     /// Exif for the current image has not been fetched yet.
     pub wants_exif: bool,
     /// The current image still needs a full-resolution decode.
@@ -906,9 +960,18 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     }
     let i = p.index.min(n - 1);
     let cur = &p.files[i];
+    // The current image's page. Only the current image has a non-zero one: the
+    // preload window deliberately prefetches page 0 of its neighbours, because
+    // prefetching a 200-page document's other 199 pages would be absurd, and
+    // because you arrive at a neighbour's later pages by pressing right, at which
+    // point it is the current image and gets planned then.
+    let cur_key = ImgKey {
+        path: cur.clone(),
+        page: p.current_page,
+    };
 
-    let need_preview = |path: &PathBuf| {
-        !p.cached.contains(path) && !p.failed.contains(&(path.clone(), Kind::Preview))
+    let need_preview = |key: &ImgKey| {
+        !p.cached.contains(key) && !p.failed.contains(&(key.clone(), Kind::Preview))
     };
 
     // A stale preview is cached *and* still wanted: the texture stays on screen
@@ -916,9 +979,11 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     // Deliberately current-image-only — refining the whole preload window costs
     // one decode per neighbour, which is the difference between 1 and 7 decodes
     // after a drag.
-    if need_preview(cur) || (p.current_stale && !p.failed.contains(&(cur.clone(), Kind::Preview))) {
+    if need_preview(&cur_key)
+        || (p.current_stale && !p.failed.contains(&(cur_key.clone(), Kind::Preview)))
+    {
         jobs.push(Job {
-            path: cur.clone(),
+            key: cur_key.clone(),
             kind: Kind::Preview,
             prio: PRIO_CURRENT_PREVIEW,
             target_dim: p.target_dim,
@@ -926,7 +991,8 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     }
     if p.wants_exif {
         jobs.push(Job {
-            path: cur.clone(),
+            // Exif describes the *file*, so it is read once and not per page.
+            key: ImgKey::first(cur),
             kind: Kind::Exif,
             prio: PRIO_CURRENT_EXIF,
             target_dim: 0,
@@ -934,7 +1000,7 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     }
     if p.wants_full {
         jobs.push(Job {
-            path: cur.clone(),
+            key: cur_key.clone(),
             kind: Kind::Full,
             prio: PRIO_FULL,
             target_dim: 0,
@@ -947,9 +1013,10 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
             ((i + d) % n, 10 + 2 * d as u32),
             ((i + n - d % n) % n, 11 + 2 * d as u32),
         ] {
-            if seen.insert(idx) && need_preview(&p.files[idx]) {
+            let key = ImgKey::first(&p.files[idx]);
+            if seen.insert(idx) && need_preview(&key) {
                 jobs.push(Job {
-                    path: p.files[idx].clone(),
+                    key,
                     kind: Kind::Preview,
                     prio,
                     target_dim: p.target_dim,
@@ -1538,6 +1605,62 @@ pub fn dim_bands(outer: [f32; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
         [ox0, cy0, cx0, cy1], // left:   only between the other two
         [cx1, cy0, ox1, cy1], // right:  only between the other two
     ]
+}
+
+/// The images the preview cache must never evict.
+///
+/// The rule is "never throw away the picture you are looking at, or one of its
+/// immediate neighbours". Once the cache is keyed by (file, page) that rule has to
+/// be stated in those terms, and the obvious reading of it — protect every page of
+/// the protected *files* — is wrong in a way that does not show up on a photo
+/// folder at all:
+///
+/// * walking into a 20-page document, all 20 pages are the same file, so all 20
+///   are protected, so nothing is evictable and the cache grows past
+///   `PREVIEW_CACHE_CAP` and stays there. The eviction loop has no victim and
+///   gives up, which is how a bounded cache silently becomes unbounded.
+/// * it is also stricter than the rule: page 1 of the file you are on is not the
+///   page you are on, and evicting it costs a re-decode the moment you press left.
+///
+/// So: the current *page*, plus page 0 of each neighbour (which is all the
+/// preload window ever decodes), plus whatever is actually on screen — the last of
+/// those because `shown` lags `cur` by design, and during that lag it is a
+/// different image.
+///
+/// Pure, so the policy is testable. It lives here rather than in the app because
+/// the app is a binary and this is the sort of thing that is only ever noticed by
+/// its memory growing.
+pub fn protected_preview_keys(
+    files: &[PathBuf],
+    index: usize,
+    page: u32,
+    shown: Option<&ImgKey>,
+    radius: usize,
+) -> std::collections::HashSet<ImgKey> {
+    let n = files.len();
+    let mut out = std::collections::HashSet::new();
+    if n == 0 {
+        if let Some(s) = shown {
+            out.insert(s.clone());
+        }
+        return out;
+    }
+    let i = index.min(n - 1);
+    if let Some(f) = files.get(i) {
+        out.insert(ImgKey {
+            path: f.clone(),
+            page,
+        });
+    }
+    for k in 0..=2 * radius {
+        if let Some(f) = files.get((i + n * 2 + k - radius) % n) {
+            out.insert(ImgKey::first(f));
+        }
+    }
+    if let Some(s) = shown {
+        out.insert(s.clone());
+    }
+    out
 }
 
 /// Which image in `files` a launch should show.
@@ -2974,8 +3097,17 @@ fn decode_jpeg_scaled(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<u8>),
     Ok((scaled.width as u32, scaled.height as u32, img.pixels))
 }
 
-pub fn load_image_full(path: &Path) -> Result<ImageData, LoadError> {
-    load_image(path, MAX_TEXTURE_DIM)
+/// Full-resolution decode of `path`, for the zoom/pan tiles and the clipboard.
+///
+/// `page` is 0 for everything but a page of a multi-page TIFF, and is threaded
+/// into the same page-aware path the preview uses rather than having a second
+/// implementation that could disagree with it.
+pub fn load_image_full(path: &Path, page: u32) -> Result<ImageData, LoadError> {
+    load_page_preview_full(path, MAX_TEXTURE_DIM, page).map(|r| {
+        // The preview is already the full image whenever the source fitted under
+        // the texture cap, which is the only way a full decode is asked for.
+        r.full.unwrap_or(r.preview)
+    })
 }
 
 /// True if the bytes look like a JPEG (magic bytes), regardless of file name.
@@ -3150,27 +3282,52 @@ pub const MAX_TIFF_PAGES: u32 = 4096;
 
 /// How many pages this file has — 1 for anything that is not a readable TIFF.
 ///
-/// **Deliberately not called during a folder scan.** A scan would mean one extra
-/// file open and IFD walk per TIFF, and start-up is the thing this project spends
-/// the most effort on; the scan already reads every file's first bytes for
-/// format sniffing, and that is where the cost has to stay. The count is asked
-/// for the first time a file is opened, and the gallery remembers the answer, so
-/// it is paid once per file rather than once per visit.
+/// **This runs on every file you navigate to**, so the non-TIFF case has to be
+/// nearly free, and it is: four bytes are read to check the magic, and a
+/// photo folder is not TIFFs. The first version of this read the whole file with
+/// `fs::read` before sniffing, which would have meant pulling a 10 MB JPEG into
+/// memory every single time you pressed the right arrow.
+///
+/// **Still not called during a folder scan.** A scan would open every file in the
+/// folder, and start-up is the thing this project spends the most effort on. The
+/// gallery remembers the answer, so this is paid once per file visited rather
+/// than once per visit.
 ///
 /// Returns 1 rather than an error for everything unreadable, because "not a
-/// multi-page TIFF" and "a TIFF we cannot read" both mean the same thing to every
+/// multi-page TIFF" and "a TIFF we cannot read" mean the same thing to every
 /// caller here: one page.
 pub fn tiff_page_count(path: &Path) -> u32 {
-    tiff_page_count_bytes(&std::fs::read(path).unwrap_or_default())
-}
-
-/// [`tiff_page_count`] over bytes already in hand, so a caller that has just read
-/// the file does not read it again.
-pub fn tiff_page_count_bytes(bytes: &[u8]) -> u32 {
-    if !is_tiff_bytes(bytes) {
+    // Four bytes, then give up. This is the whole reason the function is safe to
+    // call on every navigation.
+    let mut magic = [0u8; 4];
+    if std::fs::File::open(path)
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut magic)
+        })
+        .is_err()
+    {
         return 1;
     }
-    let Ok(mut dec) = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)) else {
+    if std::fs::File::open(path)
+        .and_then(|mut f| {
+            use std::io::Read;
+            f.read_exact(&mut magic)
+        })
+        .is_err()
+    {
+        return 1;
+    }
+    if !is_tiff_bytes(&magic) {
+        return 1;
+    }
+    // A TIFF's IFD chain is at the front of the file and `next_image` reads
+    // directories rather than pixels, so this is a few KB of reads even for a
+    // 50 MB scan. `BufReader` keeps it that way: the crate seeks a lot.
+    let Ok(file) = std::fs::File::open(path) else {
+        return 1;
+    };
+    let Ok(mut dec) = tiff::decoder::Decoder::new(std::io::BufReader::new(file)) else {
         return 1;
     };
     // `Decoder::new` has already read the first IFD, so the count starts at one.
@@ -3179,6 +3336,26 @@ pub fn tiff_page_count_bytes(bytes: &[u8]) -> u32 {
         if dec.next_image().is_err() {
             // A truncated chain: report what was really there rather than
             // guessing, and rather than failing the file outright.
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// [`tiff_page_count`] over bytes already in hand, for callers that have the
+/// whole file. Reads the first IFD chain out of the slice, so it costs nothing
+/// beyond the header — the pixels are never touched.
+pub fn tiff_page_count_bytes(bytes: &[u8]) -> u32 {
+    if !is_tiff_bytes(bytes) {
+        return 1;
+    }
+    let Ok(mut dec) = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)) else {
+        return 1;
+    };
+    let mut n = 1u32;
+    while dec.more_images() && n < MAX_TIFF_PAGES {
+        if dec.next_image().is_err() {
             break;
         }
         n += 1;
@@ -4360,6 +4537,20 @@ pub struct Gallery {
     /// lives here rather than in the caller so `next`/`prev` cannot be used in a
     /// way that quietly ignores the setting.
     pub loop_back: bool,
+    /// Which page of the current file, 0-based. Non-zero only for pages of a
+    /// multi-page TIFF.
+    ///
+    /// **A cursor, not a list.** The alternative — splicing an entry per page into
+    /// `files` — was rejected because `files` is the *unfiltered* shape that the
+    /// filter, the resume point, the rescan and `all_files` are all keyed on, and
+    /// growing it means growing the index arithmetic in every one of them. A
+    /// cursor keeps `files` exactly as it was, so all of that is untouched and
+    /// only the arithmetic in `next`/`prev` learns about pages.
+    page: u32,
+    /// How many pages each visited file has. Only ever holds files that have been
+    /// opened, and pruned whenever `files` is rebuilt, so it cannot grow without
+    /// bound as you browse.
+    page_counts: std::collections::HashMap<PathBuf, u32>,
 }
 
 impl Gallery {
@@ -4368,12 +4559,14 @@ impl Gallery {
             files: scan_folder(folder),
             index: 0,
             loop_back: true,
+            page: 0,
+            page_counts: std::collections::HashMap::new(),
         }
     }
 
     /// An empty gallery.
     ///
-    /// For the path where the caller is about to install its own list — start-up
+    /// For the path where the caller is about to install its own list - start-up
     /// with `load_all_on_startup` calls [`scan_folder_sorted`] immediately after.
     /// [`Self::new`] would walk the directory and have the result thrown away,
     /// which on a 1001-image folder is ~50 ms before the window is even up.
@@ -4382,6 +4575,8 @@ impl Gallery {
             files: Vec::new(),
             index: 0,
             loop_back: true,
+            page: 0,
+            page_counts: std::collections::HashMap::new(),
         }
     }
 
@@ -4391,11 +4586,114 @@ impl Gallery {
             files: vec![path],
             index: 0,
             loop_back: true,
+            page: 0,
+            page_counts: std::collections::HashMap::new(),
         }
     }
 
     pub fn current(&self) -> Option<&Path> {
         self.files.get(self.index).map(|p| p.as_path())
+    }
+
+    /// The page of the current file to decode. 0 for everything but pages of a
+    /// multi-page TIFF past the first.
+    pub fn current_page(&self) -> u32 {
+        self.page
+    }
+
+    /// Set page counts positionally, for `files` as it currently stands.
+    ///
+    /// **For tests.** The app learns counts one file at a time with
+    /// [`Self::learn_pages`] as you arrive at them, which is the right shape
+    /// because it costs four bytes for a non-TIFF. A test about *navigation*
+    /// should not also depend on the IFD walker being correct — when that breaks,
+    /// every navigation test fails for the wrong reason and the actual fault is
+    /// buried. Counting has its own test.
+    pub fn set_page_counts<I: IntoIterator<Item = u32>>(&mut self, counts: I) {
+        self.page_counts.clear();
+        for (path, n) in self.files.iter().zip(counts) {
+            self.page_counts.insert(path.clone(), n.max(1));
+        }
+        self.page = 0;
+    }
+
+    /// How many files have a remembered page count. So a test can assert the map
+    /// was actually emptied rather than merely that nothing broke.
+    pub fn known_page_counts(&self) -> usize {
+        self.page_counts.len()
+    }
+
+    /// Whether advancing past either end wraps around. Separate from the field so
+    /// a test can turn it off without reaching into the struct.
+    pub fn set_loop_back(&mut self, on: bool) {
+        self.loop_back = on;
+    }
+
+    /// How many pages the current file has, as far as this gallery knows. 1 until
+    /// [`Self::learn_pages`] has been asked about the file.
+    pub fn pages_in_current(&self) -> u32 {
+        self.current()
+            .and_then(|p| self.page_counts.get(p))
+            .copied()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// Find out how many pages `path` has and remember it.
+    ///
+    /// Called when a file becomes current, not during a scan — see
+    /// [`tiff_page_count`] for why the cost has to stay off the folder walk.
+    ///
+    /// **Answers from the cache when it can.** This runs on *every* navigation, so
+    /// the first version — which always re-read, because "asking is cheap" was
+    /// true of the four bytes and not of the `File::open` around them — put a file
+    /// open on the critical path of every single keypress. Browsing back and forth
+    /// over three photos is three opens, three closes and three reads to re-learn
+    /// something already known.
+    pub fn learn_pages(&mut self, path: &Path) -> u32 {
+        if let Some(n) = self.page_counts.get(path) {
+            return *n;
+        }
+        let n = tiff_page_count(path);
+        self.page_counts.insert(path.to_path_buf(), n);
+        if self.current() == Some(path) {
+            self.page = self.page.min(n.saturating_sub(1));
+        }
+        n
+    }
+
+    /// Forget every page count. Called whenever `files` is rebuilt, so the map
+    /// cannot outlive the list it describes — a stale count would put the cursor
+    /// on a page that no longer exists.
+    fn forget_pages(&mut self) {
+        self.page_counts.clear();
+        self.page = 0;
+    }
+
+    /// Forget one file's page count, and clamp the cursor if it was on that file.
+    ///
+    /// For a file whose *contents* changed. A 12-page document re-exported as one
+    /// page has to stop offering 11 pages that do not exist, and the cursor has to
+    /// come off page 12 rather than leaving `next` to walk off the end of a phantom
+    /// document.
+    pub fn forget_page_count(&mut self, path: &Path) {
+        self.page_counts.remove(path);
+        if self.current() == Some(path) {
+            self.page = 0;
+        }
+    }
+
+    /// Move to a file by index, starting at its first page.
+    ///
+    /// A *file* index, deliberately: a jump to a file has no page to go to, and
+    /// resuming should not restore a page either, because the page count is
+    /// learned on arrival and a remembered one could name a page that a rewritten
+    /// file no longer has.
+    pub fn goto_index(&mut self, index: usize) {
+        if index < self.files.len() {
+            self.index = index;
+            self.page = 0;
+        }
     }
 
     /// Rebuild [`Self::files`] from `all`, keeping only names matching `needle`.
@@ -4422,41 +4720,77 @@ impl Gallery {
             .as_ref()
             .and_then(|p| self.files.iter().position(|f| f == p))
             .unwrap_or_else(|| self.index.min(self.files.len().saturating_sub(1)));
+        // The current file survived, so its page survives too and the user keeps
+        // their place in a document they are part-way through. If it did not, the
+        // index moved to a different file and the page must go with it.
+        if self.current() != current.as_deref() {
+            self.page = 0;
+        }
         self.current() != current.as_deref()
     }
 
-    /// Advance one image. Returns whether the view actually moved — `false` at
-    /// the end with `loop_back` off, so the caller can skip the work that a
-    /// real change would justify.
+    /// Advance one image, or one page of a multi-page file.
+    ///
+    /// Within a document this moves by page; at the last page it moves to the
+    /// first page of the next file. That is the whole point of making this a
+    /// cursor: pressing right 199 times walks a 200-page scan and then carries on
+    /// into the next folder entry, which is what every document viewer does and
+    /// what nobody has to be told.
+    ///
+    /// Returns whether the view actually moved - `false` at the end with
+    /// `loop_back` off, so the caller can skip the work that a real change would
+    /// justify.
     pub fn next(&mut self) -> bool {
         if self.files.is_empty() {
             return false;
         }
+        if self.page + 1 < self.pages_in_current() {
+            self.page += 1;
+            return true;
+        }
+        // Last page (or an ordinary file): on to the next one, at its first page.
         match self.index.checked_add(1) {
             Some(i) if i < self.files.len() => {
                 self.index = i;
+                self.page = 0;
                 true
             }
             _ if self.loop_back => {
                 self.index = 0;
+                self.page = 0;
                 true
             }
             _ => false,
         }
     }
 
-    /// Go back one image. Returns whether the view actually moved.
+    /// Go back one image, or one page of a multi-page file.
+    ///
+    /// Symmetric with [`Self::next`]: from page 0 it goes to the *last* page of
+    /// the previous file, not its first. Anything else makes stepping backwards
+    /// through a folder need two presses per file, which is a small thing that
+    /// feels broken.
     pub fn prev(&mut self) -> bool {
         if self.files.is_empty() {
             return false;
         }
+        if self.page > 0 {
+            self.page -= 1;
+            return true;
+        }
         match self.index.checked_sub(1) {
             Some(i) => {
                 self.index = i;
+                // The new file's page count is only known if it was visited, which
+                // it was, since the user is stepping back through where they came.
+                // `pages_in_current` falls back to 1 for anything unknown, so this
+                // is always in range.
+                self.page = self.pages_in_current().saturating_sub(1);
                 true
             }
             None if self.loop_back => {
                 self.index = self.files.len() - 1;
+                self.page = self.pages_in_current().saturating_sub(1);
                 true
             }
             None => false,
@@ -4496,6 +4830,8 @@ pub fn load_all_from_folder(&mut self, folder: &Path) {
 
         self.files = new_files;
         self.index = new_index;
+        // The list these counts described is gone.
+        self.forget_pages();
     }
 }
 

@@ -7,10 +7,9 @@
 //! never load" report. Neither half was reachable from a test, because both
 //! lived in a binary.
 
-use image_viewer::{plan_jobs, Job, Kind, Loader, Plan};
+use image_viewer::{plan_jobs, ImgKey, Job, Kind, Loader, Plan};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -55,16 +54,16 @@ impl Harness {
             workers,
             tx,
             move |job: &Job| {
-                s2.lock().unwrap().push((job.path.clone(), job.kind));
+                s2.lock().unwrap().push((job.path().to_path_buf(), job.kind));
                 if hold_ms > 0 {
                     std::thread::sleep(Duration::from_millis(hold_ms));
                 }
-                let d = deliver(&job.path, &job.kind);
-                f2.lock().unwrap().push((job.path.clone(), job.kind, d.clone()));
-                ((job.path.clone(), job.kind, d.clone()), d != Done::Abandoned)
+                let d = deliver(&job.key.path, &job.kind);
+                f2.lock().unwrap().push((job.path().to_path_buf(), job.kind, d.clone()));
+                ((job.path().to_path_buf(), job.kind, d.clone()), d != Done::Abandoned)
             },
             |job: &Job, err: String| {
-                panic!("fake job {:?} panicked: {err}", job.path);
+                panic!("fake job {} panicked: {err}", job.path().display());
             },
             || {},
         );
@@ -145,12 +144,13 @@ fn files(n: usize) -> Vec<PathBuf> {
 fn plan<'a>(
     f: &'a [PathBuf],
     index: usize,
-    cached: &'a HashSet<PathBuf>,
-    failed: &'a HashSet<(PathBuf, Kind)>,
+    cached: &'a HashSet<ImgKey>,
+    failed: &'a HashSet<(ImgKey, Kind)>,
 ) -> Plan<'a> {
     Plan {
         files: f,
         index,
+        current_page: 0,
         cached,
         failed,
         wants_exif: false,
@@ -191,7 +191,7 @@ fn a_wanted_job_that_was_already_running_is_re_queued_if_it_gives_up() {
     let f = files(8);
     let mut h = Harness::new(1, abandons_first_attempt_only(), 120);
     h.loader.replace(vec![Job {
-        path: f[0].clone(),
+        key: ImgKey::first(&f[0]),
         kind: Kind::Preview,
         prio: 0,
         target_dim: 1024,
@@ -205,13 +205,13 @@ fn a_wanted_job_that_was_already_running_is_re_queued_if_it_gives_up() {
     // A is now in flight and abandoning. Want A again (as a neighbour) + B.
     let jobs = vec![
         Job {
-            path: f[0].clone(),
+            key: ImgKey::first(&f[0]),
             kind: Kind::Preview,
             prio: 12,
             target_dim: 1024,
         },
         Job {
-            path: f[1].clone(),
+            key: ImgKey::first(&f[1]),
             kind: Kind::Preview,
             prio: 0,
             target_dim: 1024,
@@ -250,7 +250,7 @@ fn a_wanted_job_that_delivered_is_not_run_again() {
     let mut h = Harness::new(1, delivered_always, 30u64);
 
     h.loader.replace(vec![Job {
-        path: f[0].clone(),
+        key: ImgKey::first(&f[0]),
         kind: Kind::Preview,
         prio: 0,
         target_dim: 1024,
@@ -260,7 +260,7 @@ fn a_wanted_job_that_delivered_is_not_run_again() {
     }
     // f[0] is in flight and will succeed. Ask for it again while it runs.
     h.loader.replace(vec![Job {
-        path: f[0].clone(),
+        key: ImgKey::first(&f[0]),
         kind: Kind::Preview,
         prio: 12,
         target_dim: 1024,
@@ -291,7 +291,7 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
             seen2.lock().unwrap().push((job.prio, job.target_dim));
             let abandon = seen2.lock().unwrap().len() == 1;
             (
-                (job.path.clone(), job.kind, Done::Delivered),
+                (job.path().to_path_buf(), job.kind, Done::Delivered),
                 !abandon,
             )
         },
@@ -300,7 +300,7 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
     );
 
     loader.replace(vec![Job {
-        path: f[0].clone(),
+        key: ImgKey::first(&f[0]),
         kind: Kind::Preview,
         prio: 12,
         target_dim: 2048,
@@ -310,7 +310,7 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
     }
     // Same job wanted again while in flight; it abandons, so it re-queues.
     loader.replace(vec![Job {
-        path: f[0].clone(),
+        key: ImgKey::first(&f[0]),
         kind: Kind::Preview,
         prio: 12,
         target_dim: 2048,
@@ -356,8 +356,8 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
 fn flipping_through_pictures_leaves_nothing_stranded() {
     const N: usize = 40;
     let f = files(N);
-    let mut cached: HashSet<PathBuf> = HashSet::new();
-    let failed: HashSet<(PathBuf, Kind)> = HashSet::new();
+    let mut cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
 
     // The first attempt at any given path walks away; a retry succeeds. That
     // makes abandonment deterministic per path rather than a coin flip, so the
@@ -402,10 +402,10 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
     let final_index = N - 6; // window is N-9..=N-3, clear of everything above
     steps.push(final_index);
 
-    let mut plan_at = |h: &mut Harness, cached: &mut HashSet<PathBuf>| {
+    let mut plan_at = |h: &mut Harness, cached: &mut HashSet<ImgKey>| {
         h.drain();
         for p in h.delivered.iter().filter(|(_, k)| *k == Kind::Preview).map(|(p, _)| p) {
-            cached.insert(p.clone());
+            cached.insert(ImgKey::first(p));
         }
         plan_jobs(&plan(&f, final_index, cached, &failed))
     };
@@ -415,7 +415,7 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
         // Pump, then re-plan: the order a real frame does it in.
         h.drain();
         for p in h.delivered.iter().filter(|(_, k)| *k == Kind::Preview).map(|(p, _)| p) {
-            cached.insert(p.clone());
+            cached.insert(ImgKey::first(p));
         }
         h.loader.replace(plan_jobs(&plan(&f, index, &cached, &failed)));
         // Step faster than a decode takes, so navigation lands mid-flight.
@@ -468,7 +468,7 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
     // A stranded neighbour triggers none of those, so nothing re-asks it.
     h.drain();
     for p in h.delivered.iter().filter(|(_, k)| *k == Kind::Preview).map(|(p, _)| p) {
-        cached.insert(p.clone());
+        cached.insert(ImgKey::first(p));
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     while h.loader.outstanding() > 0 {
@@ -479,7 +479,7 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
         );
         h.drain();
         for p in h.delivered.iter().filter(|(_, k)| *k == Kind::Preview).map(|(p, _)| p) {
-            cached.insert(p.clone());
+            cached.insert(ImgKey::first(p));
         }
         std::thread::sleep(Duration::from_millis(2));
     }
@@ -489,14 +489,14 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
     // this the test reports a strand for a picture that was in fact delivered.
     h.drain();
     for p in h.delivered.iter().filter(|(_, k)| *k == Kind::Preview).map(|(p, _)| p) {
-        cached.insert(p.clone());
+        cached.insert(ImgKey::first(p));
     }
 
     // Property 1: nothing wanted, nothing pending. This is the strand check.
     let outstanding_wanted: Vec<PathBuf> = plan_jobs(&plan(&f, final_index, &cached, &failed))
         .iter()
         .filter(|j| j.kind == Kind::Preview)
-        .map(|j| j.path.clone())
+        .map(|j| j.path().to_path_buf())
         .collect();
     assert!(
         outstanding_wanted.is_empty(),
@@ -555,16 +555,16 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
 #[test]
 fn the_plan_skips_cached_and_known_bad_paths() {
     let f = files(10);
-    let cached: HashSet<PathBuf> = [f[0].clone(), f[1].clone()].into_iter().collect();
-    let failed: HashSet<(PathBuf, Kind)> = [(f[5].clone(), Kind::Preview)].into_iter().collect();
+    let cached: HashSet<ImgKey> = [&f[0], &f[1]].into_iter().map(|p| ImgKey::first(p)).collect();
+    let failed: HashSet<(ImgKey, Kind)> = [(ImgKey::first(&f[5]), Kind::Preview)].into_iter().collect();
     let jobs = plan_jobs(&plan(&f, 0, &cached, &failed));
 
     assert!(
-        !jobs.iter().any(|j| j.path == f[0]),
+        !jobs.iter().any(|j| j.path() == f[0]),
         "already cached, must not be requested again"
     );
     assert!(
-        !jobs.iter().any(|j| j.path == f[5]),
+        !jobs.iter().any(|j| j.path() == f[5]),
         "known-bad preview must not be retried every frame"
     );
 }
@@ -572,14 +572,15 @@ fn the_plan_skips_cached_and_known_bad_paths() {
 #[test]
 fn the_plan_wraps_around_a_short_folder() {
     let f = files(3);
-    let cached: HashSet<PathBuf> = HashSet::new();
-    let failed: HashSet<(PathBuf, Kind)> = HashSet::new();
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
     let _ = &failed;
     // radius 3 on a 3-image folder: every image is a neighbour, and no index
     // may be requested twice.
     let jobs = plan_jobs(&Plan {
         files: &f,
         index: 0,
+        current_page: 0,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
@@ -590,10 +591,10 @@ fn the_plan_wraps_around_a_short_folder() {
     });
     let mut seen = HashSet::new();
     for j in &jobs {
-        assert!(seen.insert(j.path.clone()), "duplicate job for {:?}", j.path);
+        assert!(seen.insert(j.path().to_path_buf()), "duplicate job for {:?}", j.path());
     }
     assert_eq!(jobs.len(), 3, "3 images, each once");
-    assert_eq!(jobs[0].path, f[0], "current image still first");
+    assert_eq!(jobs[0].path(), f[0], "current image still first");
 }
 
 // ---------------------------------------------------------------------------
@@ -707,12 +708,13 @@ fn stale_current_is_planned_even_though_it_is_cached() {
     // The point of the redesign: the preview stays on screen, so it is *in* the
     // cache, and the plan must still ask for a sharper one.
     let files: Vec<PathBuf> = ["a.jpg", "b.jpg", "c.jpg"].iter().map(PathBuf::from).collect();
-    let cached: HashSet<PathBuf> = files.iter().cloned().collect();
-    let failed: HashSet<(PathBuf, Kind)> = HashSet::new();
+    let cached: HashSet<ImgKey> = files.iter().map(|p| ImgKey::first(p)).collect();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
 
     let plan = |stale: bool| Plan {
         files: &files,
         index: 0,
+        current_page: 0,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
@@ -728,7 +730,7 @@ fn stale_current_is_planned_even_though_it_is_cached() {
     );
     let jobs = plan_jobs(&plan(true));
     assert_eq!(jobs.len(), 1, "one job: the current image");
-    assert_eq!(jobs[0].path, files[0]);
+    assert_eq!(jobs[0].path(), files[0]);
     assert_eq!(jobs[0].kind, Kind::Preview);
     assert_eq!(jobs[0].target_dim, 2400, "at the new, larger target");
     assert_eq!(
@@ -744,12 +746,13 @@ fn a_stale_current_is_not_planned_when_it_failed() {
     // permanent for the session, so honouring it is what stops a resize turning
     // into an endless retry loop on a file that will never decode.
     let files: Vec<PathBuf> = vec![PathBuf::from("bad.jpg")];
-    let cached: HashSet<PathBuf> = files.iter().cloned().collect();
-    let mut failed: HashSet<(PathBuf, Kind)> = HashSet::new();
-    failed.insert((files[0].clone(), Kind::Preview));
+    let cached: HashSet<ImgKey> = files.iter().map(|p| ImgKey::first(p)).collect();
+    let mut failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    failed.insert((ImgKey::first(&files[0]), Kind::Preview));
     let jobs = plan_jobs(&Plan {
         files: &files,
         index: 0,
+        current_page: 0,
         cached: &cached,
         failed: &failed,
         wants_exif: false,

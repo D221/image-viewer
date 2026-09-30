@@ -492,6 +492,312 @@ fn a_page_is_downscaled_like_any_other_decode() {
 }
 
 // ---------------------------------------------------------------------------
+// Pages as browsable positions
+// ---------------------------------------------------------------------------
+
+/// A gallery over `files`, with page counts supplied directly.
+///
+/// [`image_viewer::Gallery::learn_pages`] reads the file, which is right for the
+/// app and wrong for a test about *navigation*: a test that wants a 3-page
+/// document to behave like a 3-page document should not depend on the IFD walker
+/// also being right, or every navigation test fails for the wrong reason when it
+/// breaks. The counting is tested separately, in `a_multi_page_tiff_reports_every_page`.
+fn gallery_with_pages(files: &[(&str, u32)]) -> image_viewer::Gallery {
+    let paths: Vec<std::path::PathBuf> = files.iter().map(|(n, _)| std::path::PathBuf::from(n)).collect();
+    let mut g = image_viewer::Gallery::empty();
+    g.set_filtered(&paths, "");
+    g.set_page_counts(files.iter().map(|(_, n)| *n));
+    g
+}
+
+#[test]
+fn pressing_right_walks_the_pages_of_a_document_and_then_the_next_file() {
+    // The behaviour that was asked for, and the reason pages are a cursor rather
+    // than extra entries in the list: arrows work, with nothing to learn.
+    let mut g = gallery_with_pages(&[("doc.tif", 3), ("photo.jpg", 1)]);
+
+    assert_eq!((g.index, g.current_page()), (0, 0));
+    assert!(g.next(), "page 2");
+    assert_eq!((g.index, g.current_page()), (0, 1));
+    assert!(g.next(), "page 3");
+    assert_eq!((g.index, g.current_page()), (0, 2));
+    assert!(g.next(), "and on into the next file");
+    assert_eq!((g.index, g.current_page()), (1, 0), "the next file starts at its first page");
+}
+
+#[test]
+fn pressing_left_from_a_first_page_lands_on_the_previous_files_last_page() {
+    // Symmetric with `next`. Landing on the *first* page of the previous file
+    // would mean two presses per file to step backwards, which feels broken even
+    // though it is not wrong.
+    let mut g = gallery_with_pages(&[("a.tif", 3), ("b.tif", 4)]);
+    g.goto_index(1);
+    assert_eq!(g.current_page(), 0);
+
+    assert!(g.prev());
+    assert_eq!((g.index, g.current_page()), (0, 2), "the last page of a.tif");
+    assert!(g.prev());
+    assert_eq!((g.index, g.current_page()), (0, 1));
+    assert!(g.prev());
+    assert_eq!((g.index, g.current_page()), (0, 0));
+}
+
+#[test]
+fn an_ordinary_folder_behaves_exactly_as_it_did_before_pages() {
+    // Every image is one page, so all of this must be the old behaviour. A
+    // regression here would be invisible in a folder of photos and obvious in a
+    // folder of scans, which is the wrong way round.
+    let mut g = gallery_with_pages(&[("a.jpg", 1), ("b.jpg", 1), ("c.jpg", 1)]);
+    assert!(g.next());
+    assert_eq!((g.index, g.current_page()), (1, 0));
+    assert!(g.next());
+    assert_eq!((g.index, g.current_page()), (2, 0));
+    assert!(g.next(), "wraps, as loop_back defaults to on");
+    assert_eq!((g.index, g.current_page()), (0, 0));
+    assert!(g.prev());
+    assert_eq!((g.index, g.current_page()), (2, 0));
+    // Three images and looping on: three steps is a full turn of the folder and
+    // must land back where it started, with no page drift on the way.
+    for _ in 0..3 {
+        assert!(g.next());
+    }
+    assert_eq!((g.index, g.current_page()), (2, 0), "a full turn of the folder");
+}
+
+#[test]
+fn loop_back_off_still_stops_at_the_ends() {
+    // The point of `next` returning bool: with looping off, the last page of the
+    // last file is a real end and the caller must be able to see it.
+    let mut g = gallery_with_pages(&[("doc.tif", 3), ("photo.jpg", 1)]);
+    g.set_loop_back(false);
+    for expected in [(0, 1), (0, 2), (1, 0)] {
+        assert!(g.next(), "step to {expected:?}");
+        assert_eq!((g.index, g.current_page()), expected);
+    }
+    assert!(!g.next(), "past the end with looping off");
+    assert_eq!((g.index, g.current_page()), (1, 0), "and it did not move");
+
+    g.goto_index(0);
+    assert!(!g.prev(), "before the start with looping off");
+    assert_eq!((g.index, g.current_page()), (0, 0));
+}
+
+#[test]
+fn a_page_count_that_shrinks_puts_the_cursor_back_in_range() {
+    // A 12-page document re-exported as one page. Without the clamp the cursor
+    // sits on page 12 of a document that has one page, and `next` walks off the
+    // end of something that does not exist.
+    let mut g = gallery_with_pages(&[("doc.tif", 12), ("b.jpg", 1)]);
+    for _ in 0..11 {
+        assert!(g.next());
+    }
+    assert_eq!(g.current_page(), 11);
+
+    g.forget_page_count(std::path::Path::new("doc.tif"));
+    assert_eq!(g.current_page(), 0, "the cursor is back on a page that exists");
+    assert!(g.next(), "and navigation continues from there");
+    assert_eq!((g.index, g.current_page()), (1, 0));
+}
+
+#[test]
+fn forgetting_a_page_count_of_another_file_leaves_the_cursor_alone() {
+    let mut g = gallery_with_pages(&[("a.tif", 5), ("b.tif", 5)]);
+    g.goto_index(0);
+    for _ in 0..3 {
+        g.next();
+    }
+    assert_eq!(g.current_page(), 3);
+    g.forget_page_count(std::path::Path::new("b.tif"));
+    assert_eq!(g.current_page(), 3, "b's count has nothing to do with where we are");
+}
+
+#[test]
+fn rebuilding_the_list_forgets_every_page_count() {
+    // Otherwise the map grows for the whole session as you browse, and — worse —
+    // can describe a file that is no longer in the list.
+    let mut g = gallery_with_pages(&[("doc.tif", 4), ("b.jpg", 1)]);
+    g.next();
+    assert_eq!(g.current_page(), 1);
+    g.load_all_from_folder(std::path::Path::new("."));
+    assert_eq!(g.current_page(), 0, "a rebuilt list starts at a page we know exists");
+    assert_eq!(g.known_page_counts(), 0, "and remembers nothing about the old list");
+}
+
+#[test]
+fn the_filter_keeps_your_place_in_a_document_but_not_across_files() {
+    // Two cases, and they differ on purpose. The current file surviving the filter
+    // means the user keeps their page; the current file being filtered out means
+    // the index moved, and carrying a page number to a different file would be
+    // showing page 4 of something that has one page.
+    let all: Vec<std::path::PathBuf> = ["doc.tif", "other.tif", "photo.jpg"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let mut g = image_viewer::Gallery::empty();
+    g.set_filtered(&all, "");
+    g.set_page_counts([4, 4, 1]);
+    for _ in 0..2 {
+        g.next();
+    }
+    assert_eq!((g.index, g.current_page()), (0, 2));
+
+    // "doc" matches doc.tif and other.tif, so the current file survives.
+    assert!(!g.set_filtered(&all, "doc"), "the current file is still there, so nothing moved");
+    assert_eq!((g.index, g.current_page()), (0, 2), "and the page is kept");
+
+    // "photo" matches only photo.tif's neighbour, so the current file is filtered
+    // out and the index falls back to the nearest surviving position — which is 0,
+    // because that is where the doc was. What matters is the page.
+    assert!(g.set_filtered(&all, "photo"), "the current file was filtered out");
+    assert_eq!(g.index, 0, "clamped to a position that exists");
+    assert_eq!(g.current_page(), 0, "and the page did not travel to a different file");
+}
+
+#[test]
+fn the_page_count_is_learned_from_the_file_and_asked_only_once() {
+    // The cost control: four bytes for anything that is not a TIFF, and the
+    // answer cached so browsing back and forth does not re-read.
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "three.tif",
+        &multipage_tiff(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], 8, 8),
+    );
+    let mut g = image_viewer::Gallery::empty();
+    g.set_filtered(&[p.clone()], "");
+
+    assert_eq!(g.learn_pages(&p), 3);
+    assert_eq!(g.pages_in_current(), 3);
+    // Second call is answered from the cache, and agrees.
+    assert_eq!(g.learn_pages(&p), 3);
+
+    // **The cache is what makes this cheap, and it is checked by deletion rather
+    // than by counting.** `learn_pages` runs on every navigation, and the first
+    // version always re-read — which put a `File::open` on the critical path of
+    // every keypress. Deleting the file makes a re-read impossible: if the answer
+    // still comes back as 3, it came from the cache.
+    std::fs::remove_file(&p).unwrap();
+    assert_eq!(
+        g.learn_pages(&p),
+        3,
+        "a cached count must survive the file being unreadable, or every arrow key re-opens it"
+    );
+    assert_eq!(g.pages_in_current(), 3);
+
+    // A plain image is one page, and asking costs one 4-byte read.
+    let jpg = dir.path().join("one.jpg");
+    Rgba::solid(8, 8, [4, 4, 4]).save(&jpg);
+    assert_eq!(image_viewer::tiff_page_count(&jpg), 1);
+    // A file that is not there at all is one page rather than a panic: `goto` asks
+    // on arrival, and a file can vanish between the scan and the arrival.
+    assert_eq!(image_viewer::tiff_page_count(&dir.path().join("gone.tif")), 1);
+}
+
+#[test]
+fn the_cursor_can_never_name_a_page_that_does_not_exist() {
+    // Checked as a property over every arrangement, because the failure it guards
+    // is an off-the-end index into a decode that then asks a file for a page it
+    // has not got.
+    for docs in [[1u32, 1, 1], [3, 1, 1], [1, 5, 1], [1, 1, 4], [2, 3, 4], [7, 1, 1]] {
+        for start in 0..docs.len() {
+            let mut g = gallery_with_pages(
+                &[
+                    ("a", docs[0]),
+                    ("b", docs[1]),
+                    ("c", docs[2]),
+                ],
+            );
+            g.goto_index(start);
+            for _ in 0..30 {
+                assert!(
+                    g.current_page() < docs[g.index],
+                    "page {} of a {}-page file at index {} (docs {docs:?})",
+                    g.current_page(),
+                    docs[g.index],
+                    g.index
+                );
+                g.next();
+            }
+            for _ in 0..30 {
+                assert!(
+                    g.current_page() < docs[g.index],
+                    "backwards: page {} of a {}-page file (docs {docs:?})",
+                    g.current_page(),
+                    docs[g.index]
+                );
+                g.prev();
+            }
+        }
+    }
+}
+
+#[test]
+fn the_protected_set_does_not_grow_with_the_length_of_a_document() {
+    // The bug this pins: protecting every page of the protected *files* makes the
+    // cache unbounded while you walk a document, because nothing is ever
+    // evictable. On a folder of photos it cannot happen — every file is one page —
+    // so the only way to see it is to ask the policy directly.
+    let files: Vec<std::path::PathBuf> = ["doc.tif", "a.jpg", "b.jpg"].iter().map(std::path::PathBuf::from).collect();
+    for page in 0..200u32 {
+        let p = image_viewer::protected_preview_keys(&files, 0, page, None, 3);
+        // The window contributes at most `2 * radius + 1` distinct files, and the
+        // page on screen is at most one more.
+        assert!(
+            p.len() <= 2 * 3 + 2,
+            "page {page} protected {} keys: {p:?}",
+            p.len()
+        );
+    }
+}
+
+#[test]
+fn the_protected_set_keeps_the_page_you_are_on_and_only_page_zero_of_neighbours() {
+    use image_viewer::{protected_preview_keys, ImgKey};
+    let files: Vec<std::path::PathBuf> = (0..9).map(|i| std::path::PathBuf::from(format!("{i}.jpg"))).collect();
+
+    // On page 6 of a document, with nothing shown yet.
+    let p = protected_preview_keys(&files, 0, 6, None, 3);
+    assert!(p.contains(&ImgKey { path: files[0].clone(), page: 6 }), "the page on screen");
+    // The window is centred on the current index and so includes it, which means
+    // page 1 of the current file is protected as well. That is one extra key, it
+    // was true of the pre-page version too, and it is not what the size test is
+    // about — what matters is that it does not become *all* of the file's pages.
+    assert!(
+        p.contains(&ImgKey::first(&files[0])),
+        "the window includes its own centre, so page 1 of the current file is in it"
+    );
+    // Neighbours: page 0 only, which is all the preload window decodes. The window
+    // is ±3 and wraps, so from index 0 in a 9-image list that is 6,7,8,0,1,2,3 —
+    // three *backwards* neighbours are included, which the first version of this
+    // test got wrong by assuming the window only reached forwards.
+    for i in [1usize, 2, 3, 6, 7, 8] {
+        assert!(p.contains(&ImgKey::first(&files[i])), "neighbour {i}");
+    }
+    for i in [4usize, 5] {
+        assert!(!p.contains(&ImgKey::first(&files[i])), "too far to be a neighbour: {i}");
+    }
+    assert_eq!(p.len(), 8, "the page on screen, plus the window's 7 files at page 0");
+
+    // A neighbour in the other direction, wrapping past the end of the list.
+    let p = protected_preview_keys(&files, 0, 0, None, 1);
+    assert!(p.contains(&ImgKey::first(&files[1])));
+    assert!(p.contains(&ImgKey::first(&files[8])), "wraps to the last file");
+    assert!(!p.contains(&ImgKey::first(&files[4])), "and no further than that");
+}
+
+#[test]
+fn the_protected_set_includes_what_is_actually_on_screen() {
+    // `shown` lags `cur` by design, so during a navigation it is a different
+    // image from the one being protected as "current". Forgetting it means the
+    // picture on screen can be the eviction victim.
+    use image_viewer::{protected_preview_keys, ImgKey};
+    let files: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg"].iter().map(std::path::PathBuf::from).collect();
+    let shown = ImgKey { path: files[2].clone(), page: 0 };
+    let p = protected_preview_keys(&files, 0, 0, Some(&shown), 1);
+    assert!(p.contains(&shown), "what is painted is never evicted");
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers, kept here so the fixtures above read as pictures not as bytes
 // ---------------------------------------------------------------------------
 

@@ -30,7 +30,7 @@
 //! takes tens of milliseconds: slow enough that the queue is under real
 //! pressure, fast enough to flip through.
 
-use image_viewer::{load_image_preview_full, plan_jobs, Job, Kind, Loader, Plan};
+use image_viewer::{load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -164,7 +164,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
         move |job: &Job| {
             let t0 = Instant::now();
             let out: Result<Decoded, String> = match job.kind {
-                Kind::Preview => load_image_preview_full(&job.path, job.target_dim)
+                Kind::Preview => load_image_preview_full(job.path(), job.target_dim)
                     .map(|r| Decoded {
                         bytes: r.preview.rgba.len()
                             + r.full.as_ref().map(|f| f.rgba.len()).unwrap_or(0),
@@ -175,10 +175,10 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
             };
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let logged = out.clone();
-            dm.lock().unwrap().push((job.path.clone(), ms, logged));
+            dm.lock().unwrap().push((job.path().to_path_buf(), ms, logged));
             (
                 Msg {
-                    path: job.path.clone(),
+                    path: job.path().to_path_buf(),
                     ms,
                     outcome: out,
                 },
@@ -188,7 +188,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
         |job: &Job, e: String| {
             (
                 Msg {
-                    path: job.path.clone(),
+                    path: job.path().to_path_buf(),
                     ms: 0.0,
                     outcome: Err(e),
                 },
@@ -204,7 +204,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
     let mut clock: u64 = 0;
     // When each visited picture was stepped to, for time-to-first-pixels.
     let mut pending_since: HashMap<PathBuf, Instant> = HashMap::new();
-    let mut failed: HashSet<(PathBuf, Kind)> = HashSet::new();
+    let mut failed: HashSet<(ImgKey, Kind)> = HashSet::new();
 
     let mut index = 0usize;
     let t_start = Instant::now();
@@ -237,7 +237,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
                     }
                 }
                 Err(e) => {
-                    failed.insert((path.clone(), Kind::Preview));
+                    failed.insert((ImgKey::first(&path), Kind::Preview));
                     eprintln!("  decode failed: {e}");
                 }
             }
@@ -263,19 +263,22 @@ fn browse(dir: &std::path::Path, hold_ms: u64) -> Session {
         }
 
         // 3. Ask for what is wanted, exactly as `schedule` does.
-        let cached_set: HashSet<PathBuf> = cache.keys().cloned().collect();
+        // The planner's caches are keyed by (file, page); this benchmark only
+        // ever holds page 0, so every key is `ImgKey::first`.
+        let cached_set: HashSet<ImgKey> = cache.keys().map(|p| ImgKey::first(p)).collect();
         let jobs = plan_jobs(&Plan {
             files: &files,
             index,
+            current_page: 0,
             cached: &cached_set,
             failed: &failed,
             wants_exif: false,
             wants_full: false,
-        current_stale: false,
+            current_stale: false,
             target_dim: PREVIEW_DIM,
             radius: RADIUS,
         });
-        wanted = jobs.iter().map(|j| j.path.clone()).collect();
+        wanted = jobs.iter().map(|j| j.path().to_path_buf()).collect();
         loader.replace(jobs);
 
         // Wait out the hold, but keep taking delivery while waiting — the app
@@ -383,7 +386,7 @@ fn take_delivery(
     log: &Arc<Mutex<Vec<(PathBuf, f64, Result<Decoded, String>)>>>,
     cache: &mut HashMap<PathBuf, Cached>,
     pending_since: &mut HashMap<PathBuf, Instant>,
-    failed: &mut HashSet<(PathBuf, Kind)>,
+    failed: &mut HashSet<(ImgKey, Kind)>,
     wanted: &HashSet<PathBuf>,
     clock: &mut u64,
 ) {
@@ -414,7 +417,7 @@ fn take_delivery(
                 }
             }
             Err(e) => {
-                failed.insert((path.clone(), Kind::Preview));
+                failed.insert((ImgKey::first(&path), Kind::Preview));
                 eprintln!("  decode failed: {e}");
             }
         }

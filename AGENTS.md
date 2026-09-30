@@ -682,6 +682,94 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Gotchas by feature
 
+- **A multi-page TIFF's page is part of the *image's identity*, not of the file's.**
+  `ImgKey { path, page }` keys every cache that holds decoded pixels — the preview
+  cache, `failed`, the loader's `wanted`/`busy`, `Job`, `Msg::Preview`/`Full`, `cur`
+  and `shown`. A path-keyed cache hands back page 1 when you asked for page 3,
+  silently, and only for multi-page files. What stays keyed on the *path* is
+  everything that describes the file rather than its contents: grid thumbnails,
+  the watcher's stamps, and `ImageEdits` (a turn or a crop frame is an edit to the
+  document, and it is what `Ctrl+S` writes). `Job::path()` is the filesystem half,
+  for the sites that need it.
+
+- **The page is a cursor, not a list.** `Gallery.files` is untouched and still one
+  entry per file; the page is a separate field on the gallery. Splicing an entry
+  per page into `files` was rejected because `files` is the unfiltered shape that
+  the filter, the resume point, the rescan and `all_files` are all keyed on, and
+  growing it means growing the index arithmetic in every one of them. A cursor
+  leaves all of that alone and only `next`/`prev` learn about pages. Consequence
+  worth knowing: `prev` from page 0 goes to the **last** page of the previous file,
+  not its first, or stepping backwards would need two presses per file.
+
+- **Page counts are learned on arrival, never during a scan.** `tiff_page_count`
+  reads **four bytes** and gives up for anything that is not a TIFF, because it
+  runs on every `goto`. The first version read the whole file with `fs::read`
+  before sniffing, which would have pulled a 10 MB JPEG into memory on every
+  keypress. Measured cost of one probe: **0.12 ms** on a 2.3 MB JPEG, 0.15 ms on a
+  PNG, 0.29 ms on a 4-page TIFF, and the answer is cached per file.
+  `learn_pages` answers from that cache — an early version always re-read, which
+  put a `File::open` on the critical path of every arrow key, and
+  `the_page_count_is_learned_from_the_file_and_asked_only_once` checks it by
+  *deleting the file* and requiring the answer to survive, which no amount of
+  counting would catch. A re-exported file must `forget_page_count`, or a
+  12-page document turned into a 1-page one leaves the cursor on page 12 of a
+  phantom.
+
+- **`protected_preview_keys` is a pure function and has to be.** The preview cache's
+  rule is "never evict what is on screen or a neighbour", and once the cache is
+  keyed by (file, page) the obvious reading — protect every page of the protected
+  *files* — makes the cache **unbounded**: walk into a 20-page document and all 20
+  pages are the same file, so all 20 are protected, so nothing is evictable and the
+  eviction loop finds no victim and gives up. It cannot happen on a photo folder,
+  where every file is one page, so it is invisible until you look at memory. Hence
+  the policy is `protected_preview_keys(files, index, page, shown, radius)` in
+  `lib.rs`: the current *page*, page 0 of each neighbour, and whatever is on screen.
+
+- **`image` 0.25 cannot read page 2 of a TIFF.** `TiffDecoder` implements only
+  `ImageDecoder`, whose `read_image` *consumes* the decoder, and it is not an
+  `AnimationDecoder` — so there is no way to ask it for the next page. The `tiff`
+  crate underneath has `more_images`/`next_image`, which is why it is a direct
+  dependency; it was already in the tree, so nothing new is downloaded. Two
+  consequences: `image` 0.25 also *writes* only single-page TIFFs, so a test
+  fixture has to use the `tiff` crate's encoder; and its `write_image` is what
+  *chains* into the IFD sequence, while `new_directory` makes a directory
+  explicitly **not** chained — an unlinked IFD is invisible to `more_images()`, so a
+  fixture built with it is single-page however many times the loop runs.
+
+- **Only pages whose colour type is a straight reinterpretation of the decoded
+  buffer are read.** Gray/GrayA/RGB/RGBA at 8 and 16 bits, with 16-bit arriving as
+  native-endian `u16`. CMYK, YCbCr, Lab and palette are **refused with an error**
+  rather than approximated: turning those into RGB means applying a colormap or a
+  colour transform, which is `image`'s job, and guessing gives pages that are
+  subtly and silently the wrong colour. An error is visible; wrong pixels are not.
+  `failed` is keyed per *image* for the same reason — one unreadable page must not
+  poison a document's other 199.
+
+- **Saving a page is refused, and the refusal is the feature.** `Ctrl+S` on page 3
+  of a document says so. The lossless path rewrites the whole file's DCT
+  coefficients and the re-encode fallback starts from page 1, so saving would write
+  page 1's pixels under the document's name and call it a lossless save of what
+  you were looking at.
+
+- **APNG and animated WebP were frozen on frame 0 until this.** `image` 0.25
+  implements `AnimationDecoder` for `GifDecoder`, `ApngDecoder` **and**
+  `WebPDecoder`, and the app used one of the three. The other two fell through to
+  the ordinary single-image decode: no error, no blank, just a picture that would
+  not move. Two non-obvious details: the frame count is asked for *before*
+  decoding, because `ApngDecoder` over a still PNG yields zero frames (harmless)
+  while `WebPDecoder` over a still WebP yields one *decoded* frame that the caller
+  throws away and then decodes a second time; and `"RIFF"` is not enough to sniff
+  WebP, because that is also how WAV and AVI begin. **No crate in this tree can
+  encode an APNG or an animated WebP** — `image` writes lossless VP8L stills and
+  has no `write_frames` — so the APNG fixture is assembled chunk by chunk in
+  `tests/multiframe.rs` and the animated-WebP *decode* path is unverified. TODO.md
+  records the gap.
+
+- **APNG `delay_num / delay_den` is a number of seconds.** The first hand-built
+  fixture wrote `120, 1` — 120 *seconds* per frame — and the only symptom was a
+  four-frame animation claiming to run for eight minutes. Nothing errored and the
+  frame count was right throughout, which is exactly why it needed a real file.
+
 - **CBZ/ZIP**: opening an archive extracts supported entries to `%TEMP%\image-viewer\<hash(path, mtime, size)>` and opens it as a folder gallery. The temp dir is reused for unchanged archives, deleted on folder switch and exit. Triage (Del, and the Move/Copy buttons) is disabled for archives; wallpaper copies the member to `%APPDATA%\image-viewer\wallpaper.<ext>` first (temp dir dies). Don't persist the temp path into `config.folder`.
 - **Resume (`last_by_folder`)** stores **file names, not full paths** (archives and folders share the format); the folder path is the key. An explicit CLI file argument beats resume — don't reintroduce the unconditional resume lookup.
 - **File registration** (`src/fileassoc.rs`): per-user HKCU ProgID + `OpenWithProgids` for all 9 extensions; never claims default silently (Windows 8+ policy). ProgID embeds the exe folder name — moving the exe requires re-registering.

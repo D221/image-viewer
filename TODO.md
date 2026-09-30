@@ -88,28 +88,66 @@ is how a wide-gamut HEIC looks flat and nobody notices, because everything
 
 ---
 
-## 3. Multi-page TIFF page navigation
+## 3. Animated WebP decode — implemented, unverified
 
-TIFF, BMP, ICO and QOI decode now. A multi-page TIFF shows **page 1 only**, with
-no indication that more pages exist, and a document scan is the main reason people
-have TIFFs.
+The animated-WebP path is written and reached (`animated_format` →
+`animation_frame_count` → `load_animation` with `WebPDecoder`), and the *detection*
+is tested: a still WebP is recognised as WebP and reported as **not** an animation,
+which is the part that would otherwise decode the file twice.
 
-Not tested, and that is a real gap rather than an oversight: `image` 0.25's
-`TiffEncoder` starts a *new* TIFF stream per instance, so writing a second page
-with a second encoder produces two concatenated headers and a file that no
-decoder will read. There is no way to synthesise a valid multi-page TIFF with
-the crate already in the tree, so a test would have to hand-build the IFD chain.
+**The decode itself is not verified, because nothing in this dependency set can
+produce an animated WebP to test against.** Checked and ruled out:
+`image` 0.25 writes lossless VP8L *stills* only; `image-webp` 0.2.4 has an encoder
+but it is single-frame; there is no libwebp binding. Hand-building an animated
+WebP means emitting a `VP8X` + `ANIM` + `ANMF` container around a real VP8 or
+VP8L bitstream, and the VP8L one is Huffman-coded — not worth writing by hand to
+test three lines that call an upstream decoder.
 
-The `Tiff` walker in `lib.rs` (written for the embedded-thumbnail work) already
-resolves IFD0's next-IFD pointer, which is exactly the page chain — so a
-`pages(path) -> Vec<usize>` helper is mostly already there.
+To close it: find one real animated WebP (a 2 KB one is enough), and either commit
+it as a fixture or add a decoder to a test-only helper. The APNG fixture in
+`tests/multiframe.rs` is the model — it is assembled chunk by chunk because nothing
+else could produce one.
 
-Until then it is a caveat in the README rather than a feature.
+## 3b. HEIF / AVIF image sequences — not started, and the crate cannot do it
+
+An ISO-BMFF `meta` box can hold several images (a burst saved as one HEIF). The
+`heic` 0.1.6 API has **no** sequence support at all: primary image, thumbnail,
+depth, gain map, auxiliary images — and that is everything. Reading a sequence
+would mean hand-walking `meta`/`iinf`/`iref` to find the item offsets and then
+calling `decode` on a constructed range per item.
+
+Left alone deliberately: sequences are rare, the per-item work is guessable from
+the spec, and guessing at a container layout is how you get a viewer that shows
+item 1 of a 3-image burst with no indication that two more exist — the exact
+failure mode item 2 above is written to avoid. If it is ever wanted, the ISO-BMFF
+walk belongs in `lib.rs` with tests, and the "is this a sequence?" question has to
+be asked during sniffing, not after decoding the primary.
+
+## 3c. Multi-page TIFF: what is deliberately not supported
+
+Pages work (see `AGENTS.md`), with three limits that are choices rather than gaps:
+
+- **Colour types that need a colormap or colour transform** — CMYK, YCbCr, Lab,
+  palette — are refused with an error past page 0. Page 1 of such a file still
+  works, because page 1 goes through `image`. If these turn out to be common in
+  real scans, the fix is to have `image` do the conversion for *every* page rather
+  than only the first, and the branch to add is small.
+- **`Ctrl+S` on a page is refused.** "Save what I see" is a statement about a file.
+  Supporting it means `save_transformed` gains a page, and the lossless JPEG path
+  gains a whole new mode (a multi-page TIFF save is a re-encode, not a DCT
+  transform), so the "lossless" claim would have to be re-examined rather than
+  assumed.
+- **The grid shows page 1 only**, one cell per file. A document is one thing to
+  browse, and a grid of 200 cells for one file is worse than one cell.
 
 ---
 
 ## 4. Smaller known items
 
+- **Thumbnails of a multi-page document are page 1, always**, and the decode for a
+  grid cell is the full pipeline at 256 px. For a 25 MB scan that is the dominant
+  cost of opening the grid, and it is the same cost as for any other large file —
+  see the next item.
 - **Large scans are the grid's real bottleneck now.** The three ~25 MB booklet
   JPEGs have no embedded thumbnail and take ~800 ms each even via the turbojpeg
   DCT path, which still decompresses every coefficient. Embedded EXIF thumbnails

@@ -33,9 +33,10 @@ use std::time::{Duration, Instant};
 use image_viewer::perf;
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
-    load_image_preview_full, set_downscale_filter, set_linear_resample,
-    scan_folder_sorted, xformed_footprint, Animation, Config, DownscaleFilter, Gallery, ImageData,
-    SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    load_page_preview_full, protected_preview_keys, set_downscale_filter, set_linear_resample,
+    scan_folder_sorted, xformed_footprint, Animation, Config, DownscaleFilter, Gallery, ImgKey,
+    ImageData, SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS,
+    PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -631,7 +632,7 @@ struct PreviewData {
 
 enum Msg {
     Preview {
-        path: PathBuf,
+        key: ImgKey,
         result: Result<PreviewData, String>,
     },
     Thumb {
@@ -639,7 +640,7 @@ enum Msg {
         result: Result<PreviewData, String>,
     },
     Full {
-        path: PathBuf,
+        key: ImgKey,
         result: Result<Arc<ImageData>, String>,
     },
     Exif {
@@ -670,19 +671,19 @@ fn new_loader(ctx: &Context, tx: Sender<Msg>) -> image_viewer::Loader {
 fn fail_msg(job: &Job, err: String) -> (Msg, bool) {
     let msg = match job.kind {
         Kind::Preview => Msg::Preview {
-            path: job.path.clone(),
+            key: job.key.clone(),
             result: Err(err),
         },
         Kind::Full => Msg::Full {
-            path: job.path.clone(),
+            key: job.key.clone(),
             result: Err(err),
         },
         Kind::Thumb => Msg::Thumb {
-            path: job.path.clone(),
+            path: job.path().to_path_buf(),
             result: Err(err),
         },
         Kind::Exif => Msg::Exif {
-            path: job.path.clone(),
+            path: job.path().to_path_buf(),
             info: None,
         },
     };
@@ -694,21 +695,27 @@ fn fail_msg(job: &Job, err: String) -> (Msg, bool) {
 /// hook reintroduced cancellation will use, and the reason the loader re-queues
 /// a wanted job on abandonment rather than on completion.
 fn run_job(job: &Job) -> (Msg, bool) {
-    let path = job.path.clone();
+    let path = job.path().to_path_buf();
+    // The page is part of the request, so the worker decodes *that* page rather
+    // than always the first. Pages of a multi-page TIFF are one file read and one
+    // IFD walk apart, so this costs nothing beyond the IFD walk.
+    let page = job.key.page;
     let msg = match job.kind {
         Kind::Preview => Msg::Preview {
-            result: decode_preview(&path, job.target_dim),
-            path,
+            result: decode_preview(&path, job.target_dim, page),
+            key: job.key.clone(),
         },
         Kind::Thumb => Msg::Thumb {
-            result: decode_preview(&path, job.target_dim),
+            // A grid cell shows the file's first page, always — a cell is one
+            // picture, and making it a slideshow would be worse than useless.
+            result: decode_preview(&path, job.target_dim, 0),
             path,
         },
         Kind::Full => Msg::Full {
-            result: load_image_full(&path)
+            result: load_image_full(&path, page)
                 .map(Arc::new)
                 .map_err(|e| e.to_string()),
-            path,
+            key: job.key.clone(),
         },
         Kind::Exif => Msg::Exif {
             info: extract_exif(&path),
@@ -721,11 +728,11 @@ fn run_job(job: &Job) -> (Msg, bool) {
 /// Decode a preview sized for the current display area (in physical pixels).
 /// The result is the full-res image when it fits the target, otherwise a
 /// texture capped at the target long side — always sharp at fit-to-window.
-fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
+fn decode_preview(path: &Path, target_dim: u32, page: u32) -> Result<PreviewData, String> {
     // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
     // preview; everything else is fully decoded once and the preview is
     // derived from that, so the full image is already available.
-    let r = load_image_preview_full(path, target_dim).map_err(|e| e.to_string())?;
+    let r = load_page_preview_full(path, target_dim, page).map_err(|e| e.to_string())?;
     perf::count(perf::C_DECODE_CALLS, 1);
     let image = ColorImage::from_rgba_unmultiplied(
         [r.preview.width as usize, r.preview.height as usize],
@@ -1007,13 +1014,28 @@ struct MyApp {
     loader: Loader,
     rx: Receiver<Msg>,
 
-    previews: HashMap<PathBuf, Preview>,
-    failed: HashSet<(PathBuf, Kind)>,
+    /// Decoded previews, keyed by **(file, page)** rather than by file. Page 1 and
+    /// page 3 of one document are different pictures, and a path-keyed cache hands
+    /// back the wrong one — silently, and only for multi-page files.
+    previews: HashMap<ImgKey, Preview>,
+    /// `(key, kind)` pairs that failed to decode, permanent for the session.
+    /// Per *image*, so a document with one unreadable page keeps its other pages.
+    failed: HashSet<(ImgKey, Kind)>,
     clock: u64,
     frame: u64,
 
-    cur: Option<PathBuf>,   // what the user asked for
-    shown: Option<PathBuf>, // what is on screen (lags `cur` until its preview is ready)
+    /// What the user asked for: a file and a page of it.
+    cur: Option<ImgKey>,
+    /// What is on screen: a file and a page of it. Lags `cur` until the wanted
+    /// preview has been adopted by `sync_shown`.
+    ///
+    /// A key rather than a path, even though the two differ only by a page number
+    /// that is 0 almost always. During the lag — which is every uncached
+    /// navigation, and therefore most of them — `shown` names the *previous*
+    /// image, and if it remembered only the path then a document's old page would
+    /// be lost the moment you moved to another one. The page has to be part of
+    /// what "what is on screen" means.
+    shown: Option<ImgKey>,
     full: Option<FullImage>,
     full_due: Option<Instant>,
     view: View,
@@ -1243,7 +1265,20 @@ impl MyApp {
         // (0 ms) is the common one for navigation.
         let is_nav = self.lat.t_request.is_some();
         self.lat.begin(Instant::now(), is_nav);
-        self.cur = self.gallery.current().map(|p| p.to_path_buf());
+        // Learn how many pages the file we are arriving at has, *before* the page
+        // is read, so `next` knows whether there is a page 2 to go to. This is
+        // four bytes for anything that is not a TIFF, and the answer is cached, so
+        // it is paid once per file rather than once per visit.
+        if let Some(p) = self.gallery.current().map(|p| p.to_path_buf()) {
+            self.gallery.learn_pages(&p);
+        }
+        self.cur = self
+            .gallery
+            .current()
+            .map(|p| ImgKey {
+                path: p.to_path_buf(),
+                page: self.gallery.current_page(),
+            });
         // Preloading hit rate: the new image already had a preview, so the
         // first pixel is free. If this counter stays low, the preload window
         // is aimed wrong.
@@ -1270,12 +1305,16 @@ impl MyApp {
         if let Some(name) = self
             .cur
             .as_ref()
-            .and_then(|p| p.file_name())
+            .and_then(|p| p.path.file_name())
             .and_then(|n| n.to_str())
         {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-                "Image Viewer - {name}"
-            )));
+            // "page 3 of 12" only when the file has more than one page, so a
+            // normal photo's title is exactly what it always was.
+            let title = match self.gallery.pages_in_current() {
+                n if n > 1 => format!("Image Viewer - {name}  ({}/{})", self.gallery.current_page() + 1, n),
+                _ => format!("Image Viewer - {name}"),
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
         self.schedule();
     }
@@ -1340,14 +1379,19 @@ impl MyApp {
         self.anim = None;
     }
 
-    fn needs_full(&self, p: &PathBuf) -> bool {
-        if self.full.as_ref().is_some_and(|f| &f.path == p) {
+    /// Whether the current image still needs a full-resolution decode.
+    ///
+    /// Takes the *key*, not the path, because "is the full decode done" is a
+    /// question about a page: page 3 of a document has its own full decode and its
+    /// own failure, and asking about the file would answer for page 1.
+    fn needs_full(&self, key: &ImgKey) -> bool {
+        if self.full.as_ref().is_some_and(|f| f.path == key.path) {
             return false;
         }
-        if self.failed.contains(&(p.clone(), Kind::Full)) {
+        if self.failed.contains(&(key.clone(), Kind::Full)) {
             return false;
         }
-        let Some(pv) = self.previews.get(p) else {
+        let Some(pv) = self.previews.get(key) else {
             return false;
         };
         // The preview pass already decoded and kept the full image (adopted by
@@ -1371,7 +1415,10 @@ impl MyApp {
             .map(image_viewer::preview_target)
             .unwrap_or(PREVIEW_TEXTURE_DIM);
 
-        let cached: HashSet<PathBuf> = self.previews.keys().cloned().collect();
+        // The cache is keyed on (file, page), so this is the set of *images*
+        // already decoded rather than of files. That is what lets the planner ask
+        // "is page 3 cached" and get an honest answer instead of page 1's.
+        let cached: HashSet<ImgKey> = self.previews.keys().cloned().collect();
         let i = self.gallery.index.min(self.gallery.files.len().saturating_sub(1));
         let cur = self.gallery.files.get(i).cloned();
         // The plan is computed by the library so it can be tested; all this does
@@ -1381,10 +1428,15 @@ impl MyApp {
             Some(cur) => image_viewer::plan_jobs(&image_viewer::Plan {
                 files: &self.gallery.files,
                 index: i,
+                current_page: self.gallery.current_page(),
                 cached: &cached,
                 failed: &self.failed,
                 wants_exif: self.exif_loading,
-                wants_full: self.full_due.is_none() && self.needs_full(cur),
+                wants_full: self.full_due.is_none()
+                    && self.needs_full(&ImgKey {
+                        path: cur.clone(),
+                        page: self.gallery.current_page(),
+                    }),
                 current_stale: self.resize.pending(),
                 target_dim,
                 radius: PRELOAD_RADIUS,
@@ -1419,19 +1471,23 @@ impl MyApp {
 
         for m in msgs {
             match m {
-                Msg::Preview { path, result } => match result {
+                Msg::Preview { key, result } => match result {
                     Ok(p) => {
-                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let name = key
+                            .path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy();
                         let px = (p.image.size[0] as u32, p.image.size[1] as u32);
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         perf::count(perf::C_TEXTURE_UPLOADS, 1);
                         perf::record(perf::JOB_PREVIEW_MS, p.load_ms * 1000);
-                        if Some(&path) == self.cur.as_ref() {
+                        if Some(&key) == self.cur.as_ref() {
                             self.lat.preview(Instant::now());
                         }
                         self.clock += 1;
                         self.previews.insert(
-                            path.clone(),
+                            key.clone(),
                             Preview {
                                 tex,
                                 orig: p.orig,
@@ -1450,15 +1506,15 @@ impl MyApp {
                         // display grew again while it was decoding, the next
                         // frame re-arms it, so a resize is never left served by
                         // a texture that is still soft.
-                        if Some(&path) == self.cur.as_ref() {
+                        if Some(&key) == self.cur.as_ref() {
                             self.resize.landed();
                         }
-                        resched |= Some(&path) == self.cur.as_ref();
+                        resched |= Some(&key) == self.cur.as_ref();
                         // "Wait for load" mode: arrived preview for the
                         // current image unblocks; if the key is still held,
                         // queue one more advance — consumed next frame so the
                         // image is guaranteed to have been painted on screen.
-                        if Some(&path) == self.cur.as_ref() && self.waiting_load {
+                        if Some(&key) == self.cur.as_ref() && self.waiting_load {
                             self.waiting_load = false;
                             if self.config.block_while_loading {
                                 let (held_fwd, held_prev) = ctx.input(|i| {
@@ -1479,12 +1535,15 @@ impl MyApp {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to load {}: {}", path.display(), e);
-                        if Some(&path) == self.cur.as_ref() {
-                            self.error = Some(format!("Failed to load {}: {}", path.display(), e));
+                        eprintln!("Failed to load {}: {}", key, e);
+                        if Some(&key) == self.cur.as_ref() {
+                            self.error = Some(format!("Failed to load {}: {}", key, e));
                             self.waiting_load = false;
                         }
-                        self.failed.insert((path, Kind::Preview));
+                        // Failed is per *image*, not per file: a document whose
+                        // page 3 is an unsupported colour type must not poison its
+                        // other 199 pages for the session.
+                        self.failed.insert((key, Kind::Preview));
                     }
                 },
                 Msg::Thumb { path, result } => match result {
@@ -1524,15 +1583,15 @@ impl MyApp {
                         }
                     }
                 },
-                Msg::Full { path, result } => match result {
+                Msg::Full { key, result } => match result {
                     Ok(data) => {
                         perf::record(perf::JOB_FULL_MS, data.load_time.as_micros() as u64);
                         // Only keep it if the user is still on this image.
-                        if Some(&path) == self.cur.as_ref() {
+                        if Some(&key) == self.cur.as_ref() {
                             self.lat.full(Instant::now());
                             let load_ms = data.load_time.as_millis() as u64;
                             self.full = Some(FullImage {
-                                path,
+                                path: key.path,
                                 data,
                                 tiles: HashMap::new(),
                                 load_ms,
@@ -1540,12 +1599,12 @@ impl MyApp {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Full-res load failed for {}: {}", path.display(), e);
-                        self.failed.insert((path, Kind::Full));
+                        eprintln!("Full-res load failed for {}: {}", key, e);
+                        self.failed.insert((key, Kind::Full));
                     }
                 },
                 Msg::Exif { path, info } => {
-                    if Some(&path) == self.cur.as_ref() {
+                    if self.cur.as_ref().is_some_and(|c| c.path == path) {
                         self.exif_info = info;
                         self.exif_loading = false;
                     }
@@ -1560,24 +1619,27 @@ impl MyApp {
 
     fn evict_previews(&mut self) {
         while self.previews.len() > PREVIEW_CACHE_CAP {
-            let n = self.gallery.files.len();
-            let i = self.gallery.index;
-            let protected: HashSet<&PathBuf> = (0..=2 * PRELOAD_RADIUS)
-                .filter(|_| n > 0)
-                .map(|k| (i + n * 2 + k - PRELOAD_RADIUS) % n)
-                .filter_map(|idx| self.gallery.files.get(idx))
-                .chain(self.shown.iter())
-                .collect();
+            let protected = protected_preview_keys(
+                &self.gallery.files,
+                self.gallery.index,
+                self.gallery.current_page(),
+                self.shown.as_ref(),
+                PRELOAD_RADIUS,
+            );
             let victim = self
                 .previews
                 .iter()
-                .filter(|(p, _)| !protected.contains(p))
+                .filter(|(k, _)| !protected.contains(k))
                 .min_by_key(|(_, v)| v.used)
-                .map(|(p, _)| p.clone());
+                .map(|(k, _)| k.clone());
             match victim {
                 Some(v) => {
                     self.previews.remove(&v);
                 }
+                // Nothing outside the protected set, so the cap cannot be honoured
+                // and the cache is allowed to stay over it rather than evict the
+                // image on screen. Bounded in practice: the protected set is at
+                // most `2 * radius + 2` images.
                 None => break,
             }
         }
@@ -1608,9 +1670,13 @@ impl MyApp {
             self.anim = None;
             return;
         };
-        if self.anim.as_ref().is_some_and(|a| &a.path != &cur) {
+        if self.anim.as_ref().is_some_and(|a| a.path != cur.path) {
             self.anim = None;
         }
+        // Page 1 and page 3 of one document are the same *file* but a different
+        // picture, so the re-fit has to happen when the page changes and not only
+        // when the file does. Comparing the key is what catches that; a path
+        // comparison cannot, because the two have the same path.
         if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
             self.shown = Some(cur.clone());
             self.view.fit = true;
@@ -1620,10 +1686,10 @@ impl MyApp {
         // while the user was on a neighbouring image.
         if let Some(pv) = self.previews.get(&cur) {
             if let Some(data) = &pv.full {
-                if self.full.as_ref().map_or(true, |f| f.path != cur) {
+                if self.full.as_ref().map_or(true, |f| f.path != cur.path) {
                     let load_ms = data.load_time.as_millis() as u64;
                     self.full = Some(FullImage {
-                        path: cur.clone(),
+                        path: cur.path.clone(),
                         data: Arc::clone(data),
                         tiles: HashMap::new(),
                         load_ms,
@@ -1635,7 +1701,7 @@ impl MyApp {
         // (animated GIFs), including preloaded neighbours.
         if let Some(pv) = self.previews.get(&cur) {
             if let Some(anim) = &pv.anim {
-                if self.anim.as_ref().map_or(true, |a| &a.path != &cur) {
+                if self.anim.as_ref().map_or(true, |a| a.path != cur.path) {
                     let f0 = &anim.frames[0];
                     let image = ColorImage::from_rgba_unmultiplied(
                         [f0.width as usize, f0.height as usize],
@@ -1643,7 +1709,7 @@ impl MyApp {
                     );
                     let tex = ctx.load_texture("anim", image, TextureOptions::LINEAR);
                     self.anim = Some(AnimView {
-                        path: cur.clone(),
+                        path: cur.path.clone(),
                         anim: Arc::clone(anim),
                         tex,
                         start: Instant::now(),
@@ -1653,7 +1719,7 @@ impl MyApp {
             }
         }
         if let Some(s) = &self.shown {
-            if self.full.as_ref().is_some_and(|f| &f.path != s) {
+            if self.full.as_ref().is_some_and(|f| f.path != s.path) {
                 self.full = None;
             }
         }
@@ -1865,11 +1931,14 @@ impl MyApp {
 
     /// Do we hold anything that a content change would make stale?
     fn has_cached_state_for(&self, p: &Path) -> bool {
-        self.previews.contains_key(p)
+        // Every page of the file, not just page 0: a re-exported document makes
+        // all of its pages stale, and `any` over the keys is the only way to ask
+        // that when the cache is keyed by (file, page).
+        self.previews.keys().any(|k| k.path == p)
             || self.thumbs.contains_key(p)
             || self.full.as_ref().is_some_and(|f| f.path == p)
-            || self.cur.as_deref() == Some(p)
-            || self.failed.iter().any(|(q, _)| q == p)
+            || self.cur.as_ref().is_some_and(|c| c.path == p)
+            || self.failed.iter().any(|(q, _)| q.path == p)
     }
 
     /// Throw away everything cached for `p` and, if it is on screen, ask for it
@@ -1882,11 +1951,18 @@ impl MyApp {
     /// the entry and retries. Without this, "edit the file I am looking at"
     /// would reliably poison it.
     fn invalidate_path(&mut self, p: &Path, ctx: &Context) {
-        self.previews.remove(p);
+        // All pages, not one. A path-keyed `remove` would be a no-op now that the
+        // cache is keyed by (file, page), and the symptom would be a
+        // re-exported document still showing the old version of page 3.
+        self.previews.retain(|k, _| k.path != p);
         self.thumbs.remove(p);
         self.thumb_tries.remove(p);
-        self.failed.retain(|(q, _)| q != p);
-        let shown_gone = self.shown.as_deref() == Some(p);
+        self.failed.retain(|(q, _)| q.path != p);
+        // A re-export can turn a 12-page document into a 1-page one. Without this
+        // the cursor would sit on a page that no longer exists and `next` would
+        // walk off the end of a phantom document.
+        self.gallery.forget_page_count(p);
+        let shown_gone = self.shown.as_ref().is_some_and(|s| s.path == p);
         if self.full.as_ref().is_some_and(|f| f.path == p) {
             self.full = None;
             self.anim = None;
@@ -1900,7 +1976,7 @@ impl MyApp {
             // outcome that looks like a bug.
             self.shown = None;
         }
-        if self.cur.as_deref() == Some(p) {
+        if self.cur.as_ref().is_some_and(|c| c.path == p) {
             self.error = None;
             self.waiting_load = false;
             // A re-exported file usually has new dimensions, so re-fit instead
@@ -1962,8 +2038,10 @@ impl MyApp {
         let now: HashSet<PathBuf> = self.gallery.files.iter().cloned().collect();
         if before != now {
             let cur = self.cur.clone();
+            // By *file*: a hidden document releases all of its pages, not just the
+            // one that happened to be cached.
             self.previews
-                .retain(|p, _| now.contains(p) || Some(p) == cur.as_ref());
+                .retain(|k, _| now.contains(&k.path) || Some(&k.path) == cur.as_ref().map(|c| &c.path));
             self.thumbs.retain(|p, _| now.contains(p));
         }
     }
@@ -1976,9 +2054,11 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
-        self.previews.remove(&p);
-        self.failed.remove(&(p.clone(), Kind::Preview));
-        self.failed.remove(&(p.clone(), Kind::Full));
+        // Every page of the file goes: the file is leaving the gallery, so its
+        // other pages are unreachable and holding their pixels is pure waste.
+        self.previews.retain(|k, _| k.path != p);
+        self.failed.retain(|(k, _)| k.path != p);
+        self.gallery.forget_page_count(&p);
         if !self.gallery.is_empty() {
             let i = self.gallery.index.min(self.gallery.len() - 1);
             self.gallery.files.remove(i);
@@ -2123,11 +2203,28 @@ impl MyApp {
     }
 
     fn save_transformed_copy(&mut self) {
-        let Some(p) = self.cur.clone() else {
+        let Some(cur) = self.cur.clone() else {
             return;
         };
+        let p = cur.path.clone();
         if self.anim.as_ref().is_some_and(|a| a.path == p) {
             self.error = Some("Cannot save a transformed animation: it has many frames".into());
+            return;
+        }
+        // "Save what I see" is a statement about a *file*, and a page of a
+        // multi-page document is not a file. The lossless JPEG path rewrites the
+        // whole file's coefficients and the re-encode fallback starts from page 1,
+        // so saving while looking at page 3 would write page 1's pixels under the
+        // name of the document and call it a lossless save of what you were
+        // looking at. Refusing is the only honest answer until the save path
+        // learns to carry a page.
+        if cur.page > 0 {
+            self.error = Some(format!(
+                "Cannot save a single page of a multi-page document ({}/{}). \
+                 Saving works on the whole file.",
+                cur.page + 1,
+                self.gallery.pages_in_current()
+            ));
             return;
         }
         let edit = self.edits.get(&p);
@@ -2149,9 +2246,10 @@ impl MyApp {
     }
 
     fn copy_image_to_clipboard(&mut self) {
-        let Some(p) = self.cur.clone() else {
+        let Some(cur) = self.cur.clone() else {
             return;
         };
+        let p = cur.path.clone();
         // Fast path: full-res pixels already in memory.
         if let Some(data) = self
             .full
@@ -2178,8 +2276,11 @@ impl MyApp {
             }
             return;
         }
-        // Fallback (large JPEG before the full decode): decode off-thread.
-        std::thread::spawn(move || match image_viewer::load_image_full(&p) {
+        // Fallback (large JPEG before the full decode): decode off-thread. The
+        // page is carried so the clipboard gets the page you are looking at, not
+        // page 1 of it.
+        let page = cur.page;
+        std::thread::spawn(move || match image_viewer::load_image_full(&p, page) {
             Ok(d) => {
                 if let Err(e) = set_clipboard_rgba(&d) {
                     eprintln!("clipboard: {e}");
@@ -2233,14 +2334,14 @@ impl MyApp {
         let filename = self
             .shown
             .as_ref()
-            .and_then(|p| p.file_name())
+            .and_then(|k| k.path.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let location = match (&self.zip_archive, self.shown.as_ref()) {
-            (Some(a), Some(p)) => format!(
+            (Some(a), Some(k)) => format!(
                 "{}!{}",
                 a.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-                p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+                k.path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
             ),
             _ => format!("{}\\{}", self.folder.display(), filename),
         };
@@ -2250,10 +2351,18 @@ impl MyApp {
             idx,
             self.gallery.len()
         );
-        if let Some((shown_path, pv)) = self
+        // "page 3/12" in the readout as well as the title, because the title bar is
+        // not always visible and this is where the position already is.
+        let pages = self.gallery.pages_in_current();
+        if pages > 1 {
+            if let Some(k) = &self.shown {
+                s += &format!(" - page {}/{}", k.page + 1, pages);
+            }
+        }
+        if let Some((shown_key, pv)) = self
             .shown
             .as_ref()
-            .and_then(|p| self.previews.get(p).map(|pv| (p, pv)))
+            .and_then(|k| self.previews.get(k).map(|pv| (k, pv)))
         {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
             // Show the dimensions as displayed once turned, so the readout
@@ -2267,14 +2376,14 @@ impl MyApp {
             // the whole image instead, so that turning or mirroring still works on
             // the full frame. The readout says what the save will produce, or the
             // user has no way to find out what they framed.
-            if let Some(crop) = self.edits.crop(shown_path) {
+            if let Some(crop) = self.edits.crop(&shown_key.path) {
                 s += &format!(" - crop {}", crop.label());
             }
             if let Some(anim) = &pv.anim {
                 s += &format!(" - anim {} frames", anim.frames.len());
             } else {
                 match &self.full {
-                    Some(f) if Some(&f.path) == self.shown.as_ref() => {
+                    Some(f) if self.shown.as_ref().is_some_and(|k| f.path == k.path) => {
                         s += &format!(" - full {} ms", f.load_ms)
                     }
                     _ => {
@@ -2389,7 +2498,7 @@ impl MyApp {
                 pv.has_alpha,
             )
         };
-        let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown) {
+        let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown.path) {
             // Advance to the current frame and repaint at its boundary.
             let (idx, next_in) = anim_frame_state(&av.anim, av.start.elapsed());
             if idx != av.last_index {
@@ -2545,7 +2654,7 @@ impl MyApp {
         let screen_density = scale * ppp; // physical px per source px
         self.frame += 1;
         let frame = self.frame;
-        if let Some(full) = self.full.as_mut().filter(|f| f.path == shown) {
+        if let Some(full) = self.full.as_mut().filter(|f| f.path == shown.path) {
             if screen_density > preview_density {
                 let (fw, fh) = (full.data.width, full.data.height);
                 let vis = panel.intersect(footprint);
@@ -2639,7 +2748,10 @@ impl MyApp {
                 // left frames the same rectangle as dragging down and right.
                 let r = egui::Rect::from_min_max(start.min(p), start.max(p));
                 if let Some((crop, _)) = self.crop_from_screen(r, footprint, display_px, pv) {
-                    self.edits.set_crop(&cur, Some(crop));
+                    // Edits are per *file*, not per page: a turn or a crop frame
+                    // you set while looking at page 2 belongs to the document, and
+                    // that is the thing `Ctrl+S` writes.
+                    self.edits.set_crop(&cur.path, Some(crop));
                 }
             }
         }
@@ -2699,7 +2811,7 @@ impl MyApp {
                             thin,
                         );
                     }
-                    if let Some(crop) = self.edits.crop(&shown) {
+                    if let Some(crop) = self.edits.crop(&shown.path) {
                         painter.text(
                             cr.left_top() + Vec2::new(4.0, -6.0),
                             egui::Align2::LEFT_BOTTOM,
@@ -2891,7 +3003,8 @@ impl MyApp {
         ctx: &Context,
     ) {
         if let Some(p) = self.cur.clone() {
-            f(&mut self.edits, &p);
+            // Per file, not per page: a turn is an edit to the document.
+            f(&mut self.edits, &p.path);
         }
         self.view.fit = true;
         self.view.offset = Vec2::ZERO;
@@ -2924,7 +3037,7 @@ impl MyApp {
         display_px: Vec2,
         pv: &Preview,
     ) -> Option<(image_viewer::Crop, (u32, u32, u32, u32))> {
-        let edit = self.edits.get(&self.cur.clone()?);
+        let edit = self.edits.get(&self.cur.as_ref()?.path);
         let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
         // `orig` is already display-oriented, so stored is recovered by undoing
         // the EXIF's axis swap. `Xform::from_exif` is the same source of truth
@@ -2968,8 +3081,8 @@ impl MyApp {
         display_px: Vec2,
         pv: &Preview,
     ) -> Option<egui::Rect> {
-        let crop = self.edits.crop(&self.shown.clone()?)?;
-        let edit = self.edits.get(&self.shown.clone()?);
+        let crop = self.edits.crop(&self.shown.as_ref()?.path)?;
+        let edit = self.edits.get(&self.shown.as_ref()?.path);
         let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
         let exif = Xform::from_exif(pv.exif_tag).unwrap_or(Xform::Identity);
         let stored = if exif.swaps_axes() {
@@ -2996,7 +3109,7 @@ impl MyApp {
         self.crop_mode = !self.crop_mode;
         if !self.crop_mode {
             if let Some(p) = self.cur.clone() {
-                self.edits.clear_crop(&p);
+                self.edits.clear_crop(&p.path);
             }
         }
         ctx.request_repaint();
@@ -3005,8 +3118,8 @@ impl MyApp {
     /// The transform of the image the user last asked for.
     fn current_xform(&self) -> Xform {
         self.cur
-            .as_deref()
-            .map_or(Xform::Identity, |p| self.edits.xform(p))
+            .as_ref()
+            .map_or(Xform::Identity, |k| self.edits.xform(&k.path))
     }
 
     /// The transform of the image actually *on screen*.
@@ -3023,8 +3136,8 @@ impl MyApp {
     /// `cur` — the image the user last asked for — even if it is not up yet.
     fn shown_xform(&self) -> Xform {
         self.shown
-            .as_deref()
-            .map_or(Xform::Identity, |p| self.edits.xform(p))
+            .as_ref()
+            .map_or(Xform::Identity, |k| self.edits.xform(&k.path))
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
@@ -3055,11 +3168,11 @@ impl MyApp {
         eprintln!(
             "stall: {:?} not painted after {:?}\n  index={}/{} shown={:?} shown==cur={}\n  \
 cached={} poisoned={} previews={} thumbs={} panics={}",
-            cur.file_name().unwrap_or_default(),
+            cur.path.file_name().unwrap_or_default(),
             t.elapsed(),
             self.gallery.index,
             self.gallery.len(),
-            self.shown.as_ref().and_then(|p| p.file_name()),
+            self.shown.as_ref().and_then(|k| k.path.file_name()),
             self.shown == self.cur,
             cached,
             poisoned,
@@ -3173,7 +3286,8 @@ fn grid_cell(
     // nothing; only real decode failures count against the budget.
     if !thumbs.contains_key(path) && tries.get(path).copied().unwrap_or(0) < THUMB_TRIES {
         loader.push(Job {
-            path: path.to_path_buf(),
+            // A grid cell is one picture, so it is always the file's first page.
+            key: ImgKey::first(path),
             kind: Kind::Thumb,
             prio: PRIO_THUMB,
             target_dim: THUMB_DIM,
@@ -3722,7 +3836,7 @@ impl eframe::App for MyApp {
                     {
                         self.toggle_crop_mode(ctx);
                     }
-                    let has_crop = self.cur.as_deref().is_some_and(|p| self.edits.crop(p).is_some());
+                    let has_crop = self.cur.as_ref().is_some_and(|k| self.edits.crop(&k.path).is_some());
                     if ui
                         .add_enabled(
                             has_crop,
@@ -3734,7 +3848,7 @@ impl eframe::App for MyApp {
                         .clicked()
                     {
                         if let Some(p) = self.cur.clone() {
-                            self.edits.clear_crop(&p);
+                            self.edits.clear_crop(&p.path);
                         }
                         ctx.request_repaint();
                     }
@@ -3806,7 +3920,7 @@ impl eframe::App for MyApp {
                     ui.label("No EXIF available.");
                 }
                 if let Some(p) = self.cur.as_ref() {
-                    if let Ok(md) = std::fs::metadata(p) {
+                    if let Ok(md) = std::fs::metadata(&p.path) {
                         ui.separator();
                         ui.label(format!(
                             "Size: {:.1} MB",

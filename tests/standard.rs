@@ -1,5 +1,4 @@
 use image_viewer::load_image;
-use std::path::Path;
 
 /// Standardized comparison of load methods.
 /// Verifies all strategies return correct dimensions and produces consistent results.
