@@ -3109,6 +3109,37 @@ pub fn is_tiff_bytes(bytes: &[u8]) -> bool {
 pub const MAX_ANIM_FRAMES: usize = 240;
 pub const MAX_ANIM_BYTES: usize = 256 * 1024 * 1024;
 
+/// A format that can carry more than one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimatedFormat {
+    Gif,
+    /// Animated PNG. A *plain* PNG is the same container with no `acTL` chunk, so
+    /// "is this animated" is a question about the file and not the extension.
+    Png,
+    /// Animated WebP. Same story: a still WebP is a VP8/VP8L still, not an ANIM
+    /// chunk.
+    Webp,
+}
+
+/// The animated format these bytes are, if any.
+///
+/// Content-based like every other format decision here, so a PNG saved as `.jpg`
+/// still animates. Cheap: magic bytes only, no header parse, no decode.
+pub fn animated_format(bytes: &[u8]) -> Option<AnimatedFormat> {
+    if is_gif_bytes(bytes) {
+        return Some(AnimatedFormat::Gif);
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(AnimatedFormat::Png);
+    }
+    // RIFF container, and the form type at offset 8 has to be WEBP. Checking the
+    // "RIFF" alone would match WAV and AVI.
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(AnimatedFormat::Webp);
+    }
+    None
+}
+
 /// A decoded animation: fully composited RGBA frames and their delays.
 #[derive(Debug, Clone)]
 pub struct Animation {
@@ -3129,11 +3160,79 @@ impl Animation {
     }
 }
 
-/// Decode an animated GIF into composited frames, capped at the limits above.
-/// The `image` crate composites partial frames and applies disposal methods.
-fn load_animation(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<Animation, LoadError> {
+/// Decode an animation into composited frames, capped at the limits above.
+///
+/// Dispatch is on [`AnimatedFormat`], not on the extension, and the `image` crate
+/// composites partial frames and applies disposal methods for all three.
+///
+/// **Why the format is passed in rather than sniffed here:** for PNG and WebP the
+/// "is it actually animated" question needs the header, and asking for the header
+/// of a *still* image is not free for WebP, whose `into_frames` decodes a full
+/// frame. [`animation_frame_count`] is the cheap check and is called first.
+fn load_animation(
+    bytes: &[u8],
+    max_dim: u32,
+    start: std::time::Instant,
+    format: AnimatedFormat,
+) -> Result<Animation, LoadError> {
+    let cur = std::io::Cursor::new(bytes);
+    match format {
+        AnimatedFormat::Gif => {
+            collect_animation(image::codecs::gif::GifDecoder::new(cur)?, max_dim, start)
+        }
+        AnimatedFormat::Png => {
+            // `apng()` is infallible in practice; it is `Result` upstream.
+            let png = image::codecs::png::PngDecoder::new(cur)?;
+            collect_animation(png.apng()?, max_dim, start)
+        }
+        AnimatedFormat::Webp => {
+            collect_animation(image::codecs::webp::WebPDecoder::new(cur)?, max_dim, start)
+        }
+    }
+}
+
+/// How many frames this file actually has, or `None` if it is not one of the
+/// animated formats — without decoding any pixels.
+///
+/// This is the cheap gate. A still WebP passed to `into_frames` yields one
+/// *decoded* frame, and the caller then discards it and decodes the file again, so
+/// asking first is the difference between one decode and two. A plain PNG yields
+/// zero frames from `ApngDecoder` (upstream documents this), which is already
+/// cheap, but the count is asked for anyway so all three formats behave alike.
+pub fn animation_frame_count(bytes: &[u8], format: AnimatedFormat) -> Option<usize> {
     use image::AnimationDecoder;
-    let dec = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))?;
+    let cur = std::io::Cursor::new(bytes);
+    let count = match format {
+        AnimatedFormat::Gif => image::codecs::gif::GifDecoder::new(cur).ok()?.into_frames().count(),
+        AnimatedFormat::Png => {
+            let png = image::codecs::png::PngDecoder::new(cur).ok()?;
+            // Only an APNG reports an animation; a plain PNG must not be
+            // mistaken for a one-frame animation, which would decode it twice.
+            if !png.is_apng().ok()? {
+                return None;
+            }
+            png.apng().ok()?.into_frames().count()
+        }
+        AnimatedFormat::Webp => {
+            let webp = image::codecs::webp::WebPDecoder::new(cur).ok()?;
+            if !webp.has_animation() {
+                return None;
+            }
+            webp.into_frames().count()
+        }
+    };
+    Some(count)
+}
+
+/// Shared body of [`load_animation`], generic over the three decoders because
+/// `image` gives them no common concrete type.
+fn collect_animation<'a, D: image::AnimationDecoder<'a>>(
+    dec: D,
+    max_dim: u32,
+    start: std::time::Instant,
+) -> Result<Animation, LoadError> {
+    // No `use image::AnimationDecoder` needed: the bound on `D` above already
+    // puts the trait in scope for `into_frames`.
     let mut frames = Vec::new();
     let mut delays = Vec::new();
     let mut total = 0usize;
@@ -3152,6 +3251,15 @@ fn load_animation(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Resu
             rgba: frame.buffer().clone().into_raw(),
             load_time: start.elapsed(),
         };
+        // A single frame that is itself over the cap is not a truncated animation,
+        // it is a decompression bomb, and the running-total check above only
+        // stops *after* it has been allocated. One 20000x20000 APNG frame is
+        // 1.6 GB, and memory exhaustion here presents as a worker that never
+        // answers rather than as an error. Checked before the downscale, because
+        // that is the size that was actually allocated.
+        if data.rgba.len() > MAX_ANIM_BYTES {
+            break;
+        }
         if data.width.max(data.height) > max_dim {
             data = downscale_image(&data, max_dim);
         }
@@ -3259,23 +3367,34 @@ pub fn load_image_preview_full(
     let stored = image_dims_bytes(&bytes);
     let orig = stored.map(|(w, h)| if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
 
-        // Animated GIF: decode the whole loop once; no second full decode, no tiles.
-    if is_gif_bytes(&bytes) {
-        if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start) {
-            if anim.frames.len() > 1 {
-                let dims = (anim.frames[0].width, anim.frames[0].height);
-                return Ok(PreviewAndFull {
-                    preview: anim.frames[0].clone(),
-                    full: None,
-                    anim: Some(anim),
-                    orig: Some(dims),
-                    below_target: false,
-                    exif_tag: tag,
-                    crop_grid,
-                });
+    // An animation: decode the whole loop once; no second full decode, no tiles.
+    //
+    // GIF, APNG and animated WebP all land here, and all three used to be handled
+    // differently — in fact APNG and animated WebP were not handled at all, and
+    // showed their first frame forever, silently. The frame count is asked for
+    // first because it is a header parse, and because a still image of an
+    // animated format must not be decoded twice: once as a "one frame animation"
+    // and again by the normal path below.
+    if let Some(fmt) = animated_format(&bytes) {
+        let frames = animation_frame_count(&bytes, fmt).unwrap_or(0);
+        if frames > 1 {
+            if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start, fmt) {
+                if anim.frames.len() > 1 {
+                    let dims = (anim.frames[0].width, anim.frames[0].height);
+                    return Ok(PreviewAndFull {
+                        preview: anim.frames[0].clone(),
+                        full: None,
+                        anim: Some(anim),
+                        orig: Some(dims),
+                        below_target: false,
+                        exif_tag: tag,
+                        crop_grid,
+                    });
+                }
             }
         }
-        // Static or unreadable GIF: fall through to the normal decode path.
+        // A still image of an animated format, or one that would not decode:
+        // fall through to the normal path, which handles it once.
     }
 
     // A camera's embedded EXIF thumbnail, for grid-sized requests. Ahead of the

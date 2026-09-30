@@ -2240,6 +2240,7 @@ name = "image-viewer"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "crc32fast",
  "criterion",
  "eframe",
  "egui",
@@ -2247,6 +2248,7 @@ dependencies = [
  "heic",
  "image",
  "jxl-oxide",
+ "miniz_oxide 0.8.9",
  "nom-exif",
  "open",
  "pollster 1.0.1",
@@ -2257,6 +2259,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
+ "tiff",
  "trash",
  "turbojpeg",
  "wallpaper",

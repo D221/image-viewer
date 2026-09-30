@@ -23,6 +23,12 @@ trash = "5"
 open = "5"
 jxl-oxide = { version = "0.12", features = ["image"] }
 heic = { version = "0.1.6", features = ["av1", "parallel"] }
+# Multi-page TIFF. `image` 0.25 wraps this crate but exposes no way to reach page
+# 2 - `TiffDecoder` implements only `ImageDecoder`, whose `read_image` consumes
+# the decoder, and it is not an `AnimationDecoder`. So depending on it directly is
+# the only way to see a multi-page TIFF's other pages. It was already in the tree
+# transitively, so this adds no new download and no new native code.
+tiff = "0.11"
 arboard = "3"
 wallpaper = "3"
 winreg = "0.52"
@@ -34,6 +40,10 @@ pollster = "1.0.1"
 criterion = "0.5"
 proptest = "1"
 tempfile = "3"
+# For the hand-built APNG fixture in tests/multiframe.rs: chunk CRCs and the
+# zlib stream inside IDAT/fdAT. Both already in the tree via the `png` feature.
+crc32fast = "1"
+miniz_oxide = "0.8"
 
 [build-dependencies]
 winresource = "0.1.31"
