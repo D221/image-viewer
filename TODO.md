@@ -161,21 +161,53 @@ Pages work (see `AGENTS.md`), with three limits that are choices rather than gap
 
 ## 5. What the test suite cannot reach — be suspicious here
 
-`main.rs` is a binary, so none of these are testable today. Each has already cost
-time, and moving logic into `lib.rs` is the fix — which is what was done for the
-job planner, the resize policy and the rotation algebra, all now in `lib.rs` with
-tests.
+`main.rs` is a binary, so none of these are reachable from a test. Each has already
+cost time, and moving logic into `lib.rs` is the fix — which is what was done for
+the job planner, the resize policy and the rotation algebra, the page cursor and
+the preview-cache eviction policy, all now in `lib.rs` with tests.
 
 - **The file-change watcher** (`check_changed`, `invalidate_path`). Needs a real
   app and a real editor. Check: change a file on disk, confirm it reloads within
   a few seconds, *including while it is mid-write* — that case is the one that
   would poison the file if `invalidate_path` stopped clearing `failed`.
-- **Everything in `eframe::App::ui`** (keys, panels, Esc precedence).
-- **Rendering behaviour**, including the `glow`→`wgpu` backend swap. No test
-  touches it; the one end-to-end run that was done is recorded in `AGENTS.md`,
-  and it has to be a visible window on a *console* session or the numbers are
-  wrong.
 - **Colour correctness** — see decision 2 above. There is no ground truth.
+
+### Synthetic input: it works on a console session, and only partly
+
+This was listed here as "cannot be tested". It can be, partially — the blocker was
+never the app, it was the **RDP session**, where injected input silently does
+nothing. On `console`, `keybd_event` and `SetCursorPos` + `mouse_event` reach the
+window, and the tell is `frames with input events` in the `--perf` report, which
+stays at 0 when the injection is being swallowed.
+
+Verified this way on a 4-page TIFF and a JPEG:
+
+| | result |
+|---|---|
+| `ArrowRight` / `ArrowLeft` | title walks `(1/4)`→`(4/4)`→next file→`(4/4)` |
+| `C` (crop mode) | enters, frame draws on drag |
+| drag with the mouse | crop frame + rule-of-thirds + dimming bands, status reads `crop 1112x889` |
+| **`Ctrl` + anything** | **does not arrive** — modifier chords are dropped |
+| clicking a collapsed panel's chevron | did not expand it |
+
+So a chord like `Ctrl+S` cannot be driven this way, and neither can a button in a
+panel that has to be opened first. Both are harness limits, not app bugs — the
+handlers are one line each and the crop/save logic is covered by
+`tests/rotate_save.rs`.
+
+Take a screenshot to check what a keypress actually did; the window title does not
+change for most of them, and the status bar carries the state you want:
+
+```powershell
+Add-Type -AssemblyName System.Drawing
+$bmp = New-Object System.Drawing.Bitmap($w, $h)
+[System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($x, $y, 0, 0, $bmp.Size)
+$bmp.Save("$env:TEMP\shot.png", [System.Drawing.Imaging.ImageFormat]::Png)
+```
+
+- **Rendering behaviour**, including the `glow`→`wgpu` backend swap, is now
+  *measured* — see `AGENTS.md` and `tests/bench_framerate.ps1`. It has to be a
+  visible window on a *console* session or the numbers are wrong.
 
 ---
 

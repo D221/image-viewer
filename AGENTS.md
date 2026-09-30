@@ -396,6 +396,23 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   (`keybd_event`/`SetForegroundWindow` from another process) silently does
   nothing in an RDP session — `frames with input events` stays 0, which is how to
   notice. `quser` reporting `console` rather than `rdp-tcp#N` is the check.
+
+- **Synthetic input works on a console session, so "unverifiable GUI" is often
+  just "unverifiable *here*".** On `console`, `keybd_event` plus
+  `SetCursorPos`/`mouse_event` reach the window, and `frames with input events` in
+  the `--perf` report is the tell. Verified this way: arrow keys stepping a
+  4-page TIFF (`(1/4)`→`(4/4)`→next file→`(4/4)` on the way back, which is the
+  asymmetric page behaviour working), `C` entering crop mode, and a mouse drag
+  producing a crop frame with rule-of-thirds guides, dimming bands, and
+  `crop 1112x889` in the status bar.
+
+  **Modifier chords do not arrive** — `Ctrl+S` and `Ctrl+C` both do nothing, with
+  `keybd_event` and with `SendInput` and scan codes, while plain keys work. So a
+  chord cannot be driven this way; neither can a button in a panel that must be
+  opened first. Those are harness limits, not app bugs. Screenshot the window to
+  see what a keypress did — the title does not change for most keys and the status
+  bar is where the state is. `TODO.md` section 5 has the script.
+
 - **A second read of a file you just read is free.** `exif_orientation` calls
   `nom_exif::read_exif(path)` although the bytes are already in memory, which
   reads like an obvious win. Measured: 0.1-0.2 ms against a 10-17 ms `fs::read`,
