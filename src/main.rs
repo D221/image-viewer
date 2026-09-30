@@ -3369,10 +3369,13 @@ impl eframe::App for MyApp {
                     if ui.button("Browse File…").clicked() {
                         self.pick_file(ctx);
                     }
-                    if ui.button("Prev (←)").clicked() {
+                    // "Left"/"Right" rather than the arrow glyphs: the default
+                    // egui font has no U+2190/U+2192, so the arrows rendered as
+                    // blank boxes, and the name of the key is clearer anyway.
+                    if ui.button("Prev (Left)").clicked() {
                         self.step(ctx, false);
                     }
-                    if ui.button("Next (→)").clicked() {
+                    if ui.button("Next (Right)").clicked() {
                         self.step(ctx, true);
                     }
                     if ui.button("Fit (F)").clicked() {
@@ -3393,12 +3396,17 @@ impl eframe::App for MyApp {
                     // no other way to get it. They compose with the turns rather
                     // than replacing them, so turn-then-mirror is a diagonal
                     // mirror and mirror-twice is back to where it started.
+                    //
+                    // "H" and "V" rather than ⇋ and ⇅: the default egui font has
+                    // neither, and a missing glyph is a blank box, not a subtle
+                    // omission. `no_ui_text_uses_a_glyph_the_font_lacks` is what
+                    // stops that coming back.
                     let xform = self.current_xform();
                     let any = xform != Xform::Identity;
                     if ui
                         .add_enabled(
                             self.cur.is_some(),
-                            egui::Button::new("⇋ Mirror").shortcut_text(""),
+                            egui::Button::new("Mirror H").shortcut_text(""),
                         )
                         .on_hover_text("Mirror left-to-right")
                         .clicked()
@@ -3408,7 +3416,7 @@ impl eframe::App for MyApp {
                     if ui
                         .add_enabled(
                             self.cur.is_some(),
-                            egui::Button::new("⇅ Mirror").shortcut_text(""),
+                            egui::Button::new("Mirror V").shortcut_text(""),
                         )
                         .on_hover_text("Mirror top-to-bottom")
                         .clicked()
@@ -3482,7 +3490,7 @@ impl eframe::App for MyApp {
                     for line in info.lines() {
                         if let Some(url) = line.strip_prefix("Maps: ") {
                             // GPS link: clickable, opens the system browser.
-                            if ui.link("Open in Google Maps ↗").clicked() {
+                            if ui.link("Open in Google Maps").clicked() {
                                 if let Err(e) = open::that_detached(url) {
                                     self.error = Some(format!("Open link failed: {e}"));
                                 }

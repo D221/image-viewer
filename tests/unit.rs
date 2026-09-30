@@ -1154,6 +1154,108 @@ fn test_grid_thumbnail_is_centred_and_textured() {
     );
 }
 
+/// Every non-ASCII character the app can draw must be in the font it draws with.
+///
+/// This exists because of a bug you can see in a screenshot and nothing else
+/// catches: the mirror buttons shipped as **blank boxes**. egui's default font is
+/// a subset, and U+21CB / U+21C5 ("leftwards arrow over rightwards", "upwards
+/// arrow over downwards") simply are not in it. A missing glyph is not a compile
+/// error, not a warning, and not a failed assertion — it is a rectangle, and it
+/// looks like a font bug rather than a missing-feature bug.
+///
+/// The same class had already shipped once: `Prev (←)` and `Next (→)` were blank
+/// too, on the two most-used buttons in the app, since before any of this work.
+/// So this checks the *sources* rather than a hand-kept list, which means a glyph
+/// added to any string literal in either UI file is covered the moment it lands,
+/// with no list to forget to update.
+///
+/// Scans for non-ASCII in any line containing a quote, which over-covers (comments
+/// count). That is deliberate: a false positive here costs one word, and a false
+/// negative costs a blank box.
+/// Drop a trailing `//` comment, respecting string literals so a `//` inside a
+/// URL does not truncate the line.
+///
+/// Needed because the comment explaining the missing-glyph bug has to be able to
+/// *name* the glyphs it is about. Without this, the fix's own explanation keeps
+/// the test red.
+fn strip_line_comment(line: &str) -> &str {
+    let b = line.as_bytes();
+    let mut in_str = false;
+    let mut in_chr = false;
+    let mut esc = false;
+    for i in 0..b.len() {
+        let c = b[i];
+        if esc {
+            esc = false;
+            continue;
+        }
+        match c {
+            b'\\' if in_str || in_chr => esc = true,
+            b'"' if !in_chr => in_str = !in_str,
+            b'\'' if !in_str => in_chr = !in_chr,
+            b'/' if !in_str && !in_chr && i + 1 < b.len() && b[i + 1] == b'/' => {
+                return &line[..i];
+            }
+            _ => {}
+        }
+    }
+    line
+}
+
+#[test]
+fn no_ui_text_uses_a_glyph_the_font_lacks() {
+    let mut missing: Vec<(char, String)> = Vec::new();
+
+    let ctx = egui::Context::default();
+    // `run_pass`, not `run_ui`: this is a headless pass and nothing applies the
+    // font-atlas delta, which epaint 0.36 debug-asserts on when it is dropped.
+    let _ = run_pass(&ctx, egui::RawInput::default(), |ui| {
+        // Two sizes: a glyph can be in the family and still be dropped when
+        // rasterised at a size the atlas does not cover.
+        let sizes = [14.0f32, 12.0];
+
+        let mut seen: std::collections::BTreeMap<char, String> = Default::default();
+        for file in ["src/main.rs", "src/lib.rs"] {
+            let text = std::fs::read_to_string(file)
+                .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+            for (i, line) in text.lines().enumerate() {
+                let code = strip_line_comment(line);
+                for c in code.chars() {
+                    if c.is_ascii() || c == '\u{FFFD}' {
+                        continue;
+                    }
+                    seen.entry(c)
+                        .or_insert_with(|| format!("{file}:{}", i + 1));
+                }
+            }
+        }
+
+        ui.ctx().fonts_mut(|f| {
+            for (c, origin) in &seen {
+                let s = c.to_string();
+                let absent = sizes
+                    .iter()
+                    .any(|sz| !f.has_glyphs(&egui::FontId::proportional(*sz), &s));
+                if absent {
+                    missing.push((*c, origin.clone()));
+                }
+            }
+        });
+    });
+
+    assert!(
+        missing.is_empty(),
+        "these characters are not in egui's default font and will render as blank \
+         boxes:\n{}\nUse ASCII, or a character the font actually has (the app uses \
+         '…' '—' '·' '°' '⟲' '⟳' successfully).",
+        missing
+            .iter()
+            .map(|(c, o)| format!("  U+{:04X} '{}' first at {o}", *c as u32, c))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
 #[test]
 fn test_xformed_footprint_only_swaps_when_the_transform_does() {
     use image_viewer::{xformed_footprint, Xform};

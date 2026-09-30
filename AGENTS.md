@@ -449,6 +449,19 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   actually moved — and `step()` skips `goto()` when it did not, which avoids
   resetting the full-res dwell timer and re-planning the queue for an image that
   did not change. The grid's own selection already clamped and never wrapped.
+- **egui's default font is a subset, and a missing glyph is a blank box — not an
+  error, not a warning, not a failed assertion.** `no_ui_text_uses_a_glyph_the_font_lacks`
+  in `tests/unit.rs` scans both UI source files for non-ASCII characters and asks
+  the real font (`Fonts::has_glyphs`, at two sizes) whether it has them. This
+  exists because `Mirror ⇋ / ⇅` shipped as empty squares: U+21CB and U+21C5 are
+  simply not in the family. The same class had already shipped on the two
+  most-used buttons in the app — `Prev (←)` and `Next (→)`, U+2190/U+2192 — since
+  long before any of this work, which is the sort of thing that survives because
+  nobody is looking at a button. **Characters that do work**: `…` `—` `·` `°` `⟲`
+  `⟳`. Everything else is ASCII or a blank box. It reads the *sources* rather than
+  a list, so it cannot fall behind; `strip_line_comment` keeps the comment
+  explaining the bug from keeping the test red, since that comment has to be able
+  to name the glyphs. Verified to fail with `⇋` reintroduced.
 - **`shown` and `cur` are different images, and the draw path must use `shown` for
   everything.** `cur` is the wanted image, set by `goto()` on a keypress;
   `shown` only advances once the preview has actually been adopted by
