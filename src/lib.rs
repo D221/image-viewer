@@ -3140,6 +3140,188 @@ pub fn animated_format(bytes: &[u8]) -> Option<AnimatedFormat> {
     None
 }
 
+/// Upper bound on the pages walked in one TIFF.
+///
+/// A corrupt or hostile file can chain IFDs indefinitely, and counting them is a
+/// `next_image()` per page. 4096 is far past any real document, and the point of
+/// the cap is that the walk terminates on *this* machine rather than on whatever
+/// the file claims.
+pub const MAX_TIFF_PAGES: u32 = 4096;
+
+/// How many pages this file has — 1 for anything that is not a readable TIFF.
+///
+/// **Deliberately not called during a folder scan.** A scan would mean one extra
+/// file open and IFD walk per TIFF, and start-up is the thing this project spends
+/// the most effort on; the scan already reads every file's first bytes for
+/// format sniffing, and that is where the cost has to stay. The count is asked
+/// for the first time a file is opened, and the gallery remembers the answer, so
+/// it is paid once per file rather than once per visit.
+///
+/// Returns 1 rather than an error for everything unreadable, because "not a
+/// multi-page TIFF" and "a TIFF we cannot read" both mean the same thing to every
+/// caller here: one page.
+pub fn tiff_page_count(path: &Path) -> u32 {
+    tiff_page_count_bytes(&std::fs::read(path).unwrap_or_default())
+}
+
+/// [`tiff_page_count`] over bytes already in hand, so a caller that has just read
+/// the file does not read it again.
+pub fn tiff_page_count_bytes(bytes: &[u8]) -> u32 {
+    if !is_tiff_bytes(bytes) {
+        return 1;
+    }
+    let Ok(mut dec) = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)) else {
+        return 1;
+    };
+    // `Decoder::new` has already read the first IFD, so the count starts at one.
+    let mut n = 1u32;
+    while dec.more_images() && n < MAX_TIFF_PAGES {
+        if dec.next_image().is_err() {
+            // A truncated chain: report what was really there rather than
+            // guessing, and rather than failing the file outright.
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// Decode page `page` (0-based) of a TIFF, downscaled to `max_dim`.
+///
+/// Goes through the `tiff` crate rather than `image`, and that is not a
+/// preference: `image` 0.25's `TiffDecoder` implements only `ImageDecoder`, whose
+/// `read_image` *consumes* the decoder, and it is not an `AnimationDecoder`. There
+/// is no way to ask it for page 2. The `tiff` crate has `more_images` and
+/// `next_image`, which is why it is a direct dependency.
+///
+/// The colour types handled are the ones that are a straight reinterpretation of
+/// the decoded buffer. CMYK, YCbCr, Lab and palette images are **not**: applying
+/// a colormap or a colour transform correctly is `image`'s job, and guessing at it
+/// here would produce pages that are subtly, silently the wrong colours — which
+/// for a scanned document means invisible but for a photo means wrong. Those
+/// return an error, which surfaces the same way any other decode failure does,
+/// rather than quietly showing something else.
+fn decode_tiff_page(
+    bytes: &[u8],
+    page: u32,
+    max_dim: u32,
+    start: std::time::Instant,
+) -> Result<ImageData, LoadError> {
+    // The `tiff` crate has its own error type and `LoadError` has no `From` for
+    // it. Routing through `Other` keeps the message, which matters: a multi-page
+    // file that cannot be read is otherwise an unexplained blank panel.
+    fn tiff_err(e: tiff::TiffError) -> LoadError {
+        LoadError::Other(format!("tiff: {e}"))
+    }
+    let mut dec = tiff::decoder::Decoder::new(std::io::Cursor::new(bytes)).map_err(tiff_err)?;
+    for _ in 0..page {
+        if !dec.more_images() {
+            return Err(LoadError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("page {page} requested, file has fewer"),
+            )));
+        }
+        dec.next_image().map_err(tiff_err)?;
+    }
+    let (w, h) = dec.dimensions().map_err(tiff_err)?;
+    let kind = dec.colortype().map_err(tiff_err)?;
+    let result = dec.read_image().map_err(tiff_err)?;
+
+    /// Straight reinterpretation of the decoded buffer, then the one conversion
+    /// every page shares.
+    ///
+    /// Only the types where that reinterpretation is the whole story are
+    /// accepted. CMYK, YCbCr, Lab and palette images are **not**: turning those
+    /// into RGB means applying a colormap or a colour transform, which is
+    /// `image`'s job, and approximating it here would produce pages that are
+    /// subtly and silently the wrong colours — for a photo, wrong; for a scanned
+    /// document, invisible. They return an error, which surfaces the way any
+    /// other decode failure does, instead of quietly showing something else.
+    ///
+    /// The 16-bit buffers arrive as native-endian `u16` (the crate converts), so
+    /// those are handled properly rather than reinterpreted from bytes.
+    fn to_rgba8(
+        w: u32,
+        h: u32,
+        kind: tiff::ColorType,
+        result: tiff::decoder::DecodingResult,
+    ) -> Result<image::RgbaImage, LoadError> {
+        use tiff::ColorType as T;
+        use tiff::decoder::DecodingResult as D;
+        let bad = |what: &str| {
+            LoadError::Other(format!(
+                "TIFF page is {kind:?}, which is not supported past the first page ({what})"
+            ))
+        };
+        let need = |got: usize, want: usize| -> Result<(), LoadError> {
+            if got == want {
+                Ok(())
+            } else {
+                Err(bad(&format!("{got} samples for {want} pixels")))
+            }
+        };
+        let img: image::DynamicImage = match (kind, result) {
+            (T::Gray(8), D::U8(b)) => {
+                need(b.len(), (w * h) as usize)?;
+                image::GrayImage::from_raw(w, h, b).ok_or_else(|| bad("bad size"))?.into()
+            }
+            (T::GrayA(8), D::U8(b)) => {
+                need(b.len(), (w * h * 2) as usize)?;
+                image::ImageBuffer::<image::LumaA<u8>, _>::from_raw(w, h, b)
+                    .ok_or_else(|| bad("bad size"))?
+                    .into()
+            }
+            (T::RGB(8), D::U8(b)) => {
+                need(b.len(), (w * h * 3) as usize)?;
+                image::RgbImage::from_raw(w, h, b).ok_or_else(|| bad("bad size"))?.into()
+            }
+            (T::RGBA(8), D::U8(b)) => {
+                need(b.len(), (w * h * 4) as usize)?;
+                image::RgbaImage::from_raw(w, h, b).ok_or_else(|| bad("bad size"))?.into()
+            }
+            (T::Gray(16), D::U16(b)) => {
+                need(b.len(), (w * h) as usize)?;
+                image::ImageBuffer::<image::Luma<u16>, _>::from_raw(w, h, b)
+                    .ok_or_else(|| bad("bad size"))?
+                    .into()
+            }
+            (T::GrayA(16), D::U16(b)) => {
+                need(b.len(), (w * h * 2) as usize)?;
+                image::ImageBuffer::<image::LumaA<u16>, _>::from_raw(w, h, b)
+                    .ok_or_else(|| bad("bad size"))?
+                    .into()
+            }
+            (T::RGB(16), D::U16(b)) => {
+                need(b.len(), (w * h * 3) as usize)?;
+                image::ImageBuffer::<image::Rgb<u16>, _>::from_raw(w, h, b)
+                    .ok_or_else(|| bad("bad size"))?
+                    .into()
+            }
+            (T::RGBA(16), D::U16(b)) => {
+                need(b.len(), (w * h * 4) as usize)?;
+                image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(w, h, b)
+                    .ok_or_else(|| bad("bad size"))?
+                    .into()
+            }
+            // The kinds the buffer layout does not describe, and any mismatch
+            // between the declared colour type and the samples that arrived.
+            _ => return Err(bad("unsupported colour type")),
+        };
+        Ok(img.to_rgba8())
+    }
+
+    let mut data = ImageData {
+        width: w,
+        height: h,
+        rgba: to_rgba8(w, h, kind, result)?.into_raw(),
+        load_time: start.elapsed(),
+    };
+    if data.width.max(data.height) > max_dim {
+        data = downscale_image(&data, max_dim);
+    }
+    Ok(normalized(data))
+}
+
 /// A decoded animation: fully composited RGBA frames and their delays.
 #[derive(Debug, Clone)]
 pub struct Animation {
@@ -3342,6 +3524,21 @@ pub fn load_image_preview_full(
     path: &Path,
     preview_max_dim: u32,
 ) -> Result<PreviewAndFull, LoadError> {
+    load_page_preview_full(path, preview_max_dim, 0)
+}
+
+/// [`load_image_preview_full`] for a specific page of a multi-page file.
+///
+/// `page` is 0-based and only TIFF has more than one; every other format ignores
+/// it, because a GIF's "pages" are frames and are handled by the animation path
+/// above. Page 0 goes through exactly the same code it always did — the existing
+/// single-page function is this one with a zero — so nothing about how the common
+/// case decodes has changed.
+pub fn load_page_preview_full(
+    path: &Path,
+    preview_max_dim: u32,
+    page: u32,
+) -> Result<PreviewAndFull, LoadError> {
     let start = std::time::Instant::now();
     let bytes = std::fs::read(path)?;
     let max_dim = preview_max_dim.min(MAX_TEXTURE_DIM);
@@ -3366,6 +3563,29 @@ pub fn load_image_preview_full(
     };
     let stored = image_dims_bytes(&bytes);
     let orig = stored.map(|(w, h)| if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
+
+    // A page after the first, of a multi-page TIFF. Ahead of everything else
+    // because no other format has pages, and a TIFF is not animated, so the
+    // animation path below cannot claim it.
+    //
+    // `orig` is deliberately left as the *file's* first-page dimensions: it is
+    // what the window fits the image into and what the zoom maths uses, and
+    // pages of one document are near enough always the same size. It is
+    // recomputed from the decoded page below, because a document whose pages
+    // differ in size is legal and showing page 3 in page 1's frame is wrong.
+    if page > 0 && is_tiff_bytes(&bytes) {
+        let data = decode_tiff_page(&bytes, page, max_dim, start)?;
+        let dims = (data.width, data.height);
+        return Ok(PreviewAndFull {
+            preview: data,
+            full: None,
+            anim: None,
+            orig: Some(dims),
+            below_target: false,
+            exif_tag: tag,
+            crop_grid,
+        });
+    }
 
     // An animation: decode the whole loop once; no second full decode, no tiles.
     //

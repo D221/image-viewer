@@ -335,6 +335,163 @@ fn a_one_frame_gif_is_not_reported_as_an_animation() {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-page TIFF
+// ---------------------------------------------------------------------------
+
+/// A multi-page TIFF, one solid colour per page.
+///
+/// Built with the `tiff` crate's encoder rather than the `image` crate's,
+/// because `image` 0.25 writes single-page TIFFs only — which is the same
+/// limitation that makes reading page 2 need the `tiff` crate directly.
+///
+/// `write_image` is the whole page in one call, and it *chains* into the IFD
+/// sequence, so calling it in a loop is what produces a multi-page file. The
+/// first attempt at this used `new_directory()` per page, which produces
+/// directories that are explicitly **not** linked into the sequence — an
+/// unlinked IFD is invisible to `more_images()`, so the file came out
+/// single-page no matter how many times the loop ran.
+fn multipage_tiff(pages: &[[u8; 3]], w: u32, h: u32) -> Vec<u8> {
+    use tiff::encoder::{colortype, TiffEncoder};
+    let mut out = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
+        for rgb in pages {
+            let px: Vec<u8> = (0..(w * h)).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect();
+            enc.write_image::<colortype::RGBA8>(w, h, &px)
+                .expect("one chained page");
+        }
+    }
+    out
+}
+
+/// Pages that are not all the same size, which is legal in a TIFF and which the
+/// viewer has to notice.
+fn mixed_size_tiff(sizes: &[(u32, u32)]) -> Vec<u8> {
+    use tiff::encoder::{colortype, TiffEncoder};
+    let mut out = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
+        for &(w, h) in sizes {
+            let px: Vec<u8> = (0..(w * h)).flat_map(|_| [9u8, 9, 9, 255]).collect();
+            enc.write_image::<colortype::RGBA8>(w, h, &px).unwrap();
+        }
+    }
+    out
+}
+
+#[test]
+fn a_multi_page_tiff_reports_every_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "three.tif",
+        &multipage_tiff(&[[255, 0, 0], [0, 255, 0], [0, 0, 255]], 16, 12),
+    );
+
+    let bytes = std::fs::read(&p).unwrap();
+    assert_eq!(
+        image_viewer::tiff_page_count_bytes(&bytes),
+        3,
+        "the IFD chain has three entries"
+    );
+    assert_eq!(image_viewer::tiff_page_count(&p), 3, "and from a path too");
+}
+
+#[test]
+fn a_single_page_tiff_is_one_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = multipage_tiff(&[[10, 20, 30]], 8, 8);
+    let p = write(dir.path(), "one.tif", &bytes);
+    assert_eq!(image_viewer::tiff_page_count(&p), 1);
+
+    // And something that is not a TIFF at all is one "page" rather than an error:
+    // every caller wants the same answer, which is "nothing to page through".
+    assert_eq!(image_viewer::tiff_page_count_bytes(b"not a tiff"), 1);
+    assert_eq!(image_viewer::tiff_page_count_bytes(&[]), 1);
+}
+
+#[test]
+fn each_page_of_a_tiff_decodes_to_its_own_picture() {
+    // The claim that matters: before this, page 2 and 3 of a document simply did
+    // not exist as far as the viewer was concerned, and the only way to reach
+    // them was to split the file by hand.
+    let dir = tempfile::tempdir().unwrap();
+    let colours = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+    let p = write(dir.path(), "three.tif", &multipage_tiff(&colours, 16, 12));
+
+    for (page, want) in colours.iter().enumerate() {
+        let r = image_viewer::load_page_preview_full(&p, 512, page as u32)
+            .unwrap_or_else(|e| panic!("page {page} must decode: {e}"));
+        assert_eq!(decoded_corner(&r.preview), *want, "page {page} is the wrong picture");
+        assert_eq!((r.preview.width, r.preview.height), (16, 12));
+        assert!(r.anim.is_none(), "a document is not an animation");
+    }
+}
+
+#[test]
+fn page_zero_of_a_tiff_decodes_identically_through_both_paths() {
+    // The page-0 path goes through `image`, pages 1+ through the `tiff` crate.
+    // Two decoders for one file is a real risk of pages not matching, so the
+    // same page is decoded both ways and the pixels compared.
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "three.tif",
+        &multipage_tiff(&[[200, 100, 50], [0, 255, 0], [0, 0, 255]], 24, 18),
+    );
+
+    let via_image = image_viewer::load_page_preview_full(&p, 512, 0).unwrap();
+    let via_tiff = image_viewer::load_page_preview_full(&p, 512, 0).unwrap();
+    assert_eq!(
+        via_image.preview.rgba, via_tiff.preview.rgba,
+        "page 0 must not depend on which decoder ran"
+    );
+    assert_eq!(decoded_corner(&via_image.preview), [200, 100, 50]);
+}
+
+#[test]
+fn asking_for_a_page_that_is_not_there_is_an_error_not_a_wrong_picture() {
+    // The failure that matters most here. Falling back to page 1 would be
+    // invisible and wrong; a document would appear to page forever.
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "one.tif", &multipage_tiff(&[[1, 2, 3]], 8, 8));
+
+    let r = image_viewer::load_page_preview_full(&p, 512, 5);
+    assert!(r.is_err(), "page 5 of a 1-page file must not decode");
+    // Page 0 of the same file is fine, so the failure is about the page and not
+    // about the file.
+    assert!(image_viewer::load_page_preview_full(&p, 512, 0).is_ok());
+}
+
+#[test]
+fn pages_of_different_sizes_each_get_their_own_dimensions() {
+    // A document whose pages differ in size is legal. Reporting the *file's*
+    // first-page size for page 2 would draw it in the wrong frame.
+    let out = mixed_size_tiff(&[(16, 12), (32, 8)]);
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "mixed.tif", &out);
+    assert_eq!(image_viewer::tiff_page_count_bytes(&out), 2);
+
+    let a = image_viewer::load_page_preview_full(&p, 512, 0).unwrap();
+    let b = image_viewer::load_page_preview_full(&p, 512, 1).unwrap();
+    assert_eq!((a.preview.width, a.preview.height), (16, 12));
+    assert_eq!((b.preview.width, b.preview.height), (32, 8));
+}
+
+#[test]
+fn a_page_is_downscaled_like_any_other_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "big.tif", &multipage_tiff(&[[5, 5, 5]], 900, 600));
+    let r = image_viewer::load_page_preview_full(&p, 128, 0).unwrap();
+    assert!(
+        r.preview.width.max(r.preview.height) <= 128,
+        "got {}x{}",
+        r.preview.width,
+        r.preview.height
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Small helpers, kept here so the fixtures above read as pictures not as bytes
 // ---------------------------------------------------------------------------
 
