@@ -55,7 +55,7 @@ double-rotate).
 - Neighbour preloading in both directions
 - Animated GIF playback with per-frame delays
 - Transparency checkerboard backdrop
-- **Rotate ⟲ / ⟳**, **⇋ / ⇅ Mirror**, **Reset turn** — quarter turns and mirrors,
+- **Rotate ⟲ / ⟳**, **Mirror H / V**, **Reset turn** — quarter turns and mirrors,
   **per image**, re-fitting each time. Turning one photo does not turn the next,
   and going back finds yours still turned — the behaviour every real viewer has.
   Turn and mirror *compose* rather than living in separate counters, because they
@@ -64,6 +64,14 @@ double-rotate).
   default: nothing is written to the file. **Save transformed…** (next to the
   buttons, or `Ctrl+S`) writes a new file beside the original with the transform
   baked in, losslessly (see below)
+- **Crop** — drag on the image to frame a crop. The frame is drawn over the whole
+  picture rather than the picture being cut on screen, so turning and mirroring
+  still apply to the full frame, and the frame follows the image if you turn it
+  afterwards. It is snapped to the JPEG block grid (8 or 16 px) because that is
+  where a lossless crop can actually land — you get up to one block of *extra*
+  picture rather than up to one block cut off the edge you framed, and the frame
+  you see is the frame that gets saved. **Clear crop** removes it and keeps any
+  rotation. While crop mode is on, dragging pans no longer
 - Folder watcher: new and deleted files are picked up automatically (every 2s)
 
 ### Gallery grid (`G`)
@@ -168,19 +176,20 @@ gl      works    Intel(R) UHD Graphics 620
 vulkan  unavailable   (0xC0000005)
 ```
 
-### Saving a transform (`Ctrl+S`)
+### Saving a transform or crop (`Ctrl+S`)
 
-Turning and mirroring are a view transform by default, so nothing you do to an
-image touches the disk. `Ctrl+S` is the one action that writes, and it writes a
-**new file beside the original** — `photo.jpg` becomes `photo_rotated.jpg`, or
-`photo_rotated2.jpg` if that exists. The original is never modified, so the
-action is reversible and saving twice accumulates instead of compounding.
+Turning, mirroring and cropping are view transforms by default, so nothing you do
+to an image touches the disk. `Ctrl+S` is the one action that writes, and it
+writes a **new file beside the original** — `photo.jpg` becomes `photo_rotated.jpg`
+(or `photo_cropped.jpg` if you cropped), with a `2`, `3`… if that exists. The
+original is never modified, so the action is reversible and saving twice
+accumulates instead of compounding.
 
 The saved file is the picture exactly as you see it: the camera's EXIF
-orientation *and* your turn and mirrors, combined, baked into the pixels, with
-the orientation tag reset so nothing applies it a second time. The two edits are
-composed into a single transform on the way in, so there is no case where the
-save has to work out "a turn and a flip" at the last moment.
+orientation, your turn and mirrors, and your crop, combined, baked into the
+pixels, with the orientation tag reset so nothing applies it a second time. The
+turn and the mirrors are composed into a single transform on the way in, so there
+is no case where the save has to work out "a turn and a flip" at the last moment.
 
 For JPEG this is genuinely lossless. Rather than decode and re-encode, the
 transform is applied to the **DCT coefficients** — the compressed data itself is
@@ -205,6 +214,23 @@ The size column is the point: a re-encode makes a fresh rate-distortion decision
 per block and comes out a different size, while a coefficient transform lands
 within a percent.
 
+**A crop and a turn are two passes, not one**, and that is forced rather than
+chosen. TurboJPEG reads a crop region in the transform's *destination* space — the
+rectangle as it lands after the turn, not before it — and refuses the four
+axis-swapping operations outright. So the crop is taken first, with no rotation,
+and the turn is applied to the cropped result. Both passes rearrange
+coefficients and neither decompresses to pixels, so it is still one generation:
+
+| image | crop | crop + turn | turn only | size ratio |
+|---|---|---|---|---|
+| 1920×1080 | 31 ms | 39 ms | 54 ms | 1.01× |
+| 4000×3000 | 103 ms | 170 ms | 323 ms | 0.99× |
+| 6000×4000 | 195 ms | 318 ms | 586 ms | 1.00× |
+
+The ratio is crop-plus-turn output over crop-only output: ~1.00 means the second
+pass moved coefficients and left the entropy-coded data alone. The 0.99× is a
+second Huffman rewrite, not a re-encode.
+
 PNG, BMP and TIFF are also saved losslessly, by decoding and re-encoding into
 their own containers — those formats have no lossy step, so nothing is lost.
 **WebP, GIF, HEIC and JXL are refused** with a message rather than re-encoded:
@@ -228,7 +254,7 @@ should not quietly do that.
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |
 | `Del` `M` `C` `E` `W` `R` | Triage, see above |
 | `Ctrl+C` | Copy image to clipboard |
-| `Ctrl+S` | Save a new file beside the current one, transform baked in losslessly |
+| `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Previous / next image |
 | Drag & drop | Open a file, folder or archive |
@@ -396,7 +422,7 @@ images and is `#[ignore]`d because it takes seconds.
   another image for the change to show everywhere.
 - The **preview cache keeps a few images either side of the current one**, so
   jumping far away discards the old previews; scrolling back re-decodes.
-- **Turning and mirroring are display-only by default.** They are not written to
+- **Turning, mirroring and cropping are display-only by default.** They are not written to
   the file and not carried into copies, clipboard or wallpaper. Only **Save
   transformed…** / `Ctrl+S` writes anything, and it writes a new file rather than
   modifying the original. Transforms are per image and last for the session only;

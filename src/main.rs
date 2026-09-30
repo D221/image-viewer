@@ -599,6 +599,14 @@ struct PreviewData {
     // judged against what we *asked for* rather than the pixels we got back —
     // comparing pixels re-decodes forever on a source smaller than the display.
     target: u32,
+    // The file's EXIF orientation tag, and the block grid a lossless JPEG crop
+    // has to align to. Both are read on the worker from the bytes the decode
+    // already had in hand, and both exist for the crop UI: a rectangle drawn on
+    // the *displayed* picture has to be expressed in *stored* coordinates, which
+    // is a composition involving the tag, and it has to land on the block grid
+    // or TurboJPEG will not cut it where the user drew.
+    exif_tag: u16,
+    crop_grid: (u32, u32),
 }
 
 enum Msg {
@@ -712,6 +720,8 @@ fn decode_preview(path: &Path, target_dim: u32) -> Result<PreviewData, String> {
         anim: r.anim.map(Arc::new),
         has_alpha: buffer_has_alpha(&r.preview.rgba),
         target: target_dim,
+        exif_tag: r.exif_tag,
+        crop_grid: r.crop_grid,
     })
 }
 
@@ -925,6 +935,12 @@ struct Preview {
     target: u32,
     // Pixel dimensions of the texture, for the same check.
     px: (u32, u32),
+    // The file's EXIF orientation tag and the block grid a lossless JPEG crop
+    // aligns to. Cached with the preview so the crop UI never has to touch the
+    // file: a rectangle drawn on the *displayed* picture must be expressed in
+    // *stored* coordinates, and that composition needs the tag.
+    exif_tag: u16,
+    crop_grid: (u32, u32),
 }
 
 /// Playback state for the animation currently on screen.
@@ -1005,8 +1021,16 @@ struct MyApp {
     /// Quarter turns and mirrors applied per image, for this session. Keyed by path
     /// because a transform belongs to a *picture*: turning one photo must not turn
     /// the next one, and returning to a turned photo must still find it turned.
-    /// Lives in `lib.rs` so the rule can be tested — see [`image_viewer::ImageTransforms`].
-    transforms: image_viewer::ImageTransforms,
+    /// Lives in `lib.rs` so the rule can be tested — see [`image_viewer::ImageEdits`].
+    edits: image_viewer::ImageEdits,
+    /// Crop mode: left-drag frames a crop instead of panning.
+    ///
+    /// A mode rather than a modifier, because a modifier would have to be held
+    /// for the whole gesture and the frame is adjusted after the fact anyway —
+    /// the crop is stored as soon as it exists and stays until cleared. Panning is
+    /// unreachable while this is on, which is the one real cost; leaving crop mode
+    /// is one click and the button says which mode you are in.
+    crop_mode: bool,
     /// Selection index the grid's scroll offset was last set for. The offset is
     /// written only when this differs, so manual scrolling is never fought.
     grid_sel_scrolled: usize,
@@ -1161,7 +1185,8 @@ impl MyApp {
             waiting_load: false,
             grid_sel: 0,
             grid_cols: 1,
-            transforms: image_viewer::ImageTransforms::default(),
+            edits: image_viewer::ImageEdits::default(),
+            crop_mode: false,
             grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
             t_boot: perf::boot(),
@@ -1389,6 +1414,8 @@ impl MyApp {
                                 anim: p.anim,
                                 has_alpha: p.has_alpha,
                                 target: p.target,
+                                exif_tag: p.exif_tag,
+                                crop_grid: p.crop_grid,
                                 px,
                             },
                         );
@@ -2076,18 +2103,18 @@ impl MyApp {
             self.error = Some("Cannot save a transformed animation: it has many frames".into());
             return;
         }
-        let xform = self.current_xform();
-        match image_viewer::save_transformed(&p, xform, None) {
+        let edit = self.edits.get(&p);
+        match image_viewer::save_transformed(&p, edit.xform, edit.crop) {
             Ok(dest) => {
                 let name = dest
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                self.notice = Some(if xform == Xform::Identity {
+                self.notice = Some(if edit.is_identity() {
                     format!("Saved {name}")
                 } else {
-                    format!("Saved {name} ({} , lossless)", xform.label())
+                    format!("Saved {name} ({} , lossless)", edit.label())
                 });
             }
             Err(e) => self.error = Some(format!("Save failed: {e}")),
@@ -2196,7 +2223,11 @@ impl MyApp {
             idx,
             self.gallery.len()
         );
-        if let Some(pv) = self.shown.as_ref().and_then(|p| self.previews.get(p)) {
+        if let Some((shown_path, pv)) = self
+            .shown
+            .as_ref()
+            .and_then(|p| self.previews.get(p).map(|pv| (p, pv)))
+        {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
             // Show the dimensions as displayed once turned, so the readout
             // matches what is on screen.
@@ -2204,6 +2235,13 @@ impl MyApp {
             if shown_xf != Xform::Identity {
                 let (w, h) = xformed_footprint(pv.orig.0 as f32, pv.orig.1 as f32, shown_xf);
                 s += &format!(" ({} {}x{})", shown_xf.label(), w as u32, h as u32);
+            }
+            // A crop is not shown by cropping the picture — the frame is drawn over
+            // the whole image instead, so that turning or mirroring still works on
+            // the full frame. The readout says what the save will produce, or the
+            // user has no way to find out what they framed.
+            if let Some(crop) = self.edits.crop(shown_path) {
+                s += &format!(" - crop {}", crop.label());
             }
             if let Some(anim) = &pv.anim {
                 s += &format!(" - anim {} frames", anim.frames.len());
@@ -2420,7 +2458,7 @@ impl MyApp {
             offset = c - (c - offset) * (target_scale / scale);
             scale = target_scale;
         }
-        if resp.dragged() {
+        if resp.dragged() && !self.crop_mode {
             offset += resp.drag_delta();
             self.lat.t_pan = Some(Instant::now());
             self.lat.want_viewport_tiles = true;
@@ -2547,6 +2585,97 @@ impl MyApp {
                 }
             } else if screen_density < preview_density * 0.5 {
                 full.tiles.clear(); // zoomed well out: release tile textures
+            }
+        }
+
+        // --- crop ---
+        //
+        // egui already tracks where the current press started
+        // (`InputState::pointer.press_origin`), so the frame needs no gesture
+        // state of its own. Using egui's rather than accumulating
+        // `resp.drag_delta()` matters: the rectangle is rebuilt from the start
+        // point every frame, so it cannot drift, and egui's press origin already
+        // applies the drag threshold.
+        let pvx = self.previews.get(&shown);
+        if self.crop_mode {
+            let (down, origin, ptr) = ui.input(|i| {
+                (
+                    i.pointer.button_down(egui::PointerButton::Primary),
+                    i.pointer.press_origin(),
+                    resp.interact_pointer_pos(),
+                )
+            });
+            if let (true, Some(start), Some(p), Some(pv), Some(cur)) =
+                (down, origin, ptr, pvx, self.cur.clone())
+            {
+                // min/max rather than `from_min_max` directly, so dragging up and
+                // left frames the same rectangle as dragging down and right.
+                let r = egui::Rect::from_min_max(start.min(p), start.max(p));
+                if let Some((crop, _)) = self.crop_from_screen(r, footprint, display_px, pv) {
+                    self.edits.set_crop(&cur, Some(crop));
+                }
+            }
+        }
+
+        // Draw the frame from the *stored* crop mapped back out, so what is on
+        // screen is the rectangle the save will cut — block-aligned, and correct
+        // through any EXIF tag or turn or mirror.
+        if let Some(pv) = pvx {
+            if let Some(cr) = self.crop_screen_rect(footprint, display_px, pv) {
+                let cr = cr.intersect(footprint);
+                if cr.width() > 1.0 && cr.height() > 1.0 {
+                    // Dim what is being cut away, as four bands rather than a
+                    // full-panel wash with a hole: no blending, so the picture
+                    // outside the frame is unchanged and only the frame is new ink.
+                    let band = Color32::from_black_alpha(140);
+                    for r in [
+                        egui::Rect::from_min_max(footprint.min, cr.left_top()),
+                        egui::Rect::from_min_max(cr.right_bottom(), footprint.right_bottom()),
+                        egui::Rect::from_min_max(
+                            egui::Pos2::new(footprint.min.x, cr.min.y),
+                            egui::Pos2::new(cr.min.x, cr.max.y),
+                        ),
+                        egui::Rect::from_min_max(
+                            egui::Pos2::new(cr.max.x, cr.min.y),
+                            egui::Pos2::new(footprint.max.x, cr.max.y),
+                        ),
+                    ] {
+                        if r.width() > 0.0 && r.height() > 0.0 {
+                            painter.rect_filled(r, 0u8, band);
+                        }
+                    }
+                    painter.rect_stroke(
+                        cr,
+                        0u8,
+                        egui::Stroke::new(1.0, Color32::WHITE),
+                        egui::StrokeKind::Outside,
+                    );
+                    // Rule of thirds. Two lines each way, faint: enough to line a
+                    // portrait up on thirds without competing with the picture.
+                    let thin = egui::Stroke::new(1.0, Color32::from_white_alpha(70));
+                    for i in 1..3 {
+                        let t = i as f32 / 3.0;
+                        let x = cr.min.x + cr.width() * t;
+                        let y = cr.min.y + cr.height() * t;
+                        painter.line_segment(
+                            [egui::Pos2::new(x, cr.min.y), egui::Pos2::new(x, cr.max.y)],
+                            thin,
+                        );
+                        painter.line_segment(
+                            [egui::Pos2::new(cr.min.x, y), egui::Pos2::new(cr.max.x, y)],
+                            thin,
+                        );
+                    }
+                    if let Some(crop) = self.edits.crop(&shown) {
+                        painter.text(
+                            cr.left_top() + Vec2::new(4.0, -6.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            crop.label(),
+                            egui::FontId::proportional(13.0),
+                            Color32::WHITE,
+                        );
+                    }
+                }
             }
         }
 
@@ -2725,22 +2854,110 @@ impl MyApp {
     /// which is worth more than saving the reset on two buttons.
     fn apply_to_current(
         &mut self,
-        f: impl FnOnce(&mut image_viewer::ImageTransforms, &std::path::Path) -> Xform,
+        f: impl FnOnce(&mut image_viewer::ImageEdits, &std::path::Path) -> Xform,
         ctx: &Context,
     ) {
         if let Some(p) = self.cur.clone() {
-            f(&mut self.transforms, &p);
+            f(&mut self.edits, &p);
         }
         self.view.fit = true;
         self.view.offset = Vec2::ZERO;
         ctx.request_repaint();
     }
 
+    /// The stored-space crop for a rectangle the user dragged on the **displayed**
+    /// picture, snapped to the block grid — that is, exactly the rectangle the
+    /// save will cut.
+    ///
+    /// The path a dragged rectangle takes, and each step is a place this could be
+    /// wrong in a way that looks fine:
+    ///
+    ///  1. screen points -> the displayed image's own pixels, via `footprint`.
+    ///     Rounded *outwards* (floor the near edges, ceil the far ones) so a
+    ///     one-pixel slip while dragging never shaves the frame.
+    ///  2. displayed pixels -> stored pixels, through the inverse of the full
+    ///     display transform. `Crop::from_display_rect` does this, and it is the
+    ///     step that transposes if you get the direction wrong.
+    ///  3. stored pixels -> the block grid TurboJPEG needs.
+    ///  4. and back out again, so the frame that is *drawn* is the frame that will
+    ///     be saved rather than the raw drag.
+    ///
+    /// Steps 3 and 4 are what stop the UI lying. Without them the user frames one
+    /// rectangle and gets another, up to a block different, and never finds out.
+    fn crop_from_screen(
+        &self,
+        screen: egui::Rect,
+        footprint: egui::Rect,
+        display_px: Vec2,
+        pv: &Preview,
+    ) -> Option<(image_viewer::Crop, (u32, u32, u32, u32))> {
+        let edit = self.edits.get(&self.cur.clone()?);
+        let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
+        // `orig` is already display-oriented, so stored is recovered by undoing
+        // the EXIF's axis swap. `Xform::from_exif` is the same source of truth
+        // the decode used, rather than a second opinion about which tags swap.
+        let exif = Xform::from_exif(pv.exif_tag).unwrap_or(Xform::Identity);
+        let stored = if exif.swaps_axes() {
+            (pv.orig.1, pv.orig.0)
+        } else {
+            pv.orig
+        };
+
+        let sx = footprint.width() / display_px.x.max(1.0);
+        let sy = footprint.height() / display_px.y.max(1.0);
+        if sx <= 0.0 || sy <= 0.0 {
+            return None;
+        }
+        let to_px = |p: egui::Pos2| -> (f32, f32) {
+            ((p.x - footprint.min.x) / sx, (p.y - footprint.min.y) / sy)
+        };
+        let (x0, y0) = to_px(screen.min);
+        let (x1, y1) = to_px(screen.max);
+        // Outwards, so the frame never loses a row to rounding.
+        let rect = (
+            x0.floor().max(0.0) as u32,
+            y0.floor().max(0.0) as u32,
+            (x1.ceil() - x0.floor()).max(0.0) as u32,
+            (y1.ceil() - y0.floor()).max(0.0) as u32,
+        );
+
+        let asked = image_viewer::Crop::from_display_rect(pv.exif_tag, edit.xform, rect, stored)?;
+        // The same snap `save_transformed` will do, done here so the drawn frame
+        // is the saved one. Idempotent: doing it again changes nothing.
+        let snapped = asked.snapped_to_mcu(pv.crop_grid.0, pv.crop_grid.1, stored.0, stored.1)?;
+        Some((snapped, snapped.to_display_rect(display, stored)))
+    }
+
+    /// The crop rectangle for the shown image, in **screen** points, or `None`.
+    fn crop_screen_rect(
+        &self,
+        footprint: egui::Rect,
+        display_px: Vec2,
+        pv: &Preview,
+    ) -> Option<egui::Rect> {
+        let crop = self.edits.crop(&self.shown.clone()?)?;
+        let edit = self.edits.get(&self.shown.clone()?);
+        let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
+        let exif = Xform::from_exif(pv.exif_tag).unwrap_or(Xform::Identity);
+        let stored = if exif.swaps_axes() {
+            (pv.orig.1, pv.orig.0)
+        } else {
+            pv.orig
+        };
+        let (dx, dy, dw, dh) = crop.to_display_rect(display, stored);
+        let sx = footprint.width() / display_px.x.max(1.0);
+        let sy = footprint.height() / display_px.y.max(1.0);
+        Some(egui::Rect::from_min_size(
+            footprint.min + Vec2::new(dx as f32 * sx, dy as f32 * sy),
+            Vec2::new(dw as f32 * sx, dh as f32 * sy),
+        ))
+    }
+
     /// The transform of the image the user last asked for.
     fn current_xform(&self) -> Xform {
         self.cur
             .as_deref()
-            .map_or(Xform::Identity, |p| self.transforms.get(p))
+            .map_or(Xform::Identity, |p| self.edits.xform(p))
     }
 
     /// The transform of the image actually *on screen*.
@@ -2758,7 +2975,7 @@ impl MyApp {
     fn shown_xform(&self) -> Xform {
         self.shown
             .as_deref()
-            .map_or(Xform::Identity, |p| self.transforms.get(p))
+            .map_or(Xform::Identity, |p| self.edits.xform(p))
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
@@ -3430,10 +3647,43 @@ impl eframe::App for MyApp {
                                 .shortcut_text("")
                                 .min_size(Vec2::new(74.0, 0.0)),
                         )
-                        .on_hover_text("Back to the file's own orientation")
+                        .on_hover_text("Back to the file's own orientation, and drop any crop")
                         .clicked()
                     {
                         self.reset_transform(ctx);
+                    }
+                    // Crop is a mode, not an action: the frame stays after the drag
+                    // so it can be adjusted, and the mode says so. The hover text
+                    // spells out the one real cost, which is that panning is
+                    // unreachable while it is on.
+                    if ui
+                        .selectable_label(self.crop_mode, "Crop")
+                        .on_hover_text(
+                            "Drag on the image to frame a crop.\n\
+                             The frame is saved by 'Save transformed...' - nothing is \
+                             written until then.\n\
+                             While this is on, dragging pans no longer.",
+                        )
+                        .clicked()
+                    {
+                        self.crop_mode = !self.crop_mode;
+                        ctx.request_repaint();
+                    }
+                    let has_crop = self.cur.as_deref().is_some_and(|p| self.edits.crop(p).is_some());
+                    if ui
+                        .add_enabled(
+                            has_crop,
+                            egui::Button::new("Clear crop")
+                                .shortcut_text("")
+                                .min_size(Vec2::new(74.0, 0.0)),
+                        )
+                        .on_hover_text("Remove the crop, keeping any rotation or mirroring")
+                        .clicked()
+                    {
+                        if let Some(p) = self.cur.clone() {
+                            self.edits.clear_crop(&p);
+                        }
+                        ctx.request_repaint();
                     }
                     // Sits with the transform buttons because that is the only
                     // thing it saves: without this the app's one writing action

@@ -14,7 +14,7 @@
 
 use image_viewer::{
     apply_exif_orientation, display_xform, exif_orientation, load_image,
-    neutralize_exif_orientation, save_transformed, unique_dest, ImageTransforms, Xform,
+    neutralize_exif_orientation, save_transformed, unique_dest, ImageEdits, Xform,
 };
 use std::path::PathBuf;
 use std::path::Path;
@@ -734,6 +734,86 @@ fn a_display_rect_survives_the_round_trip_through_stored_space() {
     }
 }
 
+// --- the per-image edit store ---------------------------------------------
+
+/// A crop and a turn are one edit, not two. Two maps would make "the crop is
+/// gone but the turn is not" a reachable state, and neither map's bound would be
+/// the other's.
+#[test]
+fn a_crop_and_a_turn_are_one_edit_and_reset_clears_both() {
+    let mut e = image_viewer::ImageEdits::default();
+    let a = PathBuf::from("a.jpg");
+    let b = PathBuf::from("b.jpg");
+
+    e.turn(&a, 1);
+    e.set_crop(&a, Some(image_viewer::Crop::new(16, 16, 32, 32).unwrap()));
+    assert_eq!(e.xform(&a), Xform::Rot90);
+    assert_eq!(e.crop(&a), Some(image_viewer::Crop::new(16, 16, 32, 32).unwrap()));
+    assert_eq!(e.len(), 1, "one image, one entry");
+
+    // Clearing the crop must leave the turn alone.
+    e.clear_crop(&a);
+    assert_eq!(e.crop(&a), None);
+    assert_eq!(e.xform(&a), Xform::Rot90, "clearing a crop must not clear the turn");
+    assert_eq!(e.len(), 1, "the turn alone is still an edit");
+
+    // And reset is the other direction: everything, at once.
+    e.set_crop(&a, Some(image_viewer::Crop::new(0, 0, 16, 16).unwrap()));
+    e.reset(&a);
+    assert!(e.is_empty(), "reset clears crop and transform together");
+    assert!(e.get(&b).is_identity(), "and only that image");
+}
+
+/// Turning after cropping must not move the frame. The crop is in stored
+/// coordinates, so it names the same *pixels* whatever is done to the picture
+/// afterwards, and the drawn frame follows the image rather than staying put.
+#[test]
+fn turning_after_cropping_keeps_the_same_pixels_framed() {
+    let mut e = image_viewer::ImageEdits::default();
+    let a = PathBuf::from("a.jpg");
+    let crop = image_viewer::Crop::new(48, 16, 32, 32).unwrap();
+    e.set_crop(&a, Some(crop));
+
+    // The frame is stored once and is not rewritten by a turn.
+    e.turn(&a, 1);
+    e.mirror_vertical(&a);
+    assert_eq!(e.crop(&a), Some(crop), "the framed pixels must not change");
+
+    // What the user sees does follow the image: the same stored rectangle maps to
+    // a different place on a turned, mirrored picture.
+    let stored = (96u32, 64u32);
+    let before = crop.to_display_rect(image_viewer::display_xform(0, Xform::Identity), stored);
+    let after = crop.to_display_rect(
+        image_viewer::display_xform(0, Xform::Transpose),
+        stored,
+    );
+    assert_ne!(before, after, "the frame must move with the picture");
+}
+
+#[test]
+fn an_edit_says_what_it_did() {
+    let none = image_viewer::Edit::default();
+    assert!(none.is_identity());
+    assert_eq!(none.label(), "no transform");
+    let turn = image_viewer::Edit {
+        xform: Xform::Rot90,
+        crop: None,
+    };
+    assert!(!turn.is_identity());
+    assert_eq!(turn.label(), "rotated 90° CW");
+    let both = image_viewer::Edit {
+        xform: Xform::FlipH,
+        crop: Some(image_viewer::Crop::new(16, 16, 32, 48).unwrap()),
+    };
+    assert_eq!(both.label(), "cropped to 32×48, mirrored left-right");
+    // Crop alone, and a rotation-only edit, are both non-identity.
+    assert!(!image_viewer::Edit {
+        xform: Xform::Identity,
+        crop: Some(image_viewer::Crop::new(0, 0, 8, 8).unwrap()),
+    }
+    .is_identity());
+}
+
 // --- helpers for the crop tests -------------------------------------------
 
 /// The stored picture turned the way the viewer shows it.
@@ -784,14 +864,14 @@ fn crop_display(rgba: &image::RgbaImage, rect: (u32, u32, u32, u32)) -> (u32, u3
 /// turning one photo turned every photo you then navigated to.
 #[test]
 fn rotating_one_image_does_not_rotate_the_next() {
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
 
     r.turn(&a, 1);
-    assert_eq!(r.get(&a), Xform::Rot90, "the turned image should be turned");
+    assert_eq!(r.xform(&a), Xform::Rot90, "the turned image should be turned");
     assert_eq!(
-        r.get(&b),
+        r.xform(&b),
         Xform::Identity,
         "a different image must be untouched - this is the whole point"
     );
@@ -801,19 +881,19 @@ fn rotating_one_image_does_not_rotate_the_next() {
 fn going_back_to_a_turned_image_still_finds_it_turned() {
     // The other half. Losing your edit on the way back is as wrong as applying it
     // to everything else, and the single-u8 version did both.
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
 
     r.turn(&a, 1);
     r.turn(&b, 2); // while browsing past it
-    assert_eq!(r.get(&a), Xform::Rot90, "coming back must not reset the first image");
-    assert_eq!(r.get(&b), Xform::Rot180);
+    assert_eq!(r.xform(&a), Xform::Rot90, "coming back must not reset the first image");
+    assert_eq!(r.xform(&b), Xform::Rot180);
 }
 
 #[test]
 fn turns_accumulate_and_wrap_in_both_directions() {
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
 
     assert_eq!(r.turn(&a, 1), Xform::Rot90);
@@ -823,7 +903,7 @@ fn turns_accumulate_and_wrap_in_both_directions() {
     assert_eq!(r.turn(&a, -1), Xform::Rot270, "negative steps go anticlockwise");
     assert_eq!(r.turn(&a, -1), Xform::Rot180);
     // A single step from untransformed, anticlockwise, is a quarter turn back.
-    let mut r2 = ImageTransforms::default();
+    let mut r2 = ImageEdits::default();
     assert_eq!(r2.turn(&a, -1), Xform::Rot270, "-1 from 0 must wrap, not underflow");
     assert_eq!(r2.turn(&a, 5), Xform::Identity, "a whole number of turns is a no-op");
 }
@@ -831,19 +911,19 @@ fn turns_accumulate_and_wrap_in_both_directions() {
 #[test]
 fn mirroring_twice_is_back_to_the_start() {
     // The one property that makes a mirror button safe to press by accident.
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
 
     r.mirror_horizontal(&a);
-    assert_eq!(r.get(&a), Xform::FlipH);
+    assert_eq!(r.xform(&a), Xform::FlipH);
     r.mirror_horizontal(&a);
-    assert_eq!(r.get(&a), Xform::Identity, "two mirrors cancel");
+    assert_eq!(r.xform(&a), Xform::Identity, "two mirrors cancel");
     assert!(r.is_empty(), "and leave nothing stored");
 
     r.mirror_vertical(&a);
-    assert_eq!(r.get(&a), Xform::FlipV);
+    assert_eq!(r.xform(&a), Xform::FlipV);
     r.mirror_vertical(&a);
-    assert_eq!(r.get(&a), Xform::Identity);
+    assert_eq!(r.xform(&a), Xform::Identity);
 }
 
 /// The two edits do not commute, and this is the whole reason the store holds a
@@ -854,21 +934,21 @@ fn mirroring_twice_is_back_to_the_start() {
 /// else.
 #[test]
 fn a_quarter_turn_then_a_mirror_is_a_diagonal_mirror() {
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
 
     r.turn(&a, 1);
     r.mirror_horizontal(&a);
-    assert_eq!(r.get(&a), Xform::Transverse, "turn-then-mirror is a diagonal mirror");
+    assert_eq!(r.xform(&a), Xform::Transverse, "turn-then-mirror is a diagonal mirror");
 
     // And the other order gives the *other* diagonal, which is a different
     // picture. That they differ is the point; a sign error here would make them
     // the same, which is why this is asserted rather than assumed.
-    let mut r2 = ImageTransforms::default();
+    let mut r2 = ImageEdits::default();
     r2.mirror_horizontal(&a);
     r2.turn(&a, 1);
-    assert_eq!(r2.get(&a), Xform::Transpose);
-    assert_ne!(r.get(&a), r2.get(&a));
+    assert_eq!(r2.xform(&a), Xform::Transpose);
+    assert_ne!(r.xform(&a), r2.xform(&a));
 }
 
 /// A mirror must not change the image's shape, or the fit, the panning limits and
@@ -888,20 +968,20 @@ fn a_mirror_leaves_the_footprint_alone_but_a_quarter_turn_does_not() {
 fn an_untransformed_image_costs_nothing() {
     // Returning to identity removes the entry rather than storing it, so browsing
     // a folder and undoing your edits leaves no residue.
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
     assert!(r.is_empty());
     r.turn(&a, 1);
     assert_eq!(r.len(), 1);
     r.turn(&a, 3); // back to identity
-    assert_eq!(r.get(&a), Xform::Identity);
+    assert_eq!(r.xform(&a), Xform::Identity);
     assert_eq!(r.len(), 0, "an identity transform should not be stored");
     assert!(r.is_empty());
 }
 
 #[test]
 fn reset_puts_an_image_back_where_it_started() {
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
     r.turn(&a, 1);
@@ -909,20 +989,20 @@ fn reset_puts_an_image_back_where_it_started() {
     r.turn(&b, 1);
 
     r.reset(&a);
-    assert_eq!(r.get(&a), Xform::Identity, "reset clears the whole transform");
+    assert_eq!(r.xform(&a), Xform::Identity, "reset clears the whole transform");
     assert_eq!(r.len(), 1, "and only that image's entry");
-    assert_eq!(r.get(&b), Xform::Rot90, "another image is untouched");
+    assert_eq!(r.xform(&b), Xform::Rot90, "another image is untouched");
 }
 
 #[test]
 fn the_record_is_bounded() {
     // A viewer left open on a 100k-image folder must not grow a map for as long
     // as it runs. Losing edits is much the smaller problem.
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     for i in 0..5000 {
         r.set(
             &PathBuf::from(format!("img{i}.jpg")),
-            Xform::ALL[1 + (i % 3)],
+            image_viewer::Edit { xform: Xform::ALL[1 + (i % 3)], crop: None },
         );
     }
     assert!(
@@ -937,14 +1017,14 @@ fn the_record_is_bounded() {
 /// nothing else would catch, because the viewer applies the tag itself.
 #[test]
 fn a_saved_file_uses_the_transform_of_the_image_being_saved() {
-    let mut r = ImageTransforms::default();
+    let mut r = ImageEdits::default();
     let a = PathBuf::from("a.jpg");
     let b = PathBuf::from("b.jpg");
     r.turn(&a, 1);
     r.turn(&b, 2);
 
     // The shape the app uses: look the transform up by the path being saved.
-    let save_b = |p: &Path| r.get(p);
+    let save_b = |p: &Path| r.xform(p);
     assert_eq!(save_b(&a), Xform::Rot90);
     assert_eq!(save_b(&b), Xform::Rot180);
     // And the composed transform differs, so the two files are genuinely not

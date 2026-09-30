@@ -488,6 +488,23 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   Getting this backwards is invisible: a valid crop of the wrong part of the
   picture. `a_display_rect_survives_the_round_trip_through_stored_space` checks
   both directions against each other over every transform.
+- **The crop frame is drawn from the STORED crop mapped back out, never from the
+  raw drag.** The chain is: screen points → displayed pixels → stored pixels
+  (`Crop::from_display_rect`) → block grid (`snapped_to_mcu`) → back to the
+  screen. The last two steps are the point. TurboJPEG will only cut on the block
+  grid, so a frame drawn from the raw drag is up to one block away from the frame
+  that gets saved, and the user has no way to find out. `crop_from_screen` and
+  `crop_screen_rect` in `main.rs` are two halves of the same conversion and must
+  stay in step — the first to store, the second to draw.
+- **A crop is a view transform; the picture is not cut on screen.** The frame
+  floats over the whole image so that turning and mirroring still apply to the
+  full frame, and it *follows* the image if you turn it afterwards, because the
+  stored rectangle names the same pixels either way. Cropping the displayed
+  pixels instead would break the moment anything else moved.
+- **Crop and transform are one `Edit` per image, not two maps.** They are saved
+  by one action and "Reset" means both, so two maps would only create states
+  nobody asked for. `ImageEdits` also carries the bound, so a per-image map
+  cannot be added without a bound.
 - **`shown` and `cur` are different images, and the draw path must use `shown` for
   everything.** `cur` is the wanted image, set by `goto()` on a keypress;
   `shown` only advances once the preview has actually been adopted by

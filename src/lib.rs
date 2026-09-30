@@ -1077,8 +1077,9 @@ impl ResizeTracker {
 /// A value maps output pixels back to input pixels, so composing is
 /// substitution: where does the final output pixel come from, through the
 /// second transform and then the first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Xform {
+    #[default]
     Identity,
     /// 90 degrees clockwise.
     Rot90,
@@ -1872,7 +1873,47 @@ const EXIF_TAG_ORIENTATION: u16 = 0x0112;
 // Per-image transform
 // ---------------------------------------------------------------------------
 
-/// The view transform the user has applied to each image, for the current session.
+/// What the user has done to one image: a crop, a turn, mirrors. All of it.
+///
+/// Crop and transform live in **one** entry rather than two maps for a practical
+/// reason: they are saved by the same action, and "Reset" should mean all of it.
+/// Two maps means a state where the crop is cleared and the turn is not, or where
+/// one of them is bounded and the other is not, and neither state is one anybody
+/// asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Edit {
+    /// Quarter turns and mirrors, composed as they were pressed.
+    pub xform: Xform,
+    /// Rectangle in **stored** coordinates, already snapped to the block grid, or
+    /// `None` for no crop.
+    pub crop: Option<Crop>,
+}
+
+impl Edit {
+    /// Is this edit a no-op? If so it should not be stored, and the save should
+    /// behave exactly as it did before the edit existed.
+    pub fn is_identity(&self) -> bool {
+        self.xform == Xform::Identity && self.crop.is_none()
+    }
+
+    /// A short description for the status line and the save confirmation.
+    pub fn label(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(c) = &self.crop {
+            parts.push(format!("cropped to {}", c.label()));
+        }
+        if self.xform != Xform::Identity {
+            parts.push(self.xform.label().to_owned());
+        }
+        if parts.is_empty() {
+            "no transform".to_owned()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// The view transform and crop the user has applied to each image, this session.
 ///
 /// **Per image, not per app**, which is the whole point. This used to be a single
 /// `u8` on the app struct, so turning one photo turned every photo you then
@@ -1893,12 +1934,12 @@ const EXIF_TAG_ORIENTATION: u16 = 0x0112;
 /// Not persisted: this is a view transform until it is saved, and it is lost on
 /// restart like every other view state.
 #[derive(Debug, Clone)]
-pub struct ImageTransforms {
-    map: std::collections::HashMap<std::path::PathBuf, Xform>,
+pub struct ImageEdits {
+    map: std::collections::HashMap<std::path::PathBuf, Edit>,
     cap: usize,
 }
 
-impl Default for ImageTransforms {
+impl Default for ImageEdits {
     fn default() -> Self {
         Self {
             map: std::collections::HashMap::new(),
@@ -1907,16 +1948,26 @@ impl Default for ImageTransforms {
     }
 }
 
-impl ImageTransforms {
-    /// The transform applied to `path`. [`Xform::Identity`] when untouched.
-    pub fn get(&self, path: &Path) -> Xform {
-        self.map.get(path).copied().unwrap_or(Xform::Identity)
+impl ImageEdits {
+    /// The whole edit for `path`. [`Edit::default`] when untouched.
+    pub fn get(&self, path: &Path) -> Edit {
+        self.map.get(path).copied().unwrap_or_default()
     }
 
-    /// Set `path`'s transform. Identity removes the entry rather than storing it,
-    /// so an untransformed image costs nothing.
-    pub fn set(&mut self, path: &Path, xform: Xform) {
-        if xform == Xform::Identity {
+    /// Just the transform, which is what the draw path and most callers want.
+    pub fn xform(&self, path: &Path) -> Xform {
+        self.get(path).xform
+    }
+
+    /// Just the crop.
+    pub fn crop(&self, path: &Path) -> Option<Crop> {
+        self.get(path).crop
+    }
+
+    /// Store `path`'s edit. A no-op removes the entry rather than storing it, so
+    /// an untouched image costs nothing.
+    pub fn set(&mut self, path: &Path, edit: Edit) {
+        if edit.is_identity() {
             self.map.remove(path);
         } else {
             if self.map.len() >= self.cap {
@@ -1926,11 +1977,25 @@ impl ImageTransforms {
                 // far smaller problem than unbounded growth.
                 self.map.clear();
             }
-            self.map.insert(path.to_path_buf(), xform);
+            self.map.insert(path.to_path_buf(), edit);
         }
     }
 
-    /// Compose `extra` onto whatever `path` already has, and store the result.
+    /// Replace just the crop, leaving any transform alone.
+    pub fn set_crop(&mut self, path: &Path, crop: Option<Crop>) {
+        let mut e = self.get(path);
+        e.crop = crop;
+        self.set(path, e);
+    }
+
+    /// Drop the crop, leaving any transform alone.
+    pub fn clear_crop(&mut self, path: &Path) {
+        self.set_crop(path, None);
+    }
+
+    /// Compose `extra` onto whatever transform `path` already has, and store the
+    /// result. Any crop is left untouched — turning a picture does not move the
+    /// frame around it.
     ///
     /// `extra` goes *first*: the button you just pressed is the innermost edit, so
     /// pressing rotate-then-mirror really does mean "rotate, then mirror". That
@@ -1938,9 +2003,10 @@ impl ImageTransforms {
     /// — but it is what makes the buttons feel like they do what they say, and it
     /// is why this is written as one function rather than three setters.
     fn compose(&mut self, path: &Path, extra: Xform) -> Xform {
-        let next = extra.then(self.get(path));
-        self.set(path, next);
-        next
+        let mut e = self.get(path);
+        e.xform = extra.then(e.xform);
+        self.set(path, e);
+        e.xform
     }
 
     /// `path` turned by `steps` quarter turns clockwise (negative = the other way).
@@ -1958,12 +2024,12 @@ impl ImageTransforms {
         self.compose(path, Xform::FlipV)
     }
 
-    /// Forget `path`'s transform entirely, back to [`Xform::Identity`].
+    /// Forget everything about `path` — crop and transform both.
     pub fn reset(&mut self, path: &Path) {
         self.map.remove(path);
     }
 
-    /// How many images currently carry a transform. For tests and diagnostics.
+    /// How many images currently carry an edit. For tests and diagnostics.
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -2867,6 +2933,20 @@ pub struct PreviewAndFull {
     /// Source is larger than the requested target: the preview texture is
     /// below source density and should be re-decoded if the display grows.
     pub below_target: bool,
+    /// The file's EXIF orientation tag, 0 when there is none.
+    ///
+    /// The decode has *already* applied it to the pixels, so nothing needs this
+    /// to draw. It travels with the result for the crop UI, which has to express
+    /// a rectangle the user dragged on the **displayed** picture back in
+    /// **stored** coordinates, and that is a composition involving the tag.
+    pub exif_tag: u16,
+    /// The block grid `(w, h)` a lossless JPEG crop origin must align to, and
+    /// `(1, 1)` for every format with no block structure.
+    ///
+    /// 8 px for 4:4:4, 16 px for the usual 4:2:0. The crop UI snaps the frame it
+    /// draws to this, so that what is on screen is what the save cuts — see
+    /// [`Crop::snapped_to_mcu`].
+    pub crop_grid: (u32, u32),
 }
 
 
@@ -3066,6 +3146,20 @@ pub fn load_image_preview_full(
     // to display them. Rotate after decode so preview and full agree, and fix
     // the reported source dimensions accordingly.
     let tag = if jpeg { exif_orientation(path) } else { 0 };
+    // The block grid a lossless JPEG crop must align to. Read here, from the
+    // bytes already in hand, rather than re-reading the file later: a crop is
+    // snapped to this, and the UI needs it on the worker thread where the read
+    // is free. `(1, 1)` for anything that is not a JPEG, so callers never have to
+    // special-case a non-JPEG.
+    let crop_grid: (u32, u32) = if jpeg {
+        turbojpeg::Decompressor::new()
+            .ok()
+            .and_then(|mut d| d.read_header(&bytes).ok())
+            .map(|h| (h.subsamp.mcu_width() as u32, h.subsamp.mcu_height() as u32))
+            .unwrap_or((1, 1))
+    } else {
+        (1, 1)
+    };
     let stored = image_dims_bytes(&bytes);
     let orig = stored.map(|(w, h)| if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
 
@@ -3080,6 +3174,8 @@ pub fn load_image_preview_full(
                     anim: Some(anim),
                     orig: Some(dims),
                     below_target: false,
+                    exif_tag: tag,
+                    crop_grid,
                 });
             }
         }
@@ -3099,6 +3195,8 @@ pub fn load_image_preview_full(
                 anim: None,
                 orig,
                 below_target: true,
+                exif_tag: tag,
+                crop_grid,
             });
         }
     }
@@ -3121,6 +3219,8 @@ pub fn load_image_preview_full(
                 orig,
                 // DCT preview never reaches source density for these files.
                 below_target: true,
+                exif_tag: tag,
+                crop_grid,
             });
         }
         eprintln!("turbojpeg failed, falling back to image crate");
@@ -3157,6 +3257,8 @@ pub fn load_image_preview_full(
         anim: None,
         orig,
         below_target,
+        exif_tag: tag,
+        crop_grid,
     })
 }
 
