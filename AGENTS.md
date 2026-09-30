@@ -10,6 +10,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
 - `cargo test --release --test bench_browse -- --ignored --nocapture` — **browsing benchmark**; flips through a generated folder at several press rates and prints time-to-first-pixels, wasted decode share, peak MB, cache-hit rate. Median of 3 (`IV_BENCH_RUNS`), 24 images by default (`IV_BENCH_N`). This is the number to move when changing the queue, the preloading window or the cache policy
 - `powershell -File tests/bench_launch.ps1 -Runs 5` — **launch benchmark against JPEGView_L**; both apps started on the same folder, reporting ms-to-window, ms-to-idle, peak MB and CPU. Two numbers, because they answer different questions: *to window* is pure start-up (config, scan, window, renderer) and *to idle* adds the first decode, which is what a person actually waits for
+- `powershell -File tests/bench_launch_apps.ps1 -Rounds 7` — **launch benchmark vs IrfanView and Windows Photo Viewer**, on a single file, varying the wgpu backend. Read the header before trusting a number: `$GapMs` matters more than anything else in it, and this app's own to-idle figure is not measurable over RDP
 - `powershell -File tests/bench_launch_ab.ps1 -Runs 9` — **A/B two builds**, interleaved, using the app's own `--perf` report. This is the one to trust for "did my change help"; see the case-insensitive-`$a` trap above
 - `cargo test --release --test bench_startup -- --ignored --nocapture` — where start-up time goes, broken down per candidate (`IV_BENCH_FOLDER` to pick the folder; an env var, because `args().nth(2)` picks up `--nocapture`)
 - `cargo run -- --perf <folder>` — turn on latency sampling; the report prints on exit and is written to `%TEMP%\image-viewer-perf.txt` (a release build has no console, so the file is the real output)
@@ -25,20 +26,44 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   (JPEGView_L: ~200 ms), but reaching first frame costs ~737 ms, and the backend is
   most of it:
 
-  | backend | to first frame | peak working set |
+  | backend | adapter + device | peak working set at window+1.5 s |
   |---|---|---|
-  | dx12 (first in probe order, so `auto` picks it) | 737 ms | 343 MB |
-  | gl | **267 ms** | **153 MB** |
+  | dx12 (first in probe order, so `auto` picks it) | 455 ms | 343 MB |
+  | gl | **186 ms** | **153 MB** |
 
-  So `auto` currently picks the **slowest** backend on this machine, by 470 ms and
-  190 MB. Adapter+device creation alone measures 455 ms on dx12 against 186 ms on
-  gl. **This is not a free change**: dx12 may well render faster, and the one axis
-  that would settle it — frame rate — cannot be measured over RDP (see the RDP
-  notes above). It is left as a setting, not changed by default, until someone has
-  checked it on a console session. The config field is **`renderer.choice`**, *not*
-  `wgpu_backend`; and a `Set-Content` of a property that does not exist fails
-  **silently** on `ConvertFrom-Json` output, which produced a three-block benchmark
-  in which all three blocks silently ran the same setting.
+  The first column is solid: `--probe-renderer <backend>` *is* adapter enumeration
+  plus `request_device` in a child process, so it measures exactly that and it
+  reproduces. End to end the app's own `--perf` "startup -> first frame" measured
+  737 ms on dx12 against 267 ms on gl under an A-B-A design (dx12 again at the end,
+  to catch drift), so `auto` picks the **slowest** backend here, by ~470 ms and
+  190 MB. **Not a free change**: dx12 may render faster, and frame rate cannot be
+  measured over RDP (see above). Left as a setting until someone checks it on a
+  console session. The config field is **`renderer.choice`**, *not* `wgpu_backend`;
+  assigning a property that does not exist to a `ConvertFrom-Json` object throws,
+  and *swallowing* that throw produced a three-block benchmark in which all three
+  blocks silently ran the same setting.
+- **End-to-end launch timing for THIS app is not measurable from an RDP session,
+  and the harness makes it worse.** Same binary, same config, same argument, two
+  ways in one sitting: launched standalone 1.5 s apart it reached a window in
+  **47-93 ms** using 153 MB; driven by `bench_launch_apps.ps1` with 3 s gaps it took
+  **1614-1909 ms** and 354 MB - and reported 354 MB for the `gl` variant with
+  `renderer.choice = gl` verified on disk immediately before the launch.
+  **IrfanView under the identical harness never moved** (window 81-116 ms, idle
+  742-846 ms, peak 29 MB) across five runs and every gap and length variant, which
+  is what makes it a control rather than a coincidence. So: trust IrfanView's
+  numbers, trust the isolated device-creation numbers, trust peak working set
+  sampled at a fixed point, and **do not trust this app's absolute to-idle figure
+  from this session**. `$GapMs` defaults to 3000 for the same reason - relaunching
+  the same exe quickly is measurably slower (1.5 s apart: 47-93 ms; 350 ms apart:
+  ~1400 ms) and alternating between two *different* exes hides it completely, so a
+  harness with one entry per app looks fine right up until you put two variants of
+  the same binary into the rotation.
+- **Windows Photo Viewer no longer exists** on Windows 11 24H2/25H2 (this box is
+  25H2, build 26200). `photoviewer.dll` is still on disk and still contains the
+  string `ImageView_Fullscreen`, but it is unregistered - no
+  `photoviewer\shell\open\command` - and `rundll32` exits 0 in ~100 ms with no
+  window, under both the comma and the space calling convention. It is kept in
+  `bench_launch_apps.ps1` as an explicit SKIP so nobody re-derives it.
 - **Start-up walked the folder three times.** `Gallery::new` scans,
   `load_all_from_folder` scans again, and `scan_folder_sorted` scans a third time
   — and the middle one's result was overwritten on the very next line. Now one scan,
