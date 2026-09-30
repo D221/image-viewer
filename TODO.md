@@ -187,16 +187,40 @@ Verified this way on a 4-page TIFF and a JPEG:
 | `ArrowRight` / `ArrowLeft` | title walks `(1/4)`→`(4/4)`→next file→`(4/4)` |
 | `C` (crop mode) | enters, frame draws on drag |
 | drag with the mouse | crop frame + rule-of-thirds + dimming bands, status reads `crop 1112x889` |
-| **`Ctrl` + anything** | **does not arrive** — modifier chords are dropped |
+| **`Ctrl+S`** | **works** — `probe_rotated.jpg` appears beside the original |
+| **`Ctrl+C`** | **looked** like it was dropped, and it was not: see below |
 | clicking a collapsed panel's chevron | did not expand it |
 
-So a chord like `Ctrl+S` cannot be driven this way, and neither can a button in a
-panel that has to be opened first. Both are harness limits, not app bugs — the
-handlers are one line each and the crop/save logic is covered by
-`tests/rotate_save.rs`.
+**The "`Ctrl` + anything does not arrive" row above was wrong, and it was wrong
+in the way that hides a bug.** Chords arrive fine. What actually happened is
+that `Ctrl+C` was broken in the app, the harness could not tell the difference,
+and the honest-looking conclusion ("harness limit, not an app bug") was written
+down and believed. `Ctrl+S` was working the whole time and nobody noticed,
+because both chords were filed under the same wrong generalisation.
+
+The rule: **a synthetic keystroke proves the app reacted, not that the app was
+sent the keystroke you think you sent.** Check the effect against something
+outside the process. `tests/probe_chords.ps1` does exactly that — the clipboard
+for `Ctrl+C`, a file on disk for `Ctrl+S`:
+
+```powershell
+powershell -File tests/probe_chords.ps1
+#   clipboard after Ctrl+C : IMAGE 3000x4000
+#   files after Ctrl+S     : probe_rotated.jpg
+```
+
+Two details that make it work where the earlier attempts did not: the modifier
+is **held across** the key press with real delays (fired with no gap, Windows
+can deliver the key with stale modifiers), and the clipboard is read from a
+**child `powershell.exe -STA`**, because the clipboard API needs an STA thread
+and pwsh 7 is MTA by default.
+
+Still not drivable: a button in a panel that has to be opened first. That one
+really is a harness limit.
 
 Take a screenshot to check what a keypress actually did; the window title does not
-change for most of them, and the status bar carries the state you want:
+change for most of them, and the status bar carries the state you want
+(`probe_chords.ps1` does this itself after each chord):
 
 ```powershell
 Add-Type -AssemblyName System.Drawing

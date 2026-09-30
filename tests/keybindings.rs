@@ -208,3 +208,61 @@ fn the_buttons_do_not_advertise_keys_that_are_gone() {
         "the crop button should advertise C"
     );
 }
+
+/// `Ctrl+C` has to be read from `Event::Copy`, because no key event is emitted.
+///
+/// This is the one binding whose failure mode is a *silently dead* line of code.
+/// The handler read `key_pressed(Key::C) && modifiers.ctrl`, which looks
+/// correct, compiles, and can never be true: `egui-winit`'s `on_keyboard_input`
+/// converts the clipboard chords and `return`s before pushing the `Key` event
+/// it just matched on. So the app compiled, the shortcut was documented, the
+/// button next to it worked, and the chord did nothing.
+///
+/// The premise is checked against real egui rather than asserted in a comment,
+/// because the whole test is worthless if egui ever stops converting the chord
+/// — that is what would make `Event::Copy` the wrong thing to read.
+#[test]
+fn ctrl_c_is_read_from_the_copy_event_and_not_from_a_key() {
+    // Premise, against the real Context: an `Event::Copy` in the input is
+    // visible as an event and invisible as a key press. This is the behaviour
+    // the handler below is written around.
+    let ctx = egui::Context::default();
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            events: vec![egui::Event::Copy],
+            ..Default::default()
+        },
+        |ctx| {
+            let copy_seen =
+                ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+            let key_seen = ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.command);
+            assert!(copy_seen, "egui no longer surfaces Event::Copy in InputState");
+            assert!(
+                !key_seen,
+                "egui now DOES deliver a C key press for the copy chord, so the \
+                 handler should go back to reading the key — this test's premise \
+                 has changed and the fix needs revisiting"
+            );
+        },
+    );
+    // A headless pass emits the font atlas and nothing applies it, which epaint
+    // debug-asserts on drop. See the `run_pass` helper in tests/unit.rs.
+    out.textures_delta.clear();
+
+    let src = source();
+    assert!(
+        !src.contains("i.key_pressed(egui::Key::C) && i.modifiers.ctrl"),
+        "Ctrl+C must not be read as a key press: egui-winit converts the chord \
+         to Event::Copy and drops the Key event, so this line can never fire."
+    );
+    assert!(
+        src.contains("egui::Event::Copy"),
+        "the copy chord should be read from `egui::Event::Copy`"
+    );
+    // The button label is the user-facing half of the same promise, and it is
+    // still true — but only now.
+    assert!(
+        src.contains("Copy IMG (Ctrl+C)"),
+        "the Copy IMG button should still advertise Ctrl+C"
+    );
+}

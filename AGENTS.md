@@ -16,6 +16,7 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 - `cargo run -- --perf <folder>` — turn on latency sampling; the report prints on exit and is written to `%TEMP%\image-viewer-perf.txt` (a release build has no console, so the file is the real output)
 - `PERF_PHASE=1` — per-phase timing inside the linear-light resampler
 - `cargo run` — launch the GUI viewer; `cargo run -- --register` / `--unregister` manage file-type registration (HKCU, no admin) and exit
+- `powershell -File tests/probe_chords.ps1` — **did that keystroke actually do the thing?** Launches the app on a scratch photo, injects `Ctrl+C` and `Ctrl+S`, and checks the two effects that cannot be faked: the **clipboard** (`IMAGE WxH`, read from a child STA process) and a **new file on disk**. Screenshots the window after each. This is the instrument for "the shortcut does nothing", and it is how the `Ctrl+C` bug was found — see the gotcha below. Console session only
 - Release builds hide the console (`windows_subsystem = "windows"`); debug keeps it for `eprintln!` diagnostics — don't "fix" this by removing the attribute
 
 ## Performance (the core goal — read before touching the pipeline)
@@ -283,6 +284,22 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   the set must be decided up front. `wgpu_backend_set()` therefore returns
   **exactly one bit, always**, and `wgpu_options()` pins it. Never make it return
   a set: two backends is not a fallback, it is a way to crash.
+- **The backend bits are wgpu's numbering, not ours, and `cargo run` was dead on
+  every launch because of it.** `wgpu_backend_set` returned `1 << 0/1/3` and
+  `exactly_one_backend_bit_is_ever_set` asserted *those same literals*, so the
+  test and the code agreed with each other while both were wrong — a test that
+  cannot fail. wgpu 30 renumbered `Backend` (`Noop=0` was inserted, so `Gl`
+  moved from bit 1 to **bit 4**), and `wgpu_options`'s `debug_assert_eq!` then
+  fired on **every debug launch**: `backend bit value drifted from lib.rs`,
+  `left: 2, right: 16`. The release build was fine, because the assert is
+  compiled out and `wgpu_options` matches on the *enum* to build the flag — so
+  the only build that noticed was the one nobody launches, and `cargo run` is
+  documented in this file. `tests/renderer.rs` now compares against
+  `Backends::VULKAN/GL/DX12` from wgpu itself, so a future renumbering is a
+  test failure rather than a stale literal. **Do not hand-transcribe these
+  numbers**; the same "never transcribe a table" rule as `Xform`, and the
+  failure mode is identical: it compiles, and it is wrong in a way that only
+  appears on a different machine or a different build profile.
 - **"Automatic" probing is per-backend child processes, and it must reach
   `request_device`.** The failure is an access violation, not an error return, so
   nothing in-process can survive it — the only place a crash can be contained is
@@ -387,6 +404,36 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   `main.rs`, so a test can see it; `main.rs` being a binary is why this
   survived). **If you add a CLI flag, add it to `path_arg` and its test.** The
   tell that it bit: a run of a *one-file* folder reporting 7 decode calls.
+- **`Ctrl+C` was never a key event, and reading it as one is a silently dead
+  line of code.** The handler was `key_pressed(Key::C) && modifiers.ctrl`, which
+  reads correctly and can never be true. `egui-winit`'s `on_keyboard_input`
+  intercepts the clipboard chords and **`return`s before pushing the `Key` event
+  it just matched on**:
+
+      } else if is_copy_command(self.modifiers, active_key) {
+          self.egui_input.events.push(egui::Event::Copy);
+          return;                      // <- no `Key { key: C, .. }` is ever pushed
+      }
+
+  and `is_copy_command` is `modifiers.command && key == C` — on Windows
+  `command` *is* `ctrl`, so the same condition. `Ctrl+X`/`Ctrl+V` are consumed
+  the same way, as `Event::Cut`/`Event::Paste`. `Ctrl+S` is not on that list,
+  which is exactly why the save chord always worked and the copy chord never
+  did: **one working chord and one broken chord, from the same closure, in the
+  same frame, with the same modifier guard.** The log of the frame is the whole
+  diagnosis in two lines — `Copy` then `Key { key: C, pressed: false }`, with
+  the `pressed: true` press simply not among the events.
+
+  So the chord is read from `egui::Event::Copy`, which is also the more correct
+  thing to do: it now answers to `Ctrl+Insert` and the dedicated Copy key too,
+  and it is inside the `!typing` block, so `Ctrl+C` in the filter box still
+  copies the selected text rather than a full-res image. **Before binding any
+  other chord, check it against `is_cut_command`/`is_copy_command`/
+  `is_paste_command` in egui-winit — those keys will not arrive as `Key`
+  events on any platform.** `ctrl_c_is_read_from_the_copy_event_and_not_from_a_key`
+  pins this, checks the premise against a real `egui::Context` rather than
+  asserting it in a comment, and is verified to fail with the old line back.
+
 - **Check the session is not remote before trusting any frame rate — and treat
   that as covering input and resize events too, not just fps.** This has now
   cost three wrong conclusions in one session: a GIF frame-rate "regression" that
@@ -406,12 +453,18 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   producing a crop frame with rule-of-thirds guides, dimming bands, and
   `crop 1112x889` in the status bar.
 
-  **Modifier chords do not arrive** — `Ctrl+S` and `Ctrl+C` both do nothing, with
-  `keybd_event` and with `SendInput` and scan codes, while plain keys work. So a
-  chord cannot be driven this way; neither can a button in a panel that must be
-  opened first. Those are harness limits, not app bugs. Screenshot the window to
-  see what a keypress did — the title does not change for most keys and the status
-  bar is where the state is. `TODO.md` section 5 has the script.
+  **Chords DO arrive — the earlier "modifier chords do not arrive" was wrong,
+  and it was wrong in the dangerous direction.** `Ctrl+S` was always working;
+  it produces a file on disk, which is impossible to miss, and
+  `tests/probe_chords.ps1` now shows it firing on every run. What was actually
+  true is narrower and much more interesting: `Ctrl+C` never worked, and it
+  looked exactly like an injection failure. It is not one — see the next entry.
+  Treat a "the harness cannot do X" claim here with suspicion: the tell that it
+  is wrong is when it would excuse a bug.
+
+  Screenshot the window to see what a keypress did — the title does not change
+  for most keys and the status bar is where the state is. `TODO.md` section 5
+  has the script.
 
 - **A second read of a file you just read is free.** `exif_orientation` calls
   `nom_exif::read_exif(path)` although the bytes are already in memory, which

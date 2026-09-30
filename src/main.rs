@@ -3623,14 +3623,42 @@ impl eframe::App for MyApp {
         // culling; Move and Copy are buttons. If they turn out to be wanted back
         // on the keyboard, a modifier is the shape to add rather than a bare
         // letter.
-        let (del, explore, reload, clip_img, wall, save_rot, crop_key) = ctx.input(|i| {
+        // `Ctrl+C` is **not** a key event, and reading it as one is why it did
+        // nothing. `egui-winit` intercepts the clipboard chords and converts
+        // them, dropping the key:
+        //
+        //     } else if is_copy_command(self.modifiers, active_key) {
+        //         self.egui_input.events.push(egui::Event::Copy);
+        //         return;                      // <- no `Key { key: C, .. }` ever
+        //     }
+        //
+        // and `is_copy_command` is `modifiers.command && key == C`, which on
+        // Windows is `ctrl` — the same thing. So `key_pressed(Key::C) &&
+        // modifiers.ctrl` is *unreachable*: the log of that frame shows
+        // `Copy` followed by `Key { key: C, pressed: false }`, and nothing
+        // between them. `Ctrl+S` survives because it is not on the list.
+        //
+        // So the chord is read from the converted event, which is also the
+        // honest way round: this is what the platform means by copy, so it
+        // now also answers to the Edit menu's Copy, `Ctrl+Insert`, and the
+        // dedicated Copy key, none of which would ever match a `C` test.
+        //
+        // It sits inside the `!typing` block below, so `Ctrl+C` in the filter
+        // box still copies the selected text rather than the picture — the
+        // text field handles the same event first, and copying a whole
+        // full-res image because you were renaming a filter is not a thing
+        // anyone asked for.
+        let clip_img = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+        let (del, explore, reload, wall, save_rot, crop_key) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
                 i.key_pressed(egui::Key::E),
                 i.key_pressed(egui::Key::R),
-                i.key_pressed(egui::Key::C) && i.modifiers.ctrl,
                 i.key_pressed(egui::Key::W) && !i.modifiers.any(),
                 i.key_pressed(egui::Key::S) && i.modifiers.ctrl,
+                // Bare `C` is still a real key event, so crop mode is
+                // unaffected: the chord interception is on the press *with*
+                // a modifier, and this is the press without one.
                 i.key_pressed(egui::Key::C) && !i.modifiers.any(),
             )
         });

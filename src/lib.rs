@@ -446,9 +446,20 @@ pub fn wgpu_backend_set(requested: WgpuBackend) -> u32 {
     match requested {
         // Bit values are wgpu's `Backends` constants; `main.rs` converts to the
         // real type so this module does not have to depend on wgpu.
+        //
+        // **These are not `1 << n` in order of this enum, and the numbering is
+        // wgpu's, not ours.** `Backends` is a bitflag over `wgpu::Backend`, which
+        // in wgpu 30 is `Noop=0, Vulkan=1, Metal=2, Dx12=3, Gl=4,
+        // BrowserWebGpu=5` — so `Gl` is bit 4, not bit 1. The old values were
+        // written from an older wgpu and left as bare literals, and
+        // `exactly_one_backend_bit_is_ever_set` asserted those same literals
+        // rather than wgpu's, so the pair agreed with each other while both were
+        // wrong and `cargo run` panicked on the `debug_assert_eq!` in
+        // `wgpu_options`. `tests/renderer.rs` now compares against
+        // `Backends::VULKAN/GL/DX12` directly; do not hand-transcribe these.
         WgpuBackend::Auto | WgpuBackend::Dx12 => 1 << 3, // DX12
-        WgpuBackend::Gl => 1 << 1,                        // GL
-        WgpuBackend::Vulkan => 1 << 0,                   // VULKAN
+        WgpuBackend::Gl => 1 << 4,                        // GL
+        WgpuBackend::Vulkan => 1 << 1,                   // VULKAN
     }
 }
 

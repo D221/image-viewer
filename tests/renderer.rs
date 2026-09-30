@@ -274,14 +274,40 @@ fn exactly_one_backend_bit_is_ever_set() {
             bits.count_ones()
         );
     }
-    // And the bit values must be the ones wgpu actually defines, or the
-    // `debug_assert` in main.rs is the only thing standing between us and a
-    // silent "no adapter found".
-    assert_eq!(image_viewer::wgpu_backend_set(WgpuBackend::Vulkan), 1 << 0);
-    assert_eq!(image_viewer::wgpu_backend_set(WgpuBackend::Gl), 1 << 1);
-    assert_eq!(image_viewer::wgpu_backend_set(WgpuBackend::Dx12), 1 << 3);
+    // The bit values must be the ones *this wgpu* defines, or `main.rs` builds a
+    // `Backends` flag that selects a backend the app never asked for.
+    //
+    // These were hardcoded as `1 << 0`, `1 << 1`, `1 << 3` and asserted against
+    // those same literals — which is a test that cannot fail. wgpu 30 renumbered
+    // `Backend` (`Noop` was inserted, so `Gl` moved from bit 1 to bit 4), the
+    // real values drifted, and `cargo run` died at startup on the
+    // `debug_assert_eq!` in `wgpu_options`. The release build was fine, because
+    // the assert is compiled out and `main.rs` matches on the *enum* to pick the
+    // flag — so the only build that noticed was the one nobody launches.
+    //
+    // Compared against wgpu's own constants now, so a future renumbering is a
+    // test failure rather than a stale literal that agrees with itself.
+    use eframe::egui_wgpu::wgpu::Backends;
+    assert_eq!(
+        image_viewer::wgpu_backend_set(WgpuBackend::Vulkan),
+        Backends::VULKAN.bits(),
+        "Vulkan bit drifted from wgpu"
+    );
+    assert_eq!(
+        image_viewer::wgpu_backend_set(WgpuBackend::Gl),
+        Backends::GL.bits(),
+        "GL bit drifted from wgpu"
+    );
+    assert_eq!(
+        image_viewer::wgpu_backend_set(WgpuBackend::Dx12),
+        Backends::DX12.bits(),
+        "DX12 bit drifted from wgpu"
+    );
     // `Auto` is resolved before it gets here, but must not produce an empty set.
-    assert_eq!(image_viewer::wgpu_backend_set(WgpuBackend::Auto), 1 << 3);
+    assert_eq!(
+        image_viewer::wgpu_backend_set(WgpuBackend::Auto),
+        Backends::DX12.bits()
+    );
 }
 
 #[test]
