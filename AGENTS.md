@@ -488,6 +488,18 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   Getting this backwards is invisible: a valid crop of the wrong part of the
   picture. `a_display_rect_survives_the_round_trip_through_stored_space` checks
   both directions against each other over every transform.
+- **The dimming bands around the crop frame are `dim_bands`, and they tile the
+  difference *exactly*.** Top and bottom span the **full width** of the picture;
+  left and right span only between them, so no pixel is covered twice and none is
+  missed. The first version wrote the top band from the picture's corner to the
+  frame's top-*left* corner and the bottom one from the frame's bottom-*right* to
+  the picture's corner — so the left and right dimmed correctly and the top and
+  bottom stayed bright except at their corners. It read as a rendering bug and was
+  arithmetic. `the_dimming_bands_cover_exactly_what_is_being_cut_away` asserts the
+  four areas sum to `picture - frame`, which catches a band that is too small, too
+  large or misplaced in one go, and is verified to fail with the bug reintroduced.
+  It lives in `lib.rs` over plain floats because that module has no egui
+  dependency on purpose, which is what makes it testable at all.
 - **The crop frame is drawn from the STORED crop mapped back out, never from the
   raw drag.** The chain is: screen points → displayed pixels → stored pixels
   (`Crop::from_display_rect`) → block grid (`snapped_to_mcu`) → back to the

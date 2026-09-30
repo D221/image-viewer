@@ -1483,6 +1483,40 @@ impl Crop {
     }
 }
 
+/// The four rectangles that dim everything outside `crop` but inside `outer`.
+///
+/// Axis-aligned rectangles as `[min_x, min_y, max_x, max_y]`, ordered top, bottom,
+/// left, right. The top and bottom bands span the **full** width of `outer`, and
+/// the left and right bands span only between them. That split is what makes them
+/// tile the difference *exactly* — every pixel outside the frame is covered once
+/// and no pixel inside it is covered at all.
+///
+/// Which is the whole content of this function, and the first version got it
+/// wrong: the top band ran from the picture's corner to the frame's top-*left*
+/// corner and the bottom band from the frame's bottom-*right* to the picture's
+/// corner, so only the corners of the top and bottom edges were dimmed while the
+/// left and right bands were right. It looked like a rendering bug and was
+/// actually an arithmetic one.
+/// `the_dimming_bands_cover_exactly_what_is_being_cut_away` is what pins it.
+///
+/// Plain floats rather than `egui::Rect` so it can be tested: this module has no
+/// egui dependency on purpose.
+pub fn dim_bands(outer: [f32; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
+    let [ox0, oy0, ox1, oy1] = outer;
+    // Clip the frame to the picture. A drag that ends outside the image must not
+    // dim anything beyond the edge.
+    let cx0 = crop[0].max(ox0);
+    let cy0 = crop[1].max(oy0);
+    let cx1 = crop[2].min(ox1);
+    let cy1 = crop[3].min(oy1);
+    [
+        [ox0, oy0, ox1, cy0], // top:    full width
+        [ox0, cy1, ox1, oy1], // bottom: full width
+        [ox0, cy0, cx0, cy1], // left:   only between the other two
+        [cx1, cy0, ox1, cy1], // right:  only between the other two
+    ]
+}
+
 /// The transform that takes a file's *stored* pixels to what the viewer shows:
 /// the EXIF orientation applied at decode, then whatever the user has done since.
 ///

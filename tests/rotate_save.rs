@@ -734,6 +734,110 @@ fn a_display_rect_survives_the_round_trip_through_stored_space() {
     }
 }
 
+/// The dimming bands must cover the picture outside the frame **exactly**.
+///
+/// Found by a screenshot: the top and bottom of the image stayed at full
+/// brightness while the left and right dimmed correctly. The bands were built as
+/// corner rectangles — the top one ran from the picture's corner to the frame's
+/// top-*left* corner — so only the corners of those edges were ever dimmed, and it
+/// read as a rendering bug rather than an arithmetic one.
+///
+/// Area is the assertion, because it catches all three ways this can be wrong at
+/// once: a band that is too small leaves a gap, one that is too large covers the
+/// frame, and one that is misplaced shifts the total somewhere else. Checking that
+/// the four sum to `picture - frame` cannot pass for any of them.
+#[test]
+fn the_dimming_bands_cover_exactly_what_is_being_cut_away() {
+    let area = |r: [f32; 4]| ((r[2] - r[0]).max(0.0)) * ((r[3] - r[1]).max(0.0));
+
+    for picture in [
+        [0.0f32, 0.0, 800.0, 600.0],
+        // Not starting at the origin, and a non-zero offset: a band written in
+        // terms of the picture's corner is only right when the corner is (0, 0).
+        [37.0, 12.0, 837.0, 612.0],
+    ] {
+        for frame in [
+            [100.0f32, 80.0, 400.0, 300.0],
+            [picture[0], picture[1], picture[2], picture[3]], // whole picture
+            // Flush against each edge in turn, and hanging off it: a drag that
+            // ends outside the image must not dim anything beyond the edge.
+            [picture[0], picture[1], picture[0] + 50.0, picture[3]],
+            [picture[2] - 50.0, picture[1], picture[2], picture[3]],
+            [picture[0], picture[1], picture[2], picture[1] + 50.0],
+            [picture[0], picture[3] - 50.0, picture[2], picture[3]],
+            [-40.0f32, -40.0, picture[2] + 40.0, picture[3] + 40.0],
+        ] {
+            let bands = image_viewer::dim_bands(picture, frame);
+            let covered: f32 = bands.iter().map(|b| area(*b)).sum();
+            let frame_clipped = {
+                let f = [
+                    frame[0].max(picture[0]),
+                    frame[1].max(picture[1]),
+                    frame[2].min(picture[2]),
+                    frame[3].min(picture[3]),
+                ];
+                area(f)
+            };
+            let want = area(picture) - frame_clipped;
+            assert!(
+                (covered - want).abs() < 0.5,
+                "bands cover {covered} but the picture minus the frame is {want}\n  picture {picture:?}\n  frame {frame:?}\n  bands {bands:?}"
+            );
+
+            // And no band may reach into the frame, or the frame is not "saved".
+            let [fx0, fy0, fx1, fy1] = [
+                frame[0].max(picture[0]),
+                frame[1].max(picture[1]),
+                frame[2].min(picture[2]),
+                frame[3].min(picture[3]),
+            ];
+            for b in bands {
+                let overlap_x = (b[2].min(fx1) - b[0].max(fx0)).max(0.0);
+                let overlap_y = (b[3].min(fy1) - b[1].max(fy0)).max(0.0);
+                assert!(
+                    overlap_x * overlap_y <= 0.0,
+                    "band {b:?} covers part of the frame {frame:?} in picture {picture:?}"
+                );
+                // Nor may a band stick out of the picture.
+                assert!(
+                    b[0] >= picture[0] - 0.01
+                        && b[1] >= picture[1] - 0.01
+                        && b[2] <= picture[2] + 0.01
+                        && b[3] <= picture[3] + 0.01,
+                    "band {b:?} escapes the picture {picture:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Specifically: the top and bottom bands must span the full width of the picture.
+///
+/// The area test above catches this, but not *which* band is wrong, and the bug
+/// was only obvious once the bands were named. Two assertions, one per axis, so a
+/// failure says which edge was left bright.
+#[test]
+fn the_top_and_bottom_bands_span_the_whole_picture() {
+    let picture = [0.0f32, 0.0, 800.0, 600.0];
+    let frame = [100.0f32, 80.0, 400.0, 300.0];
+    let [top, bottom, left, right] = image_viewer::dim_bands(picture, frame);
+
+    assert_eq!(
+        (top[0], top[2]),
+        (picture[0], picture[2]),
+        "the top band must reach both edges of the picture, not just the frame's"
+    );
+    assert_eq!(
+        (bottom[0], bottom[2]),
+        (picture[0], picture[2]),
+        "the bottom band must reach both edges of the picture, not just the frame's"
+    );
+    // The left and right bands reach the full height *only* where the top and
+    // bottom bands are not, so the four never double-cover a corner.
+    assert_eq!((left[1], left[3]), (frame[1], frame[3]));
+    assert_eq!((right[1], right[3]), (frame[1], frame[3]));
+}
+
 // --- the per-image edit store ---------------------------------------------
 
 /// A crop and a turn are one edit, not two. Two maps would make "the crop is

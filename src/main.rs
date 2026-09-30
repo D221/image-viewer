@@ -2627,21 +2627,27 @@ impl MyApp {
                     // Dim what is being cut away, as four bands rather than a
                     // full-panel wash with a hole: no blending, so the picture
                     // outside the frame is unchanged and only the frame is new ink.
+                    // The geometry — which includes not dimming the middle of the
+                    // top and bottom edges, which is what the first version did —
+                    // is `dim_bands`, and it is tested there.
                     let band = Color32::from_black_alpha(140);
-                    for r in [
-                        egui::Rect::from_min_max(footprint.min, cr.left_top()),
-                        egui::Rect::from_min_max(cr.right_bottom(), footprint.right_bottom()),
-                        egui::Rect::from_min_max(
-                            egui::Pos2::new(footprint.min.x, cr.min.y),
-                            egui::Pos2::new(cr.min.x, cr.max.y),
-                        ),
-                        egui::Rect::from_min_max(
-                            egui::Pos2::new(cr.max.x, cr.min.y),
-                            egui::Pos2::new(footprint.max.x, cr.max.y),
-                        ),
-                    ] {
-                        if r.width() > 0.0 && r.height() > 0.0 {
-                            painter.rect_filled(r, 0u8, band);
+                    let outer = [
+                        footprint.min.x,
+                        footprint.min.y,
+                        footprint.right_bottom().x,
+                        footprint.right_bottom().y,
+                    ];
+                    let inner = [cr.min.x, cr.min.y, cr.max.x, cr.max.y];
+                    for [x0, y0, x1, y1] in image_viewer::dim_bands(outer, inner) {
+                        if x1 > x0 && y1 > y0 {
+                            painter.rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::Pos2::new(x0, y0),
+                                    egui::Pos2::new(x1, y1),
+                                ),
+                                0u8,
+                                band,
+                            );
                         }
                     }
                     painter.rect_stroke(
