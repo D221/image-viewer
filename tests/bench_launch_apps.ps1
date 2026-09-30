@@ -43,6 +43,7 @@ param(
     [int]$GapMs = 3000,
     [switch]$VerboseConfig,
     [string]$Ours = "$PSScriptRoot\..\target\release\image-viewer.exe",
+    [string]$Oculante = "$PSScriptRoot\..\test-images\oculante\oculante.exe",
     [string]$Only = ""
 )
 
@@ -65,6 +66,10 @@ $APPS = @(
     @{ Name = "image-viewer (file, dx12)"; Exe = $Ours; Arg = "`"$Image`""; Kill = @("image-viewer"); Backend = "dx12" },
     @{ Name = "image-viewer (file, gl)"; Exe = $Ours; Arg = "`"$Image`""; Kill = @("image-viewer"); Backend = "gl" },
     @{ Name = "IrfanView (file)"; Exe = "C:\Program Files\IrfanView\i_view64.exe"; Arg = "`"$Image`""; Kill = @("i_view64") },
+    # Oculante is the interesting comparison: egui + wgpu, like this one, so it is
+    # the only other app here that pays the same renderer bill. IrfanView and
+    # JPEGView_L are Win32/GDI and do not, which is most of why they are light.
+    @{ Name = "Oculante (file)"; Exe = $Oculante; Arg = "`"$Image`""; Kill = @("oculante"); Log = "oculante" },
     @{ Name = "Windows Photo Viewer"; Exe = "$env:WINDIR\System32\rundll32.exe"; Arg = "`"C:\Program Files\Windows Photo Viewer\photoviewer.dll`",ImageView_Fullscreen `"$Image`""; Kill = @(); Skip = "removed in Windows 11 24H2/25H2" }
 )
 
@@ -99,11 +104,27 @@ function Measure-One($App) {
         Write-Host ("    [config] {0,-24} choice={1,-6} probed={2}" -f $App.Name, $r.choice, $r.probed)
     }
     Start-Sleep -Milliseconds $GapMs
+    # Oculante logs to stdout and, launched via `Start-Process`, inherits this
+    # script's handles. The pipeline then never sees end-of-file and the whole run
+    # hangs - which is exactly what happened on the first attempt. Redirecting to
+    # per-app log files breaks the inheritance.
+    $logOut = $null; $logErr = $null
+    if ($App.Log) {
+        $logOut = "$env:TEMP\iv_$($App.Log)_out.log"
+        $logErr = "$env:TEMP\iv_$($App.Log)_err.log"
+    }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = $null
     for ($try = 1; $try -le 10; $try++) {
-        try { $proc = Start-Process -FilePath $App.Exe -ArgumentList $App.Arg -PassThru -ErrorAction Stop; break }
-        catch { if ($try -eq 10) { throw }; Start-Sleep -Milliseconds 400 }
+        try {
+            if ($logOut) {
+                $proc = Start-Process -FilePath $App.Exe -ArgumentList $App.Arg -PassThru `
+                    -RedirectStandardOutput $logOut -RedirectStandardError $logErr -ErrorAction Stop
+            } else {
+                $proc = Start-Process -FilePath $App.Exe -ArgumentList $App.Arg -PassThru -ErrorAction Stop
+            }
+            break
+        } catch { if ($try -eq 10) { throw }; Start-Sleep -Milliseconds 400 }
     }
 
     $toWindow = $null
@@ -154,6 +175,12 @@ function Med($xs) {
 
 $live = @($APPS | Where-Object { -not $_.Skip })
 if ($Only) { $live = @($live | Where-Object { $_.Name -like "*$Only*" }) }
+# Drop anything not built rather than failing: Oculante is a clone under
+# test-images and may not have been compiled yet.
+$missing = @($live | Where-Object { -not (Test-Path $_.Exe) })
+foreach ($m in $missing) { Write-Host ("  (skipping {0}: not built at {1})" -f $m.Name, $m.Exe) }
+$live = @($live | Where-Object { Test-Path $_.Exe })
+if (-not $live.Count) { throw "nothing to measure" }
 
 Write-Host ""
 Write-Host "  launch benchmark, interleaved, $Rounds rounds, ${GapMs}ms between launches"
