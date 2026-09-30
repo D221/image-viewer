@@ -3675,12 +3675,7 @@ impl eframe::App for MyApp {
                     // unreachable while it is on.
                     if ui
                         .selectable_label(self.crop_mode, "Crop (C)")
-                        .on_hover_text(
-                            "Drag on the image to frame a crop.\n\
-                             The frame is saved by 'Save transformed...' - nothing is \
-                             written until then.\n\
-                             While this is on, dragging pans no longer.",
-                        )
+                        .on_hover_text("Drag on the image to frame")
                         .clicked()
                     {
                         self.crop_mode = !self.crop_mode;
@@ -3710,10 +3705,7 @@ impl eframe::App for MyApp {
                             self.cur.is_some(),
                             egui::Button::new("Save transformed… (Ctrl+S)"),
                         )
-                        .on_hover_text(
-                            "Write a new file beside this one, with its rotation and mirroring baked in.\n\
-                             The original is not modified.",
-                        )
+                        .on_hover_text("New file beside this one, original untouched")
                         .clicked()
                     {
                         self.save_transformed_copy();
@@ -3728,18 +3720,10 @@ impl eframe::App for MyApp {
                     // No key advertised, because there is none: Move and Copy write
                     // to the filesystem and are not on a bare keystroke. See the
                     // note where the bindings are read.
-                    if ui
-                        .button("Move…")
-                        .on_hover_text("Move this file to another folder.\nNo keyboard shortcut - this changes files on disk.")
-                        .clicked()
-                    {
+                    if ui.button("Move…").clicked() {
                         self.transfer_current(ctx, false);
                     }
-                    if ui
-                        .button("Copy…")
-                        .on_hover_text("Copy this file to another folder.\nNo keyboard shortcut - this writes to disk.")
-                        .clicked()
-                    {
+                    if ui.button("Copy…").clicked() {
                         self.transfer_current(ctx, true);
                     }
                     if ui.button("Explore (E)").clicked() {
