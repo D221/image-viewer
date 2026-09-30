@@ -488,6 +488,19 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   Getting this backwards is invisible: a valid crop of the wrong part of the
   picture. `a_display_rect_survives_the_round_trip_through_stored_space` checks
   both directions against each other over every transform.
+- **A bare letter may only do something that cannot lose data.** `M` (move) and `C`
+  (copy) used to be bound to actions that write to the filesystem, on a keystroke
+  with nothing between the key and the file; `C` is now Crop, which is a view
+  transform until `Ctrl+S`. `Del` is the one accepted exception and it goes to the
+  Recycle Bin. `tests/keybindings.rs` enforces this from an explicit
+  `BARE_LETTERS` list, where **adding a line is a claim that the action cannot lose
+  data** — the point is to make the next person write down why. It asserts against
+  `src/main.rs` as text, which is normally a weak thing to test, and it is here
+  because "a shortcut does not exist" is otherwise unobservable: the only way to
+  find out is to press it and move somebody's photo. It does **not** check that
+  bound keys *work* — that needs a synthetic keystroke, and those silently do
+  nothing over RDP, so such a test would be green forever without ever having
+  pressed anything.
 - **The dimming bands around the crop frame are `dim_bands`, and they tile the
   difference *exactly*.** Top and bottom span the **full width** of the picture;
   left and right span only between them, so no pixel is covered twice and none is
@@ -554,11 +567,11 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
   count implies a possible axis swap" is now wrong.** `xformed_footprint` asks
   `Xform::swaps_axes`; four of the eight swap and four do not, and the two diagonal
   mirrors *do* swap because a diagonal reflection is a quarter turn plus a flip.
-- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del/M/C = triage; E = open folder in default file browser; W = wallpaper; Ctrl+C = copy image; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. Rotate ⟲/⟳, Mirror ⇋/⇅, Reset turn and **Save transformed…** are bottom-panel buttons only — no keys, deliberately: `Ctrl+S` is the one chord, because an undiscoverable shortcut is worse than no shortcut. The transform is a view transform, re-fits after each edit, and is **per image** (`ImageTransforms` in `lib.rs`, keyed by path — a single app-wide `u8` is the bug this replaced, since it turned every photo you navigated to and lost your edit on the way back). It composes with the EXIF tag when saved, so look the transform up *by the path being saved*.
+- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del = Recycle Bin; E = open folder in default file browser; W = wallpaper; C = crop mode; F = fit; Ctrl+C = copy image; Ctrl+S = save transformed; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. **Move and Copy have no key** (they write to disk - see the bare-letter rule above). Rotate, Mirror H/V, Reset turn, Crop, Clear crop and **Save transformed...** are bottom-panel buttons; `Ctrl+S` is the one chord that writes. The transform and crop are a view transform, re-fit after each edit, and are **per image** (`ImageEdits` in `lib.rs`, keyed by path - a single app-wide `u8` is the bug this replaced, since it turned every photo you navigated to and lost your edit on the way back). It composes with the EXIF tag when saved, so look the transform up *by the path being saved*.
 
 ## Gotchas by feature
 
-- **CBZ/ZIP**: opening an archive extracts supported entries to `%TEMP%\image-viewer\<hash(path, mtime, size)>` and opens it as a folder gallery. The temp dir is reused for unchanged archives, deleted on folder switch and exit. Triage (Del/M/C) is disabled for archives; wallpaper copies the member to `%APPDATA%\image-viewer\wallpaper.<ext>` first (temp dir dies). Don't persist the temp path into `config.folder`.
+- **CBZ/ZIP**: opening an archive extracts supported entries to `%TEMP%\image-viewer\<hash(path, mtime, size)>` and opens it as a folder gallery. The temp dir is reused for unchanged archives, deleted on folder switch and exit. Triage (Del, and the Move/Copy buttons) is disabled for archives; wallpaper copies the member to `%APPDATA%\image-viewer\wallpaper.<ext>` first (temp dir dies). Don't persist the temp path into `config.folder`.
 - **Resume (`last_by_folder`)** stores **file names, not full paths** (archives and folders share the format); the folder path is the key. An explicit CLI file argument beats resume — don't reintroduce the unconditional resume lookup.
 - **File registration** (`src/fileassoc.rs`): per-user HKCU ProgID + `OpenWithProgids` for all 9 extensions; never claims default silently (Windows 8+ policy). ProgID embeds the exe folder name — moving the exe requires re-registering.
 - **Linear-light resize** (`downscale_image` → `linear_resize`): 12-bit sRGB↔linear LUTs, runtime-selectable filter (`DownscaleFilter`: Hermite/Catrom/Lanczos3 via `set_downscale_filter`), custom separable resampler because the `image` crate's `Filter` is `pub(crate)`. Overshoot must clamp LUT indices to 4095 (index 4097 was a worker panic). Known wart: toggling `linear_resample` doesn't re-decode existing previews (the filter dropdown does) — see `refilter` in the settings handler if you touch this.

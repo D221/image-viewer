@@ -3453,16 +3453,28 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::Enter),
             )
         });
-        let (del, move_f, copy_f, explore, reload, clip_img, wall, save_rot) = ctx.input(|i| {
+        // `M` (move) and `C` (copy) used to be bare single-key shortcuts. They are
+        // not any more, and the reason is worth keeping: both **write to the
+        // filesystem** on a keystroke with nothing standing between the key and
+        // the file. `C` in particular is the wrong letter to have bound to a
+        // mutation, because it is also the first thing anyone reaches for when
+        // they think they are in a text box somewhere else. `C` is now Crop,
+        // which touches nothing on disk until `Ctrl+S`.
+        //
+        // So the single-key budget goes to actions that cannot lose data. Triage
+        // is still one keystroke for Delete, which is the one people use while
+        // culling; Move and Copy are buttons. If they turn out to be wanted back
+        // on the keyboard, a modifier is the shape to add rather than a bare
+        // letter.
+        let (del, explore, reload, clip_img, wall, save_rot, crop_key) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
-                i.key_pressed(egui::Key::M),
-                i.key_pressed(egui::Key::C) && !i.modifiers.ctrl,
                 i.key_pressed(egui::Key::E),
                 i.key_pressed(egui::Key::R),
                 i.key_pressed(egui::Key::C) && i.modifiers.ctrl,
                 i.key_pressed(egui::Key::W) && !i.modifiers.any(),
                 i.key_pressed(egui::Key::S) && i.modifiers.ctrl,
+                i.key_pressed(egui::Key::C) && !i.modifiers.any(),
             )
         });
         // Mouse side buttons: back = previous image, forward = next image.
@@ -3521,10 +3533,6 @@ impl eframe::App for MyApp {
             }
             if del {
                 self.delete_current(ctx);
-            } else if move_f {
-                self.transfer_current(ctx, false);
-            } else if copy_f {
-                self.transfer_current(ctx, true);
             } else if explore {
                 self.explore_current();
             } else if reload {
@@ -3533,6 +3541,9 @@ impl eframe::App for MyApp {
                 self.copy_image_to_clipboard();
             } else if save_rot {
                 self.save_transformed_copy();
+            } else if crop_key {
+                self.crop_mode = !self.crop_mode;
+                ctx.request_repaint();
             } else if wall {
                 self.set_wallpaper();
             } else if mouse_back {
@@ -3663,7 +3674,7 @@ impl eframe::App for MyApp {
                     // spells out the one real cost, which is that panning is
                     // unreachable while it is on.
                     if ui
-                        .selectable_label(self.crop_mode, "Crop")
+                        .selectable_label(self.crop_mode, "Crop (C)")
                         .on_hover_text(
                             "Drag on the image to frame a crop.\n\
                              The frame is saved by 'Save transformed...' - nothing is \
@@ -3714,10 +3725,21 @@ impl eframe::App for MyApp {
                     if ui.button("Delete (Del)").clicked() {
                         self.delete_current(ctx);
                     }
-                    if ui.button("Move… (M)").clicked() {
+                    // No key advertised, because there is none: Move and Copy write
+                    // to the filesystem and are not on a bare keystroke. See the
+                    // note where the bindings are read.
+                    if ui
+                        .button("Move…")
+                        .on_hover_text("Move this file to another folder.\nNo keyboard shortcut - this changes files on disk.")
+                        .clicked()
+                    {
                         self.transfer_current(ctx, false);
                     }
-                    if ui.button("Copy… (C)").clicked() {
+                    if ui
+                        .button("Copy…")
+                        .on_hover_text("Copy this file to another folder.\nNo keyboard shortcut - this writes to disk.")
+                        .clicked()
+                    {
                         self.transfer_current(ctx, true);
                     }
                     if ui.button("Explore (E)").clicked() {

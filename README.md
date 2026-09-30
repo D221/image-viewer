@@ -64,7 +64,7 @@ double-rotate).
   default: nothing is written to the file. **Save transformed…** (next to the
   buttons, or `Ctrl+S`) writes a new file beside the original with the transform
   baked in, losslessly (see below)
-- **Crop** — drag on the image to frame a crop. The frame is drawn over the whole
+- **Crop** (`C`) — drag on the image to frame a crop. The frame is drawn over the whole
   picture rather than the picture being cut on screen, so turning and mirroring
   still apply to the full frame, and the frame follows the image if you turn it
   afterwards. It is snapped to the JPEG block grid (8 or 16 px) because that is
@@ -120,11 +120,17 @@ than silently writing into the zip.
 | Key | Action |
 |---|---|
 | `Del` | Move to the Recycle Bin (never a hard delete) |
-| `M` / `C` | Move / copy the current image to a chosen folder |
+| — | Move / copy the current image to a chosen folder (buttons; no key, see below) |
 | `E` | Reveal the containing folder in your default file browser |
 | `W` | Set as desktop wallpaper |
 | `Ctrl+C` | Copy the image to the clipboard |
 | `R` | Rescan the folder / reshuffle the sort order |
+
+Move and Copy are buttons rather than keys because they write to the filesystem.
+`M` and `C` used to be bound to them; `C` is now Crop, which is a pure view
+transform until you explicitly save. The rule the app now follows is that a bare
+letter may only do something that cannot lose data — `Del` is the exception, and it
+goes to the Recycle Bin.
 
 ### Metadata
 
@@ -252,12 +258,22 @@ should not quietly do that.
 | `/` | Focus the filter box |
 | `F11` | Fullscreen |
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |
-| `Del` `M` `C` `E` `W` `R` | Triage, see above |
+| `C` | Toggle crop mode |
+| `Del` | Move to the Recycle Bin (never a hard delete) |
+| `E` `W` `R` | Explore folder, wallpaper, reload folder |
 | `Ctrl+C` | Copy image to clipboard |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Previous / next image |
 | Drag & drop | Open a file, folder or archive |
+
+**Move and Copy have no keyboard shortcut**, deliberately. Both write to the
+filesystem, and a bare letter is one stray keystroke away from doing that. `C` used
+to be Copy and is now Crop, which touches nothing on disk until `Ctrl+S` — the
+single-key budget goes to actions that cannot lose data. `Del` keeps its key
+because it is the one people reach for while culling, and it goes to the Recycle
+Bin rather than deleting. If Move and Copy are wanted back on the keyboard, a
+modifier is the shape to add rather than a bare letter.
 
 ---
 
