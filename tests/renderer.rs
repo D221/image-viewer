@@ -44,10 +44,15 @@ fn every_backend_round_trips_through_its_name() {
 }
 
 #[test]
-fn auto_probes_dx12_first_and_vulkan_last() {
-    // DX12 is the only combination verified to work on the development machine,
-    // so it leads. Vulkan goes last because it is the one that access-violates.
-    assert_eq!(PROBE_ORDER, [WgpuBackend::Dx12, WgpuBackend::Gl, WgpuBackend::Vulkan]);
+fn auto_probes_gl_first_and_vulkan_last() {
+    // GL leads because it is measurably the cheapest backend on this machine: a
+    // bare eframe window is 321 MB on DX12 against 84 MB on GL, and adapter +
+    // device creation is 455 ms against 186 ms. See `PROBE_ORDER` for the table and
+    // for the caveat that frame rate was *not* measured — this is a one-line
+    // reversal if a console session says otherwise.
+    //
+    // Vulkan goes last because it is the one that access-violates.
+    assert_eq!(PROBE_ORDER, [WgpuBackend::Gl, WgpuBackend::Dx12, WgpuBackend::Vulkan]);
     // The probe order and the choice list must not drift apart, or "Automatic"
     // would quietly stop offering something the user can pick by hand.
     for b in WgpuBackend::CHOICES {
@@ -67,15 +72,15 @@ fn the_first_surviving_probe_wins() {
         (WgpuBackend::Gl, true),
         (WgpuBackend::Vulkan, true),
     ];
-    assert_eq!(pick_probed(&all_ok), WgpuBackend::Dx12);
+    assert_eq!(pick_probed(&all_ok), WgpuBackend::Gl, "GL leads: it is the cheapest to create");
 
-    // DX12 unavailable: GL is the next in order, even though Vulkan also works.
-    let no_dx12 = vec![
-        (WgpuBackend::Dx12, false),
-        (WgpuBackend::Gl, true),
+    // GL unavailable: DX12 is next in order, even though Vulkan also works.
+    let no_gl = vec![
+        (WgpuBackend::Dx12, true),
+        (WgpuBackend::Gl, false),
         (WgpuBackend::Vulkan, true),
     ];
-    assert_eq!(pick_probed(&no_dx12), WgpuBackend::Gl);
+    assert_eq!(pick_probed(&no_gl), WgpuBackend::Dx12);
 
     // Only Vulkan works. This is the case the whole design exists for.
     let only_vulkan = vec![
@@ -96,11 +101,11 @@ fn the_probe_order_beats_the_order_the_results_arrive_in() {
         (WgpuBackend::Gl, true),
         (WgpuBackend::Dx12, true),
     ];
-    assert_eq!(pick_probed(&reversed), WgpuBackend::Dx12);
+    assert_eq!(pick_probed(&reversed), WgpuBackend::Gl);
 
-    // Incomplete: DX12 was never tried, GL and Vulkan both report fine.
-    let partial = vec![(WgpuBackend::Gl, true), (WgpuBackend::Vulkan, true)];
-    assert_eq!(pick_probed(&partial), WgpuBackend::Gl);
+    // Incomplete: GL was never tried, DX12 and Vulkan both report fine.
+    let partial = vec![(WgpuBackend::Dx12, true), (WgpuBackend::Vulkan, true)];
+    assert_eq!(pick_probed(&partial), WgpuBackend::Dx12);
 }
 
 #[test]
@@ -108,14 +113,14 @@ fn if_nothing_works_we_still_have_to_pick_something() {
     // A probe that fails for every backend means the probing itself is
     // untrustworthy — most likely the exe cannot be re-launched. Picking nothing
     // would leave `Backends` empty and fail in a far more confusing way, so the
-    // least-bad answer is the one that has never been seen to fail.
+    // least-bad answer is the cheapest one: same reasoning as `PROBE_ORDER`.
     let none = vec![
         (WgpuBackend::Dx12, false),
         (WgpuBackend::Gl, false),
         (WgpuBackend::Vulkan, false),
     ];
-    assert_eq!(pick_probed(&none), WgpuBackend::Dx12);
-    assert_eq!(pick_probed(&[]), WgpuBackend::Dx12);
+    assert_eq!(pick_probed(&none), WgpuBackend::Gl);
+    assert_eq!(pick_probed(&[]), WgpuBackend::Gl);
 }
 
 #[test]

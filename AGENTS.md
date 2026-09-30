@@ -20,50 +20,80 @@ Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a 
 
 ## Performance (the core goal — read before touching the pipeline)
 
-- **Start-up cost is the renderer, not the folder.** Measured against JPEGView_L
-  on a 1001-image folder, and the decisive experiment is that **5 images take the
-  same time as 1001** — it is all fixed cost. We get a *window* in ~50 ms
-  (JPEGView_L: ~200 ms), but reaching first frame costs ~737 ms, and the backend is
-  most of it:
+- **Start-up cost is the renderer, not the folder, and the renderer is most of the
+  memory too.** The decisive experiment is that **5 images take the same time as
+  1001** — it is all fixed cost. We get a *window* in ~50-65 ms (JPEGView_L:
+  ~200 ms), and the backend decides everything after that:
 
-  | backend | adapter + device | peak working set at window+1.5 s |
+  | backend | adapter + device | bare eframe window | this viewer |
+  |---|---|---|---|
+  | dx12 | 455 ms | 321 MB | 343 MB |
+  | gl | **186 ms** | **84 MB** | **189 MB** |
+  | vulkan | 474 ms | crashes | crashes |
+
+  Measured with `examples/bare_eframe.rs` as the control: an eframe window and a
+  label, no viewer code at all, so the number is the renderer's rather than ours.
+  It is the reason **237 MB of the footprint was never ours to begin with** — and
+  all of it was the backend. Oculante 0.9.2, for reference, sits at 118 MB, but it
+  uses glow rather than wgpu, so it is not a like-for-like number: bare eframe on
+  wgpu+GL is *lighter* than Oculante at 84 MB.
+
+  `PROBE_ORDER` now puts **GL first** and DX12 second. This is a deliberate
+  reversal of the original order (DX12 first, on the grounds that it is the native
+  Windows backend), and the reason is the table above. Three renderer tests changed
+  with it. The caveat, and the reason it stays a one-line revert: **frame rate was
+  not measured.** DX12 may render faster, and frame rate cannot be measured over
+  RDP - this project has drawn two wrong conclusions from that before. What *is*
+  measured is memory and device-creation time, and both favour GL unambiguously.
+  For a photo viewer the first pixels are what you wait for; animation is the only
+  case where throughput shows. Check it on a console session and flip
+  `PROBE_ORDER` back if GL is worse.
+
+- **Oculante is not faster, and there is nothing of its to port.** It was measured
+  to look 29x quicker to first window, which was an artifact: our own launch time is
+  bimodal on this box (~50 ms or ~1400 ms for the same binary and config) and the
+  harness caught the two apps in opposite modes. Alternating them properly, ten
+  rounds each, every sample printed:
+
+  | | window min/med/max | peak |
   |---|---|---|
-  | dx12 (first in probe order, so `auto` picks it) | 455 ms | 343 MB |
-  | gl | **186 ms** | **153 MB** |
+  | ours (dx12) | 49 / 65 / 69 | 343 MB |
+  | Oculante | 33 / 64 / 554 | 118 MB |
 
-  The first column is solid: `--probe-renderer <backend>` *is* adapter enumeration
-  plus `request_device` in a child process, so it measures exactly that and it
-  reproduces. End to end the app's own `--perf` "startup -> first frame" measured
-  737 ms on dx12 against 267 ms on gl under an A-B-A design (dx12 again at the end,
-  to catch drift), so `auto` picks the **slowest** backend here, by ~470 ms and
-  190 MB. **Not a free change**: dx12 may render faster, and frame rate cannot be
-  measured over RDP (see above). Left as a setting until someone checks it on a
-  console session. The config field is **`renderer.choice`**, *not* `wgpu_backend`;
-  assigning a property that does not exist to a `ConvertFrom-Json` object throws,
-  and *swallowing* that throw produced a three-block benchmark in which all three
-  blocks silently ran the same setting.
-- **End-to-end launch timing for THIS app is not measurable from an RDP session,
-  and the harness makes it worse.** Same binary, same config, same argument, two
-  ways in one sitting: launched standalone 1.5 s apart it reached a window in
-  **47-93 ms** using 153 MB; driven by `bench_launch_apps.ps1` with 3 s gaps it took
-  **1614-1909 ms** and 354 MB - and reported 354 MB for the `gl` variant with
-  `renderer.choice = gl` verified on disk immediately before the launch.
-  **IrfanView under the identical harness never moved** (window 81-116 ms, idle
-  742-846 ms, peak 29 MB) across five runs and every gap and length variant, which
-  is what makes it a control rather than a coincidence. So: trust IrfanView's
-  numbers, trust the isolated device-creation numbers, trust peak working set
-  sampled at a fixed point, and **do not trust this app's absolute to-idle figure
-  from this session**. `$GapMs` defaults to 3000 for the same reason - relaunching
-  the same exe quickly is measurably slower (1.5 s apart: 47-93 ms; 350 ms apart:
-  ~1400 ms) and alternating between two *different* exes hides it completely, so a
-  harness with one entry per app looks fine right up until you put two variants of
-  the same binary into the rotation.
-- **Windows Photo Viewer no longer exists** on Windows 11 24H2/25H2 (this box is
-  25H2, build 26200). `photoviewer.dll` is still on disk and still contains the
-  string `ImageView_Fullscreen`, but it is unregistered - no
-  `photoviewer\shell\open\command` - and `rundll32` exits 0 in ~100 ms with no
-  window, under both the comma and the space calling convention. It is kept in
-  `bench_launch_apps.ps1` as an explicit SKIP so nobody re-derives it.
+  Same window time - Oculante is merely *more variable*. The one real difference
+  was memory, and `bare_eframe` showed that to be eframe's wgpu backend rather
+  than our code, which is what the `PROBE_ORDER` change above then took.
+  `bench_ab_oculante.ps1` is the honest instrument: it alternates the two, prints
+  every sample rather than a median, and reports peak at a fixed point after the
+  window.
+
+  Two ways this measurement was got wrong first, both recorded because the failure
+  mode is a *plausible number*. (1) The harness that produced "Oculante is 29x
+  quicker" caught each app in the other mode of a bimodal distribution - ours at
+  ~1400 ms, Oculante at ~48 ms; the same Oculante binary measured 2106 ms
+  standalone. (2) A run that set `renderer.choice = gl` reported *343 MB* for both
+  backends, which would have said the backend is irrelevant. It was not: the config
+  write had not taken effect at that moment. **Read the config back after writing
+  it and assert the value**, and re-measure the backend question with
+  `bare_eframe`, which has no config to get wrong.
+
+- **Opening a specific file by command line did not open that file.** `Gallery::from_file`
+  set the index to 0 and start-up then replaced the list with the whole folder
+  without touching the index, so a double-click or "Open with" showed whichever
+  file happened to sort first. `AGENTS.md` claimed an explicit argument beats
+  resume; it was beating neither, because the `!explicit_file` guard only skipped
+  the resume lookup and nothing then set the index. The rule now lives in
+  `image_viewer::startup_index` - pure, and tested in `tests/rotate_save.rs` -
+  because the wiring is in a binary and could not be reached before. Found while
+  benchmarking, not by reading: the harness passed one photo and the app showed a
+  different one, which is only visible if you look at the window title.
+
+- **Windows Photo Viewer cannot be benchmarked**, so do not spend time on it. It
+  was removed in Win11 24H2/25H2 (this box is 25H2 build 26200). The DLL is
+  present and still contains `ImageView_Fullscreen`, but it is unregistered, and
+  `rundll32` against it exits 0 in ~100 ms. IrfanView and Oculante remain the
+  usable comparisons; Oculante is the fairer one because it is also egui.
+
 - **Start-up walked the folder three times.** `Gallery::new` scans,
   `load_all_from_folder` scans again, and `scan_folder_sorted` scans a third time
   — and the middle one's result was overwritten on the very next line. Now one scan,
