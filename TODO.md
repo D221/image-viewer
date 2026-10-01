@@ -107,28 +107,7 @@ Neither is on the conversion path (§1): both only make the report honest.
 
 ---
 
-## 3. Animated WebP decode — written, never verified against a real file
-
-The path is reached (`animated_format` → `animation_frame_count` →
-`load_animation` with `WebPDecoder`) and the *detection* is tested: a still WebP
-is recognised and reported as not an animation, which is the part that would
-otherwise decode the file twice. The decode itself has never run against a real
-animated WebP, because nothing in this dependency set can produce one. Ruled out:
-`image` 0.25 writes lossless VP8L stills only; `image-webp` 0.2.4 has
-`WebPEncoder::encode` but it is single-frame; there is no libwebp binding.
-
-Hand-building one means emitting `VP8X` + `ANIM` + `ANMF` around a real VP8 or
-VP8L bitstream, and VP8L is Huffman-coded — not worth writing by hand to test
-three lines that call an upstream decoder.
-
-**To close it: get one real animated WebP** (a 2 KB one is enough) and either
-commit it as a fixture or add a decoder to a test-only helper. The APNG fixture
-in `tests/multiframe.rs` is the model — assembled chunk by chunk because nothing
-else could produce one.
-
----
-
-## 4. Multi-page TIFF: the colour types still past page 0
+## 3. Multi-page TIFF: the colour types still past page 0
 
 Pages work, and **CMYK now works too** — `cmyk_via_image` re-wraps a page's
 samples in a one-page TIFF and lets `image` do the conversion, because `image`
@@ -151,7 +130,7 @@ it; a 24-bit CMYK scan is the common print case and it is already covered.
 
 ---
 
-## 5. Smaller queued items
+## 4. Smaller queued items
 
 - **Grid thumbnails of large scans are the grid's real bottleneck.** Files with
   no embedded thumbnail take ~800 ms each even via the turbojpeg DCT path, which

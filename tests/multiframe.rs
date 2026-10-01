@@ -285,6 +285,64 @@ fn a_still_webp_is_recognised_as_webp_but_not_as_an_animation() {
 }
 
 #[test]
+fn an_animated_webp_decodes_every_frame_it_contains() {
+    // The one decode path no amount of synthesis could reach, which is why this
+    // file exists at all rather than being built here: `image` writes lossless
+    // VP8L stills only, `image-webp`'s encoder is single-frame, and there is no
+    // libwebp binding in the tree. See `tests/fixtures/README.md` for the source
+    // and licence.
+    //
+    // The failure this guards is not "animated WebP is broken" — it never was.
+    // It is that three lines calling an upstream decoder had never been *run*,
+    // which looks identical from the outside whether they are right or wrong.
+    // APNG and animated WebP were both frozen on frame 0 that way once already.
+    let bytes = include_bytes!("fixtures/animated.webp");
+
+    // Detection first: a still WebP yields one *decoded* frame from
+    // `into_frames` that the caller throws away and then decodes again, so
+    // recognising the animation is half the work.
+    assert_eq!(animated_format(bytes), Some(AnimatedFormat::Webp));
+    assert!(
+        image_viewer::is_animated(bytes, AnimatedFormat::Webp),
+        "a VP8X/ANIM container must be recognised as an animation"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "animated.webp", bytes);
+    let anim = load_image_preview_full(&p, 512)
+        .expect("an animated WebP must decode")
+        .anim
+        .expect("and be reported as an animation, not as one picture");
+
+    // Pinned numbers, because a fixture that decodes "some frames" is exactly
+    // the frozen-on-frame-0 bug wearing a different hat.
+    assert_eq!(anim.frames.len(), 10, "the file has 10 frames");
+    assert!(
+        anim.frames.iter().all(|f| (f.width, f.height) == (400, 400)),
+        "every frame is 400x400"
+    );
+    assert!(
+        anim.delays.iter().all(|d| d.as_millis() == 40),
+        "40 ms per frame: {:?}",
+        anim.delays
+    );
+    assert_eq!(anim.total_duration().as_millis(), 400, "400 ms loop");
+
+    // The frames must actually differ. Ten copies of one picture would satisfy
+    // every assertion above, and would be a still image wearing a container.
+    let differing = anim
+        .frames
+        .windows(2)
+        .filter(|pair| pair[0].rgba != pair[1].rgba)
+        .count();
+    assert_eq!(
+        differing,
+        9,
+        "all 9 adjacent frame pairs must differ, or this is not animating"
+    );
+}
+
+#[test]
 fn a_riff_container_that_is_not_webp_is_not_an_animation() {
     // "RIFF" on its own is not enough: that is also how WAV and AVI start. If
     // this ever sniffs as WebP, a folder of wav files turns into a folder of

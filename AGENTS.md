@@ -476,9 +476,16 @@ that are already in memory. One crate, no workspace, no CI.
   (`ApngDecoder` over a still PNG yields zero frames; `WebPDecoder` over a still
   WebP yields one frame the caller throws away, then decodes again), and
   `"RIFF"` is not enough to sniff WebP — WAV and AVI start the same way. Nothing
-  in this tree can *encode* an APNG or an animated WebP, so the APNG fixture is
-  assembled chunk by chunk in `tests/multiframe.rs` and the animated-WebP decode
-  path is unverified (`TODO.md` records the gap).
+  in this tree can *encode* an APNG or an animated WebP (`image` writes lossless
+  VP8L stills and has no `write_frames`; `image-webp`'s encoder is single-frame),
+  so both fixtures are the exception `tests/fixtures/` exists for: the APNG is
+  assembled chunk by chunk in `tests/multiframe.rs`, and the animated WebP is a
+  vendored 4.9 KB file (MIT/Apache, `webp-animation` 0.9.0) attributed in
+  `tests/fixtures/README.md`. **That gap closed by finding a file, not by writing
+  code**: the animated WebP path had never been *run*, which from the outside is
+  indistinguishable from broken. Both now decode every frame, with the numbers
+  pinned — and for the WebP, the frames asserted to differ from each other, since
+  ten copies of one picture would satisfy every other assertion.
 - **Embedded EXIF thumbnails** skip decoding the source entirely (measured
   16–40× on real JPEGs) and are gated on `target <= EMBEDDED_THUMB_MAX_TARGET`
   (512), so they only ever serve `Kind::Thumb` grid cells — the main view always
@@ -567,11 +574,15 @@ that are already in memory. One crate, no workspace, no CI.
 
 ## Tests
 
-- **Every suite builds its own fixtures in a `tempfile::tempdir()`.** Do not
-  reintroduce hardcoded `test-images/` paths: it is gitignored, so the test
-  passes on your machine and dies with a bare `NotFound` in a fresh clone — which
-  is exactly what happened to `tests/standard.rs`, and then to
-  `tests/integration.rs`. The only remaining readers of `test-images/` are:
+- **Every suite builds its own fixtures in a `tempfile::tempdir()`**, with one
+  narrow exception: `tests/fixtures/` holds a file only when **nothing in the
+  dependency set can write that format**. That is the same situation as the
+  hand-assembled APNG in `multiframe.rs`, just with bytes instead of code — and
+  the reason for the rule is that `test-images/` is gitignored, so a test reading
+  it passes on your machine and dies with a bare `NotFound` in a fresh clone.
+  Vendored files carry attribution in `tests/fixtures/README.md`. If a crate can
+  produce the format, it must, and the fixture does not go there. The only
+  remaining readers of `test-images/` are:
   - the **criterion targets**, which are the deliberate exception (they measure
     a real large photo, so a synthetic one would change the numbers): they pick
     the largest JPEG and print a "drop a photo in to benchmark" message.
