@@ -124,6 +124,7 @@ fn main() -> eframe::Result<()> {
                 }
             };
         }
+        Some("--icc-scan") => return icc_scan(&args),
         _ => {}
     }
 
@@ -456,6 +457,83 @@ const THUMB_TRIES: u8 = 3;
 /// File name as a lossy string, the key `last_by_folder` resume stores.
 fn file_name_of(p: &Path) -> String {
     image_viewer::file_name_of(p)
+}
+
+/// `--icc-scan <folder>`: classify every image in a folder and print the tally.
+///
+/// The question it answers is "how much of this library is wide gamut, and which
+/// files?", which otherwise means opening every image and reading the metadata
+/// panel. Nothing is configured and nothing is saved, so it prints and exits
+/// rather than becoming a mode the viewer can be left in.
+///
+/// Note for whoever adds a flag with a value: `--icc-scan` is deliberately
+/// **not** in `path_arg`'s `FLAGS_WITH_VALUE`. That list exists so the *viewer's*
+/// folder argument is not stolen by a flag's own value; here the value **is** the
+/// folder we want, and adding it would leave this command with no folder at all.
+fn icc_scan(args: &[String]) -> eframe::Result<()> {
+    use image_viewer::ColorSpace;
+
+    let Some(folder) = image_viewer::path_arg(args.iter().skip(1)) else {
+        eprintln!("--icc-scan needs a folder");
+        eprintln!("  usage: image-viewer.exe --icc-scan <folder>");
+        std::process::exit(2);
+    };
+
+    let found = image_viewer::scan_colour(&folder);
+    if found.is_empty() {
+        println!("No images in {}", folder.display());
+        return Ok(());
+    }
+
+    // Fixed order so two runs of the same folder print the same thing, and so the
+    // classes that need attention come first rather than in enum order.
+    const ORDER: [ColorSpace; 6] = [
+        ColorSpace::WideGamut,
+        ColorSpace::Unknown,
+        ColorSpace::NonRgb,
+        ColorSpace::Srgb,
+        ColorSpace::UntaggedSrgb,
+        ColorSpace::NotInspected,
+    ];
+
+    println!(
+        "Colour audit of {}  ({} image{})",
+        folder.display(),
+        found.len(),
+        if found.len() == 1 { "" } else { "s" }
+    );
+    println!();
+    for space in ORDER {
+        let n = found.iter().filter(|(_, i)| i.space == space).count();
+        let note = match space {
+            ColorSpace::WideGamut => "displayed without conversion - reads flat",
+            ColorSpace::Unknown => "profile could not be read",
+            ColorSpace::NonRgb => "not an RGB space",
+            ColorSpace::NotInspected => "colour lives where this build does not look",
+            _ => "",
+        };
+        println!("  {:<18} {n:>6}   {note}", space.label());
+    }
+
+    // List only what somebody could act on. `NotInspected` is a property of the
+    // *format*, so its count is the news; `UntaggedSrgb` is the overwhelming
+    // majority of a real library and listing it would bury everything else.
+    let notable: Vec<&std::path::PathBuf> = found
+        .iter()
+        .filter(|(_, i)| matches!(i.space, ColorSpace::WideGamut | ColorSpace::Unknown | ColorSpace::NonRgb))
+        .map(|(p, _)| p)
+        .collect();
+    if !notable.is_empty() {
+        println!();
+        println!("Files that need a look ({}):", notable.len());
+        for p in notable.iter().take(500) {
+            println!("  {}", file_name_of(p));
+        }
+        if notable.len() > 500 {
+            println!("  ... and {} more", notable.len() - 500);
+        }
+    }
+    Ok(())
 }
 
 /// Identity of a file's *contents* for change detection.

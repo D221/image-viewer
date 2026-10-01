@@ -9,6 +9,8 @@
 
 #[path = "common/icc_fixtures.rs"]
 mod icc_fixtures;
+#[path = "common/heif_fixtures.rs"]
+mod heif_fixtures;
 
 use icc_fixtures::{
     icc_profile, jpeg_with_icc, png_with_iccp, png_with_srgb_chunk, P3_RED, SRGB_RED,
@@ -133,10 +135,17 @@ fn test_non_rgb_profile_is_not_called_srgb() {
 
 #[test]
 fn test_other_containers_are_not_inspected_not_assumed() {
-    // HEIC/AVIF/JXL keep colour info in an ISO-BMFF `colr` box or the codestream.
-    // Reporting them as NotInspected rather than assuming sRGB is deliberate:
-    // assuming is how a wide-gamut HEIC photo ends up looking flat and nobody
-    // notices, because everything "works".
+    // Two things still legitimately report NotInspected, and the reason is the
+    // same for both: we do not know what colour they are, and saying nothing is
+    // the only honest answer. Guessing sRGB is how a wide-gamut photo ends up
+    // looking flat and nobody notices, because everything "works".
+    //
+    // A JXL naked codestream carries its colour inside the codestream, which
+    // nothing here parses. The `ftyp` blobs are ISO-BMFF headers with no `meta`
+    // box — a container we cannot read, which is a different thing from a format
+    // we do not read and is worth keeping in the list: a truncated or hand-edited
+    // HEIF must not fall back to a claim. (`test_a_corrupt_heif_claims_nothing_about_its_colour`
+    // covers that properly, with real containers cut short.)
     for bytes in [
         &b"\0\0\0\x18ftypheic"[..],
         &b"\0\0\0\x18ftypavif"[..],
@@ -208,7 +217,7 @@ fn test_a_profile_is_reported_even_with_no_exif_block() {
     // screenshot or a forwarded/downloaded phone photo is — returned `None` and
     // the panel rendered empty, hiding the only interesting fact about the file.
     // Real file hit: `color-p3-named.jpg` from a phone backup.
-    let mut bytes = jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0));
+    let bytes = jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0));
     assert!(
         !bytes.windows(6).any(|w| w == b"Exif\0\0"),
         "fixture must have no APP1/Exif for this test to mean anything"
@@ -276,4 +285,162 @@ fn test_color_info_on_disk_matches_bytes() {
         image_viewer::color_info(Path::new("/definitely/not/here.jpg")).space,
         ColorSpace::Unknown
     );
+}
+
+// ---------------------------------------------------------------------------
+// HEIC / AVIF: the `colr` box
+// ---------------------------------------------------------------------------
+//
+// HEIF keeps its colour in an ISO-BMFF `colr` box, which is why these files used
+// to report "not inspected" while carrying a perfectly ordinary ICC profile —
+// and iPhone HEIC is frequently Display P3, so that was a wide-gamut photo being
+// displayed as if it were sRGB with nothing in the metadata panel to say so.
+//
+// `heic::DecoderConfig::extract_icc` returns the profile bytes, so this is glue
+// rather than a container walk. What the fixtures below cannot be built by any
+// crate in this tree, hence `tests/common/heif_fixtures.rs`.
+//
+// Verified against real files as well: of four HEIF/AVIF images in
+// `test-images`, two carry a 536-byte profile that classifies as Display P3 from
+// its primaries **with no `desc` tag**, and two have no profile at all.
+
+/// Route bytes through the same entry point the app uses, as a caller that has
+/// already sniffed "not a JPEG, not a PNG" would.
+fn heif(bytes: &[u8]) -> image_viewer::ColorInfo {
+    color_info_from_bytes(bytes, false, false)
+}
+
+#[test]
+fn test_a_heif_profile_is_classified_like_any_other() {
+    // The real shape of the problem: no description, primaries only. This is 170
+    // of the 200 wide-gamut files in a phone backup, so a path that needs `desc`
+    // would be a path that does not work on real files.
+    let info = heif(&heif_fixtures::heif_with_icc(&icc_profile(
+        None,
+        P3_RED,
+        0,
+    )));
+    assert_eq!(info.space, ColorSpace::WideGamut);
+    assert_eq!(info.description, "", "the fixture has no desc tag");
+    assert_eq!(info.red_primaries, Some([P3_RED.0, P3_RED.1, P3_RED.2]));
+    assert_eq!(info.data_space, "RGB");
+    assert!(
+        info.panel_line().is_some(),
+        "a wide-gamut HEIF is exactly what the panel line exists for"
+    );
+
+    // A named sRGB profile behaves as it does everywhere else, including being
+    // worth a confirming line: "checked, needs nothing" beats silence.
+    let tagged = heif(&heif_fixtures::heif_with_icc(&icc_profile(
+        Some("sRGB IEC61966-2.1"),
+        SRGB_RED,
+        0,
+    )));
+    assert_eq!(tagged.space, ColorSpace::Srgb);
+    assert!(tagged.panel_line().is_some());
+}
+
+#[test]
+fn test_heif_nclx_parameters_are_never_called_srgb() {
+    // **The trap this fixture exists for.** `extract_icc` returns `None` when a
+    // file states its colour with `nclx` parameters instead of a profile, which
+    // is how a phone HEIC often says "Display P3". Reading that `None` as "no
+    // profile, therefore sRGB" would report a wide-gamut photo as sRGB — the
+    // exact failure the detector is for, arrived at from the opposite direction.
+    let info = heif(&heif_fixtures::heif_with_nclx_display_p3());
+    assert_eq!(
+        info.space,
+        ColorSpace::NotInspected,
+        "nclx parameters are not a profile, and are certainly not sRGB"
+    );
+    assert_ne!(info.space, ColorSpace::Srgb);
+    assert_ne!(info.space, ColorSpace::UntaggedSrgb);
+    assert_eq!(info.profile_bytes, 0);
+}
+
+#[test]
+fn test_a_corrupt_heif_claims_nothing_about_its_colour() {
+    // `extract_icc` returns `Err` for a container it cannot parse. Every entry
+    // point into a file has to survive that: the whole EXIF panel is built from
+    // untrusted bytes, and a decode error here must not become a claim.
+    let good = heif_fixtures::heif_with_icc(&icc_profile(Some("Display P3"), P3_RED, 0));
+
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("empty", Vec::new()),
+        ("not a container at all", b"GIF89a and then some".to_vec()),
+        ("truncated inside ftyp", good[..12].to_vec()),
+        ("truncated inside meta", good[..good.len() - 40].to_vec()),
+    ];
+
+    for (what, bytes) in cases {
+        let info = heif(&bytes);
+        assert_eq!(
+            info.space,
+            ColorSpace::NotInspected,
+            "{what}: reported {:?}",
+            info.space
+        );
+        assert!(
+            matches!(
+                info.space,
+                ColorSpace::NotInspected | ColorSpace::Unknown
+            ),
+            "{what}: a container we cannot parse is not evidence of any space"
+        );
+    }
+}
+
+#[test]
+fn test_scan_colour_audits_a_whole_folder() {
+    // What `--icc-scan` runs. Two properties matter and are easy to lose: it
+    // covers every format the viewer opens (not just the one being worked on),
+    // and it does not audit things that are not images.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Natural order is the contract, and these names are chosen so a lexical
+    // sort would produce a different answer (`IMG_10` before `IMG_2`).
+    for (name, bytes) in [
+        (
+            "IMG_10.jpg",
+            jpeg_with_icc(16, 16, &icc_profile(None, P3_RED, 0)),
+        ),
+        (
+            "IMG_2.jpg",
+            jpeg_with_icc(16, 16, &icc_profile(Some("sRGB IEC61966-2.1"), SRGB_RED, 0)),
+        ),
+        ("b.heic", heif_fixtures::heif_with_nclx_display_p3()),
+    ] {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+    // Not an image, and not an extension the viewer claims: it must not appear.
+    std::fs::write(dir.join("notes.txt"), b"not an image").unwrap();
+    std::fs::write(dir.join("raw.cbz"), b"PK\x03\x04").unwrap();
+
+    let found = image_viewer::scan_colour(dir);
+    let names: Vec<String> = found
+        .iter()
+        .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["b.heic", "IMG_2.jpg", "IMG_10.jpg"],
+        "natural order (`IMG_2` before `IMG_10`, case-insensitively), and nothing \
+         that is not a supported image"
+    );
+
+    let space_of = |name: &str| {
+        found
+            .iter()
+            .find(|(p, _)| p.file_name().unwrap() == name)
+            .map(|(_, i)| i.space)
+            .unwrap()
+    };
+    assert_eq!(space_of("IMG_2.jpg"), ColorSpace::Srgb);
+    assert_eq!(space_of("IMG_10.jpg"), ColorSpace::WideGamut);
+    assert_eq!(space_of("b.heic"), ColorSpace::NotInspected);
+
+    // An empty or missing folder is empty, not an error: the command prints
+    // "no images" and exits rather than failing.
+    assert!(image_viewer::scan_colour(&dir.join("does-not-exist")).is_empty());
 }

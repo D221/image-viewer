@@ -49,7 +49,10 @@ that are already in memory. One crate, no workspace, no CI.
     `Ctrl+C` / `Ctrl+S` and checks the two effects that cannot be faked: the
     clipboard and a new file on disk.
 - `cargo run` — the GUI. `-- --register` / `--unregister` (HKCU, no admin, then
-  exit). `-- --perf <folder>` — latency report on exit, also written to
+  exit). `-- --icc-scan <folder>` classifies every image in a folder and prints
+  the tally (it is deliberately **not** in `path_arg`'s `FLAGS_WITH_VALUE`: there
+  the value *is* the folder, and adding it would leave the command with none).
+  `-- --perf <folder>` — latency report on exit, also written to
   `%TEMP%\image-viewer-perf.txt`; **a release build has no console, so the file
   is the real output.** `PERF=1` for sampling without a folder, `PERF_PHASE=1`
   for per-phase resampler timing. `--probe-renderer <name>` is the internal flag
@@ -447,8 +450,13 @@ that are already in memory. One crate, no workspace, no CI.
   and silently reports "unknown". `icc_tags_valid` refuses corrupt profiles
   outright: both wrong answers are harmful (claiming sRGB skips a needed
   conversion; claiming wide gamut pushes a correct image through a P3 matrix).
-  HEIC/AVIF/JXL report `NotInspected` deliberately — assuming is how a wide-gamut
-  HEIC looks flat and nobody notices, because everything "works".
+  HEIC/AVIF report `NotInspected` when their `colr` box carries **`nclx`
+  parameters instead of a profile**, which is how a phone HEIC often says
+  Display P3; JXL reports it because its colour is inside the codestream.
+  Assuming sRGB in either case is how a wide-gamut photo looks flat and nobody
+  notices, because everything "works". `heic::DecoderConfig::extract_icc` returns
+  the raw `colr` bytes, so reading a profile is one call — it was a whole blind
+  spot only because that was not known.
 - **Never `into_frames().count()`.** The frame count's only job is "is this more
   than one?": read a header for PNG and WebP, take **two** frames for GIF
   (`is_animated`). `count()` decoded the whole animation, and a truncated GIF

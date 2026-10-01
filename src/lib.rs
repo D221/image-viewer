@@ -2681,7 +2681,36 @@ pub fn color_info_from_bytes(bytes: &[u8], is_jpeg: bool, is_png: bool) -> Color
         let _ = has_srgb;
         return ColorInfo::plain(ColorSpace::UntaggedSrgb);
     }
+    // HEIC and AVIF keep their colour in an ISO-BMFF `colr` box, which the `heic`
+    // crate reads for us. Sniffed here rather than passed in, so a caller that
+    // knows only "not a JPEG, not a PNG" still gets a real answer.
+    if is_heif_bytes(bytes) {
+        return heif_color_info(bytes);
+    }
     ColorInfo::not_inspected()
+}
+
+/// Read a HEIC/AVIF's `colr` box and classify whatever profile is in it.
+///
+/// `DecoderConfig::extract_icc` is the whole reason this is not a container walk:
+/// it returns the raw ICC bytes, or `None` when the file states its colour with
+/// **`nclx` parameters instead of a profile**. That distinction is the reason the
+/// answer is not "assume sRGB": an `nclx` file is a real possibility, and iPhone
+/// HEIC is frequently Display P3 through exactly that route, so assuming would
+/// report a wide-gamut photo as sRGB — which is the failure this whole stage
+/// exists to prevent. `None` stays [`ColorSpace::NotInspected`].
+///
+/// Verified on real files: of four HEIF/AVIF images, two carry a 536-byte ICC
+/// profile that classifies as Display P3 from its primaries with **no `desc`
+/// tag**, and two have no profile at all.
+fn heif_color_info(bytes: &[u8]) -> ColorInfo {
+    match heic::DecoderConfig::new().extract_icc(bytes) {
+        Ok(Some(profile)) => classify_icc(&profile),
+        Ok(None) => ColorInfo::not_inspected(),
+        // A container we cannot parse is not a reason to claim anything about
+        // its colour.
+        Err(_) => ColorInfo::not_inspected(),
+    }
 }
 
 /// [`color_info_from_bytes`] for a file on disk.
@@ -2689,11 +2718,29 @@ pub fn color_info(path: &Path) -> ColorInfo {
     let Ok(bytes) = std::fs::read(path) else {
         return ColorInfo::plain(ColorSpace::Unknown);
     };
-    let (is_jpeg, is_png) = (is_jpeg_bytes(&bytes), bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
-    if !is_jpeg && !is_png {
-        return ColorInfo::not_inspected();
-    }
+    let is_jpeg = is_jpeg_bytes(&bytes);
+    let is_png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
     color_info_from_bytes(&bytes, is_jpeg, is_png)
+}
+
+/// Classify every image in `folder`, in natural name order.
+///
+/// Exists so a library can be audited from a command line instead of by clicking
+/// through the metadata panel one file at a time, which is the only other way to
+/// reach [`color_info`]. It is a pure function of the folder, so it is testable;
+/// the presentation is the caller's.
+///
+/// **This reads every file whole**, because [`color_info`] does, and for a folder
+/// of 1000 images that is a few tens of megabytes and a few seconds. Fine for a
+/// command somebody asked for, wrong for anything on a startup path.
+pub fn scan_colour(folder: &Path) -> Vec<(PathBuf, ColorInfo)> {
+    scan_folder_sorted(folder, SortMode::Name)
+        .into_iter()
+        .map(|p| {
+            let info = color_info(&p);
+            (p, info)
+        })
+        .collect()
 }
 
 /// File name as a lossy string, the key `last_by_folder` resume stores and the

@@ -70,28 +70,28 @@ signal — confirm `red_primaries == Some(P3_D50_RED)` before touching pixels.
 
 ---
 
-## 2. HEIC / AVIF colour (`colr` box) — the remaining blind spot
+## 2. HEIF `nclx` colour — the remainder of the old blind spot
 
-29 of the 1001 files in that backup are HEIF, reported `NotInspected` because
-their colour lives in an ISO-BMFF `colr` box rather than a JPEG/PNG chunk. iPhone
-HEIC is frequently P3, so some of those are probably displaying wrong *and*
-invisible to the detector.
+HEIC/AVIF profiles are now read from the container's `colr` box
+(`heic::DecoderConfig::extract_icc` hands over the raw bytes), so the
+`NotInspected` label now means something narrower and more honest: **the file
+states its colour with `nclx` parameters and carries no profile at all.**
 
-**The crate already exposes it, so this is smaller than it looks.**
-`heic::HeifFile::extract_icc(&self, data) -> Result<Option<Vec<u8>>>` returns "the
-raw ICC profile bytes from the `colr` box". No ISO-BMFF walk is needed: hand
-those bytes to the existing `classify_icc` / `icc_tags_valid` and `NotInspected`
-becomes a real answer.
+Measured on real files: of four HEIF/AVIF images, two carried a 536-byte ICC
+profile classifying as Display P3 from its primaries with no `desc` tag, and two
+had no profile. The gap is therefore real but smaller than "29 of 1001 are
+invisible" made it sound — `--icc-scan <folder>` counts it for any library now.
 
-Two things left to settle:
+Two things left:
 
-- **`None` means `nclx`, not "untagged".** The method returns `None` when the
-  file uses `nclx` colour parameters instead of a profile. Count which of the 29
-  are which before assuming the blind spot closes — the rest stay
-  `NotInspected`, and the label has to stay honest rather than defaulting to
-  sRGB.
-- **An iPhone `nclx` file is P3 by construction**, so it could be reported
-  without a profile at all. Decide whether to do that or leave it uninspected.
+- **Count it.** `--icc-scan` answers this; run it on a real library rather than
+  assuming the ratio carries over from the JPEG/PNG figures.
+- **An iPhone `nclx` file is Display P3 by construction** (colour_primaries 12,
+  transfer 13), so it could be reported *without* a profile. Decide whether to
+  do that or leave those files uninspected. Reporting them is a claim about a
+  container we did not verify, so it wants the same scepticism as any other
+  "assume the common case" shortcut — and it is the same reasoning that made the
+  JPEG/PNG path refuse to guess.
 
 ---
 
@@ -138,10 +138,6 @@ Do this only if real scans need it.
 
 ## 5. Smaller queued items
 
-- **`--icc-scan <folder>` CLI mode.** Colour detection is only reachable from the
-  EXIF panel, so auditing a library means clicking through it. The classifier is
-  already a cheap per-file call — `image_viewer::color_info(path)` is public, so
-  this is glue in `main.rs`, not new logic.
 - **Grid thumbnails of large scans are the grid's real bottleneck.** Files with
   no embedded thumbnail take ~800 ms each even via the turbojpeg DCT path, which
   still decompresses every coefficient. Embedded EXIF thumbnails took everything

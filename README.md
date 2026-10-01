@@ -329,7 +329,31 @@ toggle applies to newly decoded images (see the known caveat below).
 image-viewer.exe [file | folder | archive.zip | archive.cbz]
 image-viewer.exe --register      # add this build to the "Open with" list
 image-viewer.exe --unregister
+image-viewer.exe --icc-scan <folder>   # report the colour space of every image
 ```
+
+`--icc-scan` prints a tally of what the colour detector found in a folder and
+lists the files that need a look, then exits:
+
+```
+Colour audit of C:\photos  (1001 images)
+
+  wide gamut              200   displayed without conversion - reads flat
+  unknown profile           0   profile could not be read
+  non-RGB                   0   not an RGB space
+  sRGB                    111
+  sRGB (untagged)         641
+  not inspected            49   colour lives where this build does not look
+
+Files that need a look (200):
+  IMG_0001.heic
+  ...
+```
+
+It exists because the detector is otherwise only reachable one file at a time
+from the metadata panel, and auditing a library meant clicking through it. It
+reads every file whole, so it takes a few seconds on a folder of a thousand
+images.
 
 `--register` writes a per-user (HKCU) ProgID and `OpenWithProgids` entries for
 the nine extensions the app decodes (jpg, jpeg, png, webp, gif, jxl, avif,
@@ -469,8 +493,12 @@ images and is `#[ignore]`d because it takes seconds.
 - **Wide-gamut images look flat.** The colour space is *detected* and shown in
   the metadata panel, but the pipeline is 8-bit sRGB end to end, so a Display P3
   photo is displayed without conversion and reads duller than it should.
-  HEIC/AVIF/JXL report their colour space as "not inspected" rather than
-  guessing. `TODO.md` records the investigation and the two open decisions.
+  Detection covers JPEG, PNG and — through the container's `colr` box — HEIC and
+  AVIF. What is **not** read is a HEIF that states its colour with `nclx`
+  parameters instead of a profile (which is how a phone HEIC often says Display
+  P3), and JXL, whose colour lives inside the codestream; both report "not
+  inspected" rather than guessing. `TODO.md` records the investigation and the
+  two open decisions.
 - Toggling **linear-light downsampling** does not re-decode images that are
   already in the preview cache — the filter dropdown does. Restart or move to
   another image for the change to show everywhere.
