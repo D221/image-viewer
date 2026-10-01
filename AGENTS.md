@@ -26,7 +26,16 @@ that are already in memory. One crate, no workspace, no CI.
   - `bench_browse` — the number to move when changing the queue, the preload
     window or the cache policy: time-to-first-pixels, wasted decode share, peak
     MB, cache-hit rate while flipping a generated folder. `IV_BENCH_N` (24),
-    `IV_BENCH_RUNS` (3).
+    `IV_BENCH_RUNS` (3). Its second test, `exif_ab`, is the A/B for the
+    metadata read: `Plan::wants_exif` on or off, arms interleaved, and it runs
+    the **real** `color_info` + `read_exif` so the job is not modelled as free.
+    It prints the per-read cost on the fixture *and* on the largest real JPEGs
+    in `test-images/` (skipped if absent, like the criterion targets), because
+    the read is `fs::read` and its cost is the file's size — the same exemption
+    for the same reason: no synthetic file has a real photo's bytes.
+    `IV_BENCH_RUNS` (9) there, and only the holds 0 and 30 ms: at 150 ms and
+    above the prefetch keeps up and both arms score 0, so the metric runs out of
+    resolution before the effect does.
   - `bench_resize` — decodes per window drag.
   - `bench_rotate_save` — lossless save time **and output/input size ratio**;
     1.00–1.02x is the only evidence "lossless" is true, because it is a property
@@ -122,6 +131,34 @@ that are already in memory. One crate, no workspace, no CI.
   re-arm every frame, so they survive a rebuild). `queued jobs dropped by
   rebuild` is the coalescing signal: large values mean the user outran the
   decoder — widen the window, don't add workers.
+- **The EXIF job is only wanted while the panel that shows it is drawn**
+  (`wants_exif` in `lib.rs`, on `show_panels`). It is the one job per navigation
+  that exists to fill a panel, and it is not cheap: `color_info` does `fs::read`
+  on the **whole file** to find the ICC profile, then `read_exif` seeks the APP1
+  out — 4.4 ms on the 7 MB bench fixture and **7–12 ms on real 17–27 MB
+  photographs** (`bench_browse exif_ab`, three runs) — at priority 5, i.e. *ahead
+  of every prefetch*. It has two halves and both are load-bearing: `schedule`
+  leaves it out of the plan while the panel is hidden, and the panel `push`es it
+  on the frame it reappears.
+  The second half is not belt-and-braces: re-planning from the F11 handler would
+  be a frame late at best, and `frame_prelude` sees that toggle on the *next*
+  frame, so on a static photo it can be the 2 s watcher. Asking where the data is
+  displayed cannot be late. A gate with only the first half leaves the panel
+  reading "Loading EXIF…" until the next repaint — a visible bug, which is the
+  one outcome worse than the slow path it replaced.
+- **Measured, and it is not a speedup you can feel**: one read is 7–12 ms against
+  a 380–415 ms preview decode on this box, so it is ~2.5% of one decode, and
+  `exif_ab` cannot separate the two arms at all — the per-run
+  time-to-first-pixels distributions overlap in both directions and the sign of
+  the median difference flipped between two runs of the same experiment. Queue
+  coalescing already throws most of it away when flipping fast anyway (~1 of 24
+  reads survives at a 0 ms hold, ~5 of 24 at 30 ms; the reads are paid for when
+  you *dwell*). Keep the change because it is free and it stops doing work whose
+  result is displayed nowhere — and because that ratio is set by the file size
+  and the storage, not by this code: the same 27 MB read is 10 ms on a warm local
+  SSD and tens to hundreds of ms on a network share, a spinning disk or a
+  OneDrive file still hydrating. That case is **reasoning, not a measurement** —
+  it needs storage this box does not have.
 - **`failed` is `HashSet<(ImgKey, Kind)>` and a failure is permanent for the
   session.** Only triage removal, the resize drop, the filter change
   (`refilter`) and `invalidate_path` clear entries. A transient error (a file
@@ -537,6 +574,14 @@ that are already in memory. One crate, no workspace, no CI.
 - Known waste, not worth fixing: `exif_orientation(path)` re-reads the file with
   `nom_exif::read_exif` although the bytes are already in memory. That is
   0.1–0.2 ms against a 10–17 ms `fs::read` — ~0.02% of a preview decode.
+- **The metadata *job* is the one whole-file read left in the pipeline, and it
+  is now gated on the panel being visible** (see Decode pipeline). `color_info`
+  needs the whole file because the ICC profile has to be found in it, so unlike
+  `exif_orientation` above this one is not 0.1 ms: 8–12 ms on a 17–27 MB photo.
+  It is the obvious next thing to fix properly (hand the colour read the bytes
+  the decode already has), and it is deliberately *not* fixed by dropping the
+  panel's colour line — that line is why a screenshot with no EXIF still says
+  something useful.
 
 ## Windows integration
 

@@ -144,6 +144,13 @@ shutter speed, ISO, focal length, metering mode, flash, colour space and
 orientation. GPS-tagged images also show coordinates and altitude, with a
 clickable **Open in Google Maps** link.
 
+It is read only while that panel is on screen. Reading it means reading the whole
+file (the colour profile lives in a segment that has to be found) and it happens
+on the same worker that decodes the picture, so with the panels hidden — F11, or
+`I` — the viewer stops asking for it entirely and gives the time back to the
+image. Leaving fullscreen starts the read again, so the panel is never empty
+when you can see it.
+
 ### Interface
 
 - Browse Folder… / Browse File… dialogs, plus drag-and-drop of a file, folder

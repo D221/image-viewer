@@ -1057,6 +1057,32 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
 // Resize refinement
 // ---------------------------------------------------------------------------
 
+/// Whether the viewer wants the current image's metadata read.
+///
+/// The metadata panel is the **only** thing in the app that displays EXIF, and
+/// the read is not small: `color_info` calls `fs::read` on the whole file to
+/// find the ICC profile, and `nom_exif` then seeks out the APP1 segment. It runs
+/// on a worker that a preview decode is waiting on, and it is queued at priority
+/// 5 — ahead of *every* prefetch — so a panel nobody is looking at is time
+/// taken away from the picture the user is looking at.
+///
+/// The condition is "the panel is visible", not "we are in fullscreen". The two
+/// are the same today (fullscreen sets `show_panels` false, and so does the
+/// panel toggle) but only the first one is the reason, and the second is a
+/// detail of how the panel is hidden.
+///
+/// This is the rule for both halves, and it has to be both:
+///
+/// * `schedule` must leave the job out of the plan while the panel is hidden, or
+///   a navigation queues a read whose result is thrown away.
+/// * the panel must be able to ask for it again on the frame it reappears, or
+///   leaving fullscreen leaves the panel reading "Loading EXIF…" forever — the
+///   one failure mode of a gate like this, and the reason it is a shared
+///   function rather than a `&&` at one call site.
+pub fn wants_exif(panel_visible: bool, exif_pending: bool) -> bool {
+    panel_visible && exif_pending
+}
+
 /// Long side of the preview texture for a display area, in physical pixels.
 pub fn preview_target(panel_px: (u32, u32)) -> u32 {
     panel_px

@@ -442,8 +442,9 @@ fn resolve_renderer(pref: &image_viewer::RendererPref) -> (image_viewer::WgpuBac
 // emptied this queue lived in the interaction between the plan and the queue,
 // and neither half could be reached from a test while it lived in a binary.
 
-use image_viewer::{Job, Kind, Loader, PRIO_THUMB_BASE};
+use image_viewer::{Job, Kind, Loader, PRIO_CURRENT_EXIF, PRIO_THUMB_BASE};
 const PRIO_THUMB: u32 = PRIO_THUMB_BASE;
+const PRIO_EXIF: u32 = PRIO_CURRENT_EXIF;
 
 /// Long side of grid thumbnails.
 const THUMB_DIM: u32 = 256;
@@ -1540,7 +1541,11 @@ impl MyApp {
                 current_page: self.gallery.current_page(),
                 cached: &cached,
                 failed: &self.failed,
-                wants_exif: self.exif_loading,
+                // Hidden panel: nobody can read the result, and the read is a
+                // whole-file `fs::read` on a worker a decode is waiting for. The
+                // panel asks for its own data when it is drawn, so this being
+                // false costs nothing but the work it saves.
+                wants_exif: image_viewer::wants_exif(self.show_panels, self.exif_loading),
                 wants_full: self.full_due.is_none()
                     && self.needs_full(&ImgKey {
                         path: cur.clone(),
@@ -4057,6 +4062,26 @@ impl eframe::App for MyApp {
         if self.show_panels {
             egui::Panel::left("exif").show(ui, |ui| {
                 ui.heading("EXIF");
+                // The panel is the only thing that shows this, so it is also the
+                // only thing that should ask for it. Asking here rather than
+                // trusting the plan is what makes leaving fullscreen work: the
+                // frame the panel comes back on is the frame the read starts, so
+                // there is no "Loading EXIF…" with nothing behind it. `push`
+                // dedups against queued and running work, and it is not in the
+                // queue's `wanted` set — which is fine, because a rebuild that
+                // drops it is followed by this same line on the next frame.
+                if image_viewer::wants_exif(self.show_panels, self.exif_loading) {
+                    if let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) {
+                        self.loader.push(Job {
+                            // EXIF describes the file, so it is read once and not
+                            // per page — the same key `plan_jobs` uses.
+                            key: ImgKey::first(&path),
+                            kind: Kind::Exif,
+                            prio: PRIO_EXIF,
+                            target_dim: 0,
+                        });
+                    }
+                }
                 if self.exif_loading {
                     ui.label("Loading EXIF…");
                 } else if let Some(info) = &self.exif_info {

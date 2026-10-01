@@ -598,6 +598,147 @@ fn the_plan_wraps_around_a_short_folder() {
 }
 
 // ---------------------------------------------------------------------------
+// The metadata read
+// ---------------------------------------------------------------------------
+//
+// Fullscreen hides the metadata panel, and the panel is the only thing that
+// displays EXIF — but the read is a whole-file `fs::read` (for the ICC profile)
+// on a worker that a preview decode is waiting for, at a priority ahead of every
+// prefetch. So a hidden panel should stop asking for it, and that has two halves
+// which have to agree:
+//
+//   * `schedule` leaves the job out of the plan while the panel is hidden.
+//   * the panel asks for it again the frame it reappears, or leaving fullscreen
+//     leaves the panel reading "Loading EXIF…" with nothing behind it.
+
+#[test]
+fn exif_is_wanted_only_while_the_panel_that_shows_it_is_drawn() {
+    assert!(
+        image_viewer::wants_exif(true, true),
+        "a visible panel with nothing loaded must get its data"
+    );
+    assert!(
+        !image_viewer::wants_exif(false, true),
+        "a hidden panel must not pay for a read nobody can see"
+    );
+    assert!(
+        !image_viewer::wants_exif(true, false),
+        "already loaded: a second read is pure waste"
+    );
+    assert!(!image_viewer::wants_exif(false, false));
+}
+
+#[test]
+fn a_hidden_panel_drops_the_metadata_job_and_nothing_else() {
+    let f = files(10);
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    // Page 3 of a multi-page document: the metadata describes the *file*, so the
+    // job's key is page 1 even though that is not what is on screen. A gate that
+    // quietly switched the key to the current page would poison a different
+    // (key, kind) pair every navigation.
+    let mut visible = plan(&f, 0, &cached, &failed);
+    visible.current_page = 2;
+    visible.wants_exif = image_viewer::wants_exif(true, true);
+    let mut hidden = plan(&f, 0, &cached, &failed);
+    hidden.current_page = 2;
+    hidden.wants_exif = image_viewer::wants_exif(false, true);
+    let (visible, hidden) = (plan_jobs(&visible), plan_jobs(&hidden));
+
+    let exif_of = |jobs: &[Job]| -> Vec<Job> {
+        jobs.iter().filter(|j| j.kind == Kind::Exif).cloned().collect()
+    };
+    let shown = exif_of(&visible);
+    assert_eq!(shown.len(), 1, "a visible panel gets exactly one read");
+    assert_eq!(
+        shown[0].key,
+        ImgKey::first(&f[0]),
+        "EXIF is read once per file, not per page"
+    );
+    assert_eq!(shown[0].prio, image_viewer::PRIO_CURRENT_EXIF);
+    assert!(
+        exif_of(&hidden).is_empty(),
+        "a hidden panel must not queue a metadata read"
+    );
+
+    // The gate must remove that job and *only* that job. Comparing job for job
+    // is the point: "we made the plan smaller" is not evidence that the pictures
+    // still got planned.
+    let rest = |jobs: Vec<Job>| -> Vec<(ImgKey, Kind, u32)> {
+        jobs.into_iter()
+            .filter(|j| j.kind != Kind::Exif)
+            .map(|j| (j.key, j.kind, j.prio))
+            .collect()
+    };
+    assert_eq!(
+        rest(visible),
+        rest(hidden),
+        "hiding the panel changed something other than the metadata job"
+    );
+}
+
+#[test]
+fn a_metadata_read_dropped_by_a_rebuild_can_be_asked_for_again() {
+    // The panel re-asks on every frame it is drawn with nothing loaded, and
+    // `push` does not put the job in the queue's `wanted` set — so a navigation
+    // that rebuilds the plan can throw the read away. That is fine only because
+    // the next frame asks again; this is the test for that, and for `push` not
+    // growing a dedup that would refuse the second ask.
+    let f = files(4);
+    // One worker, and it is about to be held busy by something else, so the read
+    // cannot be picked up before the rebuild gets to it. Without that this is a
+    // race: sometimes the read runs first and there is nothing left to drop.
+    let mut h = Harness::new(1, delivered_always, 200);
+    let exif = Job {
+        key: ImgKey::first(&f[0]),
+        kind: Kind::Exif,
+        prio: image_viewer::PRIO_CURRENT_EXIF,
+        target_dim: 0,
+    };
+    h.loader.push(Job {
+        key: ImgKey::first(&f[1]),
+        kind: Kind::Preview,
+        prio: image_viewer::PRIO_CURRENT_PREVIEW,
+        target_dim: 1024,
+    });
+    // Wait for the pool to actually be busy, so "queued" below means queued and
+    // not "about to be taken".
+    let busy_by = Instant::now() + Duration::from_secs(10);
+    while h.loader.running() == 0 {
+        assert!(
+            Instant::now() < busy_by,
+            "the worker never picked anything up"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    h.loader.push(exif.clone());
+    assert_eq!(
+        h.loader.queued(),
+        1,
+        "the read should be waiting behind the busy worker"
+    );
+    h.loader.replace(vec![]); // a navigation: exif is not in this plan
+    h.wait_until_idle("after the rebuild dropped the read");
+    assert_eq!(
+        h.runs_of(&f[0], Kind::Exif),
+        0,
+        "the read was queued, so a rebuild dropping it means it never ran"
+    );
+
+    h.loader.push(exif);
+    h.wait_until_idle("after the re-asked read");
+    assert_eq!(
+        h.runs_of(&f[0], Kind::Exif),
+        1,
+        "asking again after a rebuild must actually run the read"
+    );
+    assert!(
+        h.delivered.contains(&(f[0].clone(), Kind::Exif)),
+        "the re-asked read produced nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Resize refinement
 // ---------------------------------------------------------------------------
 //
