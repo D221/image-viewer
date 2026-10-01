@@ -9,19 +9,38 @@ landed.
 
 ---
 
-## 1. Display P3 → sRGB conversion — blocked on 2 decisions
+## 1. Display P3 → sRGB conversion — decided: off by default, behind a setting
+
+Decided: the conversion goes behind a settings toggle that **defaults to off**.
+Nothing about how photos look changes until it is asked for, which is the right
+default when 23% of a real library is affected and converting is a downgrade on a
+wide-gamut display. Detection already works, so the metadata panel reports "wide
+gamut" today and the setting can arrive later without the report changing.
+
+Still open, and it is the hard part:
+
+### The matrix must be derived, not transcribed
+
+The obvious move is to paste the CSS Color 4 `lin_display_p3_to_lin_srgb`
+matrix. **Do not.** ICC stores primaries **D50-adapted** — this repo measured
+exactly that in 192 real P3 profiles, at `(33759, 15807, -69)` — while the CSS
+matrix is D65-referred. Using one with the other is the classic ICC-vs-CSS
+mismatch, and it produces an image that is subtly, visibly wrong with nothing to
+show for it. So: Bradford-adapt the measured D50 primaries to D65, build the
+matrix from the adapted primaries and white point, and **pin the matrix's
+properties rather than its numbers** — white maps to white, and P3→sRGB composed
+with sRGB→P3 is the identity to within a tolerance. That is the same rule as
+`Xform` and the wgpu backend bits: a hand-copied table compiles and is wrong.
 
 ### Undecided — needs you
 
-1. **Default on or off?** Argument for on: 20% of a real library is P3 and
-   displays wrong today; converting is strictly better on an sRGB display.
-   Argument for off: it is a visible change to how your photos look, and you
-   raised (correctly) that it is a downgrade on a wide-gamut display.
+1. ~~Default on or off?~~ **Off**, decided.
 2. **Ground truth for "the colours are now right"?** The matrix running and the
    output staying in gamut are testable. Correct *appearance* is not, without a
    P3 file whose right answer is known: `test-images/color-p3-named.jpg` and
    `color-p3-anon.jpg` are the candidates — compare against JPEGView_L (in
-   `test-images`), which can convert.
+   `test-images`), which can convert. Until that exists, "verified" can only ever
+   mean "the maths is self-consistent".
 
 ### Known, verified
 
