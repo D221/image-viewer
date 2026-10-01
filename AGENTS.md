@@ -189,11 +189,18 @@ that are already in memory. One crate, no workspace, no CI.
   TIFF, because it runs on every `goto`; the answer is cached per file
   (`learn_pages`) and must be dropped on re-export (`forget_page_count`). A test
   proves it by *deleting* the file and requiring the answer to survive.
-- **Only colour types that are a straight reinterpretation of the decoded buffer
-  are read** past page 0 (Gray/GrayA/RGB/RGBA, 8 and 16 bit native-endian).
-  CMYK, YCbCr, Lab and palette are **refused with an error** rather than
-  approximated — an error is visible, subtly wrong pixels are not. `failed` is
-  keyed per image so one bad page cannot poison a document's other 199.
+- **CMYK pages are converted by `image`, and everything else is still refused
+  with an error.** `image` owns the `(255 - c) * (1 - k/255)` maths and it cannot
+  be pointed at page 2 — its TIFF decoder only reads page 0, which is the entire
+  reason `tiff` is a direct dependency — so `cmyk_via_image` re-wraps the samples
+  we already hold in a fresh one-page TIFF and decodes *that*. One copy of the
+  page, on a path only reached for a type the plain reinterpretation cannot
+  express. Palette, CMYKA, YCbCr, Lab and multiband have no such route and stay
+  errors, because an approximation would produce pages that are subtly and
+  silently the wrong colours — an error is visible, wrong pixels are not.
+  `failed` is keyed per image so one bad page cannot poison a document's other
+  199. `a_cmyk_past_the_first_page_is_converted_not_refused` asserts the actual
+  converted values, not just that a page appeared.
 - `Ctrl+S` on a page is **refused, and the refusal is the feature**: the lossless
   path rewrites the whole file and the re-encode fallback starts at page 1, so
   saving would write page 1's pixels under the document's name.

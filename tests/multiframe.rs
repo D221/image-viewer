@@ -512,6 +512,69 @@ fn page_zero_of_a_tiff_decodes_identically_through_both_paths() {
     assert_eq!(decoded_corner(&via_image.preview), [200, 100, 50]);
 }
 
+/// A two-page TIFF whose **second** page is CMYK, which is the case that used to
+/// be refused.
+///
+/// Page 1 is RGBA so the file is a normal document that merely *contains* a CMYK
+/// page — the realistic shape. Page 2's pixels are chosen so the conversion is
+/// checkable rather than merely plausible: TIFF CMYK is ink amounts where 0 means
+/// none, and `image` computes `(255 - c) * (1 - k/255)`, so no ink is white, full
+/// cyan is (0, 255, 255) and full black ink is (0, 0, 0). Anything else would mean
+/// we had started guessing at the colour transform ourselves.
+fn cmyk_second_page_tiff(w: u32, h: u32) -> Vec<u8> {
+    use tiff::encoder::{colortype, TiffEncoder};
+    let mut out = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [10u8, 20, 30, 255]).collect();
+        enc.write_image::<colortype::RGBA8>(w, h, &rgba).unwrap();
+
+        let n = (w * h) as usize;
+        let mut cmyk = vec![0u8; n * 4]; // no ink at all -> white
+        cmyk[0..4].copy_from_slice(&[255, 0, 0, 0]); // full cyan
+        cmyk[4..8].copy_from_slice(&[0, 0, 0, 255]); // full black ink
+        enc.write_image::<colortype::CMYK8>(w, h, &cmyk).unwrap();
+    }
+    out
+}
+
+#[test]
+fn a_cmyk_past_the_first_page_is_converted_not_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "print.tiff", &cmyk_second_page_tiff(4, 2));
+    assert_eq!(image_viewer::tiff_page_count(&p), 2);
+
+    // Page 1 is the first *page*, and it works for the ordinary reason.
+    let first = image_viewer::load_page_preview_full(&p, 512, 0).unwrap();
+    assert_eq!((first.preview.width, first.preview.height), (4, 2));
+
+    let cmyk = image_viewer::load_page_preview_full(&p, 512, 1).unwrap();
+    assert_eq!(
+        (cmyk.preview.width, cmyk.preview.height),
+        (4, 2),
+        "the conversion must not change the page's dimensions"
+    );
+    assert_eq!(
+        cmyk.preview.rgba.len(),
+        4 * 2 * 4,
+        "and the buffer must still be exactly w*h*4, which is what the texture \
+         upload asserts"
+    );
+
+    // The actual conversion, checked against `image`'s own formula.
+    let px = |i: usize| {
+        [
+            cmyk.preview.rgba[i * 4],
+            cmyk.preview.rgba[i * 4 + 1],
+            cmyk.preview.rgba[i * 4 + 2],
+        ]
+    };
+    assert_eq!(px(0), [0, 255, 255], "full cyan ink");
+    assert_eq!(px(1), [0, 0, 0], "full black ink");
+    assert_eq!(px(2), [255, 255, 255], "no ink is white, not black");
+    assert_eq!(px(3), [255, 255, 255]);
+}
+
 #[test]
 fn asking_for_a_page_that_is_not_there_is_an_error_not_a_wrong_picture() {
     // The failure that matters most here. Falling back to page 1 would be

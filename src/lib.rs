@@ -3430,12 +3430,14 @@ pub fn tiff_page_count_bytes(bytes: &[u8]) -> u32 {
 /// `next_image`, which is why it is a direct dependency.
 ///
 /// The colour types handled are the ones that are a straight reinterpretation of
-/// the decoded buffer. CMYK, YCbCr, Lab and palette images are **not**: applying
-/// a colormap or a colour transform correctly is `image`'s job, and guessing at it
-/// here would produce pages that are subtly, silently the wrong colours — which
-/// for a scanned document means invisible but for a photo means wrong. Those
-/// return an error, which surfaces the same way any other decode failure does,
-/// rather than quietly showing something else.
+/// the decoded buffer, plus CMYK — which needs a real conversion and gets one by
+/// asking `image` to do it. Palette, CMYKA, YCbCr, Lab and multiband pages are
+/// **not**: applying a colormap or a colour transform correctly is `image`'s job
+/// and there is no route to it for those types, while guessing would produce
+/// pages that are subtly, silently the wrong colours — which for a scanned
+/// document means invisible but for a photo means wrong. Those return an error,
+/// which surfaces the same way any other decode failure does, rather than quietly
+/// showing something else.
 fn decode_tiff_page(
     bytes: &[u8],
     page: u32,
@@ -3465,13 +3467,13 @@ fn decode_tiff_page(
     /// Straight reinterpretation of the decoded buffer, then the one conversion
     /// every page shares.
     ///
-    /// Only the types where that reinterpretation is the whole story are
-    /// accepted. CMYK, YCbCr, Lab and palette images are **not**: turning those
-    /// into RGB means applying a colormap or a colour transform, which is
-    /// `image`'s job, and approximating it here would produce pages that are
-    /// subtly and silently the wrong colours — for a photo, wrong; for a scanned
-    /// document, invisible. They return an error, which surfaces the way any
-    /// other decode failure does, instead of quietly showing something else.
+    /// Most types are a plain reinterpretation and nothing more. CMYK is not, and
+    /// goes through `image` — see [`cmyk_via_image`]. Palette, CMYKA, YCbCr, Lab
+    /// and multiband still return an error: there is no conversion we can hand to
+    /// `image` for them, and approximating a colormap or a colour transform here
+    /// would produce pages that are subtly and silently the wrong colours — for a
+    /// photo, wrong; for a scanned document, invisible. An error is visible; that
+    /// is the whole reason the refusal exists.
     ///
     /// The 16-bit buffers arrive as native-endian `u16` (the crate converts), so
     /// those are handled properly rather than reinterpreted from bytes.
@@ -3538,11 +3540,58 @@ fn decode_tiff_page(
                     .ok_or_else(|| bad("bad size"))?
                     .into()
             }
-            // The kinds the buffer layout does not describe, and any mismatch
+            // CMYK: the conversion belongs to `image`, so `image` does it. See
+            // `cmyk_via_image` for why that means re-wrapping the page.
+            (T::CMYK(8), D::U8(b)) => {
+                need(b.len(), (w * h * 4) as usize)?;
+                cmyk_via_image::<tiff::encoder::colortype::CMYK8>(w, h, &b)?.into()
+            }
+            (T::CMYK(16), D::U16(b)) => {
+                need(b.len(), (w * h * 4) as usize)?;
+                cmyk_via_image::<tiff::encoder::colortype::CMYK16>(w, h, &b)?.into()
+            }
+            // Palette, CMYKA, YCbCr, Lab and multiband: no conversion path we can
+            // hand to `image`, so they stay refused. Those, and any mismatch
             // between the declared colour type and the samples that arrived.
             _ => return Err(bad("unsupported colour type")),
         };
         Ok(img.to_rgba8())
+    }
+
+    /// Convert a CMYK page by handing it to `image` through a one-page TIFF.
+    ///
+    /// `image` owns the CMYK→RGB maths — `(255 - c) * (1 - k/255)`, verified
+    /// against `cmyk_to_rgb` in `image`'s TIFF decoder — and it is not ours to
+    /// restate. An approximation here is how a scanned document comes out a
+    /// slightly wrong shade of every colour, invisibly, which is the failure the
+    /// original refusal of these types was protecting against.
+    ///
+    /// It cannot simply be pointed at the original file, because its TIFF decoder
+    /// only ever reads page 0 — that is the entire reason this function reaches
+    /// for the `tiff` crate in the first place. So the samples already in hand
+    /// are re-wrapped in a fresh single-page TIFF and *that* is decoded. The cost
+    /// is one copy of the page, on a path only reached for a colour type the
+    /// plain reinterpretation cannot express.
+    ///
+    /// Generic over the sample type so the 8- and 16-bit cases share it; the
+    /// `tiff` encoder takes flat samples either way, so nothing is repacked.
+    fn cmyk_via_image<C: tiff::encoder::colortype::ColorType>(
+        w: u32,
+        h: u32,
+        samples: &[C::Inner],
+    ) -> Result<image::DynamicImage, LoadError>
+    where
+        [<C as tiff::encoder::colortype::ColorType>::Inner]: tiff::encoder::TiffValue,
+    {
+        let mut out = std::io::Cursor::new(Vec::new());
+        // The encoder finishes (and writes the end-of-IFD marker) when it drops,
+        // at the end of this statement, which is before `out` is read back.
+        tiff::encoder::TiffEncoder::new(&mut out)
+            .map_err(tiff_err)?
+            .write_image::<C>(w, h, samples)
+            .map_err(tiff_err)?;
+        image::load_from_memory_with_format(&out.into_inner(), image::ImageFormat::Tiff)
+            .map_err(|e| LoadError::Other(format!("tiff: {e}")))
     }
 
     let mut data = ImageData {

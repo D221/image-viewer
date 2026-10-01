@@ -116,23 +116,26 @@ else could produce one.
 
 ---
 
-## 4. Multi-page TIFF: colour types past page 0 — open question is *how*
+## 4. Multi-page TIFF: the colour types still past page 0
 
-Pages work (`AGENTS.md` has the design). CMYK, YCbCr, Lab and palette are
-refused past page 0; page 1 of such a file still works, because page 1 goes
-through `image`.
+Pages work, and **CMYK now works too** — `cmyk_via_image` re-wraps a page's
+samples in a one-page TIFF and lets `image` do the conversion, because `image`
+owns the maths and cannot be pointed at page 2. Verified for CMYK8 and CMYK16.
 
-**The obvious fix is not available.** `image` 0.25.10's TIFF codec does the
-conversion privately (`tiff::ColorType::CMYK(8) → ColorType::Rgb8`, in its
-`codecs/tiff.rs`), the `tiff` crate only *names* CMYK and converts nothing, and
-`image` cannot reach page 2 at all — which is the entire reason `tiff` is a
-direct dependency. So it is either reimplementing the conversion (which the
-reasoning elsewhere in this file distrusts: a wrong colour is silent) or
-re-wrapping the decoded samples in a one-page TIFF and letting `image` convert
-that. The second is the tractable shape: ~40 lines in `lib.rs` plus a multi-page
-CMYK fixture, which the `tiff` crate's encoder can write.
+Still refused past page 0, each an error rather than an approximation: **YCbCr,
+Lab, palette, CMYK+alpha, multiband.** The blocker is not the decoder — `image`
+can convert YCbCr and Lab — it is that the re-wrap trick needs a `tiff`-crate
+*encoder* type for the source colour type, and there isn't a usable one:
 
-Do this only if real scans need it.
+- `tiff::encoder::colortype::YCbCr8` has `Inner = u8` with `BITS_PER_SAMPLE =
+  [8, 8, 8]`, which cannot carry three samples per pixel. Writing a YCbCr page
+  through it is not possible as written.
+- palette needs the `colormap` tag applied, and Lab is not a photometric
+  interpretation the encoder offers at all.
+
+So this item is now "find or write a way to express those types in a one-page
+TIFF", not "make `image` do the conversion". Worth doing only if real scans need
+it; a 24-bit CMYK scan is the common print case and it is already covered.
 
 ---
 

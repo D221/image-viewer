@@ -479,13 +479,13 @@ images and is `#[ignore]`d because it takes seconds.
 ## Known caveats
 
 - **Multi-page TIFF: three deliberate limits.** Pages work — arrow keys page
-  through a document and the title bar and status line show which one — but:
-  pages whose colour type needs a colormap or colour transform (CMYK, YCbCr,
-  Lab, palette) are **refused with an error** past page 1 rather than converted
-  approximately, because a wrong page colour is silent; **`Ctrl+S` is refused**
-  on any page but the first, since "save what I see" is a statement about a
-  file and the lossless path rewrites the whole document; and **the grid shows
-  one cell per file** (page 1), because a document is one thing to browse.
+  through a document and the title bar and status line show which one — and CMYK
+  pages convert correctly. But: pages in **YCbCr, Lab, palette, CMYK+alpha or
+  multiband** are **refused with an error** rather than converted approximately,
+  because a wrong page colour is silent; **`Ctrl+S` is refused** on any page but
+  the first, since "save what I see" is a statement about a file and the lossless
+  path rewrites the whole document; and **the grid shows one cell per file**
+  (page 1), because a document is one thing to browse.
 - **ICO needs an RGBA PNG entry or a BMP entry.** Windows writes the large sizes
   as RGBA PNGs and the small ones as BMP, both of which decode. A PNG-compressed
   entry that is *not* RGBA is rejected, which is a limitation of the underlying
