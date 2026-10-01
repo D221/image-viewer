@@ -445,10 +445,34 @@ that are already in memory. One crate, no workspace, no CI.
   2400×1600. Assert the real contract in tests.
 - **EXIF orientation is applied to JPEGs only.** The `heic` crate already applies
   HEIF container transforms (`irot`/`imir`); the tag on top would double-rotate.
-- **Colour is detected, never transformed (yet).** `color_info` parses the ICC
-  profile and reports the space; no pixel is touched, and the pipeline is 8-bit
-  sRGB end to end (`TextureOptions` has no `srgb` field; egui wants a gamma-space
-  surface). 200 of 1001 images in a real phone backup are Display P3.
+- **Wide-gamut to sRGB is a setting, off by default, and the matrix is derived
+  rather than transcribed.** `convert_wide_gamut` in `Config`, applied at decode
+  time through `set_wide_gamut_conversion` like `set_linear_resample`. Two things
+  about it are easy to get wrong and neither shows up as an error:
+  - **The matrix is built from the two spaces' chromaticities** (`P3_XY`,
+    `SRGB_XY`, `D65_XY` → `rgb_to_xyz`), not copied out of a spec. It comes out
+    identical to the published `lin_display_p3_to_lin_srgb`, and
+    `test_the_derived_matrix_reproduces_the_icc_primaries_we_measured` checks the
+    derivation against the D50-adapted primary read out of 192 real P3 profiles —
+    agreement is 5 units in 15-bit fixed point, where the published primaries, the
+    adaptation and this code all have to be right at once.
+  - **Two transpositions, both invisible.** The first `rgb_to_xyz` stored the
+    primaries as `[primary][component]` and then solved the system as if it were
+    `[component][primary]`, so it solved the *transposed* equation: `invert3`
+    still round-tripped to the identity, the numbers were plausible, and white
+    ended up somewhere other than white. The second was the Bradford product
+    order in the test — `M_A⁻¹ · scale · M_A`, not `M_A · scale · M_A⁻¹`. Same
+    failure shape as `Xform::Transverse` and the wgpu backend bits: it compiles,
+    it type-checks, and it is wrong.
+  - `test_out_of_gamut_colours_clip_rather_than_wrap` exists because of the other
+    trap in this feature: **pure primaries convert to themselves once clipping is
+    applied**, so a fixture built from primaries asserts nothing. The value tests
+    use mid-tones, where P3 and sRGB genuinely disagree.
+- **`apply_wide_gamut_conversion` is a wrapper around `decode_page`, not a step
+  inside it.** `load_page_preview_full` has five return points — preview, full,
+  the DCT path, the embedded EXIF thumbnail, animations — and a conversion applied
+  at each is a conversion one of them forgets. Tiles are cut from the converted
+  `full` and the clipboard reuses the same buffers, so the wrapper covers both.
 - **Classify by primaries, not the `desc` string** — 170 of those 200 have no
   `desc` at all. The two primaries that occur are sRGB `(28578, 14581, 912)` and
   Display P3 `(33759, 15807, -69)`, both D50-adapted, and they never mix. Those

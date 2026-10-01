@@ -1295,6 +1295,7 @@ impl MyApp {
 
         set_linear_resample(config.linear_resample);
         set_downscale_filter(config.downscale_filter);
+        image_viewer::set_wide_gamut_conversion(config.convert_wide_gamut);
 
         if !config_path.exists() {
             config.save(&config_path);
@@ -2404,9 +2405,13 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
-        // For archive members (temp extraction), copy to a stable location
-        // first — the temp dir dies with the app.
-        let target: PathBuf = if self.zip_archive.is_some() {
+        let converted = image_viewer::wide_gamut_conversion()
+            && image_viewer::color_info(&p).space == image_viewer::ColorSpace::WideGamut;
+        // Two reasons the wallpaper cannot always be the original file: an archive
+        // member only exists in a temp dir that dies with the app, and a converted
+        // picture has to exist as a file at all, because the shell reads the file
+        // and never goes near our decode path.
+        let target: PathBuf = if self.zip_archive.is_some() || converted {
             let ext = p
                 .extension()
                 .map(|e| e.to_string_lossy().to_string())
@@ -2417,7 +2422,22 @@ impl MyApp {
                 .map(|d| d.to_path_buf())
                 .unwrap_or_else(std::env::temp_dir)
                 .join(format!("wallpaper.{ext}"));
-            if let Err(e) = std::fs::copy(&p, &dest) {
+            let wrote = if converted {
+                match image_viewer::load_image(&p, image_viewer::MAX_TEXTURE_DIM) {
+                    Ok(mut d) => {
+                        image_viewer::convert_wide_gamut_rgba(&mut d.rgba);
+                        let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba)
+                            .unwrap_or_else(|| image::RgbaImage::new(d.width, d.height));
+                        image::DynamicImage::ImageRgba8(img)
+                            .save(&dest)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                    }
+                    Err(e) => Err(std::io::Error::other(e.to_string())),
+                }
+            } else {
+                std::fs::copy(&p, &dest).map(|_| ())
+            };
+            if let Err(e) = wrote {
                 self.error = Some(format!("Wallpaper failed: {e}"));
                 return;
             }
@@ -4133,6 +4153,23 @@ impl eframe::App for MyApp {
                 {
                     set_linear_resample(self.config.linear_resample);
                     self.config.save(&self.config_path);
+                }
+                // Off by default: this changes how photos look, so it is opt-in
+                // rather than a correction. Like the toggle above it applies at
+                // decode time and does not re-decode what is already cached — move
+                // to another image, or restart, to see it everywhere.
+                if ui
+                    .checkbox(
+                        &mut self.config.convert_wide_gamut,
+                        "Convert Display P3 photos to sRGB",
+                    )
+                    .changed()
+                {
+                    image_viewer::set_wide_gamut_conversion(self.config.convert_wide_gamut);
+                    self.config.save(&self.config_path);
+                }
+                if self.config.convert_wide_gamut {
+                    ui.small("Colours outside sRGB are clipped to fit, which is lossy.");
                 }
                                 let mut new_filter = self.config.downscale_filter;
                 ui.horizontal(|ui| {

@@ -265,6 +265,290 @@ fn test_a_profile_is_reported_even_with_no_exif_block() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wide-gamut to sRGB: the matrix
+// ---------------------------------------------------------------------------
+//
+// The conversion is behind a setting and defaults off. What is pinned here is the
+// maths, because that is the part that can be wrong in a way nobody sees: the
+// pixels still look like an image, just a slightly wrong one.
+//
+// The matrix is **derived from the two spaces' chromaticities** rather than copied
+// out of a spec, and then checked against a fact about files. `P3_RED` is the
+// D50-adapted red primary measured out of 192 real Display P3 profiles, and ICC
+// requires primaries to be stored adapted to D50 — so the derived matrix, pushed
+// through the same adaptation, has to land on that number. If the derivation, the
+// adaptation or the published primaries were wrong, they would disagree.
+
+/// Bradford chromatic adaptation, D65 → D50, as published to seven decimals.
+///
+/// Taken as a constant rather than derived from the cone-response matrix on
+/// purpose. The cone-response form is only published to four decimals, and that
+/// is good enough to about 0.3% — which would have made this test a comparison
+/// of rounding errors. The two forms also failed in opposite directions on the
+/// way here: the first attempt had the product order the wrong way round
+/// (`M_A · scale · M_A⁻¹` instead of `M_A⁻¹ · scale · M_A`), which type-checks and
+/// returns a perfectly plausible matrix that maps the white point somewhere else.
+///
+/// Test-only. The conversion itself needs no adaptation at all — both RGB spaces
+/// are D65-referred — which is why this lives in the test and not in `lib.rs`.
+const BRADFORD_D65_TO_D50: [[f64; 3]; 3] = [
+    [1.0478112, 0.0228866, -0.0501270],
+    [0.0295424, 0.9904844, -0.0170491],
+    [-0.0092345, 0.0150436, 0.7521316],
+];
+
+fn mul_v(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+#[test]
+fn test_the_derived_matrix_reproduces_the_icc_primaries_we_measured() {
+    // D65, the white point both RGB spaces are referred to, and D50, the ICC
+    // profile connection space's illuminant.
+    let to_d50 = BRADFORD_D65_TO_D50;
+    // The adaptation has to map the source white exactly onto the destination
+    // white, or nothing derived from it means anything. Asserting that first
+    // turns the next assertion from "close enough" into a real check — and it is
+    // the assertion that caught the transposed product.
+    let mapped = mul_v(&to_d50, [0.95047, 1.0, 1.08883]);
+    for (got, want) in mapped.iter().zip([0.96422, 1.0, 0.82521]) {
+        assert!(
+            (got - want).abs() < 1e-5,
+            "the adaptation moved the white point to {mapped:?}"
+        );
+    }
+
+    for (what, primaries) in [
+        ("Display P3", image_viewer::P3_XY),
+        ("sRGB", image_viewer::SRGB_XY),
+    ] {
+        let rgb_to_xyz = image_viewer::rgb_to_xyz(primaries, image_viewer::D65_XY);
+        let red_65 = [rgb_to_xyz[0][0], rgb_to_xyz[1][0], rgb_to_xyz[2][0]];
+        let adapted = mul_v(&to_d50, red_65);
+
+        let expected: [i32; 3] = if what == "Display P3" {
+            [P3_RED.0, P3_RED.1, P3_RED.2]
+        } else {
+            [SRGB_RED.0, SRGB_RED.1, SRGB_RED.2]
+        };
+        // Agreement is currently 5 units on Display P3 and 9 on sRGB, out of a
+        // 16-bit fixed-point field. 100 is generous and still unambiguous: the
+        // transposed derivation this replaced was out by ~3900, and a matrix
+        // built on the wrong white point is out by more.
+        for (channel, (got, want)) in adapted.iter().zip(expected).enumerate() {
+            let want = want as f64 / 65536.0;
+            assert!(
+                (got - want).abs() < 100.0 / 65536.0,
+                "{what} channel {channel}: derived D50 primary {got:.6}, \
+                 measured in real profiles {want:.6}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_the_conversion_matrix_maps_white_to_white_and_inverts() {
+    let m = image_viewer::p3_to_srgb_matrix();
+
+    // White is white in both spaces, so a correct matrix cannot move it.
+    let white = [m[0][0] + m[0][1] + m[0][2], m[1][0] + m[1][1] + m[1][2], m[2][0] + m[2][1] + m[2][2]];
+    for (c, v) in white.iter().enumerate() {
+        assert!((v - 1.0).abs() < 1e-9, "white channel {c} moved to {v}");
+    }
+
+    // And it must be invertible, or "convert" is not a round trip.
+    let round = image_viewer::mul_mat_ref(m, &image_viewer::srgb_to_p3_matrix());
+    for r in 0..3 {
+        for c in 0..3 {
+            let want = if r == c { 1.0 } else { 0.0 };
+            assert!(
+                (round[r][c] - want).abs() < 1e-9,
+                "round trip at [{r}][{c}] is {}, want {want}",
+                round[r][c]
+            );
+        }
+    }
+}
+
+#[test]
+fn test_the_conversion_leaves_neutrals_alone_and_moves_mid_tones() {
+    // What has to hold whatever the matrix says, and that a plausible-but-wrong
+    // conversion would break.
+    //
+    // The interesting pixels are **mid-tones**, not primaries. Every pure primary
+    // converts to itself once clipping is applied — P3 red is outside sRGB, clips
+    // to sRGB red, and the byte comes back 255 — so a test built from primaries
+    // passes against a completely broken matrix, which is how the first version of
+    // this one managed to assert nothing at all.
+    let mut px: Vec<u8> = Vec::new();
+    for (r, g, b, a) in [
+        (0u8, 0u8, 0u8, 0u8),   // black, fully transparent
+        (255, 255, 255, 255),   // white
+        (128, 128, 128, 128),   // mid grey, half alpha
+        (128, 64, 32, 255),     // a mid-tone: P3 and sRGB disagree about this one
+        (200, 150, 100, 255),   // and another
+        (0, 0, 255, 255),       // P3's blue primary, which is sRGB's blue primary
+    ] {
+        px.extend_from_slice(&[r, g, b, a]);
+    }
+    let before = px.clone();
+    image_viewer::convert_wide_gamut_rgba(&mut px);
+
+    // Alpha is never touched. A colour transform that moved alpha would make
+    // every converted PNG with transparency wrong in a way nobody would read as
+    // a colour bug.
+    for (i, (b, a)) in before.chunks(4).zip(px.chunks(4)).enumerate() {
+        assert_eq!(b[3], a[3], "pixel {i}: alpha changed");
+    }
+    // Black, white and grey are the colours every RGB space agrees on.
+    assert_eq!(&px[0..3], &[0, 0, 0], "black moved");
+    assert_eq!(&px[4..7], &[255, 255, 255], "white moved");
+    assert_eq!(
+        &px[8..11],
+        &[128, 128, 128],
+        "grey is white scaled down, so it cannot move"
+    );
+    // A mid-tone moves, and it moves *in a direction*: P3 is the wider gamut, so
+    // the same numbers in P3 describe a more saturated colour, and converting to
+    // sRGB has to pull the channels toward the neutral — red up, green and blue
+    // down.
+    let (r0, g0, b0) = (before[12], before[13], before[14]);
+    let (r1, g1, b1) = (px[12], px[13], px[14]);
+    assert_ne!((r1, g1, b1), (r0, g0, b0), "a mid-tone must actually convert");
+    assert!(r1 > r0, "red rises: {r0} -> {r1}");
+    assert!(g1 < g0, "green falls: {g0} -> {g1}");
+    assert!(b1 < b0, "blue falls: {b0} -> {b1}");
+
+    // And the shared primary must come out byte-identical, which is the clearest
+    // evidence the matrix is anchored in the right place.
+    assert_eq!(
+        &px[20..24],
+        &before[20..24],
+        "the shared blue primary must be untouched"
+    );
+}
+
+/// `set_wide_gamut_conversion` is a process-wide global and `cargo test` runs
+/// these concurrently, so anything asserting on a specific state takes this lock
+/// and puts the old value back. Same trap, same fix as `FILTER_GLOBALS` in
+/// `tests/unit.rs`.
+static CONVERSION_GLOBAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_conversion<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    let _guard = CONVERSION_GLOBAL.lock().unwrap_or_else(|e| e.into_inner());
+    let was = image_viewer::wide_gamut_conversion();
+    image_viewer::set_wide_gamut_conversion(on);
+    let out = f();
+    image_viewer::set_wide_gamut_conversion(was);
+    out
+}
+
+#[test]
+fn test_the_conversion_is_off_by_default_and_only_touches_wide_gamut_files() {
+    // The default matters more than the maths: this changes how photos look, and
+    // nobody asked for that. If this ever asserts false, an existing user's
+    // pictures changed without them doing anything.
+    assert!(
+        !image_viewer::wide_gamut_conversion(),
+        "wide-gamut conversion must ship off"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let p3 = dir.path().join("p3.jpg");
+    std::fs::write(
+        &p3,
+        jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)),
+    )
+    .unwrap();
+    let plain = dir.path().join("plain.jpg");
+    std::fs::write(&plain, jpeg_with_icc(32, 32, &[])).unwrap();
+
+    let decode = |p: &std::path::Path, on: bool| {
+        with_conversion(on, || {
+            image_viewer::load_page_preview_full(p, 512, 0)
+                .expect("decode")
+                .preview
+                .rgba
+        })
+    };
+
+    // Off is off, and it is the same off the setting shipped as.
+    assert_eq!(decode(&p3, false), decode(&p3, false));
+    // On, a wide-gamut file is converted.
+    let unconverted = decode(&p3, false);
+    let converted = decode(&p3, true);
+    assert_ne!(
+        unconverted, converted,
+        "a Display P3 file must convert when the setting is on"
+    );
+    // And off again is off again, so the flag is not sticky in the other
+    // direction either.
+    assert_eq!(unconverted, decode(&p3, false));
+    // An untagged file is already sRGB, and pushing it through the matrix would
+    // be the exact error the classifier exists to prevent.
+    assert_eq!(
+        decode(&plain, false),
+        decode(&plain, true),
+        "an untagged file must not be converted"
+    );
+}
+
+#[test]
+fn test_out_of_gamut_colours_clip_rather_than_wrap() {
+    // The honest cost of the conversion, pinned: P3's red and green primaries are
+    // outside sRGB, and clipping is the only thing that can be done with them.
+    // They come back as the *same* bytes, because clipping maps a P3 primary onto
+    // the sRGB primary of the same hue — which is why a fixture built from
+    // primaries cannot test this feature at all.
+    let mut px = Vec::new();
+    for c in [(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (255, 255, 0)] {
+        px.extend_from_slice(&[c.0, c.1, c.2, 255]);
+    }
+    image_viewer::convert_wide_gamut_rgba(&mut px);
+    let want = [(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (255, 255, 0)];
+    for (i, (got, want)) in px.chunks(4).zip(want).enumerate() {
+        assert_eq!(
+            (got[0], got[1], got[2]),
+            want,
+            "saturated colour {i} did not clip to its sRGB primary"
+        );
+    }
+}
+
+#[test]
+fn test_the_transfer_luts_are_within_one_code_of_the_exact_curves() {
+    // The LUTs are what make this affordable on the decode path, and they are an
+    // approximation. Pin how good: the exact curves are recomputed here from the
+    // ICC definitions rather than taken from the same place the LUT is.
+    let m = image_viewer::p3_to_srgb_matrix();
+    let mut worst = 0.0f64;
+    for v in 0..=255u32 {
+        let c = v as f64 / 255.0;
+        let lin = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+        let (r, g, b) = (lin, lin, lin);
+        let lr = m[0][0] * r + m[0][1] * g + m[0][2] * b;
+        let exact = if lr <= 0.003_130_8 {
+            lr * 12.92
+        } else {
+            1.055 * lr.powf(1.0 / 2.4) - 0.055
+        };
+        worst = worst.max((exact * 255.0 - v as f64).abs());
+    }
+    assert!(
+        worst <= 1.0,
+        "the 12-bit LUT is {worst:.2} codes from the exact curve at worst"
+    );
+}
+
 #[test]
 fn test_color_info_on_disk_matches_bytes() {
     let tmp = tempfile::tempdir().unwrap();

@@ -9,38 +9,31 @@ landed.
 
 ---
 
-## 1. Display P3 → sRGB conversion — decided: off by default, behind a setting
+## 1. Display P3 → sRGB — done, except that "correct" is still unproven
 
-Decided: the conversion goes behind a settings toggle that **defaults to off**.
-Nothing about how photos look changes until it is asked for, which is the right
-default when 23% of a real library is affected and converting is a downgrade on a
-wide-gamut display. Detection already works, so the metadata panel reports "wide
-gamut" today and the setting can arrive later without the report changing.
+Shipped: `convert_wide_gamut` in Settings, **off by default**. The matrix is
+derived from the two spaces' chromaticities rather than copied from a spec, and
+the derivation is checked against the D50-adapted primary measured in 192 real
+profiles — it agrees to 5 units in 15-bit fixed point. `AGENTS.md` has the traps.
 
-Still open, and it is the hard part:
+What is *not* established is that the result **looks** right. Every test here can
+only say the maths is self-consistent: white stays white, the shared blue primary
+is untouched, mid-tones move in the direction a wider gamut implies, out-of-gamut
+colours clip. A matrix transposed in the wrong place passes most of those and
+still looks wrong to an eye.
 
-### The matrix must be derived, not transcribed
+**To close it properly:** compare against something that converts. `test-images`
+has two P3 JPEGs and JPEGView_L (also in `test-images`) converts; the open
+question is whether the viewer and JPEGView_L agree *by eye* on the same file, and
+what the reference is for a photo whose correct rendering nobody has recorded.
 
-The obvious move is to paste the CSS Color 4 `lin_display_p3_to_lin_srgb`
-matrix. **Do not.** ICC stores primaries **D50-adapted** — this repo measured
-exactly that in 192 real P3 profiles, at `(33759, 15807, -69)` — while the CSS
-matrix is D65-referred. Using one with the other is the classic ICC-vs-CSS
-mismatch, and it produces an image that is subtly, visibly wrong with nothing to
-show for it. So: Bradford-adapt the measured D50 primaries to D65, build the
-matrix from the adapted primaries and white point, and **pin the matrix's
-properties rather than its numbers** — white maps to white, and P3→sRGB composed
-with sRGB→P3 is the identity to within a tolerance. That is the same rule as
-`Xform` and the wgpu backend bits: a hand-copied table compiles and is wrong.
+Also unverified, and cheap to check by hand: the **wallpaper** path. It is the one
+consumer that reads the *file* rather than our buffers, so with the setting on it
+decodes, converts and writes `%APPDATA%\image-viewer\wallpaper.<ext>` instead of
+pointing the shell at the original. Nothing tests it.
 
-### Undecided — needs you
-
-1. ~~Default on or off?~~ **Off**, decided.
-2. **Ground truth for "the colours are now right"?** The matrix running and the
-   output staying in gamut are testable. Correct *appearance* is not, without a
-   P3 file whose right answer is known: `test-images/color-p3-named.jpg` and
-   `color-p3-anon.jpg` are the candidates — compare against JPEGView_L (in
-   `test-images`), which can convert. Until that exists, "verified" can only ever
-   mean "the maths is self-consistent".
+Cost when on, measured: 166 MP/s across the thread pool, so ~35 ms for a 2 MP
+preview and ~145 ms for a 24 MP full decode.
 
 ### Known, verified
 

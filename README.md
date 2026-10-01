@@ -313,6 +313,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Load all images in folder | on | Build the queue from the whole folder on startup |
 | Linear-light downsampling | on | Resample in linear light instead of gamma space — noticeably cleaner on line art |
 | Downscale filter | Hermite | Hermite / Catrom / Lanczos3, applied live |
+| Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
 | Mouse wheel flips images | off | Wheel pages instead of zooming (`Ctrl`+wheel still zooms) |
 | Loop back at folder ends | on | Wrapping past the last image returns to the first. On by default so older configs keep their existing behaviour |
@@ -490,15 +491,18 @@ images and is `#[ignore]`d because it takes seconds.
   as RGBA PNGs and the small ones as BMP, both of which decode. A PNG-compressed
   entry that is *not* RGBA is rejected, which is a limitation of the underlying
   decoder rather than a choice here.
-- **Wide-gamut images look flat.** The colour space is *detected* and shown in
-  the metadata panel, but the pipeline is 8-bit sRGB end to end, so a Display P3
-  photo is displayed without conversion and reads duller than it should.
-  Detection covers JPEG, PNG and — through the container's `colr` box — HEIC and
-  AVIF. What is **not** read is a HEIF that states its colour with `nclx`
-  parameters instead of a profile (which is how a phone HEIC often says Display
-  P3), and JXL, whose colour lives inside the codestream; both report "not
-  inspected" rather than guessing. `TODO.md` records the investigation and the
-  two open decisions.
+- **Wide-gamut photos are not converted by default.** The colour space is
+  *detected* in all cases and shown in the metadata panel, but the pipeline is
+  8-bit sRGB end to end, so a Display P3 photo is displayed without conversion and
+  reads duller than it should. **Convert Display P3 photos to sRGB** in Settings
+  turns the conversion on; it is off by default because it is a visible change to
+  your pictures, it is a *downgrade* on a wide-gamut display, and colours outside
+  sRGB are clipped to fit, which is lossy. Detection covers JPEG, PNG and — through
+  the container's `colr` box — HEIC and AVIF; what is **not** read is a HEIF that
+  states its colour with `nclx` parameters instead of a profile, and JXL, whose
+  colour lives inside the codestream. Both report "not inspected" rather than
+  guessing. `--icc-scan <folder>` reports the tally for a whole library.
+  `TODO.md` records what is and isn't verified about the conversion.
 - Toggling **linear-light downsampling** does not re-decode images that are
   already in the preview cache — the filter dropdown does. Restart or move to
   another image for the change to show everywhere.
