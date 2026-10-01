@@ -1,888 +1,576 @@
 # AGENTS.md
 
-Single Rust crate (edition 2021): a speed-first egui/eframe image viewer with a background worker-pool decode pipeline.
+Windows-only Rust desktop app: egui/eframe 0.36 on wgpu. A speed-first image
+viewer built on one rule — **the UI thread never decodes.** Every decode,
+preview and full-res tile runs on a worker pool; the UI only paints textures
+that are already in memory. One crate, no workspace, no CI.
 
 ## Commands
 
-- `cargo test` — run all tests; targets: `unit`, `property`, `integration`, `standard`, `embedded_thumbs`, `filter_and_paging`, plus the in-crate `--lib` perf tests. It **stops at the first failing target**, so use `cargo test --no-fail-fast` to see everything.
-- `cargo test --test unit` — one test file; `cargo test <name>` — one test by name
-- `cargo bench` — criterion benches in `tests/bench.rs` + `tests/bench_variants.rs` (separate targets, not part of `cargo test`)
-- `cargo test --release --test pathological -- --ignored --nocapture` — generate and time 40/60 MP images; the only way to see where big-image time actually goes
-- `cargo test --release --test bench_browse -- --ignored --nocapture` — **browsing benchmark**; flips through a generated folder at several press rates and prints time-to-first-pixels, wasted decode share, peak MB, cache-hit rate. Median of 3 (`IV_BENCH_RUNS`), 24 images by default (`IV_BENCH_N`). This is the number to move when changing the queue, the preloading window or the cache policy
-- `powershell -File tests/bench_launch.ps1 -Runs 5` — **launch benchmark against JPEGView_L**; both apps started on the same folder, reporting ms-to-window, ms-to-idle, peak MB and CPU. Two numbers, because they answer different questions: *to window* is pure start-up (config, scan, window, renderer) and *to idle* adds the first decode, which is what a person actually waits for
-- `powershell -File tests/bench_launch_apps.ps1 -Rounds 7` — **launch benchmark vs IrfanView and Windows Photo Viewer**, on a single file, varying the wgpu backend. Read the header before trusting a number: `$GapMs` matters more than anything else in it, and this app's own to-idle figure is not measurable over RDP
-- `powershell -File tests/bench_launch_ab.ps1 -Runs 9` — **A/B two builds**, interleaved, using the app's own `--perf` report. This is the one to trust for "did my change help"; see the case-insensitive-`$a` trap above
-- `cargo test --release --test bench_startup -- --ignored --nocapture` — where start-up time goes, broken down per candidate (`IV_BENCH_FOLDER` to pick the folder; an env var, because `args().nth(2)` picks up `--nocapture`)
-- `cargo run -- --perf <folder>` — turn on latency sampling; the report prints on exit and is written to `%TEMP%\image-viewer-perf.txt` (a release build has no console, so the file is the real output)
-- `PERF_PHASE=1` — per-phase timing inside the linear-light resampler
-- `cargo run` — launch the GUI viewer; `cargo run -- --register` / `--unregister` manage file-type registration (HKCU, no admin) and exit
-- `powershell -File tests/probe_chords.ps1` — **did that keystroke actually do the thing?** Launches the app on a scratch photo, injects `Ctrl+C` and `Ctrl+S`, and checks the two effects that cannot be faked: the **clipboard** (`IMAGE WxH`, read from a child STA process) and a **new file on disk**. Screenshots the window after each. This is the instrument for "the shortcut does nothing", and it is how the `Ctrl+C` bug was found — see the gotcha below. Console session only
-- Release builds hide the console (`windows_subsystem = "windows"`); debug keeps it for `eprintln!` diagnostics — don't "fix" this by removing the attribute
+- `cargo test --no-fail-fast` — the whole suite. Plain `cargo test` stops at the
+  first failing target, and `--lib` (the in-crate `perf` tests) is a target no
+  per-target command below ever runs.
+- `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
+- 21 test targets: `bench`, `bench_browse`, `bench_resize`, `bench_rotate_save`,
+  `bench_startup`, `bench_variants`, `color_profiles`, `embedded_thumbs`,
+  `filter_and_paging`, `flip_through`, `formats`, `icon`, `integration`,
+  `keybindings`, `multiframe`, `pathological`, `property`, `renderer`,
+  `rotate_save`, `standard`, `unit`.
+- **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
+  use `criterion_main!` but are ordinary `{test}` targets with the default
+  harness (there is no `[[bench]] harness = false` in `Cargo.toml`), so
+  criterion's `main` is never called: `cargo bench` prints "running 0 tests" and
+  no criterion output. The benchmarks that actually produce numbers are the
+  `#[ignore]`d ones below.
+- `cargo test --release --test <bench_*> -- --ignored --nocapture`:
+  - `bench_browse` — the number to move when changing the queue, the preload
+    window or the cache policy: time-to-first-pixels, wasted decode share, peak
+    MB, cache-hit rate while flipping a generated folder. `IV_BENCH_N` (24),
+    `IV_BENCH_RUNS` (3).
+  - `bench_resize` — decodes per window drag.
+  - `bench_rotate_save` — lossless save time **and output/input size ratio**;
+    1.00–1.02x is the only evidence "lossless" is true, because it is a property
+    of the output that no code can assert.
+  - `bench_startup` — start-up per candidate. `IV_BENCH_FOLDER` is an env var
+    because `args().nth(2)` picks up `--nocapture`.
+  - `pathological` — generated 40/60 MP images; the only way to see where
+    big-image time actually goes.
+- `powershell -File tests\<script>.ps1` — console session only (see Measuring):
+  - `bench_launch_ab.ps1 -Runs 9` — interleaved A/B of two builds via the app's
+    own `--perf` report. The one to trust for "did my change help".
+  - `bench_launch.ps1 -Runs 5` — launch vs JPEGView_L (checked out in
+    `test-images`).
+  - `bench_launch_apps.ps1 -Rounds 7` — vs IrfanView and Windows Photo Viewer.
+    Photo Viewer was removed in Win11 24H2/25H2 and cannot be benchmarked here;
+    IrfanView and Oculante can, and Oculante (also egui) is the fair one — it is
+    not faster, only more variable.
+  - `bench_framerate.ps1` — gl vs dx12 frame rate; refuses to run over RDP.
+  - `probe_chords.ps1` — "did that keystroke actually do the thing?" Injects
+    `Ctrl+C` / `Ctrl+S` and checks the two effects that cannot be faked: the
+    clipboard and a new file on disk.
+- `cargo run` — the GUI. `-- --register` / `--unregister` (HKCU, no admin, then
+  exit). `-- --perf <folder>` — latency report on exit, also written to
+  `%TEMP%\image-viewer-perf.txt`; **a release build has no console, so the file
+  is the real output.** `PERF=1` for sampling without a folder, `PERF_PHASE=1`
+  for per-phase resampler timing. `--probe-renderer <name>` is the internal flag
+  the backend probe spawns children with.
+- Release hides the console via `#![cfg_attr(not(debug_assertions),
+  windows_subsystem = "windows")]` (`src/main.rs:21`); debug keeps it for
+  `eprintln!`. Don't "fix" that by removing the attribute.
+- `cargo run --release --example make_icon` regenerates `assets/app.ico`;
+  `cargo run --release --example bare_eframe` is the control that measures the
+  renderer's own cost with no viewer code at all.
+- Needs the MSVC toolchain and CMake (turbojpeg-sys builds libjpeg-turbo).
 
-## Performance (the core goal — read before touching the pipeline)
+## Layout
 
-- **Start-up cost is the renderer, not the folder, and the renderer is most of the
-  memory too.** The decisive experiment is that **5 images take the same time as
-  1001** — it is all fixed cost. We get a *window* in ~50-65 ms (JPEGView_L:
-  ~200 ms), and the backend decides everything after that:
+- `src/lib.rs` (~4.6k lines) — everything testable: sniffing, decode, gallery
+  and paging, the job planner, the loader queue, the resize policy, the
+  transform algebra, ICC, archives, config. **If a rule can be a pure function it
+  belongs here** — every bug that could not be tested lived in `main.rs`.
+- `src/main.rs` (~4k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
+  clipboard, wallpaper, Windows integration. Unreachable from a test.
+- `src/perf.rs` (16 latency metrics, 11 always-on counters), `src/fileassoc.rs`
+  (HKCU registration), `src/icon.rs` (generated icon artwork).
+- `test-images/` is gitignored. `test-images/JPEGView_L` and
+  `test-images/oculante` are reference checkouts, not fixtures.
+- `README.md` is the user-facing document (features, keys, settings, caveats) and
+  is kept in step with the code; `TODO.md` is the deferred-work list, with the
+  investigation already done. Read `TODO.md` before starting anything colour- or
+  GUI-related — it records verified numbers that are expensive to re-derive.
+  `PLAN.md` no longer exists; don't cite it.
 
-  | backend | adapter + device | bare eframe window | this viewer |
+## Decode pipeline
+
+- **Single-pass decode** (`load_image_preview_full`): one decode, the preview is
+  derived from it and sized to the *display area* (`Job.target_dim`, central
+  panel in physical px). Two exceptions: JPEGs over `FAST_FULL_MAX_PIXELS`
+  (12 MP) get a turbojpeg DCT preview then a full decode after `FULL_DWELL`
+  (120 ms), and grid thumbs (`Kind::Thumb`, 256) may come from the embedded EXIF
+  thumbnail — then `full` is `None` and `below_target` is true, which is
+  correct: nothing adopts a grid thumbnail.
+- **The full image rides on the preview cache** (`Preview.full`, plus `anim` for
+  animations); `sync_shown` adopts it. `needs_full()` checks data availability,
+  *not* texture size vs source size — a size heuristic permanently skipped
+  full-res for preloaded neighbours.
+- **Never cancel or abandon a decode.** A job runs to completion even after the
+  user moves on. An earlier design cancelled in-flight decodes whose path left
+  the wanted set; combined with `Loader::replace` dropping queued-but-busy jobs
+  that stranded images that were never re-requested ("random images never load,
+  and nothing is decoding them"). Third-party decoders aren't interruptible
+  anyway.
+- **The queue's `wanted` map is what makes abandonment safe**: on finish, a job
+  that produced *nothing* and is still wanted is re-queued. The only correct
+  question on finish is "is this still wanted?" — not "was it wanted and running a
+  moment ago", and not "did it already deliver" (that decodes forever). A
+  **result is sent before the worker frees its busy slot**, so a queue that looks
+  idle can still have an unread message: a test that waits for idle must drain
+  once more or it invents a strand.
+- `schedule()` only re-runs on a step, on the current preview arriving, on a
+  dwell expiry or on a resize. A stranded *neighbour* triggers none of them, so
+  it stays stranded for the session. `tests/flip_through.rs` pins this and is
+  verified to fail with the old `replace`; note that looping until convergence
+  instead of stopping also makes it pass, so don't "fix" a failure with re-asks.
+- `plan_jobs` is pure (`Plan` in, `Vec<Job>` out) and priorities live beside it:
+  current preview 0, current EXIF 5, full 15, every prefetch ≥ 10 ("next" at
+  `10 + 2d`, "previous" at `11 + 2d`), thumbs from 45. `PRELOAD_RADIUS` is a
+  fixed symmetric 3 — direction-aware radii were tried and removed. `replace()`
+  makes the queue match exactly (navigation); `push()` is additive (grid thumbs
+  re-arm every frame, so they survive a rebuild). `queued jobs dropped by
+  rebuild` is the coalescing signal: large values mean the user outran the
+  decoder — widen the window, don't add workers.
+- **`failed` is `HashSet<(ImgKey, Kind)>` and a failure is permanent for the
+  session.** Only triage removal, the resize drop, the filter change
+  (`refilter`) and `invalidate_path` clear entries. A transient error (a file
+  still hydrating from OneDrive, a half-copied file) poisons the image until
+  restart while the viewer keeps painting the old frame. If a load failure looks
+  mysterious, suspect this first.
+- **Reloading a changed file is self-healing and must stay that way**:
+  `invalidate_path` clears the `failed` entry, so a file re-read mid-write fails
+  once and succeeds on the next poll. It deliberately does *not* keep the stale
+  texture (a re-export can change the dimensions) — it blanks for one decode.
+  Watcher: `maybe_rescan` every 2 s, `Stamp` = mtime + len, deliberately **not**
+  gated on `load_all_on_startup`, both halves skipped while an archive is open.
+- **Resize is coalesced by comparing with the previous frame**, never with a
+  wall-clock timer: `needs_refine` + `ResizeTracker` in `lib.rs` return
+  `Wait` / `Refine` / `Idle`. A big preview takes ~800 ms to decode, so frames
+  are ~800 ms apart and a shorter timer expires between every pair and never
+  fires. `Wait` must call `request_repaint_after(RESIZE_SETTLE_REPAINT)` or the
+  final size of a drag is never examined (nothing else asks for a repaint).
+  Panel toggles and F11 call `suppress()` so layout changes don't read as growth.
+- **Hold-to-browse**: `step()` is throttled while `waiting_load`; the queued
+  `pending_advance` is consumed at the *start of the next frame* — consuming it
+  in the same frame skips the render.
+- **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
+  300 MP = 1.2 GB for one buffer, and every cached preview carries one for free.
+  Bounded by count only: `PREVIEW_CACHE_CAP` 16 (LRU), `MAX_TILES` 64 × 1024
+  (≈256 MB), `THUMB_CACHE_CAP` 512 with `THUMB_TRIES` 3, animations 240 frames
+  / 256 MB with delays floored to 20 ms. `protected_preview_keys` is a pure
+  function in `lib.rs` for a reason: the obvious reading — protect every page of
+  every protected *file* — makes the cache **unbounded** on a 200-page document,
+  which cannot happen on a photo folder and is invisible until you read memory.
+  If you raise `PRELOAD_RADIUS`, re-check all of this. A worker panic here is
+  usually OOM; its payload is logged (`C_DECODE_PANICS`) — don't reduce it back
+  to a bare "decoder panicked", that hid the cause.
+- **The filter is the whole viewer.** `MyApp.all_files` is unfiltered;
+  `gallery.files` is it through `Gallery::set_filtered`. Every site that rebuilds
+  the list goes through `set_files` / `adopt_gallery` so the filter cannot be
+  forgotten. The filter is not persisted (a silent filter would hide files with
+  no way back). Every single-letter and navigation key is gated on
+  `!typing` (`ctx.egui_wants_keyboard_input()`), and `Esc` while typing must
+  never fall through to "close the grid / quit".
+- `Gallery::loop_back` is a field (mirrors `Config::loop_back`, default on so old
+  configs keep looping) and `next`/`prev` return whether the view moved, so
+  `step()` can skip `goto()` and leave the dwell timer and the queue plan alone.
+- `Gallery::empty()` is the start-up path: `Gallery::new` scans the folder, and
+  `load_all_from_folder` used to scan it a second time only for that result to be
+  overwritten on the next line (worth 71 ms median, 7.8%).
+- `startup_index(files, named, resume)` decides the start index and is the only
+  place the "an explicit CLI file beats resume" rule lives. Resume
+  (`last_by_folder`) stores file *names*, not paths, keyed by folder — archives
+  and folders share the format.
+
+## Paging (multi-page TIFF)
+
+- **`ImgKey { path, page }` keys every cache that holds pixels** — preview
+  cache, `failed`, loader `wanted`/`busy`, `Job`, `Msg::Preview`/`Full`, `cur`,
+  `shown`. A path-keyed cache hands back page 1 when you asked for page 3,
+  silently, and only for multi-page files. Still keyed on the *path*: grid
+  thumbs, watcher stamps, `ImageEdits` (a turn or a crop is an edit to the
+  document, and it is what `Ctrl+S` writes). `Job::path()` is the filesystem half.
+- **The page is a cursor, not a list**: one entry per file in `Gallery.files`,
+  the page is a separate field. Consequence: `prev` from page 0 goes to the
+  **last** page of the previous file, not its first.
+- **Page counts are learned on arrival, never during a scan.**
+  `tiff_page_count` reads four bytes and gives up for anything that is not a
+  TIFF, because it runs on every `goto`; the answer is cached per file
+  (`learn_pages`) and must be dropped on re-export (`forget_page_count`). A test
+  proves it by *deleting* the file and requiring the answer to survive.
+- **Only colour types that are a straight reinterpretation of the decoded buffer
+  are read** past page 0 (Gray/GrayA/RGB/RGBA, 8 and 16 bit native-endian).
+  CMYK, YCbCr, Lab and palette are **refused with an error** rather than
+  approximated — an error is visible, subtly wrong pixels are not. `failed` is
+  keyed per image so one bad page cannot poison a document's other 199.
+- `Ctrl+S` on a page is **refused, and the refusal is the feature**: the lossless
+  path rewrites the whole file and the re-encode fallback starts at page 1, so
+  saving would write page 1's pixels under the document's name.
+- The grid shows page 1 only — one cell per file, deliberately.
+- `image` 0.25 cannot read page 2: `TiffDecoder` implements only `ImageDecoder`
+  (whose `read_image` consumes it) and is not an `AnimationDecoder`, which is why
+  the `tiff` crate is a direct dependency. A test fixture must therefore use the
+  `tiff` crate's encoder, and it must chain IFDs via `write_image` —
+  `new_directory` makes a directory explicitly *not* chained, so a fixture built
+  that way is single-page however many times the loop runs. `image` 0.25 also
+  writes only single-page TIFFs.
+
+## Transforms, crop and saving
+
+- `Xform` is one of the eight square-lattice symmetries — the complete set that
+  an EXIF tag *and* a lossless JPEG transform can express. A value maps **output
+  pixels back to input pixels**, so `then` composes by *probing* (substitute a
+  point through both, find which of the eight matches) rather than by a
+  multiplication table. `Xform::Transverse` was once hand-transcribed as
+  `(h-1-oy, w-1-ox)`, should be `(w-1-oy, h-1-ox)`, compiled, type-checked, and
+  underflowed the moment the image was wider than tall. **Never transcribe one of
+  these tables** — same failure mode as the wgpu backend bits below.
+- **A saved rotation is correct only if it is *composed***: EXIF orientation ×
+  the user's turns and mirrors. Get the order or sign wrong and the result is
+  invisible *in this viewer* (it re-applies the tag itself and cancels the
+  error) and glaring everywhere else.
+- `paint_matrix` is input→output (drawing); `map` is the other way (sampling).
+  The matrix is derived by probing `map` and transposing, never transcribed.
+  Getting the direction backwards still *looks* like a rotation, just the wrong
+  one. `Mesh::transform` cannot help — `TSTransform` has no room for a
+  reflection — so `paint_tex` moves the vertices.
+- `map(coords, input_dims)`: display→stored is `display.map(.., stored_dims)`
+  directly (using `.inverse()` transposes the rectangle — a valid crop of the
+  wrong corner); stored→display does need `inverse().map(.., display_dims)`.
+  `swaps_axes` drives `xformed_footprint`: four of the eight swap, and both
+  diagonal mirrors *do* (a diagonal reflection is a quarter turn plus a flip).
+- **`ImageEdits` (in `lib.rs`) is the one per-image store** for transform *and*
+  crop, keyed by path. Turn and mirror are the same kind of edit and do not
+  commute (turn-then-mirror is a diagonal mirror), so the store holds a whole
+  `Xform`, not a turn count. Look the edit up *by the path being saved*.
+- **`shown` and `cur` are different images.** `cur` is what is wanted (set by
+  `goto`), `shown` is what is painted (set by `sync_shown`). Key the draw path
+  off `shown_xform` and everything else off `shown`; `current_xform` is right
+  only for saving. Reading the transform from `cur` painted one picture under
+  another picture's transform — visible on every navigation into a turned image,
+  silent when neither is turned.
+- **Crop is a view transform; the picture is not cut on screen.** The frame
+  floats over the whole image so turns and mirrors still apply to it, and it
+  follows the image if you turn it afterwards, because the stored rectangle names
+  the same pixels either way.
+- **The frame you see is the frame that gets saved.** Chain: screen points →
+  displayed pixels → stored pixels (`Crop::from_display_rect`) →
+  `snapped_to_mcu` → back to the screen. `crop_from_screen` and
+  `crop_screen_rect` in `main.rs` are two halves of one conversion and must stay
+  in step. The origin lands on the MCU grid (8 px for 4:4:4, 16 for the usual
+  4:2:0) and the rectangle is **grown** to fit, so the user gets up to one block
+  of *extra* picture rather than one block cut off the edge they framed.
+- **A crop and a turn are two TurboJPEG passes, forced not chosen.** Crop
+  coordinates are read in the transform's *destination* space, and the four
+  axis-swapping operations refuse a crop outright ("Invalid crop request").
+  `save_transformed` crops with the identity op, then turns the cropped result.
+  Both rearrange DCT coefficients, so it is still lossless. Do not "optimise"
+  this into one call: it passes the identity case and fails every other.
+- `dim_bands` (in `lib.rs`, over plain floats, no egui dependency) must tile the
+  difference *exactly*: top and bottom span the full picture width, left and
+  right only between them. Getting that wrong reads as a rendering bug and is
+  arithmetic — a test asserts the four areas sum to `picture - frame`.
+- **`neutralize_exif_orientation`** sets the tag to 1 and zeroes IFD0's next-IFD
+  pointer (unlinking the now-stale thumbnail). It overwrites bytes that already
+  exist and never reserialises the APP1 segment: a malformed EXIF block is worse
+  than an unreferenced thumbnail.
+- Refused with a message rather than re-encoded: WebP, GIF, HEIC, JXL. A button
+  that says "save" must not quietly create a second generation of compression.
+- **A bare letter may only do something that cannot lose data.** `M` (move) and
+  `C` (copy) used to be one keystroke from writing to the filesystem; `C` is now
+  Crop, a view transform until `Ctrl+S`. `Del` is the accepted exception and it
+  goes to the Recycle Bin. `tests/keybindings.rs` enforces this from an explicit
+  `BARE_LETTERS` list **where adding a line is a claim that the action cannot
+  lose data** — write down why.
+
+## Renderer (wgpu)
+
+- **`PROBE_ORDER` is GL, DX12, Vulkan.** GL leads on measurement, with
+  `examples/bare_eframe.rs` as the control so the number is the renderer's and
+  not ours:
+
+  | backend | adapter + device | bare eframe | this viewer |
   |---|---|---|---|
-  | dx12 | 455 ms | 321 MB | 343 MB |
   | gl | **186 ms** | **84 MB** | **189 MB** |
+  | dx12 | 455 ms | 321 MB | 343 MB |
   | vulkan | 474 ms | crashes | crashes |
 
-  Measured with `examples/bare_eframe.rs` as the control: an eframe window and a
-  label, no viewer code at all, so the number is the renderer's rather than ours.
-  It is the reason **237 MB of the footprint was never ours to begin with** — and
-  all of it was the backend. Oculante 0.9.2, for reference, sits at 118 MB, but it
-  uses glow rather than wgpu, so it is not a like-for-like number: bare eframe on
-  wgpu+GL is *lighter* than Oculante at 84 MB.
+  237 MB of the footprint was eframe's, and all of it was the backend. DX12 is
+  second because it goes through a different driver stack. Frame rate is equal
+  (76.8 fps both, interval p50 16.6 ms both, measured on a console session with
+  `tests/bench_framerate.ps1`) — same speed, 154 MB less, 269 ms cheaper.
+- **`wgpu_backend_set()` returns exactly one bit, always.** wgpu enumerates every
+  *enabled* backend during adapter discovery, before picking one, and on this
+  machine that enumeration is a hard `0xC0000005` before the window opens with
+  nothing on stderr. wgpu has no "try this, else that":
+  `native_adapter_selector` still filters enumeration by `backends` first, so the
+  set must be decided up front. Two backends is not a fallback, it is a way to
+  crash. Never set `Backends::all()` and never enable Vulkan unconditionally.
+- **The backend bits are wgpu's numbering, not ours.** wgpu 30 renumbered
+  `Backend` (`Noop = 0` was inserted, so `Gl` moved from bit 1 to **bit 4**), and
+  the old test asserted the same hand-written literals the code used — a test
+  that could not fail, which is why only the debug build (the one nobody runs)
+  noticed. `tests/renderer.rs` now compares against `Backends::GL`/`DX12`/`VULKAN`
+  from wgpu itself. Same "never transcribe a table" rule as `Xform`.
+- **"Automatic" probing is one child process per backend and must reach
+  `request_device`.** The failure is an access violation, not an error return,
+  so nothing in-process can survive it; a process that has crashed cannot catch
+  its own way out. A probe that stopped at `enumerate_adapters` reported Vulkan
+  as working on the very machine where the app access-violates on it — enumeration
+  only walks the loader's list, the failure is further in. A surface is not
+  probed (that needs a window), so a surface-only failure still passes.
+- `probe_backends` **breaks at the first success** (first-launch median
+  1370 ms → 212 ms; it used to pay for all three and throw two away). The answer
+  is cached in `config.json` (`RendererPref.probed`), so only a cold launch is
+  affected. A shortened list contains at most one success, so it cannot change
+  what `pick_probed` decides — but the function is in a binary, so the early exit
+  is pinned against the source text in `tests/renderer.rs`.
+- **"Is Vulkan installed" is the wrong question and the registry is a liar.**
+  `vulkaninfo` reports a healthy Intel UHD 620 while the
+  `Khronos\Vulkan\Drivers` registry key is absent (the loader finds
+  `igvk64.dll` another way). Do not reintroduce that probe.
+- **Changing the renderer restarts the renderer, and the app cannot ask for that
+  itself.** `run_native` only returns when the window closes, so the app writes a
+  `RestartSlot` and sends `ViewportCommand::Close`; the launch loop re-enters the
+  event loop. The app is rebuilt from config, so folder/sort/settings survive and
+  the preview cache does not.
+- `#[serde(rename_all = "lowercase")]` on `WgpuBackend` is load-bearing: without
+  it the config says `"Dx12"` while `name()`/`parse()` say `"dx12"`, and a
+  hand-edited config using the documented spelling fails to load.
+- **There is no DX11 option and there cannot be one** — wgpu removed it upstream
+  and it is absent from `Backends`. The answer to a request for it is a
+  documented "no", not a stub.
 
-  `PROBE_ORDER` now puts **GL first** and DX12 second. This is a deliberate
-  reversal of the original order (DX12 first, on the grounds that it is the native
-  Windows backend), and the reason is the table above.
+## Measuring (this project has drawn several wrong conclusions here)
 
-  **The frame rate was measured afterwards, on a console session, and there is none
-  to report** — that caveat stood for two commits and is now closed.
-  `tests/bench_framerate.ps1`, interleaved A/B, 4 rounds of 20 s on a 14 KB
-  animation, visible window, 6 s settle:
+- **Verify the session is not remote before trusting any frame rate, input event
+  or resize event.** `quser` must say `console`, not `rdp-tcp#N`, and
+  `Get-CimInstance Win32_VideoController` must not show a *Microsoft Remote
+  Display Adapter*. Over RDP a 30 fps animation measured 12.7 fps, a "LOW_LATENCY
+  made it worse" experiment was noise, a resize debounce comparison (11 vs 9
+  re-decodes) was meaningless, and synthetic key injection silently does nothing
+  (`frames with input events` stays 0). This cost four wrong conclusions; treat a
+  "the harness cannot do X" claim with suspicion — the tell that it is wrong is
+  when it would excuse a bug.
+- **A visible window.** `-WindowStyle Hidden` gets no ordinary paint/vsync
+  delivery; every fps measured that way was garbage (12/13/19/59 across runs).
+  Settle longer than any decode.
+- **"First visible pixels" is committed in `frame_prelude`**, i.e. after the
+  painting frame was presented. Never record it when the worker message arrives —
+  that is not on screen yet. A harness that timed "the message arrived" once
+  produced a plausible wrong number for a hang that was three steps away.
+- **Measure the step you suspect, not the step you can see.** Timing the frame,
+  then the decode, then a per-step timer inside the viewer is how the truncated-GIF
+  hang was localised; the harness and the raw decoder both said "fine".
+- `display-gap frames` (wanted to paint, no texture) and `stalls (>5s to first
+  pixels)` must stay 0. The stall watchdog reports the whole state once per
+  request and fires only when nothing was painted at all — check `recorded_first`,
+  not just age, or it cries wolf on cache hits. Keep a worker panic's payload.
+- **A frame count does not mean the app is spinning.** Presentation can set the
+  cadence; a 20× smaller window produced the same one. Before blaming idle CPU,
+  read `frames with input events` (0 while idle), `frame interval`, and the
+  report's "who asked for a repaint" tally (egui tags every `request_repaint` with
+  its call site). On a static photo the only source is the 2 s watcher and the app
+  idles at ~2 fps — that is correct. `ms/frame` is CPU amortised over whatever
+  frames happened, so it is meaningless at 2 fps; use total CPU% unless frames
+  are frequent.
+- **A/B must interleave** (all of A then all of B lets machine drift invent a
+  120 ms regression), and **prefer min over median** for launch timings — the
+  median on this box is ±100 ms when loaded. In `bench_launch_ab.ps1` the
+  parameters are `$PathA`/`$PathB`: PowerShell variable names are
+  case-insensitive, and a loop variable `$a` silently overwrote `$A` and ran
+  `Start-Process -FilePath 809.4`, which is indistinguishable from a missing
+  binary.
+- **Read the config back after writing it and assert the value.** A run that set
+  `renderer.choice = gl` reported identical memory for both backends, which would
+  have said the backend is irrelevant.
+- **A test that passes on the broken code is decoration.** For every trap here
+  that has a test, the test was verified to *fail* with the bug reintroduced.
+  Where a premise is an assumption about a third party (that a chord never
+  arrives as a `Key` event, that a probe is contained), the test checks the
+  premise against a real `egui::Context` / a real queue instead of asserting it
+  in a comment.
 
-  | | frames/run | interval p50 |
-  |---|---|---|
-  | gl | 1533 1536 1537 1539 | 16.6 ms |
-  | dx12 | 1534 1536 1537 1540 | 16.6 ms |
+## egui 0.36 / wgpu API notes
 
-  **76.8 fps on both; GL 0.03% slower, which is noise.** So GL is the same speed
-  for 154 MB less and a device that is 269 ms cheaper to create. Three renderer
-  tests changed with the order. Note the script refuses to run over RDP and checks
-  both `quser` and the video adapter, because that is the mistake this project has
-  made before.
+- 0.36's default features enabled `wgpu` where 0.27 enabled `glow` — the
+  renderer changed as a *side effect* of the upgrade.
+- **Headless tests must go through the `run_pass` helper in `tests/unit.rs`**,
+  which clears `textures_delta`: epaint debug-asserts when a delta is dropped
+  unapplied, and a `run_ui` pass emits the font-atlas delta every frame.
+  `Context::run` is now `Context::run_ui` and the closure gets a `Ui`.
+- **`Ui::new_child(UiBuilder)`, never `Ui::scope_builder(..)`**, to replace
+  0.27's `child_ui(rect, layout)`. `scope_builder` advances the *parent's* cursor
+  after the closure runs, which in `grid_cell` silently ate 4 pt of
+  `item_spacing` per cell.
+- `ComboBox::from_id_source` → `from_id_salt`. `ComboBox::new(id, "")` is **not**
+  the replacement: 0.36 stores `label: Option<WidgetText>` and renders an empty
+  label widget, shifting the settings panel.
+- `RectShape` moved its texture fields into `brush: Option<Arc<Brush>>`; a plain
+  `filled` has `brush: None`.
+- Don't hardcode egui's defaults in a test (`item_spacing` moves between
+  releases) — report the spacing from the layout that actually placed the cells.
+- **egui's default font is a subset; a missing glyph is a blank box, not an
+  error.** `no_ui_text_uses_a_glyph_the_font_lacks` scans `src/main.rs` *and*
+  `src/lib.rs` and asks the real font at two sizes. Only `… — · ° ⟲ ⟳` work
+  beyond ASCII — `Mirror ⇋ / ⇅` and `Prev (←)` / `Next (→)` shipped as empty
+  squares. The test reads the sources, so it cannot fall behind.
+- **Clipboard chords never arrive as `Key` events.** `egui-winit` intercepts
+  `is_cut_command`/`is_copy_command`/`is_paste_command`, pushes
+  `Event::Copy`/`Cut`/`Paste`, and **returns before pushing the key it matched**
+  (`command` is `ctrl` on Windows). `Ctrl+C` was bound to `key_pressed(Key::C) &&
+  modifiers.ctrl`, which reads correctly and can never be true; `Ctrl+S` is not
+  on that list, which is exactly why one chord worked and the other never did
+  from the same closure. Read `egui::Event::Copy` — inside the `!typing` block,
+  so `Ctrl+C` in the filter box still copies text. **Check any new chord against
+  those three functions before binding it.**
 
-- **`into_frames().count()` hangs on a truncated GIF, and it hung one.** The frame
-  count has one job — "is this more than one?" — and the version that used
-  `count()` did it by decoding the entire animation, then letting the real decode
-  do it again. Worse, `count()` has no reason to stop: a GIF whose frame data runs
-  out yields `Err` and then **keeps yielding `Err`**, so the worker never
-  answered. `image` itself handles the same file in 0.2 s.
+## Formats, colour, resampling
 
-  The symptom was not a crash and not an error, which is what made it worth
-  writing down: the app sat with **six neighbour previews decoded and none of the
-  one you asked for**, `shown=None`, `display-gap frames 0`, `panics 0`, and the
-  stall watchdog correctly firing at 6 s with a state that read as impossible. It
-  needed a real truncated 7.9 MB GIF from the phone backup to find, and a console
-  session to reach.
-
-  Now `is_animated`, which reads a header for PNG and WebP and takes **two**
-  frames for GIF. Two `next` calls and no loop cannot hang on any input.
-  `a_truncated_gif_still_decodes_and_does_not_hang` is verified to hang with
-  `count()` put back, which is the only way to test a hang: a test that merely
-  asserted the answer could not tell "returned false" from "never returned".
-
-- **A frame's own decode is not the thing to time when something hangs.** Isolating
-  it took three probes: the harness said "first frame 204 ms" (which is the *worker
-  message* arriving, not pixels painted), then `gifcount` said the raw decoder did
-  11 frames in 0.2 s, and only a per-step timer inside the viewer localised it to
-  `animation_frame_count`. The lesson is the one already recorded for the RDP work:
-  measure the step you suspect, not the step you can see.
-
-- **The backend probe used to cost ~1456 ms of the *first* launch, and almost all
-  of it was waste.** `probe_backends` ran one child process per backend, in
-  `PROBE_ORDER`, and collected the lot before choosing - so with GL leading it paid
-  for GL (186 ms), then DX12 (455 ms), then Vulkan (474 ms), and threw away the two
-  results after the winner. It now **breaks at the first success**: cold launch
-  median **1370 ms -> 212 ms**, and the probe touches one backend instead of three.
-  Warm launches were never affected (47 ms), because the answer is cached in
-  `config.json` - which is why this is easy to miss and worth having measured.
-  Nothing about the change is observable to the rest of the suite, because a
-  shortened probe list contains **at most one success** (everything before the
-  first success is a failure by construction), so it cannot change what
-  `pick_probed` decides. `probe_backends` is therefore a binary-side function
-  that no test can reach, and the early exit is pinned against the source text in
-  `tests/renderer.rs` - the same move as `tests/keybindings.rs`, for the same
-  reason: otherwise "the probe went back to running all three" is invisible.
-
-- **Oculante is not faster, and there is nothing of its to port.** It was measured
-  to look 29x quicker to first window, which was an artifact: our own launch time is
-  bimodal on this box (~50 ms or ~1400 ms for the same binary and config) and the
-  harness caught the two apps in opposite modes. Alternating them properly, ten
-  rounds each, every sample printed:
-
-  | | window min/med/max | peak |
-  |---|---|---|
-  | ours (dx12) | 49 / 65 / 69 | 343 MB |
-  | Oculante | 33 / 64 / 554 | 118 MB |
-
-  Same window time - Oculante is merely *more variable*. The one real difference
-  was memory, and `bare_eframe` showed that to be eframe's wgpu backend rather
-  than our code, which is what the `PROBE_ORDER` change above then took.
-  `bench_ab_oculante.ps1` is the honest instrument: it alternates the two, prints
-  every sample rather than a median, and reports peak at a fixed point after the
-  window.
-
-  Two ways this measurement was got wrong first, both recorded because the failure
-  mode is a *plausible number*. (1) The harness that produced "Oculante is 29x
-  quicker" caught each app in the other mode of a bimodal distribution - ours at
-  ~1400 ms, Oculante at ~48 ms; the same Oculante binary measured 2106 ms
-  standalone. (2) A run that set `renderer.choice = gl` reported *343 MB* for both
-  backends, which would have said the backend is irrelevant. It was not: the config
-  write had not taken effect at that moment. **Read the config back after writing
-  it and assert the value**, and re-measure the backend question with
-  `bare_eframe`, which has no config to get wrong.
-
-- **Opening a specific file by command line did not open that file.** `Gallery::from_file`
-  set the index to 0 and start-up then replaced the list with the whole folder
-  without touching the index, so a double-click or "Open with" showed whichever
-  file happened to sort first. `AGENTS.md` claimed an explicit argument beats
-  resume; it was beating neither, because the `!explicit_file` guard only skipped
-  the resume lookup and nothing then set the index. The rule now lives in
-  `image_viewer::startup_index` - pure, and tested in `tests/rotate_save.rs` -
-  because the wiring is in a binary and could not be reached before. Found while
-  benchmarking, not by reading: the harness passed one photo and the app showed a
-  different one, which is only visible if you look at the window title.
-
-- **Windows Photo Viewer cannot be benchmarked**, so do not spend time on it. It
-  was removed in Win11 24H2/25H2 (this box is 25H2 build 26200). The DLL is
-  present and still contains `ImageView_Fullscreen`, but it is unregistered, and
-  `rundll32` against it exits 0 in ~100 ms. IrfanView and Oculante remain the
-  usable comparisons; Oculante is the fairer one because it is also egui.
-
-- **Start-up walked the folder three times.** `Gallery::new` scans,
-  `load_all_from_folder` scans again, and `scan_folder_sorted` scans a third time
-  — and the middle one's result was overwritten on the very next line. Now one scan,
-  via `Gallery::empty()` on the start-up path. Worth **71 ms median (7.8%)** over 9
-  interleaved A/B pairs, 8 of 9 favouring it.
-- **`bench_launch_ab.ps1` is the instrument, and two earlier versions of it were
-  wrong in ways that had nothing to do with the app.** Both are recorded because
-  the failure mode is a *plausible number* rather than a crash. (1) Measuring all of
-  build A and then all of build B let machine drift invent a 120 ms regression —
-  JPEGView_L's own CPU time moved 828 → 1250 ms across the same window. It
-  interleaves now. (2) PowerShell variable names are **case-insensitive**, so the
-  loop variable `$a` overwrote the parameter `$A` and the second iteration ran
-  `Start-Process -FilePath 809.4`, which reports *"The system cannot find the file
-  specified"* — indistinguishable from a missing binary, and it sent me hunting for
-  a Windows pending-delete race that never happened. The parameters are `$PathA` /
-  `$PathB`. Prefer **min** over median for launch timings; the median on this
-  machine is ±100 ms when it is loaded.
-- **Measure, don't guess.** `src/perf.rs` samples 15 latency metrics into fixed
-  256-entry atomic rings (p50/p95/p99) plus 9 always-on counters. Enable with
-  `--perf` or `PERF=1`. "First visible pixels" is committed in `frame_prelude`,
-  i.e. *after* the painting frame was presented — never record it when the
-  worker message arrives, that is not on screen yet.
-- **`display-gap frames` must stay 0.** It counts frames that wanted to paint the
-  current image and had no texture. Nonzero means something threw away the
-  texture the user is looking at.
-- **The resampler is the hot path for big non-JPEG sources.** `linear_resize`:
-  sRGB box pre-reduction to ≤2x the target (integer running sums, rayon,
-  precomputed reciprocals) → 12-bit linear conversion of *that* buffer → two
-  kernel passes. Hard-won: the conversion must never run over the
-  full-resolution source; a reciprocal **division inside the inner loop cost more
-  than everything else combined**; the vertical pass needs its running column
-  accumulator or it misses cache on every pixel.
-- **A saved rotation is only correct if it is *composed*, and the composition is
-  the whole problem.** "Save what I see" is two transforms, not one: the EXIF
-  orientation the camera wrote, and the quarter turns the user pressed since.
-  Getting the order or the sign wrong produces a mirrored or double-rotated
-  file — and it is **invisible in this viewer**, because the viewer applies the
-  EXIF tag itself and so cancels the error out. It is glaring in every other
-  program. `Xform::then` is in `lib.rs` for that reason: the tests compare a save
-  against `apply_exif_orientation` plus the viewer's own turns, over all 9 tags x
-  4 turns, so the two cannot drift.
-- **Never transcribe a transform table by hand.** `Xform::Transverse` was
-  written as `(h-1-oy, w-1-ox)` and should be `(w-1-oy, h-1-ox)`; it compiles,
-  it type-checks, and it underflows the moment the image is wider than it is
-  tall. `Xform::then` composes by *probing* — substitute a point through both ops
-  and find which of the eight matches — rather than by a multiplication table,
-  and `composition_is_closed_over_all_sixty_four_pairs` checks the result against
-  real pixels.
-- **The orientation tag must be neutralised when pixels are baked in.** A saved
-  file whose pixels are already in display orientation must report orientation
-  1, or every other viewer double-rotates it. Only overwrite bytes that already
-  exist: `neutralize_exif_orientation` sets the tag and zeroes IFD0's next-IFD
-  pointer (which unlinks the now-stale thumbnail) and never reserialises the
-  APP1 segment, because a malformed EXIF block is worse than an unreferenced
-  thumbnail.
-- **"Lossless" has to be demonstrated, not asserted.** `bench_rotate_save.rs`
-  reports the output/input size ratio: 1.00-1.02x. A re-encode makes a fresh
-  rate-distortion decision per block and moves that number; a DCT-coefficient
-  transform does not. That ratio is the only evidence the claim is true, and it
-  is a property of the output, so nothing in the code can assert it.
-- **Decoding is never interrupted, and nothing is ever abandoned.**
-  A job runs to completion even if the user has navigated away. An earlier
-  design published a set of "wanted" paths from `schedule()` and cancelled any
-  in-flight decode whose path left it; combined with `Loader::replace` dropping
-  queued-but-busy jobs, that **stranded images that were never re-requested** —
-  "random images don't load, and the stall watchdog says they are not cached, not
-  poisoned, and nothing is decoding them". Do not reintroduce cancellation
-  without proving every cancelled job is re-queued. Third-party decoders
-  (turbojpeg/libheif/jxl-oxide) are not interruptible regardless.
-- **A decode error is permanent for the session.** `failed` is a
-  `HashSet<(PathBuf, Kind)>` and nothing clears it broadly — only that one path
-  on triage (`remove_current_from_gallery`), the resize drop, and the filter
-  change (`refilter`). A *transient* error (a file still hydrating from
-  OneDrive, a partially-copied file) therefore poisons the image until restart,
-  and the viewer keeps showing the old frame. If a load failure looks
-  mysterious, suspect this before anything else.
-- **Preloading is a fixed symmetric window**: `PRELOAD_RADIUS` (3) each side,
-  "next" at `10 + 2d` and "previous" at `11 + 2d` so a step forward is slightly
-  favoured. The current image is always `PRIO_CURRENT_PREVIEW` (0) and every
-  prefetch job is ≥ 10, so prefetch can never starve it. Direction-aware radii
-  were tried and removed.
-- **`queued jobs dropped by rebuild` is the coalescing signal.** Large values mean
-  the user outran the decoder — tune the preload window, don't add workers.
-- **Grid thumbnails use the camera's embedded EXIF thumbnail** when there is
-  one, which skips decoding the source entirely (measured 16-40x on the
-  `test-images` JPEGs: 631 ms -> 16 ms, 748 ms -> 25 ms). Gated on
-  `preview_max_dim <= EMBEDDED_THUMB_MAX_TARGET` (512), so it only ever applies
-  to `Kind::Thumb` grid cells — the main view always decodes for real. The
-  thumbnail is ~160 px, so a grid cell is slightly softer than a real 256 px
-  decode; that is the trade, and it is the one every photo browser makes.
-- **Never guess the embedded thumbnail's rotation.** The spec does not say
-  whether a camera stores the thumbnail already rotated, and makers differ.
-  `embedded_thumb_rotation` decides *per file from the aspect ratio* (a
-  quarter-turn orientation makes the two hypotheses produce mirrored ratios) and
-  returns `None` when it cannot — mirrored/180 orientations and near-square
-  sources — so those files simply decode normally. A guessed rotation shows
-  sideways photos in the grid, which is worse than being slow.
-- **`find_embedded_thumbnail` parses untrusted input.** Offsets and lengths come
-  straight out of the file. Every read is bounds-checked against the APP1
+- **Format handling is content-based, never extension-based.** Magic bytes pick
+  the decoder: JPEG (turbojpeg) / PNG, WebP, GIF / TIFF, BMP, ICO, QOI (`image`);
+  JXL (`jxl-oxide`); HEIC/HEIF/AVIF (`heic`). A PNG saved as `.jpg` must load.
+  `IMAGE_CRATE_DECODERS_WE_SKIP` in `lib.rs` lists the deliberately disabled
+  `image` decoders with reasons — sharpest is **Targa, which has no signature at
+  all** and is therefore unidentifiable here. Do not "fix" this by passing the
+  extension into the decode path.
+- **`normalized()` guards every decode exit *and* the downscale exit.** A buffer
+  that disagrees with its declared dims aborts a worker in
+  `ColorImage::from_rgba_unmultiplied`'s `assert_eq!`. Two ways it happens: a
+  decoder that mis-reports its size (truncated files, hydration races), and
+  `DynamicImage::resize` returning *smaller* than asked, because it preserves the
+  aspect ratio (980×552 asked for 300×168 comes back 298×168). Report the size
+  the library produced; keep the wrap.
+- `load_image`'s `max_dim` is a **minimum long-side target, not a hard cap**:
+  `decode_jpeg_scaled` picks a power-of-two DCT factor and the smallest reduction
+  that still leaves `>= max_dim`, so `load_image(2400x1600, 1600)` returns
+  2400×1600. Assert the real contract in tests.
+- **EXIF orientation is applied to JPEGs only.** The `heic` crate already applies
+  HEIF container transforms (`irot`/`imir`); the tag on top would double-rotate.
+- **Colour is detected, never transformed (yet).** `color_info` parses the ICC
+  profile and reports the space; no pixel is touched, and the pipeline is 8-bit
+  sRGB end to end (`TextureOptions` has no `srgb` field; egui wants a gamma-space
+  surface). 200 of 1001 images in a real phone backup are Display P3.
+- **Classify by primaries, not the `desc` string** — 170 of those 200 have no
+  `desc` at all. The two primaries that occur are sRGB `(28578, 14581, 912)` and
+  Display P3 `(33759, 15807, -69)`, both D50-adapted, and they never mix. Those
+  are *measured*; a remembered P3 value was wrong once. PNG `iCCP` is
+  zlib-compressed — inflating it is not optional, or the parser finds no `acsp`
+  and silently reports "unknown". `icc_tags_valid` refuses corrupt profiles
+  outright: both wrong answers are harmful (claiming sRGB skips a needed
+  conversion; claiming wide gamut pushes a correct image through a P3 matrix).
+  HEIC/AVIF/JXL report `NotInspected` deliberately — assuming is how a wide-gamut
+  HEIC looks flat and nobody notices, because everything "works".
+- **Never `into_frames().count()`.** The frame count's only job is "is this more
+  than one?": read a header for PNG and WebP, take **two** frames for GIF
+  (`is_animated`). `count()` decoded the whole animation, and a truncated GIF
+  yields `Err` and then *keeps* yielding `Err`, so the worker never answered —
+  the app sat with six neighbours decoded and none of the image you asked for,
+  no error and no panic. Two `next` calls and no loop cannot hang.
+- `image` 0.25 implements `AnimationDecoder` for `GifDecoder`, `ApngDecoder`
+  **and** `WebPDecoder`; using one and not the others froze APNG and animated WebP
+  on frame 0 with no error at all. Ask the frame count *before* decoding
+  (`ApngDecoder` over a still PNG yields zero frames; `WebPDecoder` over a still
+  WebP yields one frame the caller throws away, then decodes again), and
+  `"RIFF"` is not enough to sniff WebP — WAV and AVI start the same way. Nothing
+  in this tree can *encode* an APNG or an animated WebP, so the APNG fixture is
+  assembled chunk by chunk in `tests/multiframe.rs` and the animated-WebP decode
+  path is unverified (`TODO.md` records the gap).
+- **Embedded EXIF thumbnails** skip decoding the source entirely (measured
+  16–40× on real JPEGs) and are gated on `target <= EMBEDDED_THUMB_MAX_TARGET`
+  (512), so they only ever serve `Kind::Thumb` grid cells — the main view always
+  decodes for real. **Never guess the thumbnail's rotation**: the spec does not
+  say whether cameras store it already rotated, so `embedded_thumb_rotation`
+  decides per file from the aspect ratio and returns `None` when ambiguous
+  (mirrored/180 orientations, near-square sources), which falls back to a normal
+  decode. A wrong guess shows sideways photos, which is worse than being slow.
+- `find_embedded_thumbnail` parses untrusted input: offsets and lengths come
+  straight out of the file, so every read is bounds-checked against the APP1
   segment, the IFD entry count is capped, the slice must start `FFD8` and end
-  `FFD9`, and any failure returns `None` (decode normally) rather than panicking
-  on a worker. Keep it that way if you touch it. IFD1 is reached via IFD0's
-  *next-IFD pointer* (which sits after IFD0's entry table), not the header's
-  IFD0 offset — reading the wrong one looks like it works and silently finds
-  nothing.
-- **Texture churn is already low**: previews upload once per decode, tiles are
-  created once and reused, animated GIF frames update in place via `set`. Count
-  uploads (`GPU texture uploads`) before "optimising" this.
-- **Known waste:** `exif_orientation(path)` calls `nom_exif::read_exif(path)`,
-  which re-reads the whole file even though `load_image_preview_full` already
-  has it in memory. The new `Tiff` walker reads orientation's neighbours for
-  free, so this is a cheap follow-up if decode time ever matters again.
-- **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
-  300 MP = **1.2 GB** for one full-res buffer, and every cached preview carries
-  one for free (single-pass decode), so the whole preview cache can hold several
-  GB. It is bounded by **count** only (`PREVIEW_CACHE_CAP` = 16, LRU, never
-  evicting the current image or its ±`PRELOAD_RADIUS` neighbours). If you raise
-  the radius, re-check that. A worker panic here is usually OOM, and its payload
-  is kept and logged (`C_DECODE_PANICS`) — don't reduce it back to a bare
-  "decoder panicked"; that hid the real cause.
-- **`stalls (>5s to first pixels)` must stay 0.** The watchdog reports the whole
-  state (cached / poisoned / shown==cur / cache sizes / panics) once per request.
-  It fires only when no pixels were painted at all — check `recorded_first`, not
-  just age, or it cries wolf on cache hits.
+  `FFD9`, and any failure returns `None` rather than panicking on a worker. IFD1
+  is reached via IFD0's *next-IFD pointer* (after IFD0's entry table), not the
+  header's IFD0 offset — reading the wrong one looks like it works and silently
+  finds nothing.
+- **`linear_resize` is the hot path for big non-JPEG sources**: sRGB box
+  pre-reduction to ≤2× the target (integer running sums, rayon, precomputed
+  reciprocals) → 12-bit linear conversion of *that* buffer → two kernel passes.
+  The conversion must never run over the full-resolution source; a reciprocal
+  **division inside the inner loop cost more than everything else combined**; the
+  vertical pass needs its running column accumulator or it misses cache on every
+  pixel; overshoot must clamp LUT indices to 4095 (index 4097 was a worker
+  panic). Toggling `linear_resample` does not re-decode cached previews (the
+  filter dropdown does — see `refilter`).
+- Known waste, not worth fixing: `exif_orientation(path)` re-reads the file with
+  `nom_exif::read_exif` although the bytes are already in memory. That is
+  0.1–0.2 ms against a 10–17 ms `fs::read` — ~0.02% of a preview decode.
 
-## Gotchas
+## Windows integration
 
-- **egui/eframe is 0.36; the renderer is `wgpu` on DX12, with Vulkan opt-in.**
-  The renderer changed *as a side effect* of the 0.27→0.36 upgrade: 0.27's
-  default features enabled `glow`, 0.36's enable `wgpu`. wgpu enumerates every
-  enabled backend during adapter discovery, **before** picking one, and on this
-  machine that enumeration is a hard `0xC0000005` before the window opens, with
-  nothing on stderr. wgpu offers no "try this, else that" —
-  `native_adapter_selector` still filters enumeration by `backends` first — so
-  the set must be decided up front. `wgpu_backend_set()` therefore returns
-  **exactly one bit, always**, and `wgpu_options()` pins it. Never make it return
-  a set: two backends is not a fallback, it is a way to crash.
-- **The backend bits are wgpu's numbering, not ours, and `cargo run` was dead on
-  every launch because of it.** `wgpu_backend_set` returned `1 << 0/1/3` and
-  `exactly_one_backend_bit_is_ever_set` asserted *those same literals*, so the
-  test and the code agreed with each other while both were wrong — a test that
-  cannot fail. wgpu 30 renumbered `Backend` (`Noop=0` was inserted, so `Gl`
-  moved from bit 1 to **bit 4**), and `wgpu_options`'s `debug_assert_eq!` then
-  fired on **every debug launch**: `backend bit value drifted from lib.rs`,
-  `left: 2, right: 16`. The release build was fine, because the assert is
-  compiled out and `wgpu_options` matches on the *enum* to build the flag — so
-  the only build that noticed was the one nobody launches, and `cargo run` is
-  documented in this file. `tests/renderer.rs` now compares against
-  `Backends::VULKAN/GL/DX12` from wgpu itself, so a future renumbering is a
-  test failure rather than a stale literal. **Do not hand-transcribe these
-  numbers**; the same "never transcribe a table" rule as `Xform`, and the
-  failure mode is identical: it compiles, and it is wrong in a way that only
-  appears on a different machine or a different build profile.
-- **"Automatic" probing is per-backend child processes, and it must reach
-  `request_device`.** The failure is an access violation, not an error return, so
-  nothing in-process can survive it — the only place a crash can be contained is
-  a child whose exit code the parent reads. The first version of the probe
-  stopped at `enumerate_adapters` and reported **Vulkan as working** on the very
-  machine where the app access-violates on it, which would have made Automatic
-  crash the app on every launch. Enumeration walks the loader's list; the failure
-  is further in, where the driver initialises. Probe as far as an adapter **and a
-  device**; a surface is not probed because that needs a window, so a
-  surface-only failure still passes. Order is `PROBE_ORDER` (DX12, GL, Vulkan)
-  and must match `WgpuBackend::CHOICES`; the policy itself is pure and lives in
-  `pick_probed` so it is testable at all.
-- **Changing the renderer restarts the renderer, and the app cannot ask for
-  that itself.** `run_native` only returns when the window closes, so the app
-  writes a request into a shared `RestartSlot` and sends
-  `ViewportCommand::Close`; the launch loop re-enters the event loop. The app is
-  rebuilt from the config each time, so a restart keeps folder, sort and
-  settings but loses the preview cache. If you add another thing that needs the
-  event loop restarted, use the slot.
-- **`WgpuBackend` serialises as lowercase, and that is load-bearing.** Without
-  `#[serde(rename_all = "lowercase")]` the config file gets `"Dx12"` while
-  `name()` and `parse()` say `"dx12"`, so a hand-edited config using the
-  documented spelling fails to load. Found by reading a file the app had just
-  written; `the_config_file_uses_the_same_spellings_as_parse_and_name` pins it.
-- **There is no DX11 backend and there cannot be one.** wgpu removed its
-  Direct3D 11 backend upstream; it is absent from `Backends` in wgpu 22+. Do not
-  add a `Dx11` variant to satisfy a request for it — the answer is a documented
-  "no", not a stub.
-- **"Is Vulkan installed" is the wrong question, and the registry is a liar.**
-  Do not reintroduce a `Khronos\Vulkan\Drivers` probe. Measured here: `vulkaninfo`
-  reports a healthy Intel UHD 620 at API 1.2.187 with a clean environment, while
-  `Khronos\Vulkan\Drivers` is **absent** (only `ImplicitLayers` exists, no
-  `VK_*` vars) — the loader finds the driver's `igvk64.dll` some other way. And
-  wgpu + Vulkan still crashes 3/3. So Vulkan working does not imply
-  wgpu-on-Vulkan working, and the only way to discover that is to crash. Do not
-  set `Backends::all()`, and do not enable Vulkan unconditionally.
-- **Frame rates measured over RDP are meaningless — they were the reason for a
-  whole wrong theory.** On the RDP session the animated GIF ran at 12.7 fps on
-  wgpu vs 21 fps on glow, which looked like a wgpu smoothness regression. On the
-  real 60 Hz display: **58.7 fps on wgpu, 59.5 on glow, 30.0 on 0.27** — the
-  "regression" was entirely the remote display adapter. Always check whether the
-  session is remote (`Win32_VideoController` showing a *Microsoft Remote Display
-  Adapter*) before believing any frame-rate number.
-- **Verify the session is NOT remote before trusting any frame rate.** This bit
-  twice in one session: a whole "wgpu animation runs at 12 fps vs 21 fps on
-  OpenGL" investigation, and a "LOW_LATENCY made it worse, 12 → 9.3 fps"
-  experiment, were both artifacts of measuring over RDP. On the console session
-  every renderer plays the animation at exactly 30 fps. Check with
-  `quser` (look for `console`, not `rdp-tcp#N`) and `Get-CimInstance
-  Win32_VideoController` (a *Microsoft Remote Display Adapter* means remote).
-- **Frame-rate measurement traps, all of which produced wrong numbers here.**
-  (1) RDP, above — the big one. (2) `-WindowStyle Hidden`: a hidden window gets
-  no ordinary paint/vsync delivery; every fps measured that way was garbage
-  (swung 12/13/19/59 across runs). (3) Deriving fps from
-  `frames_built / process_lifetime` folds in startup and idle. (4) Reading only
-  percentiles from the 256-entry ring, whose contents depend on sample age. Use
-  a **visible** window, a settle period longer than any decode, and instrument
-  the thing you are actually measuring.
-- **Verified on the console session, 60 s visible, static photo / 30 fps GIF:**
-
-  | | idle CPU% (static) | animation fps |
-  |---|---|---|
-  | 0.27 + glow *(before)* | 6.5 | 30 |
-  | 0.36 + glow | 5.4 | 30 |
-  | 0.36 + wgpu DX12 *(now)* | **4.6** | 30 |
-
-  So the upgrade is a net win on CPU and animation is correct everywhere. The
-  only difference worth noting: 0.36 draws at 60 fps (vsync-locked) where 0.27
-  drew at 30, i.e. two draw calls per animation frame. That is a small waste,
-  not a defect, and being vsync-locked is arguably the better behaviour.
-- **The loader and the job plan live in `lib.rs`, and `tests/flip_through.rs`
-  drives them.** They used to be in `main.rs`, which is why the stranding bug
-  went uncaught. `Loader` is generic over its message type (it takes a `run`
-  closure and a `panic_msg` closure), `plan_jobs` is a pure function of a `Plan`,
-  and job priorities live beside the planner so they cannot drift.
-- **The queue keeps a `wanted` set, and that is what makes abandoning work.**
-  `replace()` records what the viewer wants; if a job then finishes *without
-  producing a result* and is still wanted, it is re-queued. Do not "simplify"
-  this to re-queue on completion — a job that already delivered would be decoded
-  forever. Do not reimplement it by remembering only the wanted-but-*running*
-  jobs either: that was the first attempt and it is wrong, because a job that
-  was merely *queued* at the time and abandoned later is then lost. The only
-  correct question on finish is "is this still wanted?".
-- **Why that matters here:** `schedule()` only re-runs on a step, when the
-  *current* image's preview arrives, on a dwell expiry, or on a resize. A
-  stranded *neighbour* triggers none of those, so it stays stranded for the
-  session — the "random images never load" report. `tests/flip_through.rs`
-  pins this: it ends with a single final `replace` while a wanted job is in
-  flight and then never prompts again, and asserts the plan for the current
-  position is empty. Reinstating the old `replace` makes it fail; note that
-  looping until convergence instead of stopping makes it *pass*, so do not
-  "fix" a failure by adding re-asks.
-- **A result is sent before its worker frees the busy slot.** So a queue that
-  looks idle can still have an unread message, and a test that checks state
-  after waiting for idle must drain once more or it will report a strand for a
-  picture that was in fact delivered. This cost two false failures.
-- **`--perf <folder>` used to open the wrong folder, silently.** `MyApp::new`
-  took the path as `args_os().nth(1)` while `main` scanned the whole list for
-  flags, so `--perf` was taken as the path, matched nothing, and the app fell
-  through to the persisted/default folder. The perf report still got written —
-  for the wrong folder. Fixed by `image_viewer::path_arg` (in `lib.rs`, not
-  `main.rs`, so a test can see it; `main.rs` being a binary is why this
-  survived). **If you add a CLI flag, add it to `path_arg` and its test.** The
-  tell that it bit: a run of a *one-file* folder reporting 7 decode calls.
-- **`Ctrl+C` was never a key event, and reading it as one is a silently dead
-  line of code.** The handler was `key_pressed(Key::C) && modifiers.ctrl`, which
-  reads correctly and can never be true. `egui-winit`'s `on_keyboard_input`
-  intercepts the clipboard chords and **`return`s before pushing the `Key` event
-  it just matched on**:
-
-      } else if is_copy_command(self.modifiers, active_key) {
-          self.egui_input.events.push(egui::Event::Copy);
-          return;                      // <- no `Key { key: C, .. }` is ever pushed
-      }
-
-  and `is_copy_command` is `modifiers.command && key == C` — on Windows
-  `command` *is* `ctrl`, so the same condition. `Ctrl+X`/`Ctrl+V` are consumed
-  the same way, as `Event::Cut`/`Event::Paste`. `Ctrl+S` is not on that list,
-  which is exactly why the save chord always worked and the copy chord never
-  did: **one working chord and one broken chord, from the same closure, in the
-  same frame, with the same modifier guard.** The log of the frame is the whole
-  diagnosis in two lines — `Copy` then `Key { key: C, pressed: false }`, with
-  the `pressed: true` press simply not among the events.
-
-  So the chord is read from `egui::Event::Copy`, which is also the more correct
-  thing to do: it now answers to `Ctrl+Insert` and the dedicated Copy key too,
-  and it is inside the `!typing` block, so `Ctrl+C` in the filter box still
-  copies the selected text rather than a full-res image. **Before binding any
-  other chord, check it against `is_cut_command`/`is_copy_command`/
-  `is_paste_command` in egui-winit — those keys will not arrive as `Key`
-  events on any platform.** `ctrl_c_is_read_from_the_copy_event_and_not_from_a_key`
-  pins this, checks the premise against a real `egui::Context` rather than
-  asserting it in a comment, and is verified to fail with the old line back.
-
-- **Check the session is not remote before trusting any frame rate — and treat
-  that as covering input and resize events too, not just fps.** This has now
-  cost three wrong conclusions in one session: a GIF frame-rate "regression" that
-  was the remote display adapter, and a resize debounce whose before/after
-  comparison (11 vs 9 re-decodes) was meaningless because RDP coalesces and
-  delays window-resize events. Separately, synthetic key injection
-  (`keybd_event`/`SetForegroundWindow` from another process) silently does
-  nothing in an RDP session — `frames with input events` stays 0, which is how to
-  notice. `quser` reporting `console` rather than `rdp-tcp#N` is the check.
-
-- **Synthetic input works on a console session, so "unverifiable GUI" is often
-  just "unverifiable *here*".** On `console`, `keybd_event` plus
-  `SetCursorPos`/`mouse_event` reach the window, and `frames with input events` in
-  the `--perf` report is the tell. Verified this way: arrow keys stepping a
-  4-page TIFF (`(1/4)`→`(4/4)`→next file→`(4/4)` on the way back, which is the
-  asymmetric page behaviour working), `C` entering crop mode, and a mouse drag
-  producing a crop frame with rule-of-thirds guides, dimming bands, and
-  `crop 1112x889` in the status bar.
-
-  **Chords DO arrive — the earlier "modifier chords do not arrive" was wrong,
-  and it was wrong in the dangerous direction.** `Ctrl+S` was always working;
-  it produces a file on disk, which is impossible to miss, and
-  `tests/probe_chords.ps1` now shows it firing on every run. What was actually
-  true is narrower and much more interesting: `Ctrl+C` never worked, and it
-  looked exactly like an injection failure. It is not one — see the next entry.
-  Treat a "the harness cannot do X" claim here with suspicion: the tell that it
-  is wrong is when it would excuse a bug.
-
-  Screenshot the window to see what a keypress did — the title does not change
-  for most keys and the status bar is where the state is. `TODO.md` section 5
-  has the script.
-
-- **A second read of a file you just read is free.** `exif_orientation` calls
-  `nom_exif::read_exif(path)` although the bytes are already in memory, which
-  reads like an obvious win. Measured: 0.1-0.2 ms against a 10-17 ms `fs::read`,
-  because the page cache has it. Don't do this "optimisation" — it is ~0.02% of a
-  preview decode.
-- **Never debounce a resize with a wall-clock timer here.** Coalesce by
-  comparing with the *previous frame* instead. A large preview takes ~800 ms to
-  decode, so while one is in flight frames are ~800 ms apart — and a timer
-  shorter than that expires between every pair of them and never fires. A
-  reverted attempt used `RESIZE_SETTLE = 140 ms` and made almost no difference
-  for exactly this reason. The test is "the size did not change since the last
-  frame"; one of those frames is requested explicitly, or the *final* size of a
-  drag is never examined because nothing else asks for a repaint.
-- **A frame count does not mean the app is spinning.** Frame rate can be set by
-  the presentation pipeline rather than by demand for frames; a 20x smaller
-  window produced the same cadence here, which is what gave it away. Before
-  concluding the app burns CPU idly, check `frames with input events` (0 while
-  idle) and `frame interval` in the `--perf` report, and ask egui who asked:
-  the report's "who asked for a repaint" section lists the `file:line` of every
-  `request_repaint`. On a static photo the only source is the 2 s folder
-  watcher (`maybe_rescan`) and the app idles at ~2 fps. That is correct.
-- **`ms/frame` is meaningless when frames are rare.** It is CPU amortised over
-  whatever frames happened; at 2 fps on a static photo it is just startup
-  spread thin. Use total CPU% unless frames are frequent (an animation).
-- **Use `Ui::new_child(UiBuilder)`, never `Ui::scope_builder(..)`, to replace
-  0.27's `Ui::child_ui(rect, layout)`.** They look interchangeable and are not.
-  `scope_builder` runs the closure and *then* calls
-  `advance_cursor_after_rect` on the parent, so calling it on a `Ui` that has
-  already allocated its own rect double-advances the cursor. In `grid_cell` that
-  silently ate 4 pt of `item_spacing` per cell — cells tightened from 8 pt to
-  4 pt, no error, no warning. `new_child` returns an owned `Ui` and leaves the
-  parent's cursor alone, which is exactly what `child_ui` did.
-- **Headless egui tests must clear `TexturesDelta` (0.36).** epaint now
-  debug-asserts when one is dropped unapplied. A `Context::run_ui` pass emits
-  the font-atlas delta every frame and nothing applies it (eframe's renderer
-  does in the real app), so tests go through the `run_pass` helper in
-  `tests/unit.rs`, which calls `out.textures_delta.clear()`. Note
-  `Context::run(input, |ctx| ..)` is now `Context::run_ui(input, |ui| ..)` and
-  the closure gets a `Ui`; `CentralPanel`/`Panel` are shown on that `Ui`.
-- **`RectShape` moved its texture fields into a `Brush`.** 0.36 has
-  `brush: Option<Arc<Brush>>` holding `fill_texture_id` + `uv`; a plain
-  `RectShape::filled` has `brush: None`. `test_grid_thumbnail_is_centred_and_textured`
-  inspects it to prove a cell isn't a solid colour block, and it has to look
-  through the `Option` now.
-- **Don't hardcode egui's default `item_spacing` in a test.** The grid test used
-  to assert an 8 pt gap between cells. `grid_row` now reports the spacing from
-  the layout that actually placed them. Egui's defaults move between releases and
-  a hardcoded number fails on upgrade for no real reason.
-- **`ComboBox::from_id_source` → `from_id_salt`, and `ComboBox::new(id, "")` is
-  NOT the replacement.** 0.36 stores `label: Option<WidgetText>` and calls
-  `ui.label(label)` when it is `Some`, so `new(id, "")` renders an empty label
-  widget and shifts the settings panel. Use `from_id_salt`.
-- **Every suite is fixture-free now; do not reintroduce hardcoded
-  `test-images/` paths into tests.** `test-images/` is gitignored, so a test
-  that reads from it passes on your machine and fails in a fresh clone —
-  `tests/standard.rs` did exactly that for the whole history of this repo and
-  died with a bare `NotFound`. Build the image you need with the `image` crate
-  in a `tempfile::tempdir()`. The two **bench** files are the deliberate
-  exception (they measure a real large photo, so generating a synthetic one
-  would change the numbers): they pick the largest JPEG in `test-images/` and
-  print a "drop a photo in test-images/ to benchmark" message instead of
-  panicking if there is none.
-- **`load_image`'s `max_dim` is a minimum long-side target, not a hard cap.**
-  `decode_jpeg_scaled` picks a power-of-two DCT factor and deliberately chooses
-  the smallest reduction that still leaves `>= max_dim`, so a source sitting
-  between two factors comes back *larger* than asked for rather than smaller and
-  blurry: `load_image(2400x1600, 1600)` returns 2400x1600, because 2400/2 = 1200
-  is already below the target. Assert the real contract in tests; I wrote the
-  intuitive one first and it failed.
-- **`cargo test` aborts after the first failing target** — use
-  `cargo test --no-fail-fast` when you want the whole picture, and note that
-  `--lib` (the in-crate `perf` tests) is a target that the per-target commands in
-  this file never run.
-- **The icon is generated code, and its look is asserted, not reviewed.** It
-  lives in `src/icon.rs` (not `examples/`) precisely so `tests/icon.rs` can check
-  it. Two bugs got through a working build, a working `ExtractIconExW` and a
-  passing registration test, because generated artwork is not a diff anyone reads:
-  the badge had a **half-extent of 0.22 in a 1×1 canvas**, so the icon filled
-  **44%** of its own bitmap and read as a stamp in an empty box; and the artwork's
-  local coordinates divided by the badge *width* (`2*HALF`) instead of its
-  half-extent, so `lx` only reached ±0.53, which squeezed everything inboard and
-  pushed the sun under the rounded corner. `coverage()` and
-  `local_coordinates_really_span_minus_one_to_one` exist for exactly this — and
-  both were verified to *fail* with the bug reintroduced, because a test that
-  passes on the broken code is decoration. **Look at
-  `assets/app-icon-preview.png` after changing it.** Also: to verify a bug fix,
+- **`build.rs` is load-bearing.** It passes `/NODEFAULTLIB:LIBCMT(D)` (turbojpeg
+  is built with the static CRT, Rust links the dynamic one — delete it and every
+  build emits LNK4098) and embeds `assets/app.ico` via `winresource`. A running
+  viewer locks the exe, so the build then fails to replace it.
+- **The icon is generated code, and its look is asserted, not reviewed.**
+  `src/icon.rs` exists in `src/` precisely so `tests/icon.rs` can check it
+  (coverage, and that local coordinates really span −1..1); two bugs got through
+  a working build, a working `ExtractIconExW` and a passing registration test
+  because generated artwork is not a diff anyone reads. **Look at
+  `assets/app-icon-preview.png` after changing it.** To verify a fix,
   `Copy-Item` restores the *backup's* old timestamp, so cargo skips the rebuild
   and you test a stale binary — `touch` the file or the green run is a lie.
-- **The window icon is `ViewportBuilder::with_icon`. Do not reach for `WM_SETICON`.**
-  Four attempts went into this before the obvious API turned up, and every earlier
-  one was the icon arriving *too late*: `WM_SETICON` only works if the window
-  procedure forwards it to `DefWindowProc` (winit's does not — it serves icons from
-  its own state, so `GWL_HICON` reads 0 while `WM_GETICON` does not, and reading
-  the long as authoritative is how you conclude the icon is missing when it is
-  not); DWM caches the title bar's icon when the non-client area is built, before
-  any of our code runs, and a later `WM_SETICON` plus `RedrawWindow` does not
-  displace it; and setting the window *class* icon works and still is not enough.
-  `with_icon` is the only moment the window does not exist yet. **Check for a
-  framework API before writing a P/Invoke module** — there is no `winicon.rs` here
-  any more, and that is the point.
-- **Explorer and the taskbar get the icon by different routes.** Explorer reads
-  the registered `DefaultIcon`; the title bar and the running taskbar button read
-  the *window*. Fixing one tells you nothing about the other, which is why
-  "Explorer looks right, the taskbar does not" is not a contradiction.
-- **An AppUserModelID's `IconUri` must be a bare path.** Quoting it (the quotes
-  in Microsoft's examples are JSON syntax, not part of the value) makes the shell
-  fail to resolve the icon, with a very confusing symptom: a *pinned* taskbar
-  button still shows the right icon, because pinning builds its own reference to
-  the exe, while the running window's button falls back to the default. Restarting
-  Explorer does not help — it re-reads the same unparseable value.
-- **`build.rs` is load-bearing**: it passes `/NODEFAULTLIB:LIBCMT(D)` because turbojpeg is built with the static CRT while Rust links the dynamic one. Delete it and every build emits LNK4098 warnings. It also embeds `assets/app.ico`; a running viewer locks the exe and the build fails to replace it.
-- **Format handling is content-based, never extension-based.** Magic-byte sniffing picks the decoder (JPEG/PNG/WebP/GIF/TIFF/BMP/ICO/QOI via the `image` crate; JXL via `jxl-oxide`; HEIC/HEIF/AVIF via the `heic` crate; misnamed files like a PNG saved as `.jpg` must keep loading — regression test exists). `image_dims_bytes` probes header dims per format. This is also why several `image` crate decoders are deliberately left disabled, most sharply **Targa, which has no signature at all** and is therefore unidentifiable here — `a_targa_cannot_be_identified_from_its_content` demonstrates that with a hand-built valid Targa instead of asserting it. Do not "fix" it by passing the extension into the decode path. Full list with reasons: `IMAGE_CRATE_DECODERS_WE_SKIP` in `lib.rs`.
-- **A registered file type needs a `DefaultIcon`, and must NOT have a `ShellEx\ThumbnailHandler`.** Without the first, Explorer shows the generic *application* icon — which is what happens once the viewer is the default, because the ProgID has no icon and the exe has no embedded one either. `build.rs` embeds `assets/app.ico` via `winresource`; an `.ico` beside the binary is not consulted, because the shell reads the exe's *resources*. Without the second, WIC keeps supplying real photo thumbnails — claiming that key would displace WIC and replace actual thumbnails with an icon, which is strictly worse. Icon and thumbnail are separate concerns; fix only the icon. Explorer caches icons per user, so a registration change needs `ie4uinit.exe -show` to become visible.
-- **`normalized()` (lib.rs) guards every decode exit** — and it must guard the
-  *downscale* exit too, not just decode. Two ways a buffer can disagree with its
-  declared dims, both of which abort a worker on
-  `ColorImage::from_rgba_unmultiplied`'s `assert_eq!(size[0]*size[1]*4, rgba.len())`:
-  a decoder that mis-reports its size (truncated files, OneDrive hydration
-  races), and **`DynamicImage::resize` silently returning a smaller image than
-  requested** (it goes through `resize_dimensions(fill = false)`, which
-  preserves the aspect ratio — 980x552 asked for 300x168 comes back 298x168).
-  Report the size the library actually produced, and keep the `normalized()`
-  wrap. This one presented as "decoder panicked" on `6.png`, permanently
-  poisoned the image in `failed`, and looked machine- and window-dependent only
-  because previews are sized to the display area, so a small target rounds hard
-  enough for the aspect-ratio clamp to bite.
-- **EXIF orientation is applied only to JPEGs.** For HEIF/AVIF the `heic` crate already applies container transforms (`irot`/`imir`); applying the EXIF tag on top would double-rotate. Some HEICs in test dumps have no EXIF at all (exiftool-verified) — that's correct, not a bug.
-- **Colour is *detected*, never transformed (yet).** `color_info` parses the ICC
-  profile and reports the space; no pixel is touched. The renderer uploads
-  `ColorImage` as `Rgba8UnormSrgb` and egui wants a gamma-space surface, so the
-  pipeline is 8-bit sRGB end to end in **0.27 and 0.36 alike** — a newer egui
-  does not unlock HDR or wide-gamut output (`TextureOptions` has no `srgb` field;
-  `App::clear_color` is documented as gamma-space sRGB). Converting P3 → sRGB is
-  therefore not a downgrade on an HDR monitor; it is the only way to display P3
-  correctly at all. Real numbers: **200 of 1001** images in a phone backup are
-  Display P3.
-- **Classify colour by primaries, not by the description string.** 170 of those
-  200 files carry a profile with **no `desc` tag at all**. The two primaries that
-  actually occur are sRGB `(28578, 14581, 912)` and Display P3
-  `(33759, 15807, -69)`, both D50-adapted, and they never mix. Those are
-  *measured* values — do not "correct" them from memory; I guessed P3 as
-  `(43682, 22250)` once and it was wrong.
-- **PNG `iCCP` is zlib-compressed.** Handing the raw chunk to the ICC parser
-  finds no `acsp` at offset 36 and silently reports "unknown". Inflating it is
-  not optional. This shipped as a bug until real P3 PNGs appeared to test against.
-- **`icc_tags_valid` refuses corrupt profiles outright.** Every tag must lie
-  inside the profile and the declared count must fit. Both wrong answers are
-  harmful: claiming sRGB skips a conversion the image needs, and claiming wide
-  gamut pushes a correct image through a P3 matrix. "Unknown" is the safe answer.
-- **HEIC/AVIF/JXL report `NotInspected`, deliberately not assumed sRGB.** Their
-  colour lives in an ISO-BMFF `colr` box or the codestream. Assuming is how a
-  wide-gamut HEIC looks flat and nobody notices, because everything "works".
-  29 of the 1001 files in that backup are HEIF and are currently a blind spot.
+- **The window icon is `ViewportBuilder::with_icon`. Do not reach for
+  `WM_SETICON`.** Four attempts failed because the icon arrived too late:
+  `WM_SETICON` needs the window procedure to forward to `DefWindowProc` (winit's
+  does not — `GWL_HICON` reads 0 while `WM_GETICON` does not, and trusting the
+  long is how you conclude the icon is missing when it is not), and DWM caches
+  the title-bar icon when the non-client area is built, before your code runs.
+  `with_icon` is the only moment the window does not exist yet. Check for a
+  framework API before writing a P/Invoke module.
+- **Explorer and the taskbar get the icon by different routes**: Explorer reads
+  the registered `DefaultIcon`, the title bar and the running taskbar button read
+  the *window*. Fixing one tells you nothing about the other.
+- **A registered type needs a `DefaultIcon` and must NOT have a
+  `ShellEx\ThumbnailHandler`.** The first is what stops Explorer showing the
+  generic *application* icon (the ProgID has no icon and the shell reads the
+  exe's *resources*, not an `.ico` beside it). The second would displace WIC's
+  real photo thumbnails with an icon, which is strictly worse. Icon and thumbnail
+  are separate concerns; fix only the icon. An AppUserModelID's `IconUri` must be
+  a bare path (the quotes in Microsoft's examples are JSON syntax) — a pinned
+  taskbar button then shows the right icon while the running window's does not.
+  Explorer caches icons per user, so a registration change needs
+  `ie4uinit.exe -show`.
+- `src/fileassoc.rs`: per-user HKCU ProgID + `OpenWithProgids` for the 9
+  extensions in `exts()`; never claims default silently (Windows 8+ policy). The
+  ProgID embeds the exe folder name, so moving the exe requires re-registering.
+- **Archives** (`.cbz`/`.zip`) extract to
+  `%TEMP%\image-viewer\<hash(path, mtime, size)>` and open as a folder gallery:
+  the temp dir is reused while the archive is unchanged and deleted on folder
+  switch and exit. Triage is disabled for members and wallpaper copies the member
+  to `%APPDATA%\image-viewer\wallpaper.<ext>` first. Never persist the temp path
+  into `config.folder`.
+- Config lives at `%APPDATA%\image-viewer\config.json` (`Config::default_path`).
+  **New `Config` fields need `#[serde(default)]`** or old configs fail to load,
+  and **never add `deny_unknown_fields`** — unknown keys are ignored, which is
+  the only reason a config written by an older build still starts a newer one.
+  `show_image_before_auto_fit` was removed on that reasoning (dead for its whole
+  life: declared, defaulted, serialised, read by nothing), and
+  `an_old_config_without_a_renderer_setting_still_loads` still carries the key
+  so that tolerance stays pinned.
+- **Any new CLI flag goes in `path_arg` (`lib.rs`) and its test.** Taking
+  `args().nth(1)` is wrong the moment a flag can come first, and it failed
+  *silently*: `--perf` was taken as the path, so the report described a folder
+  the user never asked for. A flag that takes a value must be added to
+  `FLAGS_WITH_VALUE` or its value is handed back as the folder.
 
-## Architecture (things that are easy to break)
+## Tests
 
-- **Decode is single-pass** (`load_image_preview_full` in `src/lib.rs`): the file is decoded once; the preview texture is derived from the full decode and sized to the *display area* (`Job.target_dim`, the central panel in physical px). Large JPEGs (> 12 MP, `FAST_FULL_MAX_PIXELS`) are the exception — turbojpeg DCT preview, then a full decode after a 120 ms dwell. Grid thumbnails (`Kind::Thumb`, target 256) are the other exception: they may come from the embedded EXIF thumbnail, in which case `full` is `None` and `below_target` is true, which is correct — nothing adopts a grid thumbnail, and the main view never asks for one.
-- **The full image rides on the preview cache.** `Preview` carries `full: Option<Arc<ImageData>>` (and `anim` for GIFs); `sync_shown(ctx)` adopts it for the current image. `needs_full()` checks data availability, *not* texture size vs. source size — the size heuristic was a bug that permanently skipped full-res for preloaded neighbors. Don't reintroduce it.
-- **Resize events**: growing the display drops `below_target` previews and re-decodes at the new target. Panel toggles and F11 set `suppress_resize_redecode` for exactly one transition so layout changes don't count as "window grew".
-- **Hold-to-browse** (`block_while_loading` setting): `step()` is throttled while `waiting_load`; on preview arrival a `pending_advance` is queued and consumed at the *start of the next frame* — the arrived image is guaranteed to have been painted. Consuming it in the same frame skips the render (that was the original bug).
-- **Animated GIFs** decode to all composited frames (`Animation`, caps: 240 frames / 256 MB), ride the preview cache, never get tiles, and play back through a single re-uploaded texture with delays floored to 20 ms.
-- **Never decode on the UI thread.** All decode runs on the worker pool (`Loader` in `main.rs`); the UI only paints textures. Grid thumbnails use `Kind::Thumb` jobs (`Loader::push`, prio 45) and an LRU-capped `thumbs` cache — `grid_cell` requests them lazily for visible cells only.
-- **Folder watcher**: `maybe_rescan` polls every 2 s. `check_changed` re-stats
-  every gallery file (`Stamp` = mtime + len) and invalidates anything whose
-  contents moved; `rescan` adds/removes files. Change detection is deliberately
-  **not** gated on `load_all_on_startup` — that setting is about listing files at
-  startup, and noticing that the file you are looking at was just re-exported
-  should not depend on it. Both are skipped while a cbz/zip archive is open.
-- **Reloading a changed file is self-healing, and that is the point.**
-  `invalidate_path` clears the `failed` entry as well as the caches. A file
-  re-read *while it is still being written* fails to decode, and `failed` is
-  permanent for the session — but the writer finishing moves the stamp again, so
-  the next poll re-detects and retries. Do not "optimise" that `failed.retain`
-  away: without it, editing the image you are looking at reliably poisons it,
-  which is the "random images never load" bug from this session. The reload
-  deliberately does **not** keep the stale texture on screen (a re-export can
-  change the dimensions); it blanks for one decode, like navigating to an
-  uncached image.
-- **The filter is the whole viewer, not just the grid.** `MyApp.all_files` is
-  the unfiltered list; `gallery.files` is it run through `filter` by
-  `Gallery::set_filtered` (in lib.rs, so it is testable). Every site that
-  rebuilds the whole file list goes through `set_files`/`adopt_gallery` so the
-  filter cannot be forgotten. The filter is *not* persisted — a filter that
-  silently survived a restart would hide files with no obvious way back.
-- **Global single-key shortcuts must stand down while typing.** The filter box
-  is the first text input this app has, so `App::ui` reads
-  `ctx.egui_wants_keyboard_input()` and gates every single-letter and navigation
-  key on it. Without that, typing "g" into the filter toggles the grid and "r"
-  reloads the folder. Esc while the box is focused clears the filter (or
-  defocuses) and must never fall through to "close the grid / quit".
-- **The grid's scrollbar needed `auto_shrink([false, true])`.** With
-  `[false, false]` the `ScrollArea` demands the full panel width, leaving no room
-  for the bar, so a long folder had no visible scroll position.
-- **End-of-folder navigation is a `Gallery` policy, not a caller concern.**
-  `Gallery::loop_back` (mirrors `Config::loop_back`, default **on** so old
-  configs keep looping) lives on the gallery so `next`/`prev` cannot be used in a
-  way that quietly ignores the setting. Both return `bool` — whether the view
-  actually moved — and `step()` skips `goto()` when it did not, which avoids
-  resetting the full-res dwell timer and re-planning the queue for an image that
-  did not change. The grid's own selection already clamped and never wrapped.
-- **egui's default font is a subset, and a missing glyph is a blank box — not an
-  error, not a warning, not a failed assertion.** `no_ui_text_uses_a_glyph_the_font_lacks`
-  in `tests/unit.rs` scans both UI source files for non-ASCII characters and asks
-  the real font (`Fonts::has_glyphs`, at two sizes) whether it has them. This
-  exists because `Mirror ⇋ / ⇅` shipped as empty squares: U+21CB and U+21C5 are
-  simply not in the family. The same class had already shipped on the two
-  most-used buttons in the app — `Prev (←)` and `Next (→)`, U+2190/U+2192 — since
-  long before any of this work, which is the sort of thing that survives because
-  nobody is looking at a button. **Characters that do work**: `…` `—` `·` `°` `⟲`
-  `⟳`. Everything else is ASCII or a blank box. It reads the *sources* rather than
-  a list, so it cannot fall behind; `strip_line_comment` keeps the comment
-  explaining the bug from keeping the test red, since that comment has to be able
-  to name the glyphs. Verified to fail with `⇋` reintroduced.
-- **TurboJPEG reads a crop region in the transform's DESTINATION space, and
-  refuses it outright for the four axis-swapping operations.** Measured, not
-  assumed: with 16 px labelled blocks, a crop of stored `(48,16,32,32)` comes back
-  from a `rot180` as blocks `x 1..2` — the same rectangle *after* the turn — and
-  `rot90`/`rot270`/`transpose`/`transverse` fail with "Invalid crop request". So a
-  crop and a turn **cannot** share one `Transform`. `save_transformed` does two
-  calls: crop with the identity op (source space == destination space there, so
-  the coordinates are unambiguous), then turn the cropped result. Both rearrange
-  DCT coefficients and neither decompresses to pixels, so it is still lossless —
-  `bench_rotate_save`'s `cropped_save_is_still_lossless` reports the ratio
-  (1.00x, 0.99x at 4000x3000) and that is the only evidence. Do not "optimise"
-  this back into one call; it will pass the identity case and fail every other.
-- **A crop's origin must sit on the MCU grid, and the rectangle is grown to fit
-  rather than shrunk.** 8 px for 4:4:4, 16 px for the usual 4:2:0. Growing means
-  the user gets up to one block of *extra* picture rather than up to one block cut
-  off the edge they framed. The UI must draw the snapped rectangle, not the raw
-  drag, or the frame on screen is not the frame that gets saved.
-- **`Xform::map` takes OUTPUT coordinates plus the INPUT dimensions.** It answers
-  "this output pixel came from which input pixel". So display -> stored is
-  `display.map(coords, stored_dims)` — *not* `display.inverse().map(..)`, which
-  transposes the rectangle, and for a quarter turn that is the difference between
-  cropping the top-left of a photo and the bottom-left. The reverse direction,
-  stored -> display, *does* need the inverse, with the display's dimensions.
-  Getting this backwards is invisible: a valid crop of the wrong part of the
-  picture. `a_display_rect_survives_the_round_trip_through_stored_space` checks
-  both directions against each other over every transform.
-- **A bare letter may only do something that cannot lose data.** `M` (move) and `C`
-  (copy) used to be bound to actions that write to the filesystem, on a keystroke
-  with nothing between the key and the file; `C` is now Crop, which is a view
-  transform until `Ctrl+S`. `Del` is the one accepted exception and it goes to the
-  Recycle Bin. `tests/keybindings.rs` enforces this from an explicit
-  `BARE_LETTERS` list, where **adding a line is a claim that the action cannot lose
-  data** — the point is to make the next person write down why. It asserts against
-  `src/main.rs` as text, which is normally a weak thing to test, and it is here
-  because "a shortcut does not exist" is otherwise unobservable: the only way to
-  find out is to press it and move somebody's photo. It does **not** check that
-  bound keys *work* — that needs a synthetic keystroke, and those silently do
-  nothing over RDP, so such a test would be green forever without ever having
-  pressed anything.
-- **The dimming bands around the crop frame are `dim_bands`, and they tile the
-  difference *exactly*.** Top and bottom span the **full width** of the picture;
-  left and right span only between them, so no pixel is covered twice and none is
-  missed. The first version wrote the top band from the picture's corner to the
-  frame's top-*left* corner and the bottom one from the frame's bottom-*right* to
-  the picture's corner — so the left and right dimmed correctly and the top and
-  bottom stayed bright except at their corners. It read as a rendering bug and was
-  arithmetic. `the_dimming_bands_cover_exactly_what_is_being_cut_away` asserts the
-  four areas sum to `picture - frame`, which catches a band that is too small, too
-  large or misplaced in one go, and is verified to fail with the bug reintroduced.
-  It lives in `lib.rs` over plain floats because that module has no egui
-  dependency on purpose, which is what makes it testable at all.
-- **The crop frame is drawn from the STORED crop mapped back out, never from the
-  raw drag.** The chain is: screen points → displayed pixels → stored pixels
-  (`Crop::from_display_rect`) → block grid (`snapped_to_mcu`) → back to the
-  screen. The last two steps are the point. TurboJPEG will only cut on the block
-  grid, so a frame drawn from the raw drag is up to one block away from the frame
-  that gets saved, and the user has no way to find out. `crop_from_screen` and
-  `crop_screen_rect` in `main.rs` are two halves of the same conversion and must
-  stay in step — the first to store, the second to draw.
-- **A crop is a view transform; the picture is not cut on screen.** The frame
-  floats over the whole image so that turning and mirroring still apply to the
-  full frame, and it *follows* the image if you turn it afterwards, because the
-  stored rectangle names the same pixels either way. Cropping the displayed
-  pixels instead would break the moment anything else moved.
-- **Crop and transform are one `Edit` per image, not two maps.** They are saved
-  by one action and "Reset" means both, so two maps would only create states
-  nobody asked for. `ImageEdits` also carries the bound, so a per-image map
-  cannot be added without a bound.
-- **`shown` and `cur` are different images, and the draw path must use `shown` for
-  everything.** `cur` is the wanted image, set by `goto()` on a keypress;
-  `shown` only advances once the preview has actually been adopted by
-  `sync_shown`. Between them they name different pictures. The transform was read
-  from `cur` while the texture, `orig` and the fit all came from `shown`, so a
-  picture got drawn under another picture's transform — a visible flicker on every
-  navigation into or out of a turned image, and *silent* when neither is turned.
-  Key the transform off the image being painted (`shown_xform`), not the one being
-  wanted. `current_xform` is still right for **saving**, which is about `cur` even
-  when it is not up yet.
-- **The store holds a whole `Xform`, not a turn count, and it must keep doing
-  so.** A turn and a mirror are the same *kind* of edit and they do not commute:
-  turn-then-mirror is a diagonal mirror, which is neither operation. `ImageTransforms`
-  composes on the way in (`compose`), so the map only ever contains finished
-  transforms and there is exactly one value for the display, the lossless save and
-  the tests to read. Two independent counters would push that composition to the
-  last moment, where a sign error is invisible *in this viewer* (it re-applies the
-  same mistake to the file it just wrote) and glaring in every other program.
-  `a_quarter_turn_then_a_mirror_is_a_diagonal_mirror` exists to keep the two
-  orders distinguishable — they must not collapse into the same value.
-- **`Xform::paint_matrix` is the input→output direction; `Xform::map` is the other
-  way round.** `map` answers "which input pixel is this output pixel", which is
-  what a *sampler* wants; drawing needs the opposite. The matrix is derived by
-  probing `map` and transposing (every one of the eight is a signed permutation, so
-  the inverse is the transpose) rather than transcribed, which is what stops the
-  screen and the saved file from becoming two independent statements of what the
-  transform is. `Mesh::transform` is no help — `TSTransform` is a scale and a
-  translation with no room for a reflection — so `paint_tex` moves the vertices
-  itself. **Getting the direction backwards is invisible to the eye**: a rotation
-  still looks like a rotation, just the wrong way. It happened while writing
-  `the_paint_matrix_puts_each_pixel_where_map_says_it_belongs`, which is why that
-  test walks *input → output* (the direction the code runs) instead of the
-  direction that seemed obvious.
-- **A mirror does not change the footprint, and anything that assumed "a turn
-  count implies a possible axis swap" is now wrong.** `xformed_footprint` asks
-  `Xform::swaps_axes`; four of the eight swap and four do not, and the two diagonal
-  mirrors *do* swap because a diagonal reflection is a quarter turn plus a flip.
-- **Key bindings to know**: F11 = fullscreen + hides all chrome; I = panels; G = gallery grid; `/` = focus the filter box; in the grid the arrows/Home/End/PageUp/PageDown move a *selection* (they do not change the shown image; Page moves one viewport, tracked as `grid_page_rows`) and Enter opens it; Del = Recycle Bin; E = open folder in default file browser; W = wallpaper; C = crop mode; F = fit; Ctrl+C = copy image; Ctrl+S = save transformed; R = reload folder; Esc = clear filter (if typing) → close grid → exit fullscreen → close window. Side mouse buttons = prev/next. **Move and Copy have no key** (they write to disk - see the bare-letter rule above). Rotate, Mirror H/V, Reset turn, Crop, Clear crop and **Save transformed...** are bottom-panel buttons; `Ctrl+S` is the one chord that writes. The transform and crop are a view transform, re-fit after each edit, and are **per image** (`ImageEdits` in `lib.rs`, keyed by path - a single app-wide `u8` is the bug this replaced, since it turned every photo you navigated to and lost your edit on the way back). It composes with the EXIF tag when saved, so look the transform up *by the path being saved*.
-
-## Gotchas by feature
-
-- **A multi-page TIFF's page is part of the *image's identity*, not of the file's.**
-  `ImgKey { path, page }` keys every cache that holds decoded pixels — the preview
-  cache, `failed`, the loader's `wanted`/`busy`, `Job`, `Msg::Preview`/`Full`, `cur`
-  and `shown`. A path-keyed cache hands back page 1 when you asked for page 3,
-  silently, and only for multi-page files. What stays keyed on the *path* is
-  everything that describes the file rather than its contents: grid thumbnails,
-  the watcher's stamps, and `ImageEdits` (a turn or a crop frame is an edit to the
-  document, and it is what `Ctrl+S` writes). `Job::path()` is the filesystem half,
-  for the sites that need it.
-
-- **The page is a cursor, not a list.** `Gallery.files` is untouched and still one
-  entry per file; the page is a separate field on the gallery. Splicing an entry
-  per page into `files` was rejected because `files` is the unfiltered shape that
-  the filter, the resume point, the rescan and `all_files` are all keyed on, and
-  growing it means growing the index arithmetic in every one of them. A cursor
-  leaves all of that alone and only `next`/`prev` learn about pages. Consequence
-  worth knowing: `prev` from page 0 goes to the **last** page of the previous file,
-  not its first, or stepping backwards would need two presses per file.
-
-- **Page counts are learned on arrival, never during a scan.** `tiff_page_count`
-  reads **four bytes** and gives up for anything that is not a TIFF, because it
-  runs on every `goto`. The first version read the whole file with `fs::read`
-  before sniffing, which would have pulled a 10 MB JPEG into memory on every
-  keypress. Measured cost of one probe: **0.12 ms** on a 2.3 MB JPEG, 0.15 ms on a
-  PNG, 0.29 ms on a 4-page TIFF, and the answer is cached per file.
-  `learn_pages` answers from that cache — an early version always re-read, which
-  put a `File::open` on the critical path of every arrow key, and
-  `the_page_count_is_learned_from_the_file_and_asked_only_once` checks it by
-  *deleting the file* and requiring the answer to survive, which no amount of
-  counting would catch. A re-exported file must `forget_page_count`, or a
-  12-page document turned into a 1-page one leaves the cursor on page 12 of a
-  phantom.
-
-- **`protected_preview_keys` is a pure function and has to be.** The preview cache's
-  rule is "never evict what is on screen or a neighbour", and once the cache is
-  keyed by (file, page) the obvious reading — protect every page of the protected
-  *files* — makes the cache **unbounded**: walk into a 20-page document and all 20
-  pages are the same file, so all 20 are protected, so nothing is evictable and the
-  eviction loop finds no victim and gives up. It cannot happen on a photo folder,
-  where every file is one page, so it is invisible until you look at memory. Hence
-  the policy is `protected_preview_keys(files, index, page, shown, radius)` in
-  `lib.rs`: the current *page*, page 0 of each neighbour, and whatever is on screen.
-
-- **`image` 0.25 cannot read page 2 of a TIFF.** `TiffDecoder` implements only
-  `ImageDecoder`, whose `read_image` *consumes* the decoder, and it is not an
-  `AnimationDecoder` — so there is no way to ask it for the next page. The `tiff`
-  crate underneath has `more_images`/`next_image`, which is why it is a direct
-  dependency; it was already in the tree, so nothing new is downloaded. Two
-  consequences: `image` 0.25 also *writes* only single-page TIFFs, so a test
-  fixture has to use the `tiff` crate's encoder; and its `write_image` is what
-  *chains* into the IFD sequence, while `new_directory` makes a directory
-  explicitly **not** chained — an unlinked IFD is invisible to `more_images()`, so a
-  fixture built with it is single-page however many times the loop runs.
-
-- **Only pages whose colour type is a straight reinterpretation of the decoded
-  buffer are read.** Gray/GrayA/RGB/RGBA at 8 and 16 bits, with 16-bit arriving as
-  native-endian `u16`. CMYK, YCbCr, Lab and palette are **refused with an error**
-  rather than approximated: turning those into RGB means applying a colormap or a
-  colour transform, which is `image`'s job, and guessing gives pages that are
-  subtly and silently the wrong colour. An error is visible; wrong pixels are not.
-  `failed` is keyed per *image* for the same reason — one unreadable page must not
-  poison a document's other 199.
-
-- **Saving a page is refused, and the refusal is the feature.** `Ctrl+S` on page 3
-  of a document says so. The lossless path rewrites the whole file's DCT
-  coefficients and the re-encode fallback starts from page 1, so saving would write
-  page 1's pixels under the document's name and call it a lossless save of what
-  you were looking at.
-
-- **APNG and animated WebP were frozen on frame 0 until this.** `image` 0.25
-  implements `AnimationDecoder` for `GifDecoder`, `ApngDecoder` **and**
-  `WebPDecoder`, and the app used one of the three. The other two fell through to
-  the ordinary single-image decode: no error, no blank, just a picture that would
-  not move. Two non-obvious details: the frame count is asked for *before*
-  decoding, because `ApngDecoder` over a still PNG yields zero frames (harmless)
-  while `WebPDecoder` over a still WebP yields one *decoded* frame that the caller
-  throws away and then decodes a second time; and `"RIFF"` is not enough to sniff
-  WebP, because that is also how WAV and AVI begin. **No crate in this tree can
-  encode an APNG or an animated WebP** — `image` writes lossless VP8L stills and
-  has no `write_frames` — so the APNG fixture is assembled chunk by chunk in
-  `tests/multiframe.rs` and the animated-WebP *decode* path is unverified. TODO.md
-  records the gap.
-
-- **APNG `delay_num / delay_den` is a number of seconds.** The first hand-built
-  fixture wrote `120, 1` — 120 *seconds* per frame — and the only symptom was a
-  four-frame animation claiming to run for eight minutes. Nothing errored and the
-  frame count was right throughout, which is exactly why it needed a real file.
-
-- **CBZ/ZIP**: opening an archive extracts supported entries to `%TEMP%\image-viewer\<hash(path, mtime, size)>` and opens it as a folder gallery. The temp dir is reused for unchanged archives, deleted on folder switch and exit. Triage (Del, and the Move/Copy buttons) is disabled for archives; wallpaper copies the member to `%APPDATA%\image-viewer\wallpaper.<ext>` first (temp dir dies). Don't persist the temp path into `config.folder`.
-- **Resume (`last_by_folder`)** stores **file names, not full paths** (archives and folders share the format); the folder path is the key. An explicit CLI file argument beats resume — don't reintroduce the unconditional resume lookup.
-- **File registration** (`src/fileassoc.rs`): per-user HKCU ProgID + `OpenWithProgids` for all 9 extensions; never claims default silently (Windows 8+ policy). ProgID embeds the exe folder name — moving the exe requires re-registering.
-- **Linear-light resize** (`downscale_image` → `linear_resize`): 12-bit sRGB↔linear LUTs, runtime-selectable filter (`DownscaleFilter`: Hermite/Catrom/Lanczos3 via `set_downscale_filter`), custom separable resampler because the `image` crate's `Filter` is `pub(crate)`. Overshoot must clamp LUT indices to 4095 (index 4097 was a worker panic). Known wart: toggling `linear_resample` doesn't re-decode existing previews (the filter dropdown does) — see `refilter` in the settings handler if you touch this.
-
-## Misc
-
-- **Config location is platform-dependent:** `%APPDATA%\image-viewer\config.json` on Windows — see `Config::default_path()` in `src/lib.rs`. New `Config` fields need `#[serde(default)]` or old configs fail to load.
-- **`test-images/JPEGView_L` is a checked-out reference viewer** (JPEGView fork, C++) used for feature ideas, not part of the app.
-- **`PLAN.md` is a stale early-project feature list, not documentation of current behavior** — most of it is already implemented. `TODO.md` holds the actual deferred work (P3 → sRGB conversion, the HEIC `colr` blind spot) with the investigation already done. Read `TODO.md` before starting anything colour- or GUI-related; it records verified numbers that are expensive to re-derive.
+- **Every suite builds its own fixtures in a `tempfile::tempdir()`.** Do not
+  reintroduce hardcoded `test-images/` paths: it is gitignored, so the test
+  passes on your machine and dies with a bare `NotFound` in a fresh clone — which
+  is exactly what happened to `tests/standard.rs`, and then to
+  `tests/integration.rs`. The only remaining readers of `test-images/` are:
+  - the **criterion targets**, which are the deliberate exception (they measure
+    a real large photo, so a synthetic one would change the numbers): they pick
+    the largest JPEG and print a "drop a photo in to benchmark" message.
+  - `unit.rs::test_gps_decode`, which returns early without
+    `test-images/geo.jpg` — and so skips its `dms_to_deg` checks on a clean
+    clone too.
+- Three suites assert against **source text**, deliberately, and say why in their
+  module docs: `keybindings.rs` (a shortcut that does not exist is otherwise
+  unobservable), `renderer.rs` (the probe's early exit is in a binary),
+  `unit.rs` (the glyph scan). They check the *premise* against a real context or
+  queue, not a comment — and none of them verifies that a bound key actually
+  works, because that needs a synthetic keystroke.
+- `main.rs` is unreachable from any test. Every rule that has bitten us has been
+  moved into `lib.rs` for that reason: the job planner, the resize policy, the
+  transform algebra, `dim_bands`, the page cursor, the preview-cache eviction
+  policy, `startup_index`, `path_arg`. If you are about to write a decision in
+  the binary, check whether it can be a pure function first.

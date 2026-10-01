@@ -28,9 +28,6 @@ pub struct Config {
     /// Whether to load all images from the current folder on startup.
     pub load_all_on_startup: bool,
 
-    /// Whether to show images before applying auto-fit (fit_to_window).
-    pub show_image_before_auto_fit: bool,
-
     /// Optional folder to load images from on startup.
     pub folder: Option<String>,
 
@@ -79,7 +76,6 @@ impl Config {
     pub fn load(path: &Path) -> Self {
         let default = Self {
             load_all_on_startup: true,
-            show_image_before_auto_fit: true,
             folder: None,
             sort: SortMode::Name,
             linear_resample: true,

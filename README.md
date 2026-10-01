@@ -36,8 +36,8 @@ can we still test it". QOI clears both.
 | Format | Decoder |
 |---|---|
 | JPEG | `turbojpeg`, with a DCT-scaled fast path for large images |
-| PNG, WebP, GIF | `image` crate (animated GIFs included) |
-| TIFF, BMP, ICO, QOI | `image` crate |
+| PNG, WebP, GIF | `image` crate, including APNG and animated WebP |
+| TIFF, BMP, ICO, QOI | `image` crate (multi-page TIFF past page 1 via the `tiff` crate) |
 | JPEG XL | `jxl-oxide` |
 | HEIC, HEIF, AVIF | `heic` |
 
@@ -53,7 +53,11 @@ double-rotate).
   **1024px tiles** streamed in over it (up to 8 new tiles per frame) so
   zooming in never blocks
 - Neighbour preloading in both directions
-- Animated GIF playback with per-frame delays
+- Animated playback with per-frame delays — GIF, APNG and animated WebP
+- **Multi-page TIFF**: `←` / `→` walk the pages of a document before moving to the
+  next file, and the position shows in the title bar and the status line
+  (`page 3/12`). Stepping back from page 1 lands on the **last** page of the
+  previous file, so going backwards never costs two presses per document
 - Transparency checkerboard backdrop
 - **Rotate ⟲ / ⟳**, **Mirror H / V**, **Reset turn** — quarter turns and mirrors,
   **per image**, re-fitting each time. Turning one photo does not turn the next,
@@ -164,10 +168,11 @@ process for each**. That is not ceremony: wgpu enumerates every backend in the
 enabled set during adapter discovery, and on some drivers that fails by
 **access-violating** — `0xC0000005`, before any window exists, with nothing on
 stderr. A process that has crashed cannot catch its own way out, so "try DX12
-and fall back to Vulkan" is not writable inside one process. Probing costs one
-child launch per candidate, and the answer is cached, so it only happens on the
-first run after you change the setting. **Probe backends now** re-runs it on
-demand.
+and fall back to Vulkan" is not writable inside one process. Probing **stops at
+the first backend that works** — the others exist only to be tried when it
+fails — and the answer is cached, so it normally costs one child launch, and
+only on the first run after you change the setting. **Probe backends now**
+re-runs it on demand.
 
 The probe drives the driver as far as an adapter and a **device**, not just
 adapter enumeration — enumeration only walks the loader's list, and a probe that
@@ -175,12 +180,27 @@ stopped there reported Vulkan as working on a machine where the app crashes on
 it. It does not create a window, so a backend that fails only at surface
 creation would still pass.
 
-Measured on the development machine (Intel UHD 620, driver 30.0.100.9865):
+The order is **OpenGL, then DirectX 12, then Vulkan** — measured on the
+development machine (Intel UHD 620, driver 30.0.100.9865), not assumed. Adapter
+and device creation costs 186 ms on GL against 455 ms on DX12, and an empty
+eframe window (no viewer code at all) holds 84 MB on GL against 321 MB on DX12,
+so GL is the same speed for 154 MB less. DX12 is second because it goes through
+a different driver stack, and so is the one most likely to work where GL does
+not. Automatic probing stops at the first success, so on a machine where GL
+works you see one line:
 
 ```
-dx12    works    Intel(R) UHD Graphics 620 / 30.0.100.9865
-gl      works    Intel(R) UHD Graphics 620
-vulkan  unavailable   (0xC0000005)
+Probing for a working graphics backend...
+       gl: works
+```
+
+and where it does not, the rest of the order is tried and reported in turn:
+
+```
+Probing for a working graphics backend...
+       gl: unavailable
+     dx12: works
+   vulkan: unavailable
 ```
 
 ### Saving a transform or crop (`Ctrl+S`)
@@ -248,7 +268,7 @@ should not quietly do that.
 
 | Key | Action |
 |---|---|
-| `←` `→` | Previous / next image (also `PgUp` / `PgDn` / `Space`) |
+| `←` `→` | Previous / next image, or previous / next **page** of a document (also `PgUp` / `PgDn` / `Space`) |
 | `↑` `↓` | In the grid: move the selection by a row |
 | `Enter` | In the grid: open the selected image |
 | `Home` / `End` | First / last image (in the grid: first / last cell) |
@@ -263,10 +283,16 @@ should not quietly do that.
 | `Del` | Move to the Recycle Bin (never a hard delete) |
 | `E` `W` `R` | Explore folder, wallpaper, reload folder |
 | `Ctrl+C` | Copy image to clipboard |
-| `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly |
+| `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Previous / next image |
 | Drag & drop | Open a file, folder or archive |
+
+**In the grid, the navigation keys drive a selection instead.** `←` `→` `↑` `↓`
+move by cell and by row, `PgUp` / `PgDn` move a viewport at a time, `Home` /
+`End` jump to the ends, and `Enter` opens what is highlighted. Walking the grid
+does not change the image on screen, so arrowing through a large folder costs no
+re-decodes, and the selection stops at the ends rather than wrapping.
 
 **Move and Copy have no keyboard shortcut**, deliberately. Both write to the
 filesystem, and a bare letter is one stray keystroke away from doing that. `C` used
@@ -306,8 +332,9 @@ image-viewer.exe --unregister
 ```
 
 `--register` writes a per-user (HKCU) ProgID and `OpenWithProgids` entries for
-all sixteen extensions. It deliberately does **not** claim the default-handler
-role — Windows requires the user to confirm that themselves.
+the nine extensions the app decodes (jpg, jpeg, png, webp, gif, jxl, avif,
+heic, heif). It deliberately does **not** claim the default-handler role —
+Windows requires the user to confirm that themselves.
 
 Registration includes a `DefaultIcon` pointing at the icon embedded in the exe,
 which is what makes Explorer show a picture rather than the generic application
@@ -356,7 +383,7 @@ backend is printed at startup.
   cause of images that silently never loaded, because the event that would have
   asked for them again had already gone by. `tests/flip_through.rs` pins this.
 - **Bounded memory.** Preview cache capped at 16 textures, tile cache at 64
-  (≈256 MB), thumbnails LRU-capped at 512, animated GIFs at 240 frames /
+  (≈256 MB), thumbnails LRU-capped at 512, animations at 240 frames /
   256 MB.
 
 ### Measuring it
@@ -392,25 +419,32 @@ move. `IV_BENCH_N` sets the image count, `IV_BENCH_RUNS` the repetitions.
 
 ```
 cargo build --release      # the exe users run
-cargo test                 # unit + property + integration + flip-through
+cargo test                 # every suite
 cargo test --no-fail-fast  # ... without stopping at the first failing target
-cargo bench                # criterion benchmarks (the only thing needing test-images/)
+cargo test --test unit     # one suite; cargo test <name> for one test
 
 cargo test --release --test bench_browse -- --ignored --nocapture   # browsing benchmark
 cargo test --release --test bench_resize -- --ignored --nocapture    # decodes per window drag
 cargo test --release --test bench_rotate_save -- --ignored --nocapture  # lossless save, size ratio
+cargo test --release --test bench_startup -- --ignored --nocapture   # start-up per candidate
 cargo test --release --test pathological -- --ignored --nocapture   # 40/60 MP timings
 ```
 
 Requires the MSVC toolchain and CMake (turbojpeg builds libjpeg-turbo from
 source).
 
+The benchmarks are `#[ignore]`d `cargo test` targets, not `cargo bench`:
+`tests/bench.rs` and `tests/bench_variants.rs` do use criterion, but they sit
+in `tests/` as ordinary test targets with the default harness, so `cargo bench`
+reports "running 0 tests" and prints nothing. Until they are moved to `benches/`
+with `harness = false`, the four commands above are the benchmarks that produce
+numbers.
+
 Every suite is **fixture-free** — each builds the images it needs in a temp
 directory — so a fresh clone passes with no setup at all. `test-images/` is
-gitignored and no `cargo test` suite reads it. The two `cargo bench` targets are
-the deliberate exception: they measure a real large photo, so they pick the
-biggest JPEG in `test-images/` and print a "drop a photo in to benchmark"
-message rather than failing.
+gitignored, and the only things that read it are the two criterion targets, which
+want a real large photo and print a message rather than failing, and
+`tests/unit.rs::test_gps_decode`, which skips if `geo.jpg` is absent.
 
 `cargo test` stops at the first failing target, so pass `--no-fail-fast` when
 you want the whole picture. The `pathological` suite generates its own 40/60 MP
@@ -420,11 +454,14 @@ images and is `#[ignore]`d because it takes seconds.
 
 ## Known caveats
 
-- **Multi-page TIFF shows the first page only.** Page navigation is not
-  implemented, so a 20-page document scan opens as one image with no indication
-  that more exist. The `image` crate's TIFF *encoder* cannot emit a multi-page
-  file, so this is not covered by a test — it is the library's documented
-  first-page behaviour.
+- **Multi-page TIFF: three deliberate limits.** Pages work — arrow keys page
+  through a document and the title bar and status line show which one — but:
+  pages whose colour type needs a colormap or colour transform (CMYK, YCbCr,
+  Lab, palette) are **refused with an error** past page 1 rather than converted
+  approximately, because a wrong page colour is silent; **`Ctrl+S` is refused**
+  on any page but the first, since "save what I see" is a statement about a
+  file and the lossless path rewrites the whole document; and **the grid shows
+  one cell per file** (page 1), because a document is one thing to browse.
 - **ICO needs an RGBA PNG entry or a BMP entry.** Windows writes the large sizes
   as RGBA PNGs and the small ones as BMP, both of which decode. A PNG-compressed
   entry that is *not* RGBA is rejected, which is a limitation of the underlying

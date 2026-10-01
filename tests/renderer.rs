@@ -368,8 +368,15 @@ fn the_config_file_uses_the_same_spellings_as_parse_and_name() {
 
 #[test]
 fn an_old_config_without_a_renderer_setting_still_loads() {
-    // Every other field here is `#[serde(default)]` for exactly this reason, and
-    // a missing key must not stop the app starting.
+    // Every field here is `#[serde(default)]` for exactly this reason, and a
+    // missing key must not stop the app starting.
+    //
+    // `show_image_before_auto_fit` is the interesting one now: it is a key this
+    // version does **not** have a field for any more (it was never read by
+    // anything), and the file still has to load. Unknown keys are ignored rather
+    // than rejected, which is what keeps every existing `config.json` working
+    // across an upgrade — so this literal is really testing that, and it is the
+    // only test that would notice if someone ever added `deny_unknown_fields`.
     let old = r#"{
         "load_all_on_startup": true,
         "show_image_before_auto_fit": true,
