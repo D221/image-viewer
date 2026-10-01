@@ -25,8 +25,10 @@ landed.
 
 ### Known, verified
 
-- **200 of 1001** images in `phone_backup\Download\Ttg` are Display P3. Another
-  111 are sRGB-profiled, 641 untagged sRGB, 49 uninspected.
+- **200 of 1001** images in `phone_backup\Download\Ttg` were Display P3 when this
+  was first measured; a re-run after HEIC support landed says **229**, the
+  library having grown. Another 111 are sRGB-profiled, 641 untagged sRGB, 0
+  unreadable. Re-measure with `--icc-scan` rather than trusting these.
 - The primaries never mix: **192 files at exactly `(33759,15807,-69)`** (P3) and
   111 at `(28578,14581,912)` (sRGB), both D50-adapted. These are *measured* —
   do not "correct" them from memory, a guessed P3 value was wrong once already.
@@ -70,28 +72,38 @@ signal — confirm `red_primaries == Some(P3_D50_RED)` before touching pixels.
 
 ---
 
-## 2. HEIF `nclx` colour — the remainder of the old blind spot
+## 2. WebP and GIF colour — the blind spot is not the one that was assumed
 
-HEIC/AVIF profiles are now read from the container's `colr` box
-(`heic::DecoderConfig::extract_icc` hands over the raw bytes), so the
-`NotInspected` label now means something narrower and more honest: **the file
-states its colour with `nclx` parameters and carries no profile at all.**
+This item was written as "HEIF that states its colour with `nclx` instead of a
+profile". **Running `--icc-scan` over the real library says otherwise.** Of 1001
+images in `phone_backup\Download\Ttg`:
 
-Measured on real files: of four HEIF/AVIF images, two carried a 536-byte ICC
-profile classifying as Display P3 from its primaries with no `desc` tag, and two
-had no profile. The gap is therefore real but smaller than "29 of 1001 are
-invisible" made it sound — `--icc-scan <folder>` counts it for any library now.
+| | |
+|---|---|
+| wide gamut | **229** |
+| sRGB profiled | 111 |
+| sRGB untagged | 641 |
+| unknown profile | 0 |
+| not inspected | **20** — and all 20 are **13 WebP and 7 GIF** |
 
-Two things left:
+**Zero HEIF.** Every HEIF/AVIF in that library carries an ICC profile, so the
+`nclx` case this item was about does not occur in it at all. The `nclx` handling
+is still correct to keep — `None` must not be read as sRGB — it is simply not
+where the remaining gap is.
 
-- **Count it.** `--icc-scan` answers this; run it on a real library rather than
-  assuming the ratio carries over from the JPEG/PNG figures.
-- **An iPhone `nclx` file is Display P3 by construction** (colour_primaries 12,
-  transfer 13), so it could be reported *without* a profile. Decide whether to
-  do that or leave those files uninspected. Reporting them is a claim about a
-  container we did not verify, so it wants the same scepticism as any other
-  "assume the common case" shortcut — and it is the same reasoning that made the
-  JPEG/PNG path refuse to guess.
+So the real remaining work is two formats, and it is smaller than this item was:
+
+- **WebP (13 files).** A WebP carries its profile in a RIFF `ICCP` chunk, and
+  nothing here parses it. This is the same shape as the JPEG `APP2` chunk
+  reassembly that already exists, ~20 lines of RIFF walking. There is a fixture
+  in `test-images` (`color-webp-uninspected.webp`) and 13 real files to check
+  against.
+- **GIF (7 files).** A GIF has no colour profile chunk at all — its colours come
+  from a palette. The honest answer is `UntaggedSrgb` by the same convention
+  untagged PNG and JPEG already get, not `NotInspected`. That is a one-line
+  change plus a test.
+
+Neither is on the conversion path (§1): both only make the report honest.
 
 ---
 

@@ -515,26 +515,56 @@ fn icc_scan(args: &[String]) -> eframe::Result<()> {
         println!("  {:<18} {n:>6}   {note}", space.label());
     }
 
-    // List only what somebody could act on. `NotInspected` is a property of the
-    // *format*, so its count is the news; `UntaggedSrgb` is the overwhelming
-    // majority of a real library and listing it would bury everything else.
-    let notable: Vec<&std::path::PathBuf> = found
-        .iter()
-        .filter(|(_, i)| matches!(i.space, ColorSpace::WideGamut | ColorSpace::Unknown | ColorSpace::NonRgb))
-        .map(|(p, _)| p)
-        .collect();
-    if !notable.is_empty() {
+    // List what somebody could act on. `UntaggedSrgb` is the overwhelming
+    // majority of a real library and listing it would bury everything else, so it
+    // is counted only. `NotInspected` *is* listed, under its own heading: it is
+    // this build's blind spot, and "here is what I cannot tell you" is the most
+    // useful thing an audit can say.
+    let of_space = |space: image_viewer::ColorSpace| -> Vec<&std::path::PathBuf> {
+        found
+            .iter()
+            .filter(|(_, i)| i.space == space)
+            .map(|(p, _)| p)
+            .collect()
+    };
+    for (space, title) in [
+        (
+            image_viewer::ColorSpace::WideGamut,
+            "Wide gamut - displayed without conversion, so they read flat",
+        ),
+        (
+            image_viewer::ColorSpace::Unknown,
+            "Unreadable profile - could not be classified either way",
+        ),
+        (
+            image_viewer::ColorSpace::NonRgb,
+            "Not an RGB space",
+        ),
+        (
+            image_viewer::ColorSpace::NotInspected,
+            "Not inspected - this build does not read this format's colour",
+        ),
+    ] {
+        let list = of_space(space);
+        if list.is_empty() {
+            continue;
+        }
         println!();
-        println!("Files that need a look ({}):", notable.len());
-        for p in notable.iter().take(500) {
+        println!("{} ({}):", title, list.len());
+        for p in list.iter().take(MAX_LISTED) {
             println!("  {}", file_name_of(p));
         }
-        if notable.len() > 500 {
-            println!("  ... and {} more", notable.len() - 500);
+        if list.len() > MAX_LISTED {
+            println!("  ... and {} more", list.len() - MAX_LISTED);
         }
     }
     Ok(())
 }
+
+/// How many filenames to print per class before summarising the rest. An audit
+/// of 1000 files should not scroll 1000 lines, but it must also never hide that
+/// there were more.
+const MAX_LISTED: usize = 500;
 
 /// Identity of a file's *contents* for change detection.
 ///
