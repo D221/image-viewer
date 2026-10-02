@@ -6109,11 +6109,16 @@ pub fn shape_of(pos: PagePos, ctx: &dyn PageCtx) -> Shape {
 /// of its turn. That is [`lone`]'s question, and `lone` may only be asked at an
 /// anchor.
 ///
-/// Each page's dimensions are read **once** into a local and reused. That is not
-/// only tidiness: [`PageCtx::dims`] is a `HashMap` lookup keyed on a `PathBuf`,
-/// and [`prev_anchor`] calls this once per page of the walk, so writing the
-/// three conditions as written above would cost six lookups per page where two
-/// will do.
+/// **Four [`PageCtx::dims`] calls per invocation, down from six.** Two are the
+/// hoisted locals below and two are inside the two [`shape_of`] calls; the old
+/// spelling of the three conditions called `dims` six times for the same two
+/// pages. It is not tidiness: `dims` is a `HashMap` lookup keyed on a `PathBuf`,
+/// and [`prev_anchor`] calls this once per page of an O(n) walk.
+///
+/// **The remaining two are the obvious follow-up** - `shape_of` re-reads what
+/// the locals already hold, so passing the dimensions in would make this two
+/// calls. Not done here because `shape_of` is public and takes a `PagePos`, and
+/// changing its signature for this is Task 2's call rather than a local tidy.
 pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
     let (da, db) = (ctx.dims(a), ctx.dims(b));
     if shape_of(a, ctx) == Shape::Double || shape_of(b, ctx) == Shape::Double {
@@ -6282,15 +6287,23 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
         };
         // Compared against the SUCCESSOR, and that is the whole contract: the
         // answer to "the anchor before `a`" is the anchor whose turn *ends* by
-        // handing over to `a`. Testing `anchor == a` at the top of the loop
-        // instead would ask whether `a` is an anchor the walk has already
-        // passed - true only for the first anchor, which is the one case whose
-        // answer is `None` anyway, so the two forms agree on every input.
+        // handing over to `a`.
+        //
+        // **Two edits that look similar are not the same, and only one of them
+        // changes behaviour.** Adding `if anchor == a { return None }` at the top
+        // of this loop, and leaving the check below, is *equivalent*: this loop
+        // only ever tests `anchor` values the walk has already passed, so the top
+        // check can match only the first anchor - whose answer is `None` anyway,
+        // which is what the `None` arm above already returned. That edit was run
+        // and nothing failed. **Replacing** the check below with a top-of-loop
+        // `if anchor == a { return Some(anchor) }` is a different edit and is
+        // *not* equivalent: it returns `Some(first_anchor)` where the answer is
+        // `None`, stranding the backward walk on a one-turn gallery.
         //
         // Kept as written because it is the one that says what it means, and
         // because the guard is on the *property* rather than the spelling:
         // `every_anchor_is_reached_from_the_anchor_before_it` asserts that
-        // whatever `prev_anchor` returns is an anchor whose successor is `a`.
+        // whatever this returns is an anchor whose successor is `a`.
         if next == a {
             return Some(anchor);
         }

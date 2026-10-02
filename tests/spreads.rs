@@ -2,8 +2,10 @@
 //!
 //! Everything here runs against [`TestGallery`] rather than a filesystem, which
 //! is the point of `PageCtx`: the pairing is arithmetic over a flat page cursor,
-//! so it can be driven through every shape pattern in a property test without
-//! decoding anything.
+//! so random galleries of every shape mix can be driven through a property test
+//! without decoding anything. The property tests are **random, not exhaustive** -
+//! see `any_gallery` for what 256 cases do and do not cover - so where a specific
+//! shape matters it is spelled out in a named test.
 
 use image_viewer::{
     lone, next_anchor, pairable, prev_anchor, shape_of, turn_len, PageCtx, PagePos, Shape,
@@ -318,7 +320,7 @@ proptest! {
     }
 
     /// Forward to the far end and then back the same number of times returns to
-    /// the start - the round trip, over every shape pattern.
+    /// the start - the round trip, over the random galleries `any_gallery` makes.
     ///
     /// Split out from the partition property because it is the only thing that
     /// exercises `prev_anchor`, and it is the property every local formulation of
@@ -615,13 +617,16 @@ fn a_one_page_gallery_is_a_turn_of_one_however_it_loops() {
 /// to pair on missing data would strand a turn, and a stranded turn is worse than
 /// a pair that turns out to be wrong.
 ///
-/// The turn is of *two*, not one - which is the whole point, and the reason the
-/// anchor under test is the page at flat 1 rather than the one at flat 0. Placing
-/// it at flat 1 keeps the assertion independent of `lead_lone`: at flat 0 a
-/// `lead_lone` of 1 would make the page front matter and it would take its own
-/// turn whatever its dimensions said, so the same test would pass for an entirely
-/// different reason at a different setting. Nothing else here should depend on
-/// which page of the gallery it is.
+/// The turn is of *two*, not one, and **that depends on `lead_lone` being 0**,
+/// which is why it is passed explicitly. The anchor under test is page 0, so at
+/// `lead_lone = 1` it would be front matter and take its own turn whatever its
+/// dimensions said - the assertion would still hold, but for an entirely
+/// different reason, and the test would stop being about unknown dimensions. At
+/// `lead_lone = 0` the only thing that can make it a turn of one is the
+/// dimensions themselves.
+///
+/// `shape_of` and `pairable` are asserted against page **1** instead, which is
+/// not front matter at any `lead_lone` this crate allows.
 #[test]
 fn an_unknown_page_pairs_and_is_a_turn_of_two_until_it_is_measured() {
     struct Unknown;
@@ -703,8 +708,69 @@ fn a_shape_at_the_threshold_is_not_a_spread() {
     assert_eq!(shape_of(page, &flat), Single);
     assert!(!pairable(page, page, &flat), "a zero height has no ratio to agree on");
     // And the unknown case really is the opposite, so the two are not the same
-    // arm. `Dims(1, 1)` is the control: measured, sizeable, and it pairs.
+    // arm. `Dims(1000, 1400)` is the control: measured, sizeable, and it pairs.
     assert!(pairable(page, page, &Dims(1000, 1400)), "two identical pages pair");
+
+    // **One side zero-height, the other unknown** - the cell that changed when
+    // `pairable`'s conditions were hoisted, and the one a symmetric-looking test
+    // never reaches. The old spelling short-circuited on `dims(b).is_none()`
+    // before the `NAN` comparison and answered *pairable*; the current one
+    // answers *not pairable*, which is what `pairable`'s doc says a zero height
+    // does. Both pages' identities matter: `flat`/`unknown` is the pair being
+    // tested, and `unknown`/`flat` is the mirror, so neither arm can be winning
+    // by accident of position.
+    struct Mixed(Option<(u32, u32)>, Option<(u32, u32)>);
+    impl PageCtx for Mixed {
+        fn step(&self, from: PagePos, by: isize) -> Option<PagePos> {
+            let to = from.page as isize + by;
+            (0..2).contains(&to).then_some(PagePos { index: 0, page: to as u32 })
+        }
+        fn step_no_wrap(&self, from: PagePos, by: isize) -> Option<PagePos> {
+            self.step(from, by)
+        }
+        fn key(&self, _pos: PagePos) -> Option<image_viewer::ImgKey> {
+            None
+        }
+        fn dims(&self, pos: PagePos) -> Option<(u32, u32)> {
+            match pos.page {
+                0 => self.0,
+                _ => self.1,
+            }
+        }
+        fn override_shape(&self, _pos: PagePos) -> Option<Shape> {
+            None
+        }
+        fn flat(&self, pos: PagePos) -> Option<usize> {
+            Some(pos.page as usize)
+        }
+    }
+
+    let other = PagePos { index: 0, page: 1 };
+    assert!(
+        !pairable(page, other, &Mixed(Some((2000, 0)), None)),
+        "a measured-but-unsizable page does not pair, even beside an unknown one"
+    );
+    assert!(
+        !pairable(other, page, &Mixed(Some((2000, 0)), None)),
+        "and the same whichever side it is on"
+    );
+    // Controls, so the two assertions above are not passing for an unrelated
+    // reason: unknown beside unknown pairs, and a zero height beside a *sized*
+    // page does not either.
+    assert!(pairable(page, other, &Mixed(None, None)), "two unknowns pair");
+    assert!(
+        !pairable(page, other, &Mixed(Some((2000, 0)), Some((1000, 1400)))),
+        "zero height beside a sized page is the same refusal"
+    );
+    assert!(
+        pairable(page, other, &Mixed(None, Some((1000, 1400)))),
+        "unknown beside a sized page pairs - the optimistic arm"
+    );
+
+    // Cheap to change later: there is no `impl PageCtx` in `src/` yet, only here,
+    // so this cell is not reachable from the app until Task 2 writes the real
+    // implementation. If the semantics move again, this is the assertion to move
+    // with them.
 }
 
 /// The property ruling 1's `next == a` line exists to state: whatever
@@ -712,15 +778,28 @@ fn a_shape_at_the_threshold_is_not_a_spread() {
 ///
 /// This is the guard on the load-bearing decision, and it is deliberately
 /// stated as a property rather than as a comparison against a particular
-/// spelling of the walk. A mutation that adds `if anchor == a { return None }` at
-/// the top of the loop is *behaviourally equivalent* - verified - because the
-/// walk starts on the first anchor and "return None" is that one's answer anyway.
-/// So no test can fail on that edit, and pretending otherwise would be the kind of
-/// decoration this file exists to avoid.
+/// spelling of the walk.
 ///
-/// What this pins instead is the property an editor would break by changing the
-/// line for real: returning the anchor that is `a` rather than the one that led
-/// to it, or returning an anchor at all where the answer is `None`.
+/// Two edits to `prev_anchor` look like the same mistake and are not, so both are
+/// named here rather than left to be rediscovered:
+///
+/// * **Adding** `if anchor == a { return None }` at the top of the loop, leaving
+///   the successor check alone, is **behaviourally equivalent** - verified by
+///   running it. The walk only tests `anchor` values it has already passed, so
+///   the added check can match only the first anchor, whose answer is `None`
+///   anyway. No test here can fail on that edit, and inventing one that could
+///   would be the decoration this file exists to avoid.
+/// * **Replacing** the successor check with a top-of-loop
+///   `if anchor == a { return Some(anchor) }` is **not** equivalent: it returns
+///   `Some(first_anchor)` where the answer is `None`. The first anchor's `None`
+///   is already pinned by `backwards_agrees_with_forwards` and by this test, so
+///   that edit fails both without anything new being added.
+///
+/// What this test pins is the property an edit would break by changing behaviour
+/// rather than spelling: whatever `prev_anchor` returns is an anchor **whose
+/// successor is `a`** - not `a` itself, and not an anchor where the answer is
+/// `None`. Both of those were checked by mutation: returning `Some(a)` fails five
+/// tests including this one.
 #[test]
 fn every_anchor_is_reached_from_the_anchor_before_it() {
     for lead in 0..=2u32 {
