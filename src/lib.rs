@@ -6582,31 +6582,41 @@ impl Gallery {
     /// Written against a position rather than `&mut self` so the pairing can
     /// ask about a page it is not currently on; the caller in Task 2's
     /// `PageCtx for Gallery` is a one-liner over this.
+    ///
+    /// **`by` may be more than one page**, because `prev_anchor`'s walk steps by
+    /// a whole turn, which is 1 or 2. Handled as a loop rather than a `match` on
+    /// 1 and -1: a version that only understood single steps returns `None` for
+    /// every turn of two, which is the same shape of bug as using
+    /// `pages_in_current()` for another file's page count - correct-looking, and
+    /// invisible until a real gallery is walked.
     pub fn step_no_wrap(&self, pos: PagePos, by: isize) -> Option<PagePos> {
         if pos.index >= self.files.len() {
             return None;
         }
-        match by {
-            1 if pos.page + 1 < self.pages_in(pos.index) => {
-                Some(PagePos { index: pos.index, page: pos.page + 1 })
-            }
-            // Last page (or an ordinary file): on to the next one, at its first
-            // page. `None` at the last file rather than wrapping.
-            1 => pos
-                .index
-                .checked_add(1)
-                .filter(|&i| i < self.files.len())
-                .map(|index| PagePos { index, page: 0 }),
-            -1 if pos.page > 0 => Some(PagePos { index: pos.index, page: pos.page - 1 }),
-            // From page 0 of a file: the *last* page of the previous one, not its
-            // first, matching `prev`. `None` at the first file rather than
-            // wrapping.
-            -1 => pos.index.checked_sub(1).map(|index| PagePos {
-                index,
-                page: self.pages_in(index) - 1,
-            }),
-            _ => None,
+        let mut cur = pos;
+        for _ in 0..by.unsigned_abs() {
+            cur = match by.signum() {
+                1 if cur.page + 1 < self.pages_in(cur.index) => {
+                    PagePos { index: cur.index, page: cur.page + 1 }
+                }
+                // Last page (or an ordinary file): on to the next one, at its
+                // first page. `None` at the last file rather than wrapping.
+                1 => cur.index.checked_add(1).filter(|&i| i < self.files.len()).map(|index| PagePos {
+                    index,
+                    page: 0,
+                })?,
+                -1 if cur.page > 0 => PagePos { index: cur.index, page: cur.page - 1 },
+                // From page 0 of a file: the *last* page of the previous one, not
+                // its first, matching `prev`. `None` at the first file rather
+                // than wrapping.
+                -1 => cur.index.checked_sub(1).map(|index| PagePos {
+                    index,
+                    page: self.pages_in(index) - 1,
+                })?,
+                _ => return None,
+            };
         }
+        Some(cur)
     }
 
     pub fn len(&self) -> usize {

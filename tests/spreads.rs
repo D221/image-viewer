@@ -516,6 +516,19 @@ fn a_gallery_steps_without_wrapping_whatever_loop_back_says() {
     assert_eq!(gal.step_no_wrap(P { index: 0, page: 2 }, -1), Some(P { index: 0, page: 1 }));
     // And an index that does not exist is not a panic.
     assert_eq!(gal.step_no_wrap(P { index: 9, page: 0 }, 1), None);
+
+    // **`by` may be more than one page**, because `prev_anchor`'s walk steps by a
+    // whole turn and a turn is 1 or 2. An implementation that only understood
+    // single steps returns `None` for every turn of two, which is correct for the
+    // first anchor and wrong for every one after it - and invisible to the
+    // property tests, whose test double does handle arbitrary `by`.
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 0 }, 2), Some(P { index: 0, page: 2 }));
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 0 }, 3), Some(P { index: 1, page: 0 }));
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 2 }, -2), Some(P { index: 0, page: 0 }));
+    // A two-page step that would run off the end is `None`, not a partial answer.
+    assert_eq!(gal.step_no_wrap(P { index: 2, page: 0 }, 2), None);
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 1 }, -2), None, "past the first file");
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 0 }, -1), None);
 }
 
 /// A looping gallery's **last turn is one page**, and `next_anchor` from it wraps
