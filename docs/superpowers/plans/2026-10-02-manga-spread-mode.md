@@ -237,9 +237,17 @@ Five input classes the spec implies but does not spell out, most likely to bite 
       /// `invalidate_path`**, or a re-exported file keeps its old page's shape and
       /// every spread after it stays mis-paired for the session.
       pub fn forget_shapes(&mut self, path: &Path);
+      /// How many pages the file at `index` has. **Never `pages_in_current()`** —
+      /// that answers about `self.index`, so using it for an arbitrary position
+      /// silently answers a different question. Task 1 added this and it is pinned.
+      pub fn pages_in(&self, index: usize) -> u32;
   }
-  impl PageCtx for Gallery { /* all five methods */ }
+  impl PageCtx for Gallery { /* all SIX methods */ }
   ```
+  **Six, not five.** Task 1 added `step_no_wrap` alongside `step`: the tiling asks
+  "does this page have a partner within this gallery" (no wrap) while `next_anchor`
+  asks "where does the cursor go next" (wraps). `Gallery` already implements both, with
+  `step_no_wrap` written as a loop over `by` because a turn-length step of 2 must work.
 
 - [ ] **Step 1: Write the failing tests**
 
