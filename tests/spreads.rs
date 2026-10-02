@@ -619,14 +619,15 @@ fn a_one_page_gallery_is_a_turn_of_one_however_it_loops() {
 ///
 /// The turn is of *two*, not one, and **that depends on `lead_lone` being 0**,
 /// which is why it is passed explicitly. The anchor under test is page 0, so at
-/// `lead_lone = 1` it would be front matter and take its own turn whatever its
-/// dimensions said - the assertion would still hold, but for an entirely
-/// different reason, and the test would stop being about unknown dimensions. At
+/// `lead_lone = 1` it is front matter and `lone` answers yes whatever its
+/// dimensions said - `turn_len` is then 1 and the assertion below would fail,
+/// and the test would have stopped being about unknown dimensions. At
 /// `lead_lone = 0` the only thing that can make it a turn of one is the
 /// dimensions themselves.
 ///
-/// `shape_of` and `pairable` are asserted against page **1** instead, which is
-/// not front matter at any `lead_lone` this crate allows.
+/// `shape_of` and `pairable` are asserted against page **1** instead, and both
+/// are insensitive to `lead_lone`: neither one reads `flat`, so front matter can
+/// reach them only through `lone`.
 #[test]
 fn an_unknown_page_pairs_and_is_a_turn_of_two_until_it_is_measured() {
     struct Unknown;
