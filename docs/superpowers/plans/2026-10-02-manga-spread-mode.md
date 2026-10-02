@@ -27,11 +27,24 @@
 
 Five input classes the spec implies but does not spell out, most likely to bite first. Each is pinned to a test in the task that owns the code.
 
-1. **A folder of ordinary landscape photographs with manga mode on.** A 3:2 photo has an aspect ratio of 1.5, above `SPREAD_ASPECT`, so *every page takes a whole turn* and nothing ever pairs. That is arguably right (a landscape photo cannot share a spread with anything) but it reads as "manga mode is broken", so it must render sanely at full width. → Task 5.
-2. **A single landscape page among portrait pages** — a splash page or an insert. Must take its own turn, never be squashed into a half. This is Paperback #251 and Aidoku #939. → Task 1.
-3. **A multi-page TIFF in manga mode.** A turn straddles a page boundary, and `Gallery::prev` from page 0 lands on the *last page of the previous file*, so a turn can also straddle a file boundary. → Task 1.
-4. **An archive, re-extracted.** The `%TEMP%` directory changes when the archive does; overrides must survive that and must never be keyed on it. → Task 3.
-5. **An empty or single-image gallery in manga mode, and `loop_back` off at the ends.** No division by zero in `spread_fit`, no wrap past the last anchor, no phantom partner. → Tasks 1 and 5.
+1. **Phone-scanned manga, where every page carries an EXIF orientation tag.** A page
+   stored landscape at 1600x900 with orientation 6 *displays* as 900x1600. Read the
+   stored dims and the ratio is 1.78, above `SPREAD_ASPECT`, so **every page in the
+   volume is wrongly isolated and nothing ever pairs** — silently, on the single largest
+   category of real manga library. `page_dims` returns *stored* dims on purpose, so
+   applying the tag is a separate, load-bearing step in the cache. → Task 2.
+2. **A single landscape page among portrait pages** — a splash page, a fold-out insert, a
+   landscape layout page. Must take its own turn, never be squashed into a half. This is
+   Paperback #251 and Aidoku #939, and it is the ambiguity no aspect-ratio detector can
+   resolve. → Task 1.
+3. **A multi-page TIFF in manga mode.** A turn straddles a page boundary, and
+   `Gallery::prev` from page 0 lands on the *last page of the previous file*, so a turn
+   can also straddle a file boundary. → Task 1.
+4. **An archive, re-extracted.** The `%TEMP%` directory changes when the archive does;
+   overrides must survive that and must never be keyed on it. → Task 3.
+5. **An empty or single-image gallery in manga mode, and `loop_back` off at the ends.**
+   No division by zero in `spread_fit`, no wrap past the last anchor, no phantom partner.
+   → Tasks 1 and 5.
 
 ---
 
@@ -234,10 +247,15 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   - `page_dims_reads_stored_dimensions_without_decoding` — write a PNG with the `image`
     crate at 800x1200; assert `page_dims(p, 0) == Some((800, 1200))`.
   - `page_dims_returns_none_for_a_file_that_is_not_an_image` — a file of random bytes.
-  - `the_shape_of_a_rotated_jpeg_ignores_the_tag` — write a JPEG 1600x900 carrying EXIF
-    orientation 6; assert `page_dims` reports `(1600, 900)` (stored) while the gallery's
-    cached shape treats it as `Single`, i.e. the orientation is applied by the cache, not
-    by `page_dims`.
+  - `a_rotated_phone_scan_is_judged_as_it_displays` — Review Focus 1, and the highest
+    consequence in this plan. Write a JPEG **1600x900** carrying EXIF orientation 6.
+    Assert `page_dims` reports `(1600, 900)` — stored, by design — and that
+    `shape_of` over the gallery's cache is `Shape::Single`, because
+    `orientation_swaps_dims` says the displayed page is 900x1600. Then assert the
+    converse directly: feeding the *stored* dims to `shape_of` yields `Double`, which is
+    precisely the bug, so the test fails loudly if the orientation is ever dropped.
+    Orientation tags 5, 6, 7 and 8 all swap; 2, 3 and 4 do not, so a tag-3 rotation must
+    still be judged by its stored dims.
   - `a_learned_dimension_never_changes` — learn, then overwrite the file with a
     differently-sized image, and assert the cache still answers the old value until
     `forget_shapes`.
@@ -286,8 +304,13 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   right and get judged then — the same argument `plan_jobs` makes at `src/lib.rs:1148-1152`).
 
   - `learn_shapes(path)` answers from the cache when it can, reads `page_dims`, applies
-    `exif_orientation` to orient the result, stores, and returns. Its doc comment repeats
-    `learn_pages`' warning: this runs on every navigation, so re-reading is not free.
+    `exif_orientation`, swaps the dims when `orientation_swaps_dims(tag)` says to, stores,
+    and returns. **The swap is the load-bearing part and the reason `page_dims` returns
+    stored dims at all** — see Review Focus 1: a phone-scanned page stored 1600x900 with
+    orientation 6 has a *stored* ratio of 1.78, above `SPREAD_ASPECT`, so skipping this
+    isolates every page in the volume and nothing ever pairs. Its doc comment repeats
+    `learn_pages`' warning as well: this runs on every navigation, so re-reading is not
+    free.
   - `forget_shapes(path)` removes the entry.
   - Initialise `shapes` in `new`, `empty` and `from_file`, and clear it in the existing
     `forget_pages` (which runs whenever `files` is rebuilt).
@@ -570,12 +593,12 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   - `spread_fit_is_the_more_constrained_of_the_pages` — pages `[(400,800),(400,1600)]` in
     an `800x600` panel; assert the result is the scale the *taller* page needs, not the
     shorter one's.
-  - `a_landscape_photo_folder_leaves_every_page_a_whole_turn` — Review Focus 1. A panel
-    `800x600` and a single page `[(1200,800)]` (ratio 1.5, above `SPREAD_ASPECT`): assert
-    `spread_fit` is that page's own fit into a half, that `spread_rects` gives it the
-    half the seam is on, that nothing panics and no empty vector comes back. The point of
-    the test is that a folder of 3:2 photographs in manga mode is *one page per turn* and
-    must render sanely rather than looking broken.
+  - `a_wide_insert_page_lays_out_at_the_half_the_seam_is_on` — a panel `800x600` and one
+    page `[(1200,800)]`, the shape of a fold-out insert or a landscape layout page. Assert
+    `spread_fit` is that page's own fit into a half, that `spread_rects` gives it the half
+    the seam is on with its inner edge at the seam, that nothing panics, and that no
+    empty vector comes back. The page is *wider than its half*, which is the case a
+    naive fit would get wrong.
   - `spread_fit_survives_an_empty_panel_and_a_zero_sized_page` — panel `(0, 0)`,
     page `(0, 0)`: assert a finite, non-zero scale and no panic.
 
