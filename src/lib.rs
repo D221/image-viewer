@@ -5863,6 +5863,365 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
     Ok((extracted, encrypted))
 }
 
+// ---------------------------------------------------------------------------
+// Manga spreads: a page's shape, and the walk over turns
+// ---------------------------------------------------------------------------
+//
+// A *turn* is what the screen shows at once: one page, or two pages facing each
+// other. A page that is itself a scan of two printed pages takes a whole turn
+// alone and **re-pairs everything after it**, which is the whole reason the walk
+// below cannot be a pairing table computed once and stored - one wide page in
+// the middle of a book moves every turn behind it.
+//
+// ## The invariant: the cursor is always a turn anchor
+//
+// An *anchor* is a page a turn opens on. Every function in this section is
+// written assuming the position handed to it is an anchor, and that assumption
+// is the design rather than a convenience: it is what makes "is this page
+// alone?" one local test instead of a question about everything behind it.
+//
+// The tempting formulation is "can this page pair with the next one?", asked at
+// whatever page the cursor happens to be on. It is wrong, and wrong in the one
+// case a reader notices:
+//
+//     page 4 is portrait and page 5 is a fold-out, so 4 "cannot pair with 5",
+//     so 4 is alone.  False: 4 is the second half of {3, 4}.
+//
+// Nothing local to a page can tell "the first half of a pair" from "alone",
+// because that depends on what happened *behind* it. So the question is only
+// ever asked at an anchor, where by construction nothing paired from behind,
+// and `next_anchor`/`prev_anchor` are what keep the cursor at one. `lone`
+// carries this in its doc comment; that comment is load-bearing.
+//
+// ## No page map, and why that is affordable
+//
+// Mihon keeps a `TreeSet` of isolated page indices, because it looks up an
+// arbitrary prefix of a chapter of unknown length. Aidoku keeps a set *and* an
+// `shiftIsolation(after:, by:)` to repair its indices when it physically inserts
+// split pages. Kavita precomputes the whole pairing table server-side and
+// invalidates it when a file changes. None of that is needed here, and each of
+// those costs is a cost this design would really pay: a precomputed table has
+// to be rebuilt whenever a dimension is learned, a file is re-exported, or the
+// filter changes, and a stale entry is a *wrong pairing*, which is invisible
+// until you are three pages into the wrong book.
+//
+// Instead every query is relative to a cursor that is always an anchor, so both
+// directions are a bounded number of local reads: forward is one `turn_len`,
+// backward is two `pairable` calls. The four questions those need - step, key,
+// dimensions, override - are exactly `PageCtx`.
+//
+// ## The irreducible ambiguity, and why it is survivable
+//
+// A single landscape page (a splash page, a fold-out insert) and a scan of two
+// printed pages are geometrically identical, both about 1.414, and no
+// aspect-ratio detector can separate them. Every reader in the field has this
+// bug: Paperback #251, "the double page always start on the left panel"; Aidoku
+// #939, wide images "forced into double-page layout, resulting in black screen".
+//
+// Two things contain it. `pairable`'s tolerance check means a landscape page
+// will not pair with a portrait one, so it takes its own turn rather than being
+// squashed into a half. And a turn's halves are drawn at one shared scale, so a
+// partner that turns out to be wrong shows with a gap under it rather than
+// distorted. The detector's only job is **whether to look for a partner**,
+// never which side; a wrong guess costs a pairing, not a broken picture. A
+// user override beats the detector outright, which is why `PageCtx` asks for one
+// separately instead of folding it into the dimensions.
+
+/// A screen rectangle as `[x, y, width, height]`. Plain floats rather than
+/// `egui::Rect` so it can be tested: this module has no egui dependency on
+/// purpose.
+pub type Rect4 = [f32; 4];
+
+/// The aspect ratio above which an untagged page is taken to be a scan of two
+/// printed pages, and so takes a whole turn to itself.
+///
+/// 1.2 and not 1.0, which is what most readers use: a real page is about 0.707
+/// and a real spread about 1.414, so a threshold of 1.0 sits on the midpoint and
+/// would call a square-ish single page a spread. Above the threshold, not at or
+/// below it - a page exactly at 1.2 is a page.
+pub const SPREAD_ASPECT: f32 = 1.2;
+
+/// How far two pages' aspect ratios may differ and still be one turn.
+///
+/// Mihon's `pairAspectTolerance`. This is the check that keeps a landscape page
+/// out of a pair rather than squashing it into a half, and 0.1 is loose enough
+/// that two scans of the same book - slightly cropped, slightly rotated -
+/// still pair.
+pub const PAIR_ASPECT_TOLERANCE: f32 = 0.1;
+
+/// How many pages at the front of a gallery are shown one to a turn: the cover
+/// alone, then pairs.
+///
+/// 1 because that is how a book opens, and because the most-reported pairing
+/// failure in every mature reader is the opposite case - a scan whose blank
+/// front-matter page was dropped, which wants 0. It is a setting because which
+/// one is right depends on the book and not on the format.
+pub const LEAD_LONE_DEFAULT: u32 = 1;
+
+/// The most leading pages [`LEAD_LONE_DEFAULT`] can be raised to.
+///
+/// A bound rather than a free number because the setting is nudged with a key,
+/// and a gallery is only ever asked about its first few pages - past that the
+/// question "is this page front matter?" has stopped having an answer.
+pub const LEAD_LONE_MAX: u32 = 4;
+
+/// What a page looks like, which decides whether it takes a whole turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Single,
+    Double,
+}
+
+/// One page of the flat sequence a gallery walks.
+///
+/// A position rather than a key, because the walk is arithmetic: `step` and
+/// `flat` are what it needs, and both are cheaper over an index than over a
+/// `HashMap` lookup. The same pair plus a path is what every pixel cache is
+/// keyed on, so nothing here has to invent an identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PagePos {
+    /// Which file in the gallery.
+    pub index: usize,
+    /// Which page within a multi-page document, 0-based. Always 0 for an
+    /// ordinary image.
+    pub page: u32,
+}
+
+/// The four facts the pairing walk needs, and nothing else.
+///
+/// A trait rather than a parameter struct because the real implementation is a
+/// `Gallery` plus a shape cache and the test implementation is a `Vec<Shape>`,
+/// and neither can be built from the other. Every method is a read: the walk
+/// makes no decision that cannot be recomputed from these, which is what keeps
+/// a wrong pairing debuggable.
+///
+/// No default bodies on purpose - a default would be a guess about a gallery
+/// this section cannot see, and the guess would be silently wrong for archives
+/// and for a `page_counts` that has not been learned yet.
+pub trait PageCtx {
+    /// Step the flat page cursor by `by` pages, honouring `loop_back`. `None`
+    /// past either end when looping is off. **The only primitive that moves.**
+    fn step(&self, from: PagePos, by: isize) -> Option<PagePos>;
+
+    /// The key for a position, for the shape cache and the loader. `None` for a
+    /// position that does not exist.
+    fn key(&self, pos: PagePos) -> Option<ImgKey>;
+
+    /// Cached display dimensions. `None` = not learned yet, and that is a state
+    /// the pairing is built to survive rather than an error.
+    fn dims(&self, pos: PagePos) -> Option<(u32, u32)>;
+
+    /// The user's override for this page, if any. Beats the detector outright.
+    fn override_shape(&self, pos: PagePos) -> Option<Shape>;
+
+    /// The page's ordinal in the whole gallery, so it can be compared with
+    /// `lead_lone`. `None` when a preceding file's page count is not yet
+    /// learned - only ever asked about the first few pages of a gallery, where
+    /// the cursor's having arrived there guarantees the counts are known.
+    fn flat(&self, pos: PagePos) -> Option<usize>;
+}
+
+/// A page's width-to-height ratio, or `f32::NAN` when it cannot be measured.
+///
+/// `NAN` rather than a sentinel number, because every comparison against it is
+/// false - and that is what makes the two unknown cases fall out correctly,
+/// which is why `pairable` needs both a `dims().is_none()` arm and this:
+///
+/// * **No dimensions at all** is optimistic, and the `is_none()` arm is what
+///   says so. Refusing to pair on missing data would strand a turn, and a
+///   stranded turn is worse than a pair that turns out to be wrong.
+/// * **A height of zero** is a page that was measured and still has no ratio, so
+///   it falls through to the `NAN` comparison and will not pair. Both directions
+///   of that asymmetry are the safe ones: a lone turn is visible on screen, a
+///   wrong partner is not.
+fn ratio(pos: PagePos, ctx: &dyn PageCtx) -> f32 {
+    match ctx.dims(pos) {
+        Some((w, h)) if h > 0 => w as f32 / h as f32,
+        _ => f32::NAN,
+    }
+}
+
+/// What a page looks like: the user's override if there is one, otherwise
+/// whether it is wider than a real page is.
+///
+/// **The dimensions must be the ones the page _displays_ at.** A phone scan
+/// stored 1600x900 with EXIF orientation 6 displays as 900x1600, and the stored
+/// pair's ratio is 1.78 - above [`SPREAD_ASPECT`] - so *every* page in the
+/// volume is judged a spread, every page takes a whole turn to itself, and
+/// nothing ever pairs. That failure is silent and it lands on the largest
+/// category of real manga library there is, which is why whatever fills
+/// [`PageCtx::dims`] applies the orientation tag instead of reporting the
+/// stored size.
+///
+/// Unknown dimensions are [`Shape::Single`], the optimistic reading: an
+/// unmeasured page is not a wide one.
+///
+/// A zero height is never a division by zero - `h > 0` is checked before the
+/// ratio is formed, not after.
+pub fn shape_of(pos: PagePos, ctx: &dyn PageCtx) -> Shape {
+    if let Some(s) = ctx.override_shape(pos) {
+        return s;
+    }
+    match ctx.dims(pos) {
+        Some((w, h)) if h > 0 && (w as f32 / h as f32) > SPREAD_ASPECT => Shape::Double,
+        _ => Shape::Single,
+    }
+}
+
+/// Whether two adjacent pages can share a turn.
+///
+/// Three conditions, and each one is a way the obvious alternative is wrong:
+///
+/// * **Neither page is a spread.** A scan of two printed pages is a whole turn
+///   by itself; pairing it would put two real pages and one scan in one
+///   viewport, all three squashed.
+/// * **Their ratios agree to within [`PAIR_ASPECT_TOLERANCE`].** This is what
+///   keeps a landscape page out of a pair - Paperback #251's "the double page
+///   always start on the left panel" and Aidoku #939's "forced into double-page
+///   layout, resulting in black screen" - without any content-based detection,
+///   which is out of scope because it would need a decode before the pairing is
+///   known.
+/// * **An unknown dimension never blocks the pair.** See [`ratio`]: optimism
+///   here costs a pairing that the shared scale makes visible as a gap, and
+///   strictness costs a turn that never opens.
+///
+/// What this deliberately does **not** answer is whether `a` is the first half
+/// of its turn. That is [`lone`]'s question, and `lone` may only be asked at an
+/// anchor.
+pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
+    shape_of(a, ctx) != Shape::Double
+        && shape_of(b, ctx) != Shape::Double
+        && (ctx.dims(a).is_none()
+            || ctx.dims(b).is_none()
+            || (ratio(a, ctx) - ratio(b, ctx)).abs() <= PAIR_ASPECT_TOLERANCE)
+}
+
+/// Does the turn anchored at `s` hold only that page?
+///
+/// **VALID ONLY AT AN ANCHOR** - a page some turn opens on - which is the
+/// cursor's only ever position, by the invariant this section is built on. At a
+/// non-anchor this function is *wrong*, and the example is worth more than the
+/// rule:
+///
+/// ```text
+/// page 4 is portrait, page 5 is a landscape insert
+///   -> 4 "cannot pair with 5", so this answers "4 is alone"
+///   -> but 4 is the second half of {3, 4}
+/// ```
+///
+/// Asking whether `j` pairs with `j+1` cannot tell "the first half of a pair"
+/// from "alone", because the answer depends on what happened *behind* `j`. At
+/// an anchor nothing paired from behind, so the same local test is a complete
+/// answer. **This is the one thing here that must not be "simplified"** into a
+/// predicate evaluated wherever the cursor happens to be: every such
+/// formulation passes a forward-only test, because forward pairing never looks
+/// back, and is wrong from the first landscape page onwards - a wrong pairing
+/// being invisible until you are three pages into the wrong book.
+///
+/// [`prev_anchor`] is written out longhand rather than calling this on the page
+/// before the cursor, for the reason in the example above.
+///
+/// Three reasons to be alone, in the order they are asked:
+///
+/// * **Front matter.** The first `lead_lone` pages of the gallery, by flat
+///   ordinal, because a book opens on its cover alone. `0` for a scan whose
+///   blank first page was dropped, which is the most-reported pairing complaint
+///   in every mature reader (Komga #123, #2132; OpenComic #456; Paperback #251).
+/// * **A spread**, which takes a whole turn and re-pairs everything after it.
+///   **This arm is redundant, and that is verified rather than assumed.**
+///   `pairable` already refuses any page whose `shape_of` is `Double`, in either
+///   position, so for every wide page the third arm's `!pairable` is true anyway.
+///   Deleting this arm was tried and changes no answer on any input - including
+///   the design's own trace - so it is *not* the load-bearing guard the design
+///   assumed. The arm that is load-bearing is the first one, `flat < lead_lone`:
+///   deleting it breaks four tests at once. It is kept because it is what the
+///   specification states, and because it is the only statement of the
+///   re-pairing rule visible at the point where the re-pairing happens.
+/// * **Nothing to pair with**: the next page is a spread, it is a different
+///   shape of page, or there is no next page at all.
+pub fn lone(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> bool {
+    ctx.flat(anchor).is_some_and(|f| f < lead_lone as usize)
+        || shape_of(anchor, ctx) == Shape::Double
+        || match ctx.step(anchor, 1) {
+            Some(next) => !pairable(anchor, next, ctx),
+            None => true,
+        }
+}
+
+/// How many pages the turn anchored at `s` holds: one, or two.
+///
+/// There is no `Turn` type on purpose. A turn is `[anchor] + maybe [anchor+1]`,
+/// which every caller can already express, and a struct over it would only add
+/// a conversion to get wrong.
+pub fn turn_len(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> usize {
+    if lone(anchor, lead_lone, ctx) {
+        1
+    } else {
+        2
+    }
+}
+
+/// The anchor after `a`, or `None` past the end with looping off.
+///
+/// Forward is one addition, and that is the whole reason this design needs no
+/// pairing table: the next anchor is this turn's length away, and a turn's
+/// length is a local test.
+pub fn next_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
+    ctx.step(a, turn_len(a, lead_lone, ctx) as isize)
+}
+
+/// The anchor before `a`, or `None` before the start.
+///
+/// Backward is two local reads rather than one, and the second is the whole
+/// trick. Page `b` *is* the anchor before `a` when `b` took a whole turn alone;
+/// otherwise `b` was the **second** half of a pair and the anchor is `b-1`. The
+/// two cases are told apart by asking whether `b` paired with the page behind it
+/// - a question about the past, which is exactly what [`lone`] cannot be asked.
+///
+/// **Written out longhand rather than as `if lone(b)`.** That is the trap this
+/// section exists to survive: `lone(b)` asks whether `b` pairs with `b+1`, so
+/// for `b = 4` under a landscape page 5 it answers "alone" when 4 is the second
+/// half of {3, 4}. The backward walk would land the cursor on a page that is not
+/// an anchor, and every turn from there on would be wrong.
+///
+/// **KNOWN DEFECT - the two cases above are not exhaustive, and the third breaks
+/// this function.** `pairable(b-1, b)` cannot distinguish "`b-1` is an anchor
+/// that paired" from "`b-1` is itself the second half of a pair", and those want
+/// opposite answers:
+///
+/// ```text
+/// pages [Single, Single, Single, Double], lead_lone = 0
+///   forward:  {0,1} paired | {2} alone (3 is wide) | {3} wide
+///   so the anchors are 0, 2, 3 - page 2 is an ANCHOR.
+///   walking back from 3, b = 2, and pairable(1, 2) is *true* (both portrait),
+///   so this reads 2 as "the second of {1,2}" and returns 1, skipping turn {2}.
+/// ```
+///
+/// Getting it right needs "is `b-1` an anchor?", which is the mirror of the
+/// question [`lone`] is forbidden from being asked, and it propagates backward
+/// through a whole run of pairs: in the run `[Single, Single, Single]` above,
+/// page 2's anchor-ness is settled only by page 0. That is a walk, not two reads.
+/// Under `loop_back` - the default - there is no run start at all, `step` never
+/// returns `None`, and a naive recursion does not terminate: a verified attempt
+/// overflowed the stack on a four-page all-portrait gallery.
+///
+/// So this is left as specified rather than "fixed" into something that is
+/// correct in the common case and hangs or loops in the rest. It needs a
+/// decision about how the walk is bounded, which is not one this function can
+/// make for itself. `walking_backwards_returns_to_the_anchor_it_started_from`
+/// and `backwards_agrees_with_forwards` fail against it and are the evidence.
+pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
+    let Some(b) = ctx.step(a, -1) else { return None };
+    let took_alone = ctx.flat(b).is_some_and(|f| f < lead_lone as usize)
+        || shape_of(b, ctx) == Shape::Double
+        || !matches!(ctx.step(b, -1), Some(prev) if pairable(prev, b, ctx));
+    Some(if took_alone {
+        b
+    } else {
+        ctx.step(b, -1).expect("paired with prev, which exists")
+    })
+}
+
 /// A simple gallery state: a list of files and a current index.
 #[derive(Debug, Clone)]
 pub struct Gallery {
