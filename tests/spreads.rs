@@ -206,9 +206,18 @@ fn a_turn_runs_cover_pairs_a_wide_page_then_pairs_again() {
 /// Exhaustive over the *shapes* rather than over the page counts a reader
 /// happens to have, because the interesting inputs are the mixtures: a run of
 /// pairs, a wide page mid-run, a wide page at either end, and the offset moving
-/// where the odd page out lands. Looping is off, because that is the case where
-/// the walk has to terminate - `a_looping_gallery_wraps_at_both_ends` covers the
-/// other one.
+/// where the odd page out lands.
+///
+/// **Looping is off here, deliberately.** "Every page is in exactly one turn" is
+/// a claim about a *linear* tiling. A looping gallery's tiling is a cycle: a
+/// four-page all-`Single` gallery tiles `{0,1}{2,3}` and then wraps onto page 0
+/// again, and an odd-length one has a turn that straddles the wrap and so names
+/// the same page twice. That is correct behaviour, not a defect, and asserting a
+/// partition over it would be asserting something the design does not promise.
+/// The looping cases have their own tests -
+/// `a_looping_gallery_wraps_at_both_ends` and
+/// `the_only_page_of_a_looping_gallery_is_its_own_predecessor` - because they are
+/// about the two ways `prev_anchor`'s walk can end rather than about the tiling.
 fn any_gallery() -> impl Strategy<Value = (TestGallery, u32)> {
     (1usize..=12, 0u32..=2).prop_flat_map(|(len, lead)| {
         proptest::collection::vec(any::<bool>(), len).prop_map(move |wide| {
@@ -237,14 +246,21 @@ fn singles(len: usize) -> TestGallery {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// The coverage property: a forward walk lands every page in exactly one
-    /// turn, no turn overlaps another, and the anchors strictly increase.
+    /// The tiling property: the turns **partition** the gallery. Every page is in
+    /// exactly one turn - none in two, none missing - and the anchors strictly
+    /// increase.
+    ///
+    /// Asserted as a sorted multiset rather than a sequence, so it pins the
+    /// property that matters and not the order the walk happened to use: a turn
+    /// that claimed a page another turn already had would show up as a duplicate
+    /// and displace some other page, so equality with `0..n` catches overlap and
+    /// stranding in the same comparison.
     ///
     /// This is the check that catches an off-by-one in `turn_len` - a walk that
-    /// stepped by 2 unconditionally would leave the last page of an odd-length
-    /// gallery stranded, and one that stepped by 1 would pair nothing at all.
+    /// stepped by 2 unconditionally would strand the last page of an odd-length
+    /// gallery, and one that stepped by 1 would pair nothing at all.
     #[test]
-    fn walking_forwards_visits_every_page_exactly_once((g, lead) in any_gallery()) {
+    fn the_turns_partition_the_gallery((g, lead) in any_gallery()) {
         let anchors = g.anchors(lead);
         prop_assert!(!anchors.is_empty(), "a non-empty gallery has at least one anchor");
 
@@ -258,37 +274,41 @@ proptest! {
             previous = Some(flat);
             covered.extend(g.flat_of(&g.turn_at(anchor, lead)));
         }
-        prop_assert_eq!(covered, (0..g.total_pages()).collect::<Vec<_>>(),
-            "every page is in exactly one turn, in order and without overlap");
+
+        let mut sorted = covered.clone();
+        sorted.sort_unstable();
+        prop_assert_eq!(sorted, (0..g.total_pages()).collect::<Vec<_>>(),
+            "every page is in exactly one turn: no overlap, none missing");
+        prop_assert!(covered.iter().all(|&f| f < g.total_pages()),
+            "no turn names a page outside the gallery");
     }
 
-    /// Walking back from the last anchor returns to the first, one `prev_anchor`
-    /// per turn, and then reports that there is nothing before it.
+    /// Forward to the far end and then back the same number of times returns to
+    /// the start - the round trip, over every shape pattern.
     ///
-    /// This is the property the naive "can this page pair with the next one?"
-    /// predicate fails and a forward-only test does not, which is why it is a
-    /// property test over every shape pattern rather than the one hand-written
-    /// trace.
-    ///
-    /// **KNOWN FAILING against the specified `prev_anchor`.** Minimal case is
-    /// `[Single, Single, Single, Double]` with `lead_lone = 0`: the forward walk
-    /// gives `{0,1} {2} {3}` and anchors `[0,2,3]`, but walking back from 3
-    /// returns 1, because `pairable(1,2)` is true and the formula cannot tell
-    /// that page 2 is an anchor in its own right from a page that is the second
-    /// half of a pair. See the `KNOWN DEFECT` note on `prev_anchor` in
-    /// `src/lib.rs`. Kept red deliberately: it is the evidence, and turning it
-    /// off would hide the one thing this test exists to find.
+    /// Split out from the partition property because it is the only thing that
+    /// exercises `prev_anchor`, and it is the property every local formulation of
+    /// `prev_anchor` fails: they cannot tell "b is a lone anchor" from "b is a
+    /// second half whose forward neighbour happens to be unpairable". The case
+    /// that pins it is `[Single, Single, Single, Double]`, at `lead_lone` 0 and 1
+    /// alike.
     #[test]
-    fn walking_backwards_returns_to_the_anchor_it_started_from((g, lead) in any_gallery()) {
-        let forwards = g.anchors(lead);
-        prop_assert!(!forwards.is_empty());
+    fn walking_forwards_then_backwards_returns_to_the_start((g, lead) in any_gallery()) {
+        let anchors = g.anchors(lead);
+        prop_assert!(!anchors.is_empty());
 
-        let mut cur = *forwards.last().unwrap();
-        for &expected in forwards[..forwards.len() - 1].iter().rev() {
+        let mut cur = *anchors.last().unwrap();
+        for &expected in anchors[..anchors.len() - 1].iter().rev() {
             cur = prev_anchor(cur, lead, &g).expect("every anchor but the first has one before it");
-            prop_assert_eq!(g.flat(cur), g.flat(expected));
+            prop_assert_eq!(
+                g.flat(cur),
+                g.flat(expected),
+                "round trip over {:?} at lead {}",
+                g,
+                lead
+            );
         }
-        prop_assert_eq!(prev_anchor(forwards[0], lead, &g), None,
+        prop_assert!(prev_anchor(anchors[0], lead, &g).is_none(),
             "nothing comes before the first anchor");
     }
 }
@@ -442,6 +462,45 @@ fn a_looping_gallery_wraps_at_both_ends() {
     assert_eq!(g.flat_of(&g.anchors(0)), vec![0, 2]);
     assert_eq!(next_anchor(g.page_at(2).unwrap(), 0, &g), g.page_at(0));
     assert_eq!(prev_anchor(g.page_at(0).unwrap(), 0, &g), g.page_at(2));
+}
+
+/// A one-page gallery with looping on is its own predecessor, in both directions.
+///
+/// This is the case that decides how `prev_anchor` is written. The only turn is
+/// `{0}`, so walking back from page 0 has to land on page 0 - returning `None`
+/// would mean the cursor could never step back, and worse, could never step
+/// forward either, because `turn_len` would be asked about a position the walk
+/// had already rejected.
+///
+/// It is the one input where **comparing against the successor instead of the
+/// anchor is the difference between working and not**. Testing `anchor == a` at
+/// the top of the loop returns `None` here, because the loop starts on page 0
+/// and page 0 is the position being asked about; the answer only appears one
+/// `step` later, as the successor of a real anchor.
+///
+/// Pinned separately because nothing else covers it: every other gallery in this
+/// file has a front page that is genuinely in front of something.
+#[test]
+fn the_only_page_of_a_looping_gallery_is_its_own_predecessor() {
+    for shapes in [vec![Single], vec![Double]] {
+        let g = TestGallery {
+            docs: vec![shapes],
+            loop_back: true,
+        };
+        let only = g.page_at(0).unwrap();
+        assert_eq!(prev_anchor(only, 0, &g), Some(only), "{g:?}");
+        // Forward wraps onto itself for the same reason. `turn_len` here is 2,
+        // because with looping on `step(0, 1)` is page 0 and `pairable(0, 0)`
+        // compares the page with itself - an artefact of wrapping rather than
+        // anything a real one-image gallery does, so the length is not asserted.
+        assert_eq!(next_anchor(only, 0, &g), Some(only), "{g:?}");
+    }
+
+    // With looping off the same gallery has nothing before it, which is the
+    // other half of the distinction: `Some(only)` above is a fact about
+    // looping, not about one-page galleries.
+    let open = TestGallery::one_doc(vec![Single]);
+    assert_eq!(prev_anchor(open.page_at(0).unwrap(), 0, &open), None);
 }
 
 /// An unmeasured page is judged `Single` and **pairs** optimistically, so a turn

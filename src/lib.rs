@@ -6128,15 +6128,15 @@ pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
 ///   blank first page was dropped, which is the most-reported pairing complaint
 ///   in every mature reader (Komga #123, #2132; OpenComic #456; Paperback #251).
 /// * **A spread**, which takes a whole turn and re-pairs everything after it.
-///   **This arm is redundant, and that is verified rather than assumed.**
-///   `pairable` already refuses any page whose `shape_of` is `Double`, in either
-///   position, so for every wide page the third arm's `!pairable` is true anyway.
-///   Deleting this arm was tried and changes no answer on any input - including
-///   the design's own trace - so it is *not* the load-bearing guard the design
-///   assumed. The arm that is load-bearing is the first one, `flat < lead_lone`:
-///   deleting it breaks four tests at once. It is kept because it is what the
-///   specification states, and because it is the only statement of the
-///   re-pairing rule visible at the point where the re-pairing happens.
+///   **This arm is redundant with `pairable`'s own `shape_of(a) != Double` check,
+///   and is kept for legibility.** Deleting it was tried and changes no answer on
+///   any input, because the third arm's `!pairable` is true for every wide page
+///   anyway. It stays because it is the only statement of the re-pairing rule
+///   visible at the point where re-pairing is decided, and because someone will
+///   otherwise try to "remove the duplication". The arm that is genuinely
+///   load-bearing is the first one, `flat < lead_lone`: deleting that breaks the
+///   trace, `leading_pages_can_be_lone`, `backwards_agrees_with_forwards` and the
+///   round-trip property at once.
 /// * **Nothing to pair with**: the next page is a spread, it is a different
 ///   shape of page, or there is no next page at all.
 pub fn lone(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> bool {
@@ -6170,56 +6170,75 @@ pub fn next_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
     ctx.step(a, turn_len(a, lead_lone, ctx) as isize)
 }
 
+/// How many anchors [`prev_anchor`] will consider before giving up.
+///
+/// **A bound on a walk that terminates on its own, not the walk's cost.** The
+/// walk exits as soon as `step` returns `None` at the front of a non-looping
+/// gallery, or as soon as it wraps onto page 0 of a looping one, so this only
+/// ever bites on a gallery larger than it names. Its value is deliberately far
+/// above any plausible gallery rather than tuned: being generous costs nothing,
+/// because the loop cannot reach the number without the answer already being
+/// known.
+pub const PREV_SCAN_LIMIT: usize = 1 << 20;
+
 /// The anchor before `a`, or `None` before the start.
 ///
-/// Backward is two local reads rather than one, and the second is the whole
-/// trick. Page `b` *is* the anchor before `a` when `b` took a whole turn alone;
-/// otherwise `b` was the **second** half of a pair and the anchor is `b-1`. The
-/// two cases are told apart by asking whether `b` paired with the page behind it
-/// - a question about the past, which is exactly what [`lone`] cannot be asked.
-///
-/// **Written out longhand rather than as `if lone(b)`.** That is the trap this
-/// section exists to survive: `lone(b)` asks whether `b` pairs with `b+1`, so
-/// for `b = 4` under a landscape page 5 it answers "alone" when 4 is the second
-/// half of {3, 4}. The backward walk would land the cursor on a page that is not
-/// an anchor, and every turn from there on would be wrong.
-///
-/// **KNOWN DEFECT - the two cases above are not exhaustive, and the third breaks
-/// this function.** `pairable(b-1, b)` cannot distinguish "`b-1` is an anchor
-/// that paired" from "`b-1` is itself the second half of a pair", and those want
-/// opposite answers:
+/// **Backward is O(distance from the front), and it has to be.** Forward is one
+/// addition, because an anchor knows its own turn length without asking anything.
+/// Going backwards there is no such thing to ask, and the reason is the same
+/// asymmetry this whole section is built on:
 ///
 /// ```text
 /// pages [Single, Single, Single, Double], lead_lone = 0
 ///   forward:  {0,1} paired | {2} alone (3 is wide) | {3} wide
-///   so the anchors are 0, 2, 3 - page 2 is an ANCHOR.
-///   walking back from 3, b = 2, and pairable(1, 2) is *true* (both portrait),
-///   so this reads 2 as "the second of {1,2}" and returns 1, skipping turn {2}.
+///   so page 2 is an ANCHOR - it went alone because nothing was ahead of it.
+///   but pairable(1, 2) is true (both portrait), so "could 2 pair with the page
+///   behind it?" cannot tell that apart from "2 is the second half of {1,2}".
 /// ```
 ///
-/// Getting it right needs "is `b-1` an anchor?", which is the mirror of the
-/// question [`lone`] is forbidden from being asked, and it propagates backward
-/// through a whole run of pairs: in the run `[Single, Single, Single]` above,
-/// page 2's anchor-ness is settled only by page 0. That is a walk, not two reads.
-/// Under `loop_back` - the default - there is no run start at all, `step` never
-/// returns `None`, and a naive recursion does not terminate: a verified attempt
-/// overflowed the stack on a four-page all-portrait gallery.
+/// So this **rebuilds the tiling forward from page 0** and returns the anchor
+/// that led to `a`. Every step is in-memory arithmetic over dimensions that are
+/// already cached, and the walk is only ever as long as the distance back to the
+/// first page - which for a manga volume is a few hundred cheap reads against a
+/// decode measured in hundreds of milliseconds.
 ///
-/// So this is left as specified rather than "fixed" into something that is
-/// correct in the common case and hangs or loops in the rest. It needs a
-/// decision about how the walk is bounded, which is not one this function can
-/// make for itself. `walking_backwards_returns_to_the_anchor_it_started_from`
-/// and `backwards_agrees_with_forwards` fail against it and are the evidence.
+/// **Do not "optimise" this back into a two-candidate local test.** There is no
+/// such rule. Three were tried and all three are wrong, each on
+/// `[Single, Single, Single, Double]`:
+///
+/// * `lone(b)` - wrong at `lead_lone = 1`, returns 2 where the answer is 1.
+/// * `shape(b) == Double || !pairable(b-1, b) || front(b)` - wrong at
+///   `lead_lone = 0`, returns 1 where the answer is 2.
+/// * "is `b` an anchor, i.e. does its own `turn_len` land on `a`?" - wrong at
+///   `lead_lone = 1`, returns 2 where the answer is 1.
+///
+/// Anchor-ness of `b` depends on `b-1`'s turn length, which depends on `b-2`'s,
+/// so it is only settled by walking back to the front. The forward direction
+/// escapes this because it always starts from a known anchor; the backward
+/// direction has no such starting point, which is why it walks instead.
 pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
-    let Some(b) = ctx.step(a, -1) else { return None };
-    let took_alone = ctx.flat(b).is_some_and(|f| f < lead_lone as usize)
-        || shape_of(b, ctx) == Shape::Double
-        || !matches!(ctx.step(b, -1), Some(prev) if pairable(prev, b, ctx));
-    Some(if took_alone {
-        b
-    } else {
-        ctx.step(b, -1).expect("paired with prev, which exists")
-    })
+    let zero = PagePos { index: 0, page: 0 };
+    let mut anchor = zero;
+    for _ in 0..PREV_SCAN_LIMIT {
+        let next = match ctx.step(anchor, turn_len(anchor, lead_lone, ctx) as isize) {
+            Some(n) => n,
+            None => return None,
+        };
+        // Compared against the SUCCESSOR, never against `anchor` itself: with a
+        // one-page gallery and looping on, page 0 is its own predecessor, and
+        // testing `anchor == a` at the top of the loop would return `None` there
+        // and strand the cursor on a gallery it can never leave.
+        if next == a {
+            return Some(anchor);
+        }
+        if next == zero {
+            // Wrapped a whole lap without reaching `a`, which with looping on
+            // means `a` is not in the tiling this walk is following.
+            return None;
+        }
+        anchor = next;
+    }
+    None
 }
 
 /// A simple gallery state: a list of files and a current index.
