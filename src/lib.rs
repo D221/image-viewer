@@ -6049,26 +6049,6 @@ pub trait PageCtx {
     fn flat(&self, pos: PagePos) -> Option<usize>;
 }
 
-/// A page's width-to-height ratio, or `f32::NAN` when it cannot be measured.
-///
-/// `NAN` rather than a sentinel number, because every comparison against it is
-/// false - and that is what makes the two unknown cases fall out correctly,
-/// which is why `pairable` needs both a `dims().is_none()` arm and this:
-///
-/// * **No dimensions at all** is optimistic, and the `is_none()` arm is what
-///   says so. Refusing to pair on missing data would strand a turn, and a
-///   stranded turn is worse than a pair that turns out to be wrong.
-/// * **A height of zero** is a page that was measured and still has no ratio, so
-///   it falls through to the `NAN` comparison and will not pair. Both directions
-///   of that asymmetry are the safe ones: a lone turn is visible on screen, a
-///   wrong partner is not.
-fn ratio(pos: PagePos, ctx: &dyn PageCtx) -> f32 {
-    match ctx.dims(pos) {
-        Some((w, h)) if h > 0 => w as f32 / h as f32,
-        _ => f32::NAN,
-    }
-}
-
 /// What a page looks like: the user's override if there is one, otherwise
 /// whether it is wider than a real page is.
 ///
@@ -6109,19 +6089,45 @@ pub fn shape_of(pos: PagePos, ctx: &dyn PageCtx) -> Shape {
 ///   layout, resulting in black screen" - without any content-based detection,
 ///   which is out of scope because it would need a decode before the pairing is
 ///   known.
-/// * **An unknown dimension never blocks the pair.** See [`ratio`]: optimism
-///   here costs a pairing that the shared scale makes visible as a gap, and
-///   strictness costs a turn that never opens.
+/// * **An unknown dimension never blocks the pair.** Optimism here costs a
+///   pairing that the shared scale makes visible as a gap, and strictness costs
+///   a turn that never opens.
+///
+/// The two ways a ratio can be unavailable are therefore treated differently,
+/// and the asymmetry is deliberate:
+///
+/// * **No dimensions at all** pairs. There is nothing to compare against, and
+///   refusing would strand a turn for as long as the dimension read takes.
+/// * **A height of zero** does not pair. The page was measured and still has no
+///   ratio, so it is not missing data - it is a page that cannot be sized.
+///
+/// Both directions of that are the safe ones: a lone turn is visible on screen,
+/// a wrong partner is not. `a_shape_at_the_threshold_is_not_a_spread` pins the
+/// zero-height case for both `shape_of` and this.
 ///
 /// What this deliberately does **not** answer is whether `a` is the first half
 /// of its turn. That is [`lone`]'s question, and `lone` may only be asked at an
 /// anchor.
+///
+/// Each page's dimensions are read **once** into a local and reused. That is not
+/// only tidiness: [`PageCtx::dims`] is a `HashMap` lookup keyed on a `PathBuf`,
+/// and [`prev_anchor`] calls this once per page of the walk, so writing the
+/// three conditions as written above would cost six lookups per page where two
+/// will do.
 pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
-    shape_of(a, ctx) != Shape::Double
-        && shape_of(b, ctx) != Shape::Double
-        && (ctx.dims(a).is_none()
-            || ctx.dims(b).is_none()
-            || (ratio(a, ctx) - ratio(b, ctx)).abs() <= PAIR_ASPECT_TOLERANCE)
+    let (da, db) = (ctx.dims(a), ctx.dims(b));
+    if shape_of(a, ctx) == Shape::Double || shape_of(b, ctx) == Shape::Double {
+        return false;
+    }
+    // An unknown dimension never blocks the pair, so the tolerance check is only
+    // reached when both are known.
+    match (da, db) {
+        (Some((aw, ah)), Some((bw, bh))) if ah > 0 && bh > 0 => {
+            (aw as f32 / ah as f32 - bw as f32 / bh as f32).abs() <= PAIR_ASPECT_TOLERANCE
+        }
+        (Some((_, 0)), _) | (_, Some((_, 0))) => false,
+        _ => true,
+    }
 }
 
 /// Does the turn anchored at `s` hold only that page?
@@ -6146,8 +6152,10 @@ pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
 /// back, and is wrong from the first landscape page onwards - a wrong pairing
 /// being invisible until you are three pages into the wrong book.
 ///
-/// [`prev_anchor`] is written out longhand rather than calling this on the page
-/// before the cursor, for the reason in the example above.
+/// The same asymmetry is why [`prev_anchor`] cannot ask this question either,
+/// and does not try: it rebuilds the tiling forward from page 0 instead of
+/// testing the page before the cursor, because every local test of that page has
+/// already been shown wrong. Its doc comment lists the three that were tried.
 ///
 /// Three reasons to be alone, in the order they are asked:
 ///
@@ -6272,11 +6280,17 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
             Some(n) => n,
             None => return None,
         };
-        // Compared against the SUCCESSOR, never against `anchor` itself. With a
-        // one-page gallery the only turn is `{0}`, so walking back from page 0
-        // has to land on page 0; testing `anchor == a` at the top of the loop
-        // returns `None` there, because the walk starts *on* the page being
-        // asked about and the answer only appears one `step` later.
+        // Compared against the SUCCESSOR, and that is the whole contract: the
+        // answer to "the anchor before `a`" is the anchor whose turn *ends* by
+        // handing over to `a`. Testing `anchor == a` at the top of the loop
+        // instead would ask whether `a` is an anchor the walk has already
+        // passed - true only for the first anchor, which is the one case whose
+        // answer is `None` anyway, so the two forms agree on every input.
+        //
+        // Kept as written because it is the one that says what it means, and
+        // because the guard is on the *property* rather than the spelling:
+        // `every_anchor_is_reached_from_the_anchor_before_it` asserts that
+        // whatever `prev_anchor` returns is an anchor whose successor is `a`.
         if next == a {
             return Some(anchor);
         }
@@ -6589,6 +6603,11 @@ impl Gallery {
     /// every turn of two, which is the same shape of bug as using
     /// `pages_in_current()` for another file's page count - correct-looking, and
     /// invisible until a real gallery is walked.
+    ///
+    /// Every caller in this crate passes 1, 2 or -1. A `by` of `isize::MIN`
+    /// would loop 2^63 times, so it is not defended against: no caller can
+    /// produce one, and the alternative - a saturating bound - would be a branch
+    /// that cannot change an answer for any reachable input.
     pub fn step_no_wrap(&self, pos: PagePos, by: isize) -> Option<PagePos> {
         if pos.index >= self.files.len() {
             return None;
