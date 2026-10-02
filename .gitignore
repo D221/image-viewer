@@ -35,3 +35,6 @@ desktop.ini
 
 # test images - large files
 test-images/
+
+# isolated worktrees
+.worktrees/
