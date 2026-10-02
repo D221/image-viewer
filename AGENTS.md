@@ -22,7 +22,9 @@ that are already in memory. One crate, no workspace, no CI.
   criterion's `main` is never called: `cargo bench` prints "running 0 tests" and
   no criterion output. The benchmarks that actually produce numbers are the
   `#[ignore]`d ones below.
-- `cargo test --release --test <bench_*> -- --ignored --nocapture`:
+- `cargo test --release --test <bench_*> -- --ignored --nocapture`
+  (**load the `measuring-runtime` skill first** — these print numbers, and the
+  numbers are only as good as the session they ran in):
   - `bench_browse` — the number to move when changing the queue, the preload
     window or the cache policy: time-to-first-pixels, wasted decode share, peak
     MB, cache-hit rate while flipping a generated folder. `IV_BENCH_N` (24),
@@ -222,25 +224,19 @@ that are already in memory. One crate, no workspace, no CI.
   away is the retention and the second downscale.
 - **A baseline JPEG thumbnail is a cache problem, not a decode problem.** Every
   pixel needs every DCT coefficient, so the entropy decode is the floor for *any*
-  conformant decoder and no amount of clever scaling moves it. Interleaved, min of
-  4, release, on this box:
-
-  | | 95.7 MP baseline 4:2:0, 27 MB | 16.8 MP 4:4:4, 26 MB |
-  |---|---|---|
-  | `fs::read` | 13 ms | 11 ms |
-  | DCT 1/8 | **833 ms** | **580 ms** |
-  | DCT 1/1 | 1242 ms | 677 ms |
-
-  DCT scaling buys 25-30% and no more. So the answer to a slow cell is *not
-  decoding it again* — `load_grid_thumbnail` and `%LOCALAPPDATA%\image-viewer\thumbs`
-  — and the first visit to a folder of large scans is **unchanged and
-  unchangeable** (~24 × 700 ms over 4 workers). Warm is 0.6-1.8 ms. Do not let a
-  benchmark print only the warm number; `bench_browse thumb_cache_ab` prints both
-  for that reason. The one decode-side shortcut that *does* exist is the
-  progressive DC-scan truncation (3.3x), and **every large file in this library is
-  baseline** — 0 of 5 big scans, 0 of 5 big phone photos — so it was measured and
-  not built. Its trap if anyone does: a first SOS with `Ns=1` is *not* interleaved,
-  and truncating there yields one component's DC and a plausible wrong picture.
+  conformant decoder and no amount of clever scaling moves it: DCT 1/8 is 833 ms
+  against 1/1's 1242 ms on a 95.7 MP scan, so DCT scaling buys 25-30% and no more
+  (full table in the `measuring-runtime` skill's reference). So the answer to a
+  slow cell is *not decoding it again* — `load_grid_thumbnail` and
+  `%LOCALAPPDATA%\image-viewer\thumbs` — and the first visit to a folder of large
+  scans is **unchanged and unchangeable** (~24 × 700 ms over 4 workers). Warm is
+  0.6-1.8 ms. Do not let a benchmark print only the warm number;
+  `bench_browse thumb_cache_ab` prints both for that reason. The one decode-side
+  shortcut that *does* exist is the progressive DC-scan truncation (3.3x), and
+  **every large file in this library is baseline** — 0 of 5 big scans, 0 of 5 big
+  phone photos — so it was measured and not built. Its trap if anyone does: a
+  first SOS with `Ns=1` is *not* interleaved, and truncating there yields one
+  component's DC and a plausible wrong picture.
 - **A cache's design is almost entirely about how it can be wrong**, and every
   "wrong" here is a grid cell showing the wrong picture, which is worse than a
   blank one and undiagnosable. Four guards, each with a test verified to fail
@@ -522,105 +518,50 @@ that are already in memory. One crate, no workspace, no CI.
   and it is absent from `Backends`. The answer to a request for it is a
   documented "no", not a stub.
 
-## Measuring (this project has drawn several wrong conclusions here)
+## Measuring
 
-- **Verify the session is not remote before trusting any frame rate, input event
-  or resize event.** `quser` must say `console`, not `rdp-tcp#N`, and
-  `Get-CimInstance Win32_VideoController` must not show a *Microsoft Remote
-  Display Adapter*. Over RDP a 30 fps animation measured 12.7 fps, a "LOW_LATENCY
-  made it worse" experiment was noise, a resize debounce comparison (11 vs 9
-  re-decodes) was meaningless, and synthetic key injection silently does nothing
-  (`frames with input events` stays 0). This cost four wrong conclusions; treat a
-  "the harness cannot do X" claim with suspicion — the tell that it is wrong is
-  when it would excuse a bug.
-- **A visible window.** `-WindowStyle Hidden` gets no ordinary paint/vsync
-  delivery; every fps measured that way was garbage (12/13/19/59 across runs).
-  Settle longer than any decode.
-- **"First visible pixels" is committed in `frame_prelude`**, i.e. after the
-  painting frame was presented. Never record it when the worker message arrives —
-  that is not on screen yet. A harness that timed "the message arrived" once
-  produced a plausible wrong number for a hang that was three steps away.
-- **Measure the step you suspect, not the step you can see.** Timing the frame,
-  then the decode, then a per-step timer inside the viewer is how the truncated-GIF
-  hang was localised; the harness and the raw decoder both said "fine".
-- `display-gap frames` (wanted to paint, no texture) and `stalls (>5s to first
-  pixels)` must stay 0. The stall watchdog reports the whole state once per
-  request and fires only when nothing was painted at all — check `recorded_first`,
-  not just age, or it cries wolf on cache hits. Keep a worker panic's payload.
-- **A frame count does not mean the app is spinning.** Presentation can set the
-  cadence; a 20× smaller window produced the same one. Before blaming idle CPU,
-  read `frames with input events` (0 while idle), `frame interval`, and the
-  report's "who asked for a repaint" tally (egui tags every `request_repaint` with
-  its call site). On a static photo the only source is the 2 s watcher and the app
-  idles at ~2 fps — that is correct. `ms/frame` is CPU amortised over whatever
-  frames happened, so it is meaningless at 2 fps; use total CPU% unless frames
-  are frequent.
-- **A/B must interleave** (all of A then all of B lets machine drift invent a
-  120 ms regression), and **prefer min over median** for launch timings — the
-  median on this box is ±100 ms when loaded. In `bench_launch_ab.ps1` the
-  parameters are `$PathA`/`$PathB`: PowerShell variable names are
-  case-insensitive, and a loop variable `$a` silently overwrote `$A` and ran
-  `Start-Process -FilePath 809.4`, which is indistinguishable from a missing
-  binary.
-- **An injected keystroke needs the foreground, and taking it is not free.**
-  `SetForegroundWindow` is *refused* unless the calling process owns the current
-  foreground window — and a harness launched from a terminal does not, the
-  terminal does. Run `probe_thumb_cache.ps1` from wezterm with a plain
-  `SetForegroundWindow` and every key goes to the terminal: the grid never opens,
-  nothing is written, and the run "proves" the feature broken. The fix is
-  `AttachThreadInput` to the foreground thread's queue (plus a
-  topmost/notopmost `SetWindowPos` so the window is at the front of the z-order as
-  well as focused), which `Native::Focus` does. **`ForegroundIs` must still be
-  checked afterwards** — the steal can fail too, and the tell that it did is a
-  clean zero, not an error.
+**Producing a number here is a procedure with preconditions that have each already
+produced a wrong conclusion. Load the `measuring-runtime` skill before you
+benchmark, run a `probe_*.ps1`, A/B two builds, or write that a change was
+faster.** The short form: `quser` must say `console` (over RDP a 30 fps animation
+measured 12.7 and four conclusions were wrong); a hidden window gets no
+paint/vsync delivery; arms must interleave and both must be warmed up before
+either is measured; `SetForegroundWindow` is refused unless you own the foreground
+window; and a *killed* process writes no perf report at all.
+
+Reading a report that already exists is the other half, and it stays here:
+
 - **A killed process produces no perf report, and no report looks exactly like a
   broken feature.** The report is written by `on_exit`, so a harness must
-  `CloseMainWindow` and wait for exit; `Kill` is the fallback for a *hang*, not
-  the normal path. Related: an empty cache directory after a run is ambiguous
-  between "the feature is off" and "the keys went to another window" — which is
-  why the probe checks disk, counters *and* a screenshot, and why it deletes the
-  cache itself before the cold run instead of trusting it to be empty.
-- **Interleaving and min are not enough: warm-up lands on whichever arm runs
-  first.** A unit test comparing a 16-frame GIF's cell against a 1-frame one, with
-  identical first frames, reported 550 ms against 53 ms — a clean 10x that was
-  entirely one-time cost in the process (first use of the `image` machinery,
-  dynamic linking, allocator). Min of two interleaved rounds did not fix it: the
-  real culprit was **rayon's global thread pool**, built by the first
-  `linear_resize` and worth ~450 ms in a debug build, still landing on whichever
-  arm went first. So *before believing a ratio in-process*, do a discarded warm-up
-  call of **both** arms, and know that any lazily-initialised global in the path
-  (`rayon`, `image`'s decoders, a font atlas) will find the first arm. This is the
-  same failure shape as the RDP conclusions: a number that looks like a finding and
-  is an artefact. The speed claim went to `bench_browse thumb_cache_ab` and the
-  unit test kept only what is deterministic.
+  `CloseMainWindow` and wait; `Kill` is the fallback for a *hang*.
+- **"First visible pixels" is committed in `frame_prelude`**, i.e. after the
+  painting frame was presented — never when the worker message arrives, which is
+  not on screen yet. A harness that timed "the message arrived" produced a
+  plausible wrong number for a hang that was three steps away.
+- **A frame count does not mean the app is spinning.** Presentation can set the
+  cadence; a 20× smaller window produced the same one. Read `frames with input
+  events` (0 while idle) before blaming CPU. On a static photo the only source is
+  the 2 s watcher and ~2 fps is correct — which is why **`ms/frame`, CPU amortised
+  over whatever frames happened, is meaningless**. Use total CPU%.
+- `display-gap frames` (wanted to paint, no texture) and `stalls (>5s to first
+  pixels)` must stay 0. The watchdog fires only when nothing was painted at all —
+  check `recorded_first`, not just age, or it cries wolf on cache hits. Keep a
+  worker panic's payload; a bare "decoder panicked" hid the cause (it is usually
+  OOM).
 - **Read the config back after writing it and assert the value.** A run that set
   `renderer.choice = gl` reported identical memory for both backends, which would
   have said the backend is irrelevant.
-- **A test that passes on the broken code is decoration.** For every trap here
-  that has a test, the test was verified to *fail* with the bug reintroduced.
-  Where a premise is an assumption about a third party (that a chord never
-  arrives as a `Key` event, that a probe is contained), the test checks the
-  premise against a real `egui::Context` / a real queue instead of asserting it
-  in a comment.
-- **Reintroducing the bug is how you find out a test is decoration, and it finds
-  more than the bug.** Each of the four cache guards was removed in turn: the IEND
-  check, the stamp check, the path check, the header-dims check and the cell
-  downscale all failed as expected. Two results were not:
-  * The `full: None` arm for a cell **could not fail any test**, because
-    `load_thumbnail` returns only the preview, so the arm is unobservable from
-    outside — which is itself the proof that no caller can depend on it. It was
-    kept because `ThumbData` is what stops a caller asking, and the comment says
-    plainly what it does *not* save.
-  * `dct_is_cheapest` turned out to be **redundant**: `decode_bytes` already takes
-    the DCT path for a JPEG at any `max_dim`, so routing a cell there separately
-    changed nothing. It was deleted rather than kept as insurance, and the
-    downscale moved out of the branch into `load_thumbnail` where one copy covers
-    every return point. **A change whose only justification was "it looks right"
-    is a change nobody has measured.**
-  The lesson generalises: the first draft of a fix routinely contains a piece that
-  does nothing. Find it by deleting each piece and watching for a test that does
-  not fail — and do not then keep it, because an untested no-op is a trap for the
-  next reader.
+- **Measure the step you suspect, not the step you can see.** Timing the frame,
+  then the decode, then adding a per-step timer inside the viewer is how the
+  truncated-GIF hang was localised; the harness and the raw decoder both said
+  "fine".
+
+**A test that passes on the broken code is decoration.** For every trap here that
+has a test, the test was verified to *fail* with the bug reintroduced. Where a
+premise is an assumption about a third party (that a chord never arrives as a `Key`
+event, that a probe is contained), the test checks the premise against a real
+`egui::Context` / a real queue instead of asserting it in a comment. **Load the
+`verifying-a-change` skill before committing anything.**
 
 ## egui 0.36 / wgpu API notes
 
@@ -657,6 +598,12 @@ that are already in memory. One crate, no workspace, no CI.
   those three functions before binding it.**
 
 ## Formats, colour, resampling
+
+**Load the `adding-a-decoder` skill before adding a format, changing a decoder, or
+fixing a file that decodes to the wrong pixels.** It sequences the checks below
+into an order, and carries the per-format lookup (which decoder, whether it
+animates, which primaries it reports). What follows is the part that constrains
+an edit.
 
 - **Format handling is content-based, never extension-based.** Magic bytes pick
   the decoder: JPEG (turbojpeg) / PNG, WebP, GIF / TIFF, BMP, ICO, QOI (`image`);
@@ -759,14 +706,13 @@ that are already in memory. One crate, no workspace, no CI.
   header's IFD0 offset — reading the wrong one looks like it works and silently
   finds nothing.
 - **`linear_resize` is the hot path for big non-JPEG sources**: sRGB box
-  pre-reduction to ≤2× the target (integer running sums, rayon, precomputed
-  reciprocals) → 12-bit linear conversion of *that* buffer → two kernel passes.
-  The conversion must never run over the full-resolution source; a reciprocal
-  **division inside the inner loop cost more than everything else combined**; the
-  vertical pass needs its running column accumulator or it misses cache on every
-  pixel; overshoot must clamp LUT indices to 4095 (index 4097 was a worker
-  panic). Toggling `linear_resample` does not re-decode cached previews (the
-  filter dropdown does — see `refilter`).
+  pre-reduction to ≤2× the target → 12-bit linear conversion of *that* buffer →
+  two kernel passes. The conversion must never run over the full-resolution
+  source, a reciprocal **division inside the inner loop cost more than everything
+  else combined**, the vertical pass needs its running column accumulator or it
+  misses cache on every pixel, and **overshoot must clamp LUT indices to 4095**
+  (index 4097 was a worker panic). Toggling `linear_resample` does not re-decode
+  cached previews (the filter dropdown does — see `refilter`).
 - Known waste, not worth fixing: `exif_orientation(path)` re-reads the file with
   `nom_exif::read_exif` although the bytes are already in memory. That is
   0.1–0.2 ms against a 10–17 ms `fs::read` — ~0.02% of a preview decode.
@@ -873,14 +819,14 @@ that are already in memory. One crate, no workspace, no CI.
     large scan because the synthetic fixture deliberately is not that expensive
     and the absolute number should not be extrapolated from it.
 - **`thumb_cache.rs` is the model for testing something with four independent
-  ways to be wrong.** Its structure is the point: one test per guard, each
-  verified to fail with the guard removed; a damaged-entry test that *enumerates*
-  damage rather than asserting one case (which is how the truncated-PNG-as-a-hit
-  bug surfaced); the cache root passed in explicitly so nothing touches the real
-  `%LOCALAPPDATA%` and no test depends on an env var; global toggles saved and
-  restored; and **no timing assertion**, with the reason written down rather than
-  discovered later (see Measuring — the first two attempts at one were pure
-  warm-up artefacts).
+  ways to be wrong** — one test per guard, each verified to fail with the guard
+  removed; a damaged-entry test that *enumerates* damage rather than asserting one
+  case (which is how the truncated-PNG-as-a-hit bug surfaced); the cache root
+  passed in explicitly so no test depends on an env var; and **no timing
+  assertion**, with the reason written down rather than discovered later (the first
+  two attempts at one were pure warm-up artefacts). Load the
+  `verifying-a-change` skill before writing a test for something that can be wrong
+  in several ways at once.
 - Three suites assert against **source text**, deliberately, and say why in their
   module docs: `keybindings.rs` (a shortcut that does not exist is otherwise
   unobservable), `renderer.rs` (the probe's early exit is in a binary),
