@@ -75,11 +75,12 @@ impl TestGallery {
     /// stops moving: with `loop_back` off it runs out of pages, and the visited
     /// check is what keeps a looping gallery from spinning here forever.
     ///
-    /// The stop condition is "a position we have already seen" rather than "the
-    /// position we started at", because those differ once looping is on: a
-    /// three-page gallery loops `0, 2, 1, 0` and only returns to the start after
-    /// passing two other positions. A helper that assumed otherwise would hang
-    /// rather than fail, which is the worst way for a test to end.
+    /// The stop condition is "a position we have already seen". With looping on,
+    /// `next_anchor` from the last anchor wraps to page 0, so a walk that only
+    /// stopped on `None` would spin forever; and it cannot stop merely on
+    /// returning to the start, because a one-page looping gallery returns to the
+    /// start on the first step. A helper that assumed either would hang rather
+    /// than fail, which is the worst way for a test to end.
     fn anchors(&self, lead_lone: u32) -> Vec<PagePos> {
         let Some(mut cur) = self.page_at(0) else {
             return Vec::new();
@@ -99,10 +100,13 @@ impl TestGallery {
     /// it. There is deliberately no `Turn` type in the library for this to
     /// return - a turn is `[anchor] + maybe [anchor+1]`, which is already
     /// expressible, and a struct would only add a conversion.
+    ///
+    /// `step_no_wrap`, because `turn_len` looks for a partner the same way: a
+    /// turn must not name a page twice, and across the wrap seam it would.
     fn turn_at(&self, a: PagePos, lead_lone: u32) -> Vec<PagePos> {
         let mut turn = vec![a];
         if turn_len(a, lead_lone, self) == 2 {
-            if let Some(partner) = self.step(a, 1) {
+            if let Some(partner) = self.step_no_wrap(a, 1) {
                 turn.push(partner);
             }
         }
@@ -137,6 +141,20 @@ impl PageCtx for TestGallery {
             target as usize
         };
         self.page_at(flat)
+    }
+
+    /// The same walk with the wrap taken out, so a gallery's last turn cannot
+    /// straddle the seam however `loop_back` is set.
+    fn step_no_wrap(&self, from: PagePos, by: isize) -> Option<PagePos> {
+        let total = self.total_pages() as isize;
+        if total == 0 {
+            return None;
+        }
+        let target = self.flat(from)? as isize + by;
+        if target < 0 || target >= total {
+            return None;
+        }
+        self.page_at(target as usize)
     }
 
     fn key(&self, _pos: PagePos) -> Option<image_viewer::ImgKey> {
@@ -201,25 +219,21 @@ fn a_turn_runs_cover_pairs_a_wide_page_then_pairs_again() {
 }
 
 /// Every shape pattern from length 1 to 12, at each leading-lone offset a user
-/// can actually reach.
+/// can actually reach, under **both** looping settings.
 ///
 /// Exhaustive over the *shapes* rather than over the page counts a reader
 /// happens to have, because the interesting inputs are the mixtures: a run of
 /// pairs, a wide page mid-run, a wide page at either end, and the offset moving
 /// where the odd page out lands.
 ///
-/// **Looping is off here, deliberately.** "Every page is in exactly one turn" is
-/// a claim about a *linear* tiling. A looping gallery's tiling is a cycle: a
-/// four-page all-`Single` gallery tiles `{0,1}{2,3}` and then wraps onto page 0
-/// again, and an odd-length one has a turn that straddles the wrap and so names
-/// the same page twice. That is correct behaviour, not a defect, and asserting a
-/// partition over it would be asserting something the design does not promise.
-/// The looping cases have their own tests -
-/// `a_looping_gallery_wraps_at_both_ends` and
-/// `the_only_page_of_a_looping_gallery_is_its_own_predecessor` - because they are
-/// about the two ways `prev_anchor`'s walk can end rather than about the tiling.
+/// Both `loop_back` settings are in here, and the partition property below holds
+/// for both, because `lone` asks for a partner with `step_no_wrap`: a turn never
+/// straddles the wrap, so the tiling of a looping gallery is exactly the tiling
+/// of the same gallery with looping off. Only `next_anchor` wraps. Before that
+/// rule a looping gallery tiled cyclically - four all-`Single` pages gave
+/// `{0}{1,2}{3,0}` - and no linear partition could hold.
 fn any_gallery() -> impl Strategy<Value = (TestGallery, u32)> {
-    (1usize..=12, 0u32..=2).prop_flat_map(|(len, lead)| {
+    (1usize..=12, 0u32..=2, any::<bool>()).prop_flat_map(|(len, lead, looping)| {
         proptest::collection::vec(any::<bool>(), len).prop_map(move |wide| {
             let shapes = wide
                 .into_iter()
@@ -228,7 +242,7 @@ fn any_gallery() -> impl Strategy<Value = (TestGallery, u32)> {
             (
                 TestGallery {
                     docs: vec![shapes],
-                    loop_back: false,
+                    loop_back: looping,
                 },
                 lead,
             )
@@ -256,6 +270,12 @@ proptest! {
     /// and displace some other page, so equality with `0..n` catches overlap and
     /// stranding in the same comparison.
     ///
+    /// **Holds for looping galleries too**, and that is the point of the
+    /// no-wrap rule: a turn must never straddle the seam, so a looping gallery
+    /// tiles exactly as a non-looping one does. The per-turn no-duplicate check
+    /// is what would catch a seam-straddling turn on its own - `{3,0}` names no
+    /// page twice, but it does put the gallery's last page beside its first.
+    ///
     /// This is the check that catches an off-by-one in `turn_len` - a walk that
     /// stepped by 2 unconditionally would strand the last page of an odd-length
     /// gallery, and one that stepped by 1 would pair nothing at all.
@@ -272,7 +292,14 @@ proptest! {
                 prop_assert!(prev < flat, "anchors must strictly increase: {} then {}", prev, flat);
             }
             previous = Some(flat);
-            covered.extend(g.flat_of(&g.turn_at(anchor, lead)));
+
+            let turn = g.flat_of(&g.turn_at(anchor, lead));
+            let mut in_turn = turn.clone();
+            in_turn.sort_unstable();
+            in_turn.dedup();
+            prop_assert_eq!(in_turn.len(), turn.len(),
+                "a turn names no page twice: {:?}", turn);
+            covered.extend(turn);
         }
 
         let mut sorted = covered.clone();
@@ -449,58 +476,106 @@ fn nothing_moves_past_either_end_when_looping_is_off() {
     }
 }
 
-/// A gallery with looping on wraps instead, and this is the behaviour a task
-/// that adds real navigation will lean on. Kept here because the wrap is a
-/// property of `step`, and a test that only ever runs with looping off would not
-/// notice `step` ignoring the setting at all.
+/// `Gallery::step_no_wrap` is the real page arithmetic with the wrap taken out,
+/// and Task 2's `PageCtx for Gallery` is a one-liner over it - so it is pinned
+/// here rather than left for Task 2 to discover.
+///
+/// The case that matters is the one the cursor is not on: `pages_in_current`
+/// answers about `self.index`, so an implementation that reached for it would
+/// report the *cursor's* file's page count for any other position, and a
+/// three-page document's last page would look like an ordinary file's. Asking
+/// about file 0's pages while the cursor sits on file 1 is what separates the
+/// two.
 #[test]
-fn a_looping_gallery_wraps_at_both_ends() {
+fn a_gallery_steps_without_wrapping_whatever_loop_back_says() {
+    use image_viewer::{Gallery, PagePos as P};
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg"]
+        .iter()
+        .map(|n| dir.path().join(n))
+        .collect();
+    for p in &paths {
+        std::fs::write(p, b"not really a jpeg").unwrap();
+    }
+    let mut gal = Gallery::from_file(paths[0].clone());
+    gal.files = paths;
+    gal.set_page_counts([3u32, 1, 1]);
+    gal.set_loop_back(true);
+
+    // Inside a three-page document, with the cursor parked on file 1.
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 0 }, 1), Some(P { index: 0, page: 1 }));
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 1 }, 1), Some(P { index: 0, page: 2 }));
+    // Its last page has no partner, and does not wrap to the next document's
+    // first page from *within* the step - it crosses into it, which is `next`.
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 2 }, 1), Some(P { index: 1, page: 0 }));
+
+    // The end of the gallery is `None` whatever `loop_back` says.
+    assert_eq!(gal.step_no_wrap(P { index: 2, page: 0 }, 1), None, "no wrap past the last file");
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 0 }, -1), None, "no wrap before the first");
+    // Backwards within a document.
+    assert_eq!(gal.step_no_wrap(P { index: 0, page: 2 }, -1), Some(P { index: 0, page: 1 }));
+    // And an index that does not exist is not a panic.
+    assert_eq!(gal.step_no_wrap(P { index: 9, page: 0 }, 1), None);
+}
+
+/// A looping gallery's **last turn is one page**, and `next_anchor` from it wraps
+/// to page 0.
+///
+/// This is the wrap seam, and it is the case that made the partition property
+/// false for looping galleries. Four all-`Single` pages used to tile
+/// `{0} {1,2} {3,0}`, so turning forward off the last spread showed page 4
+/// beside page 1 - a spread of the wrong two pages, silently. `lone` now asks
+/// for a partner with `step_no_wrap`, so page 3 finds no partner inside the
+/// gallery, takes a turn alone, and `next_anchor` wraps from there.
+///
+/// So the tiling is `{0,1} {2,3}` with the cursor cycling 0 -> 2 -> 0, which is
+/// exactly what the same gallery gives with looping off, and the wrap lives in
+/// one place instead of in the pairing.
+#[test]
+fn a_looping_gallery_truncates_its_last_turn_and_still_wraps() {
     let g = TestGallery {
         docs: vec![vec![Single, Single, Single, Single]],
         loop_back: true,
     };
+    assert_eq!(g.turns(0), vec![vec![0, 1], vec![2, 3]], "no turn straddles the seam");
     assert_eq!(g.flat_of(&g.anchors(0)), vec![0, 2]);
-    assert_eq!(next_anchor(g.page_at(2).unwrap(), 0, &g), g.page_at(0));
-    assert_eq!(prev_anchor(g.page_at(0).unwrap(), 0, &g), g.page_at(2));
+
+    let last = g.page_at(2).unwrap();
+    assert_eq!(turn_len(last, 0, &g), 2);
+    let end = g.page_at(3).unwrap();
+    assert_eq!(turn_len(end, 0, &g), 1, "the last anchor has no partner inside the gallery");
+    assert_eq!(next_anchor(end, 0, &g), g.page_at(0), "and the cursor still wraps");
+
+    // Backwards stops at the front even though the cursor wraps forwards: there
+    // is no previous turn before the first one, and whether the app should jump
+    // to the last turn is the navigation layer's decision, not this function's.
+    assert_eq!(prev_anchor(g.page_at(0).unwrap(), 0, &g), None, "{g:?}");
+    assert_eq!(prev_anchor(g.page_at(2).unwrap(), 0, &g), g.page_at(0));
 }
 
-/// A one-page gallery with looping on is its own predecessor, in both directions.
+/// A one-page gallery: the only turn is `{0}`, so `turn_len` is 1 whatever
+/// `loop_back` says.
 ///
-/// This is the case that decides how `prev_anchor` is written. The only turn is
-/// `{0}`, so walking back from page 0 has to land on page 0 - returning `None`
-/// would mean the cursor could never step back, and worse, could never step
-/// forward either, because `turn_len` would be asked about a position the walk
-/// had already rejected.
+/// `step_no_wrap` is what makes that true with looping on. Before it, the
+/// partner test saw the wrap, so a one-page gallery's "next page" was page 0
+/// again and `pairable(0, 0)` compared the page with itself and said yes -
+/// pinning a turn of two for a gallery that has one page in it.
 ///
-/// It is the one input where **comparing against the successor instead of the
-/// anchor is the difference between working and not**. Testing `anchor == a` at
-/// the top of the loop returns `None` here, because the loop starts on page 0
-/// and page 0 is the position being asked about; the answer only appears one
-/// `step` later, as the successor of a real anchor.
-///
-/// Pinned separately because nothing else covers it: every other gallery in this
-/// file has a front page that is genuinely in front of something.
+/// Pinned separately because nothing else covers it: every other gallery here
+/// has a second page, and a self-comparison is the only way to get this wrong.
 #[test]
-fn the_only_page_of_a_looping_gallery_is_its_own_predecessor() {
-    for shapes in [vec![Single], vec![Double]] {
-        let g = TestGallery {
-            docs: vec![shapes],
-            loop_back: true,
-        };
-        let only = g.page_at(0).unwrap();
-        assert_eq!(prev_anchor(only, 0, &g), Some(only), "{g:?}");
-        // Forward wraps onto itself for the same reason. `turn_len` here is 2,
-        // because with looping on `step(0, 1)` is page 0 and `pairable(0, 0)`
-        // compares the page with itself - an artefact of wrapping rather than
-        // anything a real one-image gallery does, so the length is not asserted.
-        assert_eq!(next_anchor(only, 0, &g), Some(only), "{g:?}");
+fn a_one_page_gallery_is_a_turn_of_one_however_it_loops() {
+    for looping in [false, true] {
+        for shapes in [vec![Single], vec![Double]] {
+            let g = TestGallery {
+                docs: vec![shapes],
+                loop_back: looping,
+            };
+            let only = g.page_at(0).unwrap();
+            assert_eq!(turn_len(only, 0, &g), 1, "looping {looping} over {g:?}");
+            assert_eq!(g.turns(0), vec![vec![0]], "looping {looping} over {g:?}");
+        }
     }
-
-    // With looping off the same gallery has nothing before it, which is the
-    // other half of the distinction: `Some(only)` above is a fact about
-    // looping, not about one-page galleries.
-    let open = TestGallery::one_doc(vec![Single]);
-    assert_eq!(prev_anchor(open.page_at(0).unwrap(), 0, &open), None);
 }
 
 /// An unmeasured page is judged `Single` and **pairs** optimistically, so a turn
@@ -519,6 +594,9 @@ fn an_unknown_page_pairs_and_is_a_turn_of_two_until_it_is_measured() {
         fn step(&self, from: PagePos, by: isize) -> Option<PagePos> {
             let to = from.page as isize + by;
             (0..2).contains(&to).then_some(PagePos { index: 0, page: to as u32 })
+        }
+        fn step_no_wrap(&self, from: PagePos, by: isize) -> Option<PagePos> {
+            self.step(from, by)
         }
         fn key(&self, _pos: PagePos) -> Option<image_viewer::ImgKey> {
             None
@@ -556,6 +634,9 @@ fn a_shape_at_the_threshold_is_not_a_spread() {
     struct Dims(u32, u32);
     impl PageCtx for Dims {
         fn step(&self, _from: PagePos, _by: isize) -> Option<PagePos> {
+            None
+        }
+        fn step_no_wrap(&self, _from: PagePos, _by: isize) -> Option<PagePos> {
             None
         }
         fn key(&self, _pos: PagePos) -> Option<image_viewer::ImgKey> {

@@ -5905,9 +5905,12 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
 // filter changes, and a stale entry is a *wrong pairing*, which is invisible
 // until you are three pages into the wrong book.
 //
-// Instead every query is relative to a cursor that is always an anchor, so both
-// directions are a bounded number of local reads: forward is one `turn_len`,
-// backward is two `pairable` calls. The four questions those need - step, key,
+// Instead every query is relative to a cursor that is always an anchor.
+// Forward is O(1): one `turn_len`. **Backward is not, and cannot be** - it
+// rebuilds the tiling forward from page 0, so it costs the distance from the
+// front in in-memory reads over cached dimensions. See `prev_anchor` for why
+// there is no local rule for it, which is the one place this design's
+// "no page map" argument does not hold. The questions those need - step, key,
 // dimensions, override - are exactly `PageCtx`.
 //
 // ## The irreducible ambiguity, and why it is survivable
@@ -6002,6 +6005,31 @@ pub trait PageCtx {
     /// Step the flat page cursor by `by` pages, honouring `loop_back`. `None`
     /// past either end when looping is off. **The only primitive that moves.**
     fn step(&self, from: PagePos, by: isize) -> Option<PagePos>;
+
+    /// Step the flat page cursor without wrapping: `None` past either end even
+    /// when `loop_back` is on.
+    ///
+    /// **Both this and [`Self::step`] exist because two questions were being
+    /// asked with one method**, and they have different right answers:
+    ///
+    /// * *"Does this page have a partner within this gallery?"* - **must not see
+    ///   across the wrap.** A turn is a spread on screen, and a spread that
+    ///   pairs the last page of a volume with its own first is not a spread of
+    ///   that book: turning forward off the last spread would show page 4
+    ///   beside page 1. So with looping on the **last turn truncates to one
+    ///   page**, and the tiling is exactly the tiling the same gallery would
+    ///   have with looping off.
+    /// * *"Where does the cursor go next?"* - **must wrap**, or `loop_back` does
+    ///   nothing at all.
+    ///
+    /// `step` answers the second and this answers the first, so [`lone`] - which
+    /// asks whether a partner exists - uses this one, and only
+    /// [`next_anchor`] uses `step`.
+    ///
+    /// It also removes a self-comparison that had no meaning: with wrapping, a
+    /// one-page gallery's "next page" was page 0 again, and asking whether it
+    /// pairs with itself said yes.
+    fn step_no_wrap(&self, from: PagePos, by: isize) -> Option<PagePos>;
 
     /// The key for a position, for the shape cache and the loader. `None` for a
     /// position that does not exist.
@@ -6139,10 +6167,16 @@ pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
 ///   round-trip property at once.
 /// * **Nothing to pair with**: the next page is a spread, it is a different
 ///   shape of page, or there is no next page at all.
+///
+/// The partner test asks [`PageCtx::step_no_wrap`], not `step`, and that one
+/// choice is what stops a turn straddling the wrap: with `loop_back` on, the
+/// last anchor has no partner, so the last turn of a volume is one page and the
+/// next press moves to page 1. A reader expects the last spread to be the last
+/// page alone, not that page beside the first one.
 pub fn lone(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> bool {
     ctx.flat(anchor).is_some_and(|f| f < lead_lone as usize)
         || shape_of(anchor, ctx) == Shape::Double
-        || match ctx.step(anchor, 1) {
+        || match ctx.step_no_wrap(anchor, 1) {
             Some(next) => !pairable(anchor, next, ctx),
             None => true,
         }
@@ -6166,6 +6200,13 @@ pub fn turn_len(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> usize {
 /// Forward is one addition, and that is the whole reason this design needs no
 /// pairing table: the next anchor is this turn's length away, and a turn's
 /// length is a local test.
+///
+/// **The only caller of the wrapping [`PageCtx::step`].** The wrap belongs here
+/// and nowhere else: [`lone`] asks for a partner with `step_no_wrap`, so a turn
+/// never straddles the seam, and this is where a looping gallery's cursor
+/// actually gets back to page 0. That split is what makes a looping gallery's
+/// tiling identical to the same gallery's tiling with looping off, so the
+/// partition property holds for both.
 pub fn next_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
     ctx.step(a, turn_len(a, lead_lone, ctx) as isize)
 }
@@ -6173,12 +6214,11 @@ pub fn next_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
 /// How many anchors [`prev_anchor`] will consider before giving up.
 ///
 /// **A bound on a walk that terminates on its own, not the walk's cost.** The
-/// walk exits as soon as `step` returns `None` at the front of a non-looping
-/// gallery, or as soon as it wraps onto page 0 of a looping one, so this only
-/// ever bites on a gallery larger than it names. Its value is deliberately far
-/// above any plausible gallery rather than tuned: being generous costs nothing,
-/// because the loop cannot reach the number without the answer already being
-/// known.
+/// walk exits as soon as [`PageCtx::step_no_wrap`] returns `None` at the front
+/// of the gallery, whatever `loop_back` says, so this only ever bites on a
+/// gallery larger than it names. Its value is deliberately far above any
+/// plausible gallery rather than tuned: being generous costs nothing, because
+/// the loop cannot reach the number without the answer already being known.
 pub const PREV_SCAN_LIMIT: usize = 1 << 20;
 
 /// The anchor before `a`, or `None` before the start.
@@ -6216,25 +6256,29 @@ pub const PREV_SCAN_LIMIT: usize = 1 << 20;
 /// so it is only settled by walking back to the front. The forward direction
 /// escapes this because it always starts from a known anchor; the backward
 /// direction has no such starting point, which is why it walks instead.
+///
+/// **Returns `None` at the first anchor even when `loop_back` is on.** There is
+/// no turn before the first one; whether the *app* should jump back to the last
+/// turn of a looping gallery is the navigation layer's decision, and Task 7
+/// makes it. This function only ever reports the tiling.
 pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
-    let zero = PagePos { index: 0, page: 0 };
-    let mut anchor = zero;
+    let mut anchor = PagePos { index: 0, page: 0 };
     for _ in 0..PREV_SCAN_LIMIT {
-        let next = match ctx.step(anchor, turn_len(anchor, lead_lone, ctx) as isize) {
+        // `step_no_wrap`, so the walk ends at the front of the gallery rather
+        // than cycling: there is no previous turn before the first one, and
+        // whether the *app* wraps to the last turn on a looping gallery is the
+        // navigation layer's decision, not this function's.
+        let next = match ctx.step_no_wrap(anchor, turn_len(anchor, lead_lone, ctx) as isize) {
             Some(n) => n,
             None => return None,
         };
-        // Compared against the SUCCESSOR, never against `anchor` itself: with a
-        // one-page gallery and looping on, page 0 is its own predecessor, and
-        // testing `anchor == a` at the top of the loop would return `None` there
-        // and strand the cursor on a gallery it can never leave.
+        // Compared against the SUCCESSOR, never against `anchor` itself. With a
+        // one-page gallery the only turn is `{0}`, so walking back from page 0
+        // has to land on page 0; testing `anchor == a` at the top of the loop
+        // returns `None` there, because the walk starts *on* the page being
+        // asked about and the answer only appears one `step` later.
         if next == a {
             return Some(anchor);
-        }
-        if next == zero {
-            // Wrapped a whole lap without reaching `a`, which with looping on
-            // means `a` is not in the tiling this walk is following.
-            return None;
         }
         anchor = next;
     }
@@ -6509,6 +6553,59 @@ impl Gallery {
                 true
             }
             None => false,
+        }
+    }
+
+    /// How many pages the file at `index` has, as far as this gallery knows.
+    /// 1 until [`Self::learn_pages`] has been asked about it.
+    ///
+    /// [`Self::pages_in_current`] is the same question about the *cursor's*
+    /// file, which is not the same thing: the pairing asks about pages the
+    /// cursor is not on, and answering with the current file's page count would
+    /// make a three-page document's last page look like an ordinary file's.
+    pub fn pages_in(&self, index: usize) -> u32 {
+        self.files
+            .get(index)
+            .and_then(|p| self.page_counts.get(p))
+            .copied()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// The page `by` pages from `pos`, without honouring `loop_back`.
+    ///
+    /// This is [`Self::next`] and [`Self::prev`]'s page arithmetic with the
+    /// wrap taken out, which is what [`PageCtx::step_no_wrap`] needs so a
+    /// gallery's last turn cannot straddle the wrap. `None` past either end
+    /// whatever `loop_back` says.
+    ///
+    /// Written against a position rather than `&mut self` so the pairing can
+    /// ask about a page it is not currently on; the caller in Task 2's
+    /// `PageCtx for Gallery` is a one-liner over this.
+    pub fn step_no_wrap(&self, pos: PagePos, by: isize) -> Option<PagePos> {
+        if pos.index >= self.files.len() {
+            return None;
+        }
+        match by {
+            1 if pos.page + 1 < self.pages_in(pos.index) => {
+                Some(PagePos { index: pos.index, page: pos.page + 1 })
+            }
+            // Last page (or an ordinary file): on to the next one, at its first
+            // page. `None` at the last file rather than wrapping.
+            1 => pos
+                .index
+                .checked_add(1)
+                .filter(|&i| i < self.files.len())
+                .map(|index| PagePos { index, page: 0 }),
+            -1 if pos.page > 0 => Some(PagePos { index: pos.index, page: pos.page - 1 }),
+            // From page 0 of a file: the *last* page of the previous one, not its
+            // first, matching `prev`. `None` at the first file rather than
+            // wrapping.
+            -1 => pos.index.checked_sub(1).map(|index| PagePos {
+                index,
+                page: self.pages_in(index) - 1,
+            }),
+            _ => None,
         }
     }
 
