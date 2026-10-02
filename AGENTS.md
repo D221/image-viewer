@@ -288,13 +288,66 @@ that are already in memory. One crate, no workspace, no CI.
   floats over the whole image so turns and mirrors still apply to it, and it
   follows the image if you turn it afterwards, because the stored rectangle names
   the same pixels either way.
-- **The frame you see is the frame that gets saved.** Chain: screen points →
+- **The frame you see is the frame that gets saved, and the frame that gets
+  copied.** Chain: screen points →
   displayed pixels → stored pixels (`Crop::from_display_rect`) →
   `snapped_to_mcu` → back to the screen. `crop_from_screen` and
   `crop_screen_rect` in `main.rs` are two halves of one conversion and must stay
   in step. The origin lands on the MCU grid (8 px for 4:4:4, 16 for the usual
   4:2:0) and the rectangle is **grown** to fit, so the user gets up to one block
   of *extra* picture rather than one block cut off the edge they framed.
+- **A frame can only be drawn, not moved.** Tried: a press *inside* the frame
+  translates it, a press *outside* draws a new one, with `Crop::moved_by` doing
+  the arithmetic through the same three steps a frame is built with. Reverted
+  because it was wrong in the hand in a way the tests did not catch. **If it is
+  attempted again, the trap to design around is the frame that covers the whole
+  picture**: every press is then "inside" it, so there is no way to start a new
+  frame at all — a state the old behaviour simply could not reach. That needs an
+  explicit way out (a handle, a modifier, or `Clear crop` as the escape), not
+  only a hit test.
+- **A drag can be held to a shape** (`constrain_to_aspect`, `CropAspect`). The
+  frame is built from the **press point**, and the axis the pointer leads is kept
+  while the other one gives — so `crop_from_screen` takes anchor and pointer, not
+  a finished min/max rect. A rect has already thrown the anchor away, and without
+  it the frame grows out of the middle of the drag. Three decisions that will look
+  wrong to somebody tidying:
+  * **Shift means 1:1, not "ignore the setting"** — the other common convention.
+    The default setting is `Free`, so a Shift-means-override shortcut would do
+    nothing at all out of the box.
+  * **The shape is decided per frame, not latched on press.** Letting go of Shift
+    mid-drag is how you get out of a shape you did not want.
+  * **`constrain_to_aspect` has no guard for a flat drag**, and that is not an
+    oversight. `dx / dy` really is a division by zero, but every branch lands on
+    the same answer — a zero on one side zeroes the other — so a guard would be a
+    branch that cannot change an output, which is worse than none because it reads
+    as protection that is not there. `a_drag_with_no_area_is_not_given_a_shape`
+    pins the user-visible property instead.
+  * **`CropAspect::Source` resolves against the *displayed* size**, not the file's.
+    A 3:2 photo turned on its side is 2:3 on screen, and a frame that insisted on
+    3:2 would not fit it.
+- **`Ctrl+C` and `Ctrl+S` are one feature with two outputs**, and they reach the
+  same picture by *different* routes, which is the whole difficulty.
+  `save_transformed` cuts the rectangle out of the **stored** pixels and then
+  applies `display_xform(exif, user)`. `region_for_save` (clipboard) is handed a
+  buffer that is already EXIF-oriented, so it moves the rectangle with
+  `to_display_rect(exif, stored)` — the *forward* direction, exif part alone — and
+  then applies the user's turn by itself. Both are crop-then-turn, so both agree.
+  `the_clipboard_region_is_the_picture_the_save_would_write` builds the save's own
+  formulation independently and compares over every exif tag × all eight xforms ×
+  four rectangles; it fails if the rect moves backwards, if the exif part is
+  dropped or inverted, and if the two transforms are composed in the wrong order.
+  **The trap is that every one of those mistakes yields a valid picture of the
+  wrong part of the photo** — nothing about the result looks broken. Three
+  details are load-bearing and easy to undo:
+  * animation frames are **stored** pixels (the animation path reports `exif_tag`
+    and never calls `apply_exif_orientation`), so the clipboard passes `0` there.
+    Passing the reported tag transposes a GIF a second time.
+  * `FullImage` carries `exif_tag` because that is a property of the buffer, not
+    of the preview it happened to arrive with.
+  * `set_clipboard_rgba` takes the buffer **by value**: 24 MP is 96 MB, and the
+    copy is unavoidable, so it happens once.
+  The clipboard does not re-encode at all, which is why it needs neither the
+  lossless DCT path nor the re-encode fallback `save_transformed` has.
 - **A crop and a turn are two TurboJPEG passes, forced not chosen.** Crop
   coordinates are read in the transform's *destination* space, and the four
   axis-swapping operations refuse a crop outright ("Invalid crop request").

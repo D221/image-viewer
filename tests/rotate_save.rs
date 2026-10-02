@@ -620,6 +620,345 @@ fn a_crop_and_a_turn_are_saved_together_losslessly() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Holding the crop frame to a shape
+// ---------------------------------------------------------------------------
+
+/// The ratio a frame came out at, or `None` if it has no area.
+fn aspect_of(r: (f32, f32, f32, f32)) -> Option<f32> {
+    let (w, h) = (r.2 - r.0, r.3 - r.1);
+    (w > 0.0 && h > 0.0).then_some(w / h)
+}
+
+#[test]
+fn shift_gives_a_perfect_square_whatever_the_drag_did() {
+    for (anchor, corner) in [
+        ((0.0, 0.0), (300.0, 100.0)),
+        ((0.0, 0.0), (100.0, 300.0)),
+        ((50.0, 50.0), (450.0, 60.0)),
+        ((0.0, 0.0), (137.0, 421.0)),
+    ] {
+        let r = image_viewer::constrain_to_aspect(anchor, corner, Some(1.0));
+        let ratio = aspect_of(r).unwrap_or_else(|| panic!("{anchor:?}->{corner:?} gave no frame"));
+        assert!(
+            (ratio - 1.0).abs() < 1e-4,
+            "{anchor:?}->{corner:?} gave {ratio}, not a square"
+        );
+    }
+}
+
+#[test]
+fn a_held_shape_keeps_the_press_point_and_the_direction_of_the_drag() {
+    // The press point is the anchor, so the frame grows out of where the drag
+    // started rather than out of the middle of the drag.
+    let anchor = (20.0, 30.0);
+    let r = image_viewer::constrain_to_aspect(anchor, (220.0, 130.0), Some(16.0 / 9.0));
+    assert_eq!((r.0, r.1), anchor, "the frame moved off the press point");
+    // The axis the pointer leads is the one kept: right and down here, so the
+    // far corner is still down-right of the anchor.
+    assert!(r.2 > anchor.0 && r.3 > anchor.1, "wrong quadrant: {r:?}");
+
+    // The same drag mirrored about the press point frames the same shape. This
+    // is the reason the min/max rectangle is rebuilt from the anchor rather than
+    // carried through from the raw pointer: a frame you drew bottom-right and one
+    // you drew top-left have to be the same size or the same crop needs two
+    // different drags depending on the corner you happened to start from.
+    let (w, h) = (r.2 - r.0, r.3 - r.1);
+    let up_left = image_viewer::constrain_to_aspect(
+        anchor,
+        (anchor.0 - w, anchor.1 - h),
+        Some(16.0 / 9.0),
+    );
+    assert_eq!(
+        (up_left.2 - up_left.0, up_left.3 - up_left.1),
+        (w, h),
+        "the same drag mirrored framed a different shape"
+    );
+    // The frame lies wholly on the mirrored side and still touches the press
+    // point — the anchor is a corner of the rectangle, not its middle.
+    assert!(
+        up_left.2 <= anchor.0 && up_left.3 <= anchor.1,
+        "not up-left of the press point: {up_left:?} vs {anchor:?}"
+    );
+    assert_eq!(
+        (up_left.2, up_left.3),
+        anchor,
+        "the mirrored frame lost the corner it was dragged from"
+    );
+}
+
+#[test]
+fn the_led_axis_is_the_one_that_gives() {
+    // Too wide for the ratio: the width is trimmed, and the height — which the
+    // pointer is not leading — is what has to give.
+    let wide = image_viewer::constrain_to_aspect((0.0, 0.0), (200.0, 100.0), Some(1.0));
+    assert_eq!(wide, (0.0, 0.0, 100.0, 100.0), "width should have been trimmed");
+    // Too tall: the mirror of it.
+    let tall = image_viewer::constrain_to_aspect((0.0, 0.0), (100.0, 200.0), Some(1.0));
+    assert_eq!(tall, (0.0, 0.0, 100.0, 100.0), "height should have been trimmed");
+}
+
+#[test]
+fn a_free_drag_is_left_exactly_as_it_was() {
+    // `None` is not "approximately free" — the rectangle has to be bit-identical
+    // to the drag, or every uncropped drag in the app shifts by a rounding step.
+    for (anchor, corner) in [
+        ((0.0, 0.0), (300.0, 100.0)),
+        ((10.0, 20.0), (5.0, 300.0)),
+        ((-4.0, -9.0), (11.0, 2.0)),
+    ] {
+        let (ax, ay) = anchor;
+        let (cx, cy) = corner;
+        assert_eq!(
+            image_viewer::constrain_to_aspect(anchor, corner, None),
+            (ax.min(cx), ay.min(cy), ax.max(cx), ay.max(cy)),
+            "{anchor:?}->{corner:?} moved with no shape asked for"
+        );
+    }
+}
+
+#[test]
+fn a_drag_with_no_area_is_not_given_a_shape() {
+    // Pressing and holding Shift without moving must not pop a frame into being.
+    // This needs no special case in the implementation to hold — a zero on one
+    // axis zeroes the other, so every branch collapses the frame — but it is the
+    // user-visible property, and it is what a "minimum frame size" or a
+    // "snap-to-a-shape-on-press" change would break.
+    for corner in [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)] {
+        for aspect in [None, Some(1.0), Some(16.0 / 9.0), Some(1.0 / 100.0)] {
+            let r = image_viewer::constrain_to_aspect((0.0, 0.0), corner, aspect);
+            assert_eq!(aspect_of(r), None, "a flat drag grew into {r:?}");
+        }
+    }
+}
+
+#[test]
+fn every_shape_in_the_list_resolves_to_the_ratio_it_is_labelled_with() {
+    for a in image_viewer::CropAspect::ALL {
+        let want = match a {
+            image_viewer::CropAspect::Free => None,
+            image_viewer::CropAspect::Square => Some(1.0),
+            image_viewer::CropAspect::Widescreen => Some(16.0 / 9.0),
+            image_viewer::CropAspect::Portrait => Some(9.0 / 16.0),
+            image_viewer::CropAspect::Classic => Some(4.0 / 3.0),
+            image_viewer::CropAspect::TallClassic => Some(3.0 / 4.0),
+            image_viewer::CropAspect::Photo => Some(3.0 / 2.0),
+            image_viewer::CropAspect::TallPhoto => Some(2.0 / 3.0),
+            // Resolved against the image, not the label.
+            image_viewer::CropAspect::Source => Some(3.0 / 2.0),
+        };
+        assert_eq!(
+            a.ratio((3000, 2000)),
+            want,
+            "{:?} ({}) does not resolve to its own label",
+            a,
+            a.label()
+        );
+    }
+}
+
+#[test]
+fn same_as_the_image_follows_the_picture_as_it_is_shown() {
+    // A 3:2 photo turned on its side is 2:3 on screen, and a frame that insisted
+    // on 3:2 would not fit it — the caller passes the *displayed* size for
+    // exactly this reason, so this is the assertion that the source is the
+    // displayed picture and not the file.
+    assert_eq!(
+        image_viewer::CropAspect::Source.ratio((3000, 2000)),
+        Some(1.5)
+    );
+    assert_eq!(
+        image_viewer::CropAspect::Source.ratio((2000, 3000)),
+        Some(2.0 / 3.0)
+    );
+    // A degenerate size cannot be divided by, and must not become NaN — a NaN
+    // ratio would sail through `constrain_to_aspect`'s filter and produce a
+    // rectangle of nonsense.
+    assert_eq!(image_viewer::CropAspect::Source.ratio((0, 0)), None);
+}
+
+#[test]
+fn a_config_written_before_this_existed_still_loads() {
+    // The whole reason the field is `#[serde(default)]`: an old config that
+    // knows nothing about crop shapes must start, and must start on Free, or the
+    // feature arrives as a behaviour change nobody asked for on upgrade.
+    let old = r#"{
+        "load_all_on_startup": true,
+        "folder": null,
+        "sort": "name"
+    }"#;
+    let c: image_viewer::Config = serde_json::from_str(old).expect("an old config must parse");
+    assert_eq!(c.crop_aspect, image_viewer::CropAspect::Free);
+    assert_eq!(c.crop_aspect, image_viewer::CropAspect::default());
+}
+
+#[test]
+fn a_crop_shape_survives_a_config_round_trip() {
+    for a in image_viewer::CropAspect::ALL {
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(json, format!("\"{}\"", json.trim_matches('"')), "not a bare word");
+        let back: image_viewer::CropAspect = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a, "{a:?} did not survive {json}");
+    }
+    // Lowercase in the file, whatever the variant is called in Rust: the same
+    // trap that made `WgpuBackend` write "Dx12" and then fail to read it back.
+    let json = serde_json::to_string(&image_viewer::CropAspect::TallPhoto).unwrap();
+    assert_eq!(json, "\"tallphoto\"");
+}
+
+// ---------------------------------------------------------------------------
+// The clipboard: the same edit, as pixels
+// ---------------------------------------------------------------------------
+//
+// `Ctrl+S` writes the framed picture to a file and `Ctrl+C` puts it on the
+// clipboard, so they are one feature with two outputs. The clipboard takes
+// pixels, so it cannot use the lossless DCT path and does not want to: nothing is
+// re-compressed at all there.
+//
+// That leaves the interesting question, which is whether two different routes to
+// the same picture agree. `save_transformed` cuts in **stored** space and then
+// applies the whole display transform. `region_for_save` is handed a buffer that
+// is already EXIF-oriented, so it has to move the rectangle into that buffer's
+// space and then apply the user's turn alone. Two compositions, one answer — and
+// the ways to get it wrong are silent, because a wrongly-placed crop is still a
+// perfectly good picture of the wrong part of the photo.
+
+/// The buffer a decode hands the app: EXIF orientation applied, user turn not.
+fn oriented_decode(img: &image::DynamicImage, exif_tag: u16) -> image_viewer::ImageData {
+    let mut d = image_viewer::ImageData {
+        width: img.width(),
+        height: img.height(),
+        rgba: img.to_rgba8().into_raw(),
+        load_time: std::time::Duration::ZERO,
+    };
+    apply_exif_orientation(&mut d, exif_tag);
+    d
+}
+
+/// The clipboard route, checked against the save's own formulation of the edit.
+///
+/// `want` is built the way `save_transformed` builds it — crop the stored pixels,
+/// then apply `display_xform(exif, user)` — so the two are independent statements
+/// of the same edit and cannot both be wrong in the same way. Raster algebra
+/// only, so the comparison is exact: a JPEG in the loop would make a loose
+/// threshold the only option and would hide a crop of the wrong corner inside it.
+#[test]
+fn the_clipboard_region_is_the_picture_the_save_would_write() {
+    let (w, h) = (96u32, 64u32);
+    let src = quadrants(w, h);
+    let stored_rgba = src.to_rgba8().into_raw();
+    for exif_tag in [0u16, 1, 2, 3, 4, 5, 6, 7, 8] {
+        let buffer = oriented_decode(&src, exif_tag);
+        for user in Xform::ALL {
+            // A grid of frames, including ones flush to an edge and ones big
+            // enough to be the whole picture: the corners are where a transposed
+            // rectangle shows up.
+            let display = image_viewer::display_xform(exif_tag, user);
+            let (dw, dh) = display.out_dims(w, h);
+            for rect in [
+                (0u32, 0u32, dw, dh),
+                (0, 0, dw.min(32), dh.min(32)),
+                (dw / 4, dh / 4, dw / 2, dh / 2),
+                (dw.saturating_sub(32), dh.saturating_sub(16), 32.min(dw), 16.min(dh)),
+            ] {
+                let Some(crop) =
+                    image_viewer::Crop::from_display_rect(exif_tag, user, rect, (w, h))
+                else {
+                    continue;
+                };
+                let what = format!("exif={exif_tag} user={user:?} crop={crop:?}");
+
+                let got = image_viewer::region_for_save(&buffer, exif_tag, user, Some(crop))
+                    .unwrap_or_else(|| panic!("{what}: refused a crop it was given"));
+
+                let (cw, ch, cut) = crop.apply_rgba(w, h, &stored_rgba).unwrap();
+                let want = display
+                    .apply_rgba(cw, ch, &cut)
+                    .unwrap_or_else(|| panic!("{what}: the save's own route failed too"));
+
+                assert_eq!(
+                    (got.width, got.height),
+                    (want.0, want.1),
+                    "{what}: wrong size for the framed region"
+                );
+                assert_eq!(got.rgba, want.2, "{what}: wrong pixels for the framed region");
+            }
+        }
+    }
+}
+
+/// No edit, no change. This is the path every image takes until somebody turns
+/// something, and it must stay a copy of the decode rather than a resample, a
+/// re-orientation or a no-op that quietly drops the alpha.
+#[test]
+fn an_unedited_image_goes_to_the_clipboard_exactly_as_decoded() {
+    let src = quadrants(96, 64);
+    for exif_tag in [0u16, 1, 3, 6, 8] {
+        let buffer = oriented_decode(&src, exif_tag);
+        for (user, crop) in [
+            (Xform::Identity, None),
+            (Xform::Identity, Some(image_viewer::Crop::new(0, 0, 96, 64).unwrap())),
+        ] {
+            let got = image_viewer::region_for_save(&buffer, exif_tag, user, crop).unwrap();
+            assert_eq!(
+                (got.width, got.height),
+                (buffer.width, buffer.height),
+                "exif={exif_tag} {user:?}: an edit that is a no-op changed the size"
+            );
+            assert_eq!(
+                got.rgba, buffer.rgba,
+                "exif={exif_tag} {user:?} {crop:?}: an edit that is a no-op changed the pixels"
+            );
+        }
+    }
+}
+
+/// The clipboard against the real thing: decode a file, cut it, and compare with
+/// the file `Ctrl+S` would have written and read back.
+///
+/// The looser comparison is `assert_same_pixels`, because the save goes through a
+/// JPEG round trip and the clipboard does not. The point is not bit-equality —
+/// it is that the two routes name the same *region*, and a region that is off by
+/// a transpose or a quarter turn is off by whole quadrants, which no amount of
+/// JPEG noise can disguise.
+#[test]
+fn the_clipboard_matches_a_real_saved_file() {
+    let (w, h) = (96u32, 64u32);
+    for (exif_tag, user, crop) in [
+        (0u16, Xform::Identity, image_viewer::Crop::new(16, 16, 32, 32)),
+        (6, Xform::Identity, image_viewer::Crop::new(16, 16, 32, 32)),
+        (6, Xform::Rot90, image_viewer::Crop::new(8, 0, 48, 32)),
+        (8, Xform::Transverse, image_viewer::Crop::new(0, 16, 32, 32)),
+        (3, Xform::FlipV, image_viewer::Crop::new(16, 8, 32, 32)),
+    ]
+    .map(|(t, u, c)| (t, u, c.unwrap()))
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = quadrants(w, h);
+        let p = write_jpeg(tmp.path(), "photo.jpg", &src, exif_tag);
+        let what = format!("exif={exif_tag} user={user:?} crop={crop:?}");
+
+        // The save's answer, through a real file.
+        let dest = save_transformed(&p, user, Some(crop)).unwrap();
+        let saved = load_image(&dest, 4096).unwrap();
+
+        // The clipboard's answer, from the same decode the app already holds.
+        let buffer = image_viewer::load_image_full(&p, 0).unwrap();
+        assert_eq!(
+            exif_orientation(&p),
+            exif_tag,
+            "{what}: the fixture's EXIF tag did not round-trip, so this proves nothing"
+        );
+        let copied =
+            image_viewer::region_for_save(&buffer, exif_tag, user, Some(crop)).unwrap();
+
+        let want = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(saved.width, saved.height, saved.rgba).unwrap(),
+        );
+        assert_same_pixels(&copied, &want, &what);
+    }
+}
+
 /// A crop that keeps every pixel must behave exactly like no crop at all —
 /// including the file name, which would otherwise say `_cropped` for a file that
 /// was not.

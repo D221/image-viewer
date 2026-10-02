@@ -22,6 +22,147 @@ pub fn load_image_preview(path: &Path, preview_max_dim: u32) -> Result<ImageData
     load_image(path, preview_max_dim.min(512))
 }
 
+/// The shape a crop frame is held to while it is being dragged.
+///
+/// A curated list rather than an arbitrary ratio, because this is a dropdown in
+/// the settings panel and the ratios people actually want are the ones a camera
+/// or a phone shoots at. `#[serde(rename_all = "lowercase")]` so the config
+/// spelling matches the labels — the same trap `WgpuBackend` fell into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CropAspect {
+    /// Whatever the drag makes. The original behaviour, and the default: a crop
+    /// that locks a shape before anybody asked for one is a worse default than
+    /// one that does not.
+    #[default]
+    Free,
+    /// 1:1.
+    Square,
+    /// 16:9 — a phone held sideways.
+    Widescreen,
+    /// 9:16 — a phone held upright.
+    Portrait,
+    /// 4:3.
+    Classic,
+    /// 3:4.
+    TallClassic,
+    /// 3:2 — a 35 mm frame.
+    Photo,
+    /// 2:3.
+    TallPhoto,
+    /// The shape of the image as it is displayed, so the frame starts at the
+    /// edges of the picture whatever its orientation or any turn applied to it.
+    Source,
+}
+
+impl CropAspect {
+    /// Every option, in the order the dropdown lists them.
+    pub const ALL: [CropAspect; 9] = [
+        CropAspect::Free,
+        CropAspect::Square,
+        CropAspect::Widescreen,
+        CropAspect::Portrait,
+        CropAspect::Classic,
+        CropAspect::TallClassic,
+        CropAspect::Photo,
+        CropAspect::TallPhoto,
+        CropAspect::Source,
+    ];
+
+    /// What the dropdown says. The number is in the label because "Square" and
+    /// "1:1" are not obviously the same intent to somebody reaching for either.
+    pub fn label(self) -> &'static str {
+        match self {
+            CropAspect::Free => "Free",
+            CropAspect::Square => "Square 1:1",
+            CropAspect::Widescreen => "Widescreen 16:9",
+            CropAspect::Portrait => "Portrait 9:16",
+            CropAspect::Classic => "Classic 4:3",
+            CropAspect::TallClassic => "Tall 3:4",
+            CropAspect::Photo => "Photo 3:2",
+            CropAspect::TallPhoto => "Tall photo 2:3",
+            CropAspect::Source => "Same as image",
+        }
+    }
+
+    /// The ratio to hold a frame to, as width over height, or `None` for free.
+    ///
+    /// `display` is the image's **displayed** size in its own pixels — after the
+    /// EXIF orientation and any turn — because the frame is dragged on what is on
+    /// screen. `Source` therefore follows the picture as it appears, which is the
+    /// only version of "the same shape" that means anything to the person
+    /// dragging: a 3:2 photo turned on its side is 2:3 on screen, and a frame
+    /// that insisted on 3:2 would not fit it.
+    pub fn ratio(self, display: (u32, u32)) -> Option<f32> {
+        let (w, h) = (display.0 as f32, display.1 as f32);
+        let (nw, nh) = match self {
+            CropAspect::Free => return None,
+            CropAspect::Square => (1.0, 1.0),
+            CropAspect::Widescreen => (16.0, 9.0),
+            CropAspect::Portrait => (9.0, 16.0),
+            CropAspect::Classic => (4.0, 3.0),
+            CropAspect::TallClassic => (3.0, 4.0),
+            CropAspect::Photo => (3.0, 2.0),
+            CropAspect::TallPhoto => (2.0, 3.0),
+            CropAspect::Source => {
+                if w <= 0.0 || h <= 0.0 {
+                    return None;
+                }
+                (w, h)
+            }
+        };
+        Some(nw / nh)
+    }
+}
+
+/// Hold a dragged crop frame to `aspect` (width over height), anchored at the
+/// press point.
+///
+/// Returns `(x0, y0, x1, y1)` in the same space it was given. The axis the
+/// pointer leads is kept and the **other** one is the one that gives — drag
+/// right and down for a wide frame and the height follows the width. That is the
+/// convention every editor uses; letting both axes chase the pointer cannot be
+/// hit reliably with a mouse.
+///
+/// `None` is a no-op, and so is a frame with no width or no height: a rectangle
+/// with nothing to it has no aspect to hold, and the crop refuses it downstream
+/// rather than the frame jumping the instant the drag cleared egui's threshold.
+///
+/// The result is not clamped to the image here. The caller does that, and a frame
+/// anchored near an edge will come out slightly the wrong shape for the same
+/// reason a saved crop comes out up to one MCU block bigger than the drag: the
+/// rectangle that actually gets cut is the one inside the picture.
+pub fn constrain_to_aspect(
+    anchor: (f32, f32),
+    corner: (f32, f32),
+    aspect: Option<f32>,
+) -> (f32, f32, f32, f32) {
+    let (ax, ay) = anchor;
+    let (mut cx, mut cy) = corner;
+    let free = || (ax.min(cx), ay.min(cy), ax.max(cx), ay.max(cy));
+    let Some(r) = aspect.filter(|r| r.is_finite() && *r > 0.0) else {
+        return free();
+    };
+    // No special case for a flat drag. It looks like it needs one — `dx / dy` is
+    // a division by zero — but every branch lands on the same answer: a zero on
+    // one side makes the other side zero too, so the frame collapses to nothing
+    // and the crop refuses it. A guard here would be a branch that cannot change
+    // an output, which is worse than no branch, because it reads as protection
+    // that is not there.
+    let (mut dx, mut dy) = ((cx - ax).abs(), (cy - ay).abs());
+    if dx / dy > r {
+        dx = dy * r;
+    } else {
+        dy = dx / r;
+    }
+    // Keep the direction the pointer went: dragging up and left has to frame the
+    // same rectangle as dragging down and right, or the same crop needs two
+    // different drags depending on which corner you started from.
+    cx = if corner.0 < anchor.0 { ax - dx } else { ax + dx };
+    cy = if corner.1 < anchor.1 { ay - dy } else { ay + dy };
+    (ax.min(cx), ay.min(cy), ax.max(cx), ay.max(cy))
+}
+
 /// Configuration settings for the image viewer.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -76,6 +217,12 @@ pub struct Config {
     #[serde(default)]
     pub convert_wide_gamut: bool,
 
+    /// Shape a crop frame is held to while it is dragged. `Free` so an old
+    /// config — and a new install — behaves exactly as it did before this
+    /// existed.
+    #[serde(default)]
+    pub crop_aspect: CropAspect,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -99,6 +246,7 @@ impl Config {
             loop_back: true,
             renderer: RendererPref::default(),
             convert_wide_gamut: false,
+            crop_aspect: CropAspect::default(),
             last_by_folder: std::collections::HashMap::new(),
         };
 
@@ -1767,6 +1915,86 @@ pub fn display_xform(exif_tag: u16, user: Xform) -> Xform {
     Xform::from_exif(exif_tag)
         .unwrap_or(Xform::Identity)
         .then(user)
+}
+
+/// The picture a save would produce, as pixels, cut out of an already-decoded
+/// buffer. This is what the clipboard gets.
+///
+/// The raster twin of [`save_transformed`]: the same edit, the same order, the
+/// same pixels — but nothing written and nothing re-compressed. The lossless DCT
+/// path is not available here and is not wanted: the clipboard takes pixels, so
+/// there is no generation loss at all. That is a *better* answer than the save's
+/// fallback for a format it cannot transform losslessly.
+///
+/// ## The two spaces, which is where this could have gone wrong
+///
+/// `oriented` is what a decode produces: **EXIF orientation applied, the user's
+/// transform not**. Every `full` buffer in the app is exactly that. `crop`, on
+/// the other hand, is in **stored** coordinates, because that is what TurboJPEG's
+/// crop region is expressed against. So the rectangle has to be moved into the
+/// buffer's space before it can be used, and getting that move backwards is the
+/// [`Crop::from_display_rect`] trap: for a quarter turn it is the difference
+/// between the top-left of the photo and the bottom-left, and both of them are a
+/// perfectly good picture of the wrong part of it.
+///
+/// The direction is `to_display_rect` with an *identity user transform*, which is
+/// the EXIF part alone — the forward direction, matching what
+/// `crop_from_screen` computed on the way in.
+///
+/// ## Why crop-then-turn
+///
+/// It is the order [`save_transformed`] uses in both of its branches, so the
+/// clipboard and the file cannot disagree, and it is the cheap one:
+/// `Xform::apply_rgba` is only ever asked about the pixels inside the frame,
+/// rather than all 24 megapixels of it. It is also correct in its own right —
+/// `T(crop(src, R'))` is `crop(T(src), R)` when `R' = T⁻¹(R)` — which is the
+/// property that makes cutting in stored space and then turning legitimate.
+///
+/// `None` means the crop does not fit the buffer, or the buffer disagrees with
+/// its own dimensions. Neither should be reachable: the rectangle is clamped and
+/// snapped to the block grid on the way in, and every decode is `normalized()`.
+pub fn region_for_save(
+    oriented: &ImageData,
+    exif_tag: u16,
+    user: Xform,
+    crop: Option<Crop>,
+) -> Option<ImageData> {
+    let (w, h) = (oriented.width, oriented.height);
+    if oriented.rgba.len() != (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let exif = Xform::from_exif(exif_tag).unwrap_or(Xform::Identity);
+    // The buffer is the stored picture with the EXIF orientation applied, so the
+    // stored dimensions are its own with that axis swap undone. This is the same
+    // derivation `crop_from_screen` does, and the two have to agree or the
+    // rectangle names different pixels here than it does there.
+    let stored = if exif.swaps_axes() { (h, w) } else { (w, h) };
+
+    let (cw, ch, cut) = match crop {
+        Some(c) => {
+            let (x, y, cw, ch) = c.to_display_rect(exif, stored);
+            let r = Crop::new(x, y, cw, ch)?;
+            r.apply_rgba(w, h, &oriented.rgba)?
+        }
+        // Owned because the clipboard needs owned pixels; this is the one copy the
+        // caller could not have avoided anyway.
+        None => (w, h, oriented.rgba.clone()),
+    };
+    if user == Xform::Identity {
+        return Some(ImageData {
+            width: cw,
+            height: ch,
+            rgba: cut,
+            load_time: oriented.load_time,
+        });
+    }
+    let (ow, oh, px) = user.apply_rgba(cw, ch, &cut)?;
+    Some(ImageData {
+        width: ow,
+        height: oh,
+        rgba: px,
+        load_time: oriented.load_time,
+    })
 }
 
 /// Why a transform could not be saved, when it could not.

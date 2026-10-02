@@ -77,6 +77,12 @@ double-rotate).
   you see is the frame that gets saved. **Clear crop** removes it and keeps any
   rotation, and so does leaving crop mode — press `C`, drag, press `C`, and you are
   back where you were. While crop mode is on, dragging pans no longer
+- **Holding `Shift` frames a perfect 1:1 square**, whatever the drag was doing.
+  **Settings → Crop shape** picks a shape for every drag instead: 1:1, 16:9, 9:16,
+  4:3, 3:4, 3:2, 2:3, or **Same as image**, which follows the picture as displayed —
+  so a 3:2 photo you have turned on its side gets a 2:3 frame. The default is
+  Free, and an existing frame keeps whatever shape it has
+
 - Folder watcher: new and deleted files are picked up automatically (every 2s)
 
 ### Gallery grid (`G`)
@@ -128,7 +134,7 @@ than silently writing into the zip.
 | — | Move / copy the current image to a chosen folder (buttons; no key, see below) |
 | `E` | Reveal the containing folder in your default file browser |
 | `W` | Set as desktop wallpaper |
-| `Ctrl+C` | Copy the image to the clipboard |
+| `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears |
 | `R` | Rescan the folder / reshuffle the sort order |
 
 Move and Copy are buttons rather than keys because they write to the filesystem.
@@ -225,6 +231,12 @@ pixels, with the orientation tag reset so nothing applies it a second time. The
 turn and the mirrors are composed into a single transform on the way in, so there
 is no case where the save has to work out "a turn and a flip" at the last moment.
 
+`Ctrl+C` gives you the same picture, on the clipboard, and it is the same edit
+rather than a lookalike: the rectangle you framed, cut out of the pixels already
+decoded, and turned. Nothing is re-compressed on the way — the clipboard takes
+pixels, so there is no encode step and no second generation of JPEG artefacts.
+Paste it into anything and it is the crop you drew, at full resolution.
+
 For JPEG this is genuinely lossless. Rather than decode and re-encode, the
 transform is applied to the **DCT coefficients** — the compressed data itself is
 moved, not recompressed. Measured on generated images at quality 90, and
@@ -289,7 +301,7 @@ should not quietly do that.
 | `C` | Toggle crop mode |
 | `Del` | Move to the Recycle Bin (never a hard delete) |
 | `E` `W` `R` | Explore folder, wallpaper, reload folder |
-| `Ctrl+C` | Copy image to clipboard |
+| `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Previous / next image |
@@ -515,11 +527,15 @@ images and is `#[ignore]`d because it takes seconds.
   another image for the change to show everywhere.
 - The **preview cache keeps a few images either side of the current one**, so
   jumping far away discards the old previews; scrolling back re-decodes.
-- **Turning, mirroring and cropping are display-only by default.** They are not written to
-  the file and not carried into copies, clipboard or wallpaper. Only **Save
-  transformed…** / `Ctrl+S` writes anything, and it writes a new file rather than
+- **Turning, mirroring and cropping do not touch the file.** Nothing is written
+  until **Save transformed…** / `Ctrl+S`, and that writes a new file rather than
   modifying the original. Transforms are per image and last for the session only;
   they are not persisted across restarts.
+- **The clipboard carries the edit; the wallpaper does not.** `Ctrl+C` puts the
+  picture *as you framed it* on the clipboard — cropped, turned and mirrored —
+  because that is the picture you were looking at and pasting it somewhere else
+  should paste that one. **Set wallpaper** still copies the original file, so the
+  desktop shows the photograph as the camera stored it.
 - **A rotated JPEG can lose up to one 16 px block off an edge.** Lossless
   transforms move whole 8×8 DCT blocks, so a width or height that is not a
   multiple of the MCU block size leaves partial blocks that cannot reach the new

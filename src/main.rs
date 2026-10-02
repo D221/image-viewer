@@ -1098,6 +1098,11 @@ struct FullImage {
     data: Arc<ImageData>,
     tiles: HashMap<(u32, u32), Tile>,
     load_ms: u64,
+    /// The file's EXIF orientation, which the decode has **already applied** to
+    /// `data`. Carried here so the clipboard can place a stored-space crop into
+    /// an oriented buffer without reaching back into the preview cache — and
+    /// because the value that describes a buffer is a property of the buffer.
+    exif_tag: u16,
 }
 
 /// `scale` / `offset` only matter while `fit` is false.
@@ -1704,11 +1709,14 @@ impl MyApp {
                         if Some(&key) == self.cur.as_ref() {
                             self.lat.full(Instant::now());
                             let load_ms = data.load_time.as_millis() as u64;
+                            let exif_tag =
+                                self.previews.get(&key).map_or(0, |pv| pv.exif_tag);
                             self.full = Some(FullImage {
                                 path: key.path,
                                 data,
                                 tiles: HashMap::new(),
                                 load_ms,
+                                exif_tag,
                             });
                         }
                     }
@@ -1807,6 +1815,7 @@ impl MyApp {
                         data: Arc::clone(data),
                         tiles: HashMap::new(),
                         load_ms,
+                        exif_tag: pv.exif_tag,
                     });
                 }
             }
@@ -2359,47 +2368,82 @@ impl MyApp {
         }
     }
 
+    /// Put the image on the clipboard **as it is framed**: the same crop and the
+    /// same turn `Ctrl+S` would write, as pixels.
+    ///
+    /// The edit is looked up by the path being copied, for the same reason the
+    /// save looks it up by the path being saved: a crop and a turn belong to the
+    /// *document*, and `ImageEdits` is the one store for both. Reading it off the
+    /// current view instead would make the clipboard a statement about whatever
+    /// was on screen rather than about this file.
+    ///
+    /// Which buffer the pixels come from differs by path, and each one is in a
+    /// different coordinate space — see [`image_viewer::region_for_save`], which is
+    /// where the space arithmetic lives and is tested.
     fn copy_image_to_clipboard(&mut self) {
         let Some(cur) = self.cur.clone() else {
             return;
         };
         let p = cur.path.clone();
-        // Fast path: full-res pixels already in memory.
-        if let Some(data) = self
-            .full
-            .as_ref()
-            .filter(|f| f.path == p)
-            .map(|f| Arc::clone(&f.data))
-        {
-            match set_clipboard_rgba(&data) {
-                Ok(()) => {
-                    self.notice =
-                        Some(format!("Copied {}x{} image to clipboard", data.width, data.height))
-                }
-                Err(e) => self.error = Some(format!("Clipboard failed: {e}")),
+        let edit = self.edits.get(&p);
+        let (xform, crop) = (edit.xform, edit.crop);
+        let edited = !edit.is_identity();
+
+        // Fast path: full-res pixels already in memory, EXIF orientation applied.
+        if let Some(f) = self.full.as_ref().filter(|f| f.path == p) {
+            match image_viewer::region_for_save(&f.data, f.exif_tag, xform, crop) {
+                Some(out) => match set_clipboard_rgba(out.width, out.height, out.rgba) {
+                    Ok(()) => self.notice = Some(copied_notice(out.width, out.height, &edit)),
+                    Err(e) => self.error = Some(format!("Clipboard failed: {e}")),
+                },
+                None => self.error = Some("The crop does not fit this image".into()),
             }
             return;
         }
         // Animation: copy the frame currently on screen.
+        //
+        // The tag is **0**, and that is a fact rather than a shrug: animation
+        // frames are handed over in stored pixels — the animation path reports
+        // `exif_tag` but never calls `apply_exif_orientation` — so the frame and
+        // the crop are already in the same space and applying the tag here would
+        // transpose the frame a second time. Passing 0 is also exactly what the
+        // save does to a GIF, because `exif_orientation` finds no tag in one.
         if let Some(av) = self.anim.as_ref().filter(|a| a.path == p) {
             let idx = av.last_index.min(av.anim.frames.len().saturating_sub(1));
-            if let Err(e) = set_clipboard_rgba(&av.anim.frames[idx]) {
-                self.error = Some(format!("Clipboard failed: {e}"));
-            } else {
-                self.notice = Some("Copied animation frame to clipboard".into());
+            match image_viewer::region_for_save(&av.anim.frames[idx], 0, xform, crop) {
+                Some(out) => {
+                    let msg = if edited {
+                        copied_notice(out.width, out.height, &edit)
+                    } else {
+                        format!(
+                            "Copied {}x{} animation frame to clipboard",
+                            out.width, out.height
+                        )
+                    };
+                    match set_clipboard_rgba(out.width, out.height, out.rgba) {
+                        Ok(()) => self.notice = Some(msg),
+                        Err(e) => self.error = Some(format!("Clipboard failed: {e}")),
+                    }
+                }
+                None => self.error = Some("The crop does not fit this image".into()),
             }
             return;
         }
         // Fallback (large JPEG before the full decode): decode off-thread. The
         // page is carried so the clipboard gets the page you are looking at, not
-        // page 1 of it.
+        // page 1 of it, and so is the edit: `edits` lives on the UI thread and is
+        // not shared, so everything the worker needs is resolved here.
         let page = cur.page;
+        let exif_tag = self.previews.get(&cur).map_or(0, |pv| pv.exif_tag);
         std::thread::spawn(move || match image_viewer::load_image_full(&p, page) {
-            Ok(d) => {
-                if let Err(e) = set_clipboard_rgba(&d) {
-                    eprintln!("clipboard: {e}");
+            Ok(d) => match image_viewer::region_for_save(&d, exif_tag, xform, crop) {
+                Some(out) => {
+                    if let Err(e) = set_clipboard_rgba(out.width, out.height, out.rgba) {
+                        eprintln!("clipboard: {e}");
+                    }
                 }
-            }
+                None => eprintln!("clipboard: the crop does not fit this image"),
+            },
             Err(e) => eprintln!("clipboard decode failed: {e}"),
         });
         self.notice = Some("Copying image to clipboard…".into());
@@ -2877,10 +2921,16 @@ impl MyApp {
             if let (true, Some(start), Some(p), Some(pv), Some(cur)) =
                 (down, origin, ptr, pvx, self.cur.clone())
             {
-                // min/max rather than `from_min_max` directly, so dragging up and
-                // left frames the same rectangle as dragging down and right.
-                let r = egui::Rect::from_min_max(start.min(p), start.max(p));
-                if let Some((crop, _)) = self.crop_from_screen(r, footprint, display_px, pv) {
+                // Shift is a temporary 1:1 whatever the setting says, because it
+                // is the one shape that is always wanted and never worth a trip to
+                // the settings panel. Read per frame rather than latched on press:
+                // the shape a drag ends up with should be the one your hand is
+                // doing now, and letting go of Shift mid-drag is how you get out
+                // of a shape you did not want.
+                let aspect = self.crop_aspect(&ctx, display_px);
+                if let Some((crop, _)) =
+                    self.crop_from_screen(start, p, aspect, footprint, display_px, pv)
+                {
                     // Edits are per *file*, not per page: a turn or a crop frame
                     // you set while looking at page 2 belongs to the document, and
                     // that is the thing `Ctrl+S` writes.
@@ -3151,9 +3201,10 @@ impl MyApp {
     /// The path a dragged rectangle takes, and each step is a place this could be
     /// wrong in a way that looks fine:
     ///
-    ///  1. screen points -> the displayed image's own pixels, via `footprint`.
-    ///     Rounded *outwards* (floor the near edges, ceil the far ones) so a
-    ///     one-pixel slip while dragging never shaves the frame.
+    ///  1. screen points -> the displayed image's own pixels, via `footprint`,
+    ///     with the frame first held to `aspect` if one is asked for. Rounded
+    ///     *outwards* (floor the near edges, ceil the far ones) so a one-pixel
+    ///     slip while dragging never shaves the frame.
     ///  2. displayed pixels -> stored pixels, through the inverse of the full
     ///     display transform. `Crop::from_display_rect` does this, and it is the
     ///     step that transposes if you get the direction wrong.
@@ -3163,24 +3214,24 @@ impl MyApp {
     ///
     /// Steps 3 and 4 are what stop the UI lying. Without them the user frames one
     /// rectangle and gets another, up to a block different, and never finds out.
+    ///
+    /// `anchor` and `ptr` rather than a finished rect, because holding a shape
+    /// needs to know which corner the drag started from: the constrained frame
+    /// grows out of the press point, not out of the middle. A min/max rect has
+    /// already thrown that away.
+    #[allow(clippy::too_many_arguments)]
     fn crop_from_screen(
         &self,
-        screen: egui::Rect,
+        anchor: egui::Pos2,
+        ptr: egui::Pos2,
+        aspect: Option<f32>,
         footprint: egui::Rect,
         display_px: Vec2,
         pv: &Preview,
     ) -> Option<(image_viewer::Crop, (u32, u32, u32, u32))> {
         let edit = self.edits.get(&self.cur.as_ref()?.path);
         let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
-        // `orig` is already display-oriented, so stored is recovered by undoing
-        // the EXIF's axis swap. `Xform::from_exif` is the same source of truth
-        // the decode used, rather than a second opinion about which tags swap.
-        let exif = Xform::from_exif(pv.exif_tag).unwrap_or(Xform::Identity);
-        let stored = if exif.swaps_axes() {
-            (pv.orig.1, pv.orig.0)
-        } else {
-            pv.orig
-        };
+        let stored = stored_dims(pv);
 
         let sx = footprint.width() / display_px.x.max(1.0);
         let sy = footprint.height() / display_px.y.max(1.0);
@@ -3190,8 +3241,13 @@ impl MyApp {
         let to_px = |p: egui::Pos2| -> (f32, f32) {
             ((p.x - footprint.min.x) / sx, (p.y - footprint.min.y) / sy)
         };
-        let (x0, y0) = to_px(screen.min);
-        let (x1, y1) = to_px(screen.max);
+        // The shape is held in the image's own pixels rather than in screen
+        // points, because that is the space the rectangle is finally expressed
+        // in — and because a square in image pixels is a square on screen, the
+        // footprint scaling the same on both axes.
+        let (ax, ay) = to_px(anchor);
+        let (cx, cy) = to_px(ptr);
+        let (x0, y0, x1, y1) = image_viewer::constrain_to_aspect((ax, ay), (cx, cy), aspect);
         // Outwards, so the frame never loses a row to rounding.
         let rect = (
             x0.floor().max(0.0) as u32,
@@ -3217,12 +3273,7 @@ impl MyApp {
         let crop = self.edits.crop(&self.shown.as_ref()?.path)?;
         let edit = self.edits.get(&self.shown.as_ref()?.path);
         let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
-        let exif = Xform::from_exif(pv.exif_tag).unwrap_or(Xform::Identity);
-        let stored = if exif.swaps_axes() {
-            (pv.orig.1, pv.orig.0)
-        } else {
-            pv.orig
-        };
+        let stored = stored_dims(pv);
         let (dx, dy, dw, dh) = crop.to_display_rect(display, stored);
         let sx = footprint.width() / display_px.x.max(1.0);
         let sy = footprint.height() / display_px.y.max(1.0);
@@ -3230,6 +3281,22 @@ impl MyApp {
             footprint.min + Vec2::new(dx as f32 * sx, dy as f32 * sy),
             Vec2::new(dw as f32 * sx, dh as f32 * sy),
         ))
+    }
+
+    /// The ratio a crop frame is being dragged to, from the setting and Shift.
+    ///
+    /// Shift wins, and it means square. The alternative — Shift meaning "ignore the
+    /// setting" — is the other common convention, and it is worse here: with the
+    /// default setting being `Free` there would be nothing for Shift to override,
+    /// and the shortcut people reach for would do nothing at all.
+    fn crop_aspect(&self, ctx: &Context, display_px: Vec2) -> Option<f32> {
+        // The image's own size, in whole pixels: what "the same shape as the
+        // image" means, and a degenerate zero cannot be divided by.
+        let dims = (display_px.x.max(1.0) as u32, display_px.y.max(1.0) as u32);
+        if ctx.input(|i| i.modifiers.shift) {
+            return image_viewer::CropAspect::Square.ratio(dims);
+        }
+        self.config.crop_aspect.ratio(dims)
     }
 
     /// Enter or leave crop mode. Leaving it throws the frame away.
@@ -3533,8 +3600,27 @@ fn grid_cell(
 
 /// A small 2x2-square checker texture used as the transparency backdrop.
 /// Painted with repeat-wrapped UVs so it tiles at any image size.
-fn make_checker_texture(ctx: &Context) -> TextureHandle {
-    const N: usize = 64; // texture side in px
+/// The file's **stored** pixel dimensions, recovered from a preview's
+/// already-oriented `orig`.
+///
+/// Three places need this — drawing a frame, reading one back out, and moving
+/// one — and they all have to agree about which space a rectangle is in.
+/// Repeating the derivation three times is three chances to crop a valid picture
+/// of the wrong part of the photo, which is exactly the failure this codebase
+/// has already paid for once. `Xform::from_exif` is the same source of truth the
+/// decode used, rather than a second opinion about which tags swap axes.
+fn stored_dims(pv: &Preview) -> (u32, u32) {
+    if Xform::from_exif(pv.exif_tag)
+        .unwrap_or(Xform::Identity)
+        .swaps_axes()
+    {
+        (pv.orig.1, pv.orig.0)
+    } else {
+        pv.orig
+    }
+}
+
+fn make_checker_texture(ctx: &Context) -> TextureHandle {    const N: usize = 64; // texture side in px
     const SQ: usize = 32; // square side in px
     let mut pixels = Vec::with_capacity(N * N);
     for y in 0..N {
@@ -3555,15 +3641,33 @@ fn make_checker_texture(ctx: &Context) -> TextureHandle {
     )
 }
 
-/// Put an RGBA image on the clipboard (any thread).
-fn set_clipboard_rgba(d: &ImageData) -> Result<(), String> {
+/// Put RGBA pixels on the Windows clipboard, from any thread.
+///
+/// Takes the buffer **by value** so arboard can take ownership of it. A 24 MP
+/// photo is 96 MB, and cloning it to hand it to a function that was going to
+/// clone it again is not a detail: this is the one call on this path that is
+/// unavoidably a copy, and the point is that it happens once.
+fn set_clipboard_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     cb.set_image(arboard::ImageData {
-        width: d.width as usize,
-        height: d.height as usize,
-        bytes: std::borrow::Cow::Owned(d.rgba.clone()),
+        width: width as usize,
+        height: height as usize,
+        bytes: std::borrow::Cow::Owned(rgba),
     })
     .map_err(|e| e.to_string())
+}
+
+/// What went on the clipboard, said in the terms the user acted in.
+///
+/// A crop or a turn is worth naming in the confirmation. "Copied 6000x4000 image
+/// to clipboard" when the user framed a quarter of the photo is true and useless;
+/// the size alone does not say which quarter.
+fn copied_notice(w: u32, h: u32, edit: &image_viewer::Edit) -> String {
+    if edit.is_identity() {
+        format!("Copied {w}x{h} image to clipboard")
+    } else {
+        format!("Copied {w}x{h} to clipboard ({})", edit.label())
+    }
 }
 
 /// Paint a texture into `rect`, turned by `xform` about the rect's centre.
@@ -3992,7 +4096,7 @@ impl eframe::App for MyApp {
                     // unreachable while it is on.
                     if ui
                         .selectable_label(self.crop_mode, "Crop (C)")
-                        .on_hover_text("Drag on the image to frame")
+                        .on_hover_text("Drag on the image to frame. Hold Shift for a square.")
                         .clicked()
                     {
                         self.toggle_crop_mode(ctx);
@@ -4237,6 +4341,31 @@ impl eframe::App for MyApp {
                     // so it has to be told.
                     self.gallery.loop_back = self.config.loop_back;
                     self.config.save(&self.config_path);
+                }
+                // Sits with the crop button's own row rather than under Graphics
+                // because it is a property of the *gesture*, not of the app: it
+                // changes what a drag does, and nothing about it applies until
+                // somebody drags.
+                ui.horizontal(|ui| {
+                    ui.label("Crop shape:");
+                    let mut choice = self.config.crop_aspect;
+                    egui::ComboBox::from_id_salt("crop_aspect")
+                        .selected_text(choice.label())
+                        .show_ui(ui, |ui| {
+                            for a in image_viewer::CropAspect::ALL {
+                                ui.selectable_value(&mut choice, a, a.label());
+                            }
+                        });
+                    if choice != self.config.crop_aspect {
+                        self.config.crop_aspect = choice;
+                        self.config.save(&self.config_path);
+                    }
+                });
+                if self.config.crop_aspect != image_viewer::CropAspect::Free {
+                    ui.small(
+                        "Frames a new crop to this shape; Shift forces a square for one drag. \
+                         A frame already drawn keeps the shape it has.",
+                    );
                 }
                 if new_filter != self.config.downscale_filter {
                     self.config.downscale_filter = new_filter;
