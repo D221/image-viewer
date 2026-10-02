@@ -358,6 +358,7 @@ Five input classes the spec implies but does not spell out, most likely to bite 
 
 **Files:**
 - Modify: `src/lib.rs` (new section beside the thumbnail cache, around `src/lib.rs:4468`)
+- Modify: `src/main.rs` — `MyApp` gains `spreads`, plus load and save wiring
 - Test: `tests/spreads.rs`
 
 **Interfaces:**
@@ -379,6 +380,22 @@ Five input classes the spec implies but does not spell out, most likely to bite 
       pub fn set_shape(&mut self, path: &Path, page: u32, shape: Shape);
       pub fn toggle(&mut self, path: &Path, page: u32, detected: Shape) -> Shape;
       pub fn nudge_lead_lone(&mut self, by: i32);
+      /// Drop every override for one file, for `invalidate_path`.
+      pub fn forget_file(&mut self, path: &Path);
+  }
+  ```
+  and in `main.rs`, so Task 4 has something to borrow:
+  ```rust
+  impl MyApp {
+      /// The overrides for the gallery on screen. Loaded when a gallery is opened
+      /// and re-read on `invalidate_path`, because a re-export can change a file's
+      /// page count and an override naming page 3 of a one-page document is stale.
+      pub spreads: GallerySpreads;
+      /// The path overrides are keyed by: the gallery's root. For an archive this is
+      /// the ORIGINAL archive path, never the %TEMP% extraction directory, which
+      /// changes on every re-extract and would orphan every override.
+      pub spreads_key: Option<String>;
+      pub fn save_spreads(&self);
   }
   ```
 
@@ -430,15 +447,37 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   an archive does not carry a drive letter. Doc comment: **the archive's original path is
   the key; a `%TEMP%` extraction path must never be written.**
 
-- [ ] **Step 4: Run to verify it passes**
+- [ ] **Step 4: Wire the overrides onto `MyApp`**
+
+  Task 4's `AppPageCtx` borrows `&self.spreads`, so the field has to exist before then.
+
+  - `MyApp` gains `spreads: GallerySpreads` (default) and `spreads_key: Option<String>`.
+  - Wherever a gallery is opened — `adopt_gallery` (`src/main.rs:1529`) and
+    `open_archive` (`src/main.rs:1948`) — set `spreads_key` to the gallery's root and
+    `load_spread_overrides`. **For an archive, `spreads_key` is the original archive
+    path**, which the app already holds; the temp extraction path must never reach this
+    field. `adopt_gallery` is the right single site because every site that rebuilds the
+    list already goes through it — the same reason the filter cannot be forgotten.
+  - `save_spreads()` writes via `save_spread_overrides` and **swallows the error**. A
+    read-only or full disk must not break browsing; the same rule the thumbnail cache
+    follows. Doc comment says so.
+  - Call `spreads.forget_file(path)` from `invalidate_path` (`src/main.rs:2152`),
+    beside `gallery.forget_shapes(path)` from Task 2.
+
+- [ ] **Step 5: Run to verify it passes**
 
   Run: `cargo test --test spreads`
   Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Run the full suite**
+
+  Run: `cargo test --no-fail-fast`
+  Expected: green.
+
+- [ ] **Step 7: Commit**
 
   ```bash
-  git add src/lib.rs tests/spreads.rs
+  git add src/lib.rs src/main.rs tests/spreads.rs
   git commit -m "Persist per-page shape overrides and the leading-lone offset"
   ```
 
@@ -658,12 +697,20 @@ Five input classes the spec implies but does not spell out, most likely to bite 
 ### Task 6: Paint two pages
 
 **Files:**
-- Modify: `src/main.rs` — `MyApp` gains `shown_partner`; `central` (`src/main.rs:2636`)
-- Test: `tests/unit.rs` (headless layout assertions)
+- Modify: `src/main.rs` — `Config` gains the two manga fields; `MyApp` gains
+  `shown_partner`; `central` (`src/main.rs:2636`)
+- Modify: `src/lib.rs` — the two `Config` fields
+- Test: `tests/spreads.rs` (the config default test only)
 
 **Interfaces:**
 - Consumes: Task 5's `spread_fit`, `spread_rects`, `Rect4`; Task 4's `turn_partner`.
-- Produces: `MyApp::shown_partner: Option<ImgKey>`, set in `sync_shown`
+- Produces:
+  ```rust
+  // Config - declared HERE, not in Task 8, because this is the first task that reads them.
+  #[serde(default)]              pub manga_mode: bool,
+  #[serde(default = "default_true")] pub manga_rtl: bool,
+  ```
+  and `MyApp::shown_partner: Option<ImgKey>`, set in `sync_shown`
   (`src/main.rs:1835`), cleared in `reset_display` and `invalidate_path`.
 
   **`shown` stays the cursor page and keeps its current meaning.** Every view-shaped code
@@ -672,25 +719,31 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   the paint loop reads `shown_partner`. This is what keeps the task small and is why no
   crop, tile or save code changes in this plan at all.
 
-- [ ] **Step 1: Write the failing test**
+  **Do not add a `#[cfg(test)]` module to `main.rs`.** It is a binary and unreachable from
+  every integration test, and that is a documented property of this project, not an
+  accident. The geometry this task consumes is already pinned by Task 5's pure tests;
+  the wiring is verified by the suite plus the console-session check in Step 6.
 
-  Headless, through the `run_pass` helper in `tests/unit.rs` (`tests/unit.rs:798`), which
-  clears `textures_delta`: `a_lone_page_and_a_pair_have_the_same_total_width_at_the_seam`
-  is already covered by Task 5. For *this* task the assertion is that a spread does not
-  move the cursor page's own footprint relative to the single-image case:
-  `the_cursor_pages_footprint_is_unchanged_by_manga_mode` — drive a real pass with
-  `shown` set and `shown_partner` set, and assert the cursor page's painted rect is the
-  same rectangle the single-image path produced at the same scale. Read it out of
-  `out.shapes` by filtering `Shape::Rect` with a `Brush` whose
-  `fill_texture_id != TextureId::default()`, the same technique as
-  `test_grid_thumbnail_is_centred_and_textured` at `tests/unit.rs:1067`.
+- [ ] **Step 1: Add the two config fields, and prove an old config still loads**
 
-- [ ] **Step 2: Run to verify it fails**
+  In `tests/spreads.rs`:
+  ```rust
+  #[test]
+  fn a_config_written_before_manga_mode_still_loads() {
+      let cfg: Config = serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+          .expect("an old config must load");
+      assert!(!cfg.manga_mode, "manga mode is opt-in");
+      assert!(cfg.manga_rtl, "right-to-left is the default for a manga library");
+  }
+  ```
+  Then add the fields to `Config` with the two `serde` attributes above.
 
-  Run: `cargo test --test unit the_cursor_pages_footprint_is_unchanged_by_manga_mode`
-  Expected: fails — nothing paints a second page.
+- [ ] **Step 2: Run to verify it fails, then passes**
 
-- [ ] **Step 3: Add the field and `turn_pages`**
+  Run: `cargo test --test spreads a_config_written_before_manga_mode_still_loads`
+  Expected: compile error on the two missing fields; then PASS.
+
+- [ ] **Step 3: Add the field and set it**
 
   `shown_partner: Option<ImgKey>` next to `shown` (`src/main.rs:1197`).
 
@@ -702,12 +755,21 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   cursor, so the spread never shows one page from this turn beside a stale page from the
   last.
 
-- [ ] **Step 4: Split the panel and paint the turn**
+- [ ] **Step 4: Halve `display_dim` in a spread, then split the panel and paint the turn**
 
-  In `central`, after the grid early-return and before the single-image lookup:
+  Two changes to `panel_px` (`src/main.rs:2644`), both gated on `self.config.manga_mode`:
 
-  - When manga mode is off, take the existing path unchanged. Guard the whole new code
-    behind `self.config.manga_mode` so single-image browsing is byte-identical.
+  - `panel_px` becomes the **half** panel, so `preview_target` asks for half-width
+    textures and `display_dim`/`schedule` refine at the right size. A page can never need
+    more than half the panel's width, and decoding for the whole panel would make every
+    spread twice as expensive than it needs to be.
+  - `rects = spread_rects(panel_as_Rect4_translated_by_view_offset, &dims, scale,
+    self.config.manga_rtl)`, where the panel passed in is already translated by
+    `self.view.offset` so the seam pans with the image.
+
+  Then, in `central`, after the grid early-return and before the single-image lookup:
+
+  - When manga mode is off, take the existing path unchanged, byte for byte.
   - Build `pages: Vec<(f32, f32)>` from the turn's members' **dimensions** — the gallery's
     shape cache first, the preview's `orig` second — *not* from the textures. Layout from
     dimensions, paint from textures, so the layout does not reflow when a partner's
@@ -716,7 +778,6 @@ Five input classes the spec implies but does not spell out, most likely to bite 
     the dimension prefetch, and it is worth saying so in a comment.
   - `scale = spread_fit((panel.width(), panel.height()), &dims)`, and use that as the
     `fit_scale` for the shared view so zoom clamping behaves exactly as it does today.
-  - `rects = spread_rects(panel_as_Rect4_translated_by_view_offset, &dims, scale, self.config.manga_rtl)`.
   - For each `(key, rect)` pair, look up `self.previews.get(&key)` and `paint_tex` it at
     that rect, snapping `x` and `y` to the physical pixel grid with the existing `snap`
     closure. `paint_tex` itself is unchanged — it already takes an arbitrary `Rect`.
@@ -730,15 +791,11 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   The pan clamp's `panel.size()` becomes the turn's total footprint so panning stops at
   the spread's edge rather than the panel's.
 
-- [ ] **Step 5: Run to verify it passes**
-
-  Run: `cargo test --test unit`
-  Expected: all pass.
-
-- [ ] **Step 6: Run the full suite**
+- [ ] **Step 5: Run the full suite**
 
   Run: `cargo test --no-fail-fast`
-  Expected: green.
+  Expected: green, including `tests/unit.rs`'s existing headless layout tests, which is
+  what proves the single-image path did not move.
 
 - [ ] **Step 7: Verify by hand, on a console session**
 
@@ -856,27 +913,25 @@ Five input classes the spec implies but does not spell out, most likely to bite 
 **Files:**
 - Modify: `src/main.rs:3842-3856` (input read), `src/main.rs:3966-4027` (dispatch),
   `src/main.rs:3462-3476` (`pending_advance`), `src/main.rs:4272-4518` (Settings)
-- Modify: `src/lib.rs:167-239` (`Config`)
+- Modify: `src/lib.rs` (the new `NavInput` and `nav_is_forward`, beside the other input
+  policy helpers)
 - Test: `tests/keybindings.rs`
 
 **Interfaces:**
-- Consumes: Task 3's `GallerySpreads`; Task 7's `turn_forward`/`turn_backward`.
+- Consumes: Task 3's `GallerySpreads` and `MyApp::save_spreads`; Task 6's
+  `Config.manga_mode` / `Config.manga_rtl`; Task 7's turn-walking `step`.
 - Produces:
   ```rust
-  // Config
-  #[serde(default)]              pub manga_mode: bool,
-  #[serde(default = "default_true")] pub manga_rtl: bool,
-  ```
-  and one pure function, which is the only testable part of the whole direction change:
-  ```rust
+  pub enum NavInput { Right, Left, Next, Previous, WheelDown }
+
   /// Whether a navigation input means *forwards* in reading order.
   ///
   /// Under `manga_rtl` the keys track the screen, so a rightward press is backwards
   /// in a book that opens to the left.
   pub fn nav_is_forward(input: NavInput, rtl: bool) -> bool;
-
-  pub enum NavInput { Right, Left, Next, Previous, WheelDown }
   ```
+  The two `Config` fields are **not** declared here — Task 6 declares them, because
+  Task 6 is the first task that reads them.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -895,16 +950,13 @@ Five input classes the spec implies but does not spell out, most likely to bite 
     this app owns, so they cannot lose a user's images.
   - Extend the brace-matched `!typing` block assertion (`tests/keybindings.rs:28-51`) to
     cover the four new letters.
-  - `an_old_config_without_the_manga_settings_still_loads` — a `config.json` carrying only
-    `load_all_on_startup`, `folder` and the pre-existing keys; assert `manga_mode` is
-    `false` and `manga_rtl` is `true`.
 
 - [ ] **Step 2: Run to verify it fails**
 
   Run: `cargo test --test keybindings`
   Expected: compile error — `nav_is_forward` does not exist.
 
-- [ ] **Step 3: Add the config fields and `nav_is_forward` in `src/lib.rs`**
+- [ ] **Step 3: Add `NavInput` and `nav_is_forward` to `src/lib.rs`**
 
   `nav_is_forward`:
   ```rust
