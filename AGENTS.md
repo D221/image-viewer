@@ -11,11 +11,11 @@ that are already in memory. One crate, no workspace, no CI.
   first failing target, and `--lib` (the in-crate `perf` tests) is a target no
   per-target command below ever runs.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
-- 21 test targets: `bench`, `bench_browse`, `bench_resize`, `bench_rotate_save`,
+- 22 test targets: `bench`, `bench_browse`, `bench_resize`, `bench_rotate_save`,
   `bench_startup`, `bench_variants`, `color_profiles`, `embedded_thumbs`,
   `filter_and_paging`, `flip_through`, `formats`, `icon`, `integration`,
   `keybindings`, `multiframe`, `pathological`, `property`, `renderer`,
-  `rotate_save`, `standard`, `unit`.
+  `rotate_save`, `standard`, `thumb_cache`, `unit`.
 - **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
   use `criterion_main!` but are ordinary `{test}` targets with the default
   harness (there is no `[[bench]] harness = false` in `Cargo.toml`), so
@@ -36,6 +36,13 @@ that are already in memory. One crate, no workspace, no CI.
     `IV_BENCH_RUNS` (9) there, and only the holds 0 and 30 ms: at 150 ms and
     above the prefetch keeps up and both arms score 0, so the metric runs out of
     resolution before the effect does.
+  - `bench_browse thumb_cache_ab` — the A/B for grid cells: `load_grid_thumbnail`
+    cold against warm over a generated folder, arms interleaved, then the real
+    per-cell cost of the large scans in `test-images/`. **It prints the cold
+    number on purpose.** A baseline JPEG has no cheaper full-image read, so the
+    cold figure is a floor that no amount of caching moves, and a benchmark that
+    printed only the warm one would be how that got forgotten.
+    `IV_BENCH_N` (24), `IV_BENCH_RUNS` (5).
   - `bench_resize` — decodes per window drag.
   - `bench_rotate_save` — lossless save time **and output/input size ratio**;
     1.00–1.02x is the only evidence "lossless" is true, because it is a property
@@ -57,6 +64,15 @@ that are already in memory. One crate, no workspace, no CI.
   - `probe_chords.ps1` — "did that keystroke actually do the thing?" Injects
     `Ctrl+C` / `Ctrl+S` and checks the two effects that cannot be faked: the
     clipboard and a new file on disk.
+  - `probe_thumb_cache.ps1` — the same shape for the grid: presses `G` and checks
+    three things that cannot be faked (cells painted, entries on disk, cache
+    **hits** in the perf report on a second open), then screenshots the window so
+    "a window appeared" is never the evidence. It closes the window rather than
+    killing it, because the report is written by `on_exit` and a killed process
+    reports nothing — which reads exactly like a broken feature. Verdict on the
+    real app, this box: cold 4 misses / 4 entries, warm **4 hits / 0 misses**,
+    `worker: thumbnail decode` **1.0 ms p50**, `gallery open -> first thumbs`
+    **8.7 ms**, display-gap frames / stalls / worker panics all 0.
 - `cargo run` — the GUI. `-- --register` / `--unregister` (HKCU, no admin, then
   exit). `-- --icc-scan <folder>` classifies every image in a folder and prints
   the tally (it is deliberately **not** in `path_arg`'s `FLAGS_WITH_VALUE`: there
@@ -76,13 +92,14 @@ that are already in memory. One crate, no workspace, no CI.
 
 ## Layout
 
-- `src/lib.rs` (~4.6k lines) — everything testable: sniffing, decode, gallery
+- `src/lib.rs` (~5.9k lines) — everything testable: sniffing, decode, gallery
   and paging, the job planner, the loader queue, the resize policy, the
-  transform algebra, ICC, archives, config. **If a rule can be a pure function it
-  belongs here** — every bug that could not be tested lived in `main.rs`.
-- `src/main.rs` (~4k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
+  transform algebra, ICC, archives, the grid-thumbnail cache, config. **If a rule
+  can be a pure function it belongs here** — every bug that could not be tested
+  lived in `main.rs`.
+- `src/main.rs` (~4.3k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
   clipboard, wallpaper, Windows integration. Unreachable from a test.
-- `src/perf.rs` (16 latency metrics, 11 always-on counters), `src/fileassoc.rs`
+- `src/perf.rs` (16 latency metrics, 13 always-on counters), `src/fileassoc.rs`
   (HKCU registration), `src/icon.rs` (generated icon artwork).
 - `test-images/` is gitignored. `test-images/JPEGView_L` and
   `test-images/oculante` are reference checkouts, not fixtures.
@@ -181,6 +198,82 @@ that are already in memory. One crate, no workspace, no CI.
 - **Hold-to-browse**: `step()` is throttled while `waiting_load`; the queued
   `pending_advance` is consumed at the *start of the next frame* — consuming it
   in the same frame skips the render.
+- **A grid cell is not a small preview, and that is why `Purpose` exists.** A cell
+  is 150 *points* of one fixed picture, and it used to be `load_page_preview_full`
+  with a smaller number — which returned `full` and a 5851 KB texture for it. Two
+  things that only a cell needs, both measured:
+  * **It must be downscaled to its target, and nothing upstream can do it.**
+    `decode_jpeg_scaled` picks the *smallest* reduction still covering the target
+    out of 1/8, 1/4, 1/2 and 1, so a 17000 px scan yields 2100 px for a 256 px
+    cell — 44x, and `THUMB_CACHE_CAP` 512 × that is a **2.9 GB** texture ceiling.
+    The step lives in `load_thumbnail`, once, *after* `decode_page` returns,
+    because that function has five return points and the same argument the
+    wide-gamut wrapper makes.
+  * **It must decode one animation frame, not the loop.** The animation branch
+    used to run `load_animation` (240 frames, 256 MB) to keep `frames[0]`. The
+    900x318 GIF in `test-images`: 344 ms → 7.9 ms. `first_frame` is one `next()`
+    and no loop, like `is_animated`, and it deliberately does *not* ask
+    `is_animated` first — that costs two frame decodes to answer a question a cell
+    does not have.
+  `ThumbData` in `main.rs` has neither `full` nor `anim`. Not having the fields is
+  the point: there is no way to fill them by accident. Note what is *not* claimed —
+  `dynamic_to_image_data` still decodes at source size and resizes for PNG, HEIC,
+  JXL and TIFF, so the transient full-size buffer is still allocated; what went
+  away is the retention and the second downscale.
+- **A baseline JPEG thumbnail is a cache problem, not a decode problem.** Every
+  pixel needs every DCT coefficient, so the entropy decode is the floor for *any*
+  conformant decoder and no amount of clever scaling moves it. Interleaved, min of
+  4, release, on this box:
+
+  | | 95.7 MP baseline 4:2:0, 27 MB | 16.8 MP 4:4:4, 26 MB |
+  |---|---|---|
+  | `fs::read` | 13 ms | 11 ms |
+  | DCT 1/8 | **833 ms** | **580 ms** |
+  | DCT 1/1 | 1242 ms | 677 ms |
+
+  DCT scaling buys 25-30% and no more. So the answer to a slow cell is *not
+  decoding it again* — `load_grid_thumbnail` and `%LOCALAPPDATA%\image-viewer\thumbs`
+  — and the first visit to a folder of large scans is **unchanged and
+  unchangeable** (~24 × 700 ms over 4 workers). Warm is 0.6-1.8 ms. Do not let a
+  benchmark print only the warm number; `bench_browse thumb_cache_ab` prints both
+  for that reason. The one decode-side shortcut that *does* exist is the
+  progressive DC-scan truncation (3.3x), and **every large file in this library is
+  baseline** — 0 of 5 big scans, 0 of 5 big phone photos — so it was measured and
+  not built. Its trap if anyone does: a first SOS with `Ns=1` is *not* interleaved,
+  and truncating there yields one component's DC and a plausible wrong picture.
+- **A cache's design is almost entirely about how it can be wrong**, and every
+  "wrong" here is a grid cell showing the wrong picture, which is worse than a
+  blank one and undiagnosable. Four guards, each with a test verified to fail
+  without it (`tests/thumb_cache.rs`):
+  * **Staleness** — the stamp (mtime **and** length) lives in the entry and is
+    checked on every read, so correctness does *not* depend on the watcher
+    remembering to invalidate. `forget_thumbnail` in `invalidate_path` is disk
+    hygiene only. Length is in the pair because a re-save inside one filesystem
+    tick changes the bytes without changing the time.
+  * **Collisions** — the name is 64 bits of path hash, so the path is stored in
+    the entry and compared. Without it two files that collide show each other's
+    cells.
+  * **Half-written entries** — write to `.tmp`, then `fs::rename` (which replaces
+    on Windows), so a reader — *including a second instance of the app* — sees the
+    old entry or the new one.
+  * **Corruption and truncation** — **`image`'s PNG decoder accepts a stream
+    missing its last 64 bytes** and hands back a full-size image with the tail
+    zeroed. That was a live bug here: a half-copied cache file was a *hit* and a
+    cell with a black band across it, no error anywhere. PNG's own `IEND`
+    terminator is the exact and free completeness check. Assume other decoders in
+    this tree are similarly lenient and check the container's terminator, not just
+    the decoder's return value.
+  * Every failure anywhere in it — unwritable directory, full disk, bad header —
+    is a **miss**, and none may fail the decode the caller already has.
+  * Stored **losslessly**, so "a hit is byte for byte the decode it replaced" is a
+    testable statement. A q90 JPEG thumb would be ~8x smaller and would give that
+    up. `CompressionType::Fast`, not `Best`: `Best` buys under 1% of size for
+    15-36x the encode time, and that time lands *before* the cell's message is
+    sent.
+  * The name is a hash of the path **only**. Putting the stamp in the name would
+    leave one orphan per save; in the header, a re-saved file overwrites its own
+    entry. Two-hex fanout because 30 000 files in one NTFS directory is a directory
+    big enough to make `read_dir` slow.
 - **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
   300 MP = 1.2 GB for one buffer, and every cached preview carries one for free.
   Bounded by count only: `PREVIEW_CACHE_CAP` 16 (LRU), `MAX_TILES` 64 × 1024
@@ -469,6 +562,37 @@ that are already in memory. One crate, no workspace, no CI.
   case-insensitive, and a loop variable `$a` silently overwrote `$A` and ran
   `Start-Process -FilePath 809.4`, which is indistinguishable from a missing
   binary.
+- **An injected keystroke needs the foreground, and taking it is not free.**
+  `SetForegroundWindow` is *refused* unless the calling process owns the current
+  foreground window — and a harness launched from a terminal does not, the
+  terminal does. Run `probe_thumb_cache.ps1` from wezterm with a plain
+  `SetForegroundWindow` and every key goes to the terminal: the grid never opens,
+  nothing is written, and the run "proves" the feature broken. The fix is
+  `AttachThreadInput` to the foreground thread's queue (plus a
+  topmost/notopmost `SetWindowPos` so the window is at the front of the z-order as
+  well as focused), which `Native::Focus` does. **`ForegroundIs` must still be
+  checked afterwards** — the steal can fail too, and the tell that it did is a
+  clean zero, not an error.
+- **A killed process produces no perf report, and no report looks exactly like a
+  broken feature.** The report is written by `on_exit`, so a harness must
+  `CloseMainWindow` and wait for exit; `Kill` is the fallback for a *hang*, not
+  the normal path. Related: an empty cache directory after a run is ambiguous
+  between "the feature is off" and "the keys went to another window" — which is
+  why the probe checks disk, counters *and* a screenshot, and why it deletes the
+  cache itself before the cold run instead of trusting it to be empty.
+- **Interleaving and min are not enough: warm-up lands on whichever arm runs
+  first.** A unit test comparing a 16-frame GIF's cell against a 1-frame one, with
+  identical first frames, reported 550 ms against 53 ms — a clean 10x that was
+  entirely one-time cost in the process (first use of the `image` machinery,
+  dynamic linking, allocator). Min of two interleaved rounds did not fix it: the
+  real culprit was **rayon's global thread pool**, built by the first
+  `linear_resize` and worth ~450 ms in a debug build, still landing on whichever
+  arm went first. So *before believing a ratio in-process*, do a discarded warm-up
+  call of **both** arms, and know that any lazily-initialised global in the path
+  (`rayon`, `image`'s decoders, a font atlas) will find the first arm. This is the
+  same failure shape as the RDP conclusions: a number that looks like a finding and
+  is an artefact. The speed claim went to `bench_browse thumb_cache_ab` and the
+  unit test kept only what is deterministic.
 - **Read the config back after writing it and assert the value.** A run that set
   `renderer.choice = gl` reported identical memory for both backends, which would
   have said the backend is irrelevant.
@@ -478,6 +602,25 @@ that are already in memory. One crate, no workspace, no CI.
   arrives as a `Key` event, that a probe is contained), the test checks the
   premise against a real `egui::Context` / a real queue instead of asserting it
   in a comment.
+- **Reintroducing the bug is how you find out a test is decoration, and it finds
+  more than the bug.** Each of the four cache guards was removed in turn: the IEND
+  check, the stamp check, the path check, the header-dims check and the cell
+  downscale all failed as expected. Two results were not:
+  * The `full: None` arm for a cell **could not fail any test**, because
+    `load_thumbnail` returns only the preview, so the arm is unobservable from
+    outside — which is itself the proof that no caller can depend on it. It was
+    kept because `ThumbData` is what stops a caller asking, and the comment says
+    plainly what it does *not* save.
+  * `dct_is_cheapest` turned out to be **redundant**: `decode_bytes` already takes
+    the DCT path for a JPEG at any `max_dim`, so routing a cell there separately
+    changed nothing. It was deleted rather than kept as insurance, and the
+    downscale moved out of the branch into `load_thumbnail` where one copy covers
+    every return point. **A change whose only justification was "it looks right"
+    is a change nobody has measured.**
+  The lesson generalises: the first draft of a fix routinely contains a piece that
+  does nothing. Find it by deleting each piece and watching for a test that does
+  not fail — and do not then keep it, because an untested no-op is a trap for the
+  next reader.
 
 ## egui 0.36 / wgpu API notes
 
@@ -688,6 +831,20 @@ that are already in memory. One crate, no workspace, no CI.
   life: declared, defaulted, serialised, read by nothing), and
   `an_old_config_without_a_renderer_setting_still_loads` still carries the key
   so that tolerance stays pinned.
+- **A cache of any sort is `%LOCALAPPDATA%`, not `%APPDATA%` and not beside the
+  config.** `thumb_cache_root` is the only cache on disk today, and the reason is
+  that its contents are *this machine's* decodes of files that may be on a network
+  share, are worthless on another machine, and are 256 MB. A roaming profile is
+  the wrong place for that, and syncing it would be a bug, not a feature.
+  `Config.thumbnail_cache` is the kill switch (`set_thumbnail_cache`, mirroring
+  `set_linear_resample`), defaulting **on** with `#[serde(default =
+  "default_true")]`, and the settings panel states the cap and the path next to
+  the toggle — a cache that silently takes a quarter of a disk should not be
+  enabled quietly.
+- **A member of an archive caches under its temp path.** `%TEMP%\image-viewer\
+  <hash(path, mtime, size)>` changes whenever the archive does, so editing a
+  `.cbz` orphans every member's cached cell. They age out with everything else;
+  no special case was written, and that is a decision rather than an oversight.
 - **Any new CLI flag goes in `path_arg` (`lib.rs`) and its test.** Taking
   `args().nth(1)` is wrong the moment a flag can come first, and it failed
   *silently*: `--perf` was taken as the path, so the report described a folder
@@ -711,6 +868,19 @@ that are already in memory. One crate, no workspace, no CI.
   - `unit.rs::test_gps_decode`, which returns early without
     `test-images/geo.jpg` — and so skips its `dms_to_deg` checks on a clean
     clone too.
+  - `bench_browse::real_scan_cells`, called from `thumb_cache_ab`, which returns
+    early when the directory is absent. It prints the real per-cell cost of a
+    large scan because the synthetic fixture deliberately is not that expensive
+    and the absolute number should not be extrapolated from it.
+- **`thumb_cache.rs` is the model for testing something with four independent
+  ways to be wrong.** Its structure is the point: one test per guard, each
+  verified to fail with the guard removed; a damaged-entry test that *enumerates*
+  damage rather than asserting one case (which is how the truncated-PNG-as-a-hit
+  bug surfaced); the cache root passed in explicitly so nothing touches the real
+  `%LOCALAPPDATA%` and no test depends on an env var; global toggles saved and
+  restored; and **no timing assertion**, with the reason written down rather than
+  discovered later (see Measuring — the first two attempts at one were pure
+  warm-up artefacts).
 - Three suites assert against **source text**, deliberately, and say why in their
   module docs: `keybindings.rs` (a shortcut that does not exist is otherwise
   unobservable), `renderer.rs` (the probe's early exit is in a binary),

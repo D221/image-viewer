@@ -51,6 +51,14 @@
 //! make navigation faster" has no answer if the benchmark pretends the job
 //! costs nothing. It is the one job per navigation that exists only to fill a
 //! panel, and it is queued *ahead* of every prefetch.
+//!
+//! The thumbnail arm (`thumb_cache_ab`) is the third kind of measurement here: not
+//! a scheduling question but a **"can this be made faster at all"** one. A 95 MP
+//! baseline JPEG has no cheaper full-image read — every pixel needs every DCT
+//! coefficient, so the entropy decode is the floor for any conformant decoder — and
+//! the grid's answer to that is a cache rather than a faster decode. Which means
+//! the number that matters is the **cold** one, and printing only the warm number
+//! would be how the limit of the change got forgotten.
 
 use image::ImageEncoder as _;
 use image_viewer::{color_info, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
@@ -799,4 +807,202 @@ fn exif_ab() {
         );
     }
     eprintln!();
+}
+
+/// Fill a grid: decode one thumbnail per file and report what it cost.
+///
+/// Two arms, interleaved, and the honest question is not "is the warm arm fast" —
+/// it obviously is — but **whether the cold arm is unchanged**. The cache exists
+/// because a baseline JPEG has no cheaper full-image read (every pixel needs every
+/// DCT coefficient), so a cache cannot make a *first* visit to a folder of large
+/// scans fast, and a benchmark that only prints the warm number is how that gets
+/// forgotten. Both arms are printed side by side for exactly that reason.
+///
+/// The cold arm is measured by pointing `LOCALAPPDATA` at a fresh directory per
+/// round rather than by deleting entries, so each round starts from nothing.
+#[test]
+#[ignore = "benchmark; run with --ignored --nocapture"]
+fn thumb_cache_ab() {
+    let n: usize = std::env::var("IV_BENCH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24);
+    let runs: usize = std::env::var("IV_BENCH_RUNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5);
+    // 3000x2000 is the browse fixture's size and is deliberately *below* the size
+    // that made this interesting: the point of the measurement is the ratio, and a
+    // fixture big enough to take 700 ms per cell would make the benchmark take
+    // minutes. `real_scan_cells` below prints the real per-cell figure from
+    // `test-images` so the absolute number is not left to be extrapolated.
+    let dir = fixture_dir(n);
+    let list = files(&dir);
+    assert!(list.len() >= n, "fixture is short: {} of {n}", list.len());
+    eprintln!(
+        "\n  thumbnail cache A/B: {n} cells at {W}x{H}, median of {runs} interleaved, \
+         {:.1} MB each\n",
+        mean_mb(&dir)
+    );
+
+    // One session = fill every cell once, on this thread, and report the total.
+    // Single-threaded on purpose: this measures the cost of a cell, and letting
+    // four workers divide the same total would just hide it behind a core count.
+    let fill = |round: usize, cold: bool| -> (f64, u64) {
+        if cold {
+            let scratch = std::env::temp_dir().join(format!("iv-bench-thumbcache-cold-{round}"));
+            let _ = std::fs::remove_dir_all(&scratch);
+            // SAFETY: single-threaded at this point in the test, and the value is
+            // restored by the process exiting.
+            unsafe { std::env::set_var("LOCALAPPDATA", &scratch) };
+        }
+        let t = Instant::now();
+        for p in &list {
+            let d = image_viewer::load_grid_thumbnail(p, 256).expect("cell must load");
+            assert!(
+                d.width.max(d.height) <= 256,
+                "a cell came back {}x{}",
+                d.width,
+                d.height
+            );
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let bytes = dir_bytes(&image_viewer::thumb_cache_root());
+        (ms, bytes)
+    };
+
+    // Warm-up both arms: page cache, lazily faulted JPEG tables, and the rayon's
+    // global thread pool that the first `downscale_image` builds (~450 ms in a debug
+    // build, which is large enough to invent a 10x regression if it lands on one
+    // arm — see the note in `tests/thumb_cache.rs`).
+    let _ = fill(0, true);
+    let _ = fill(0, false);
+
+    let mut cold_ms = Vec::new();
+    let mut warm_ms = Vec::new();
+    let mut cold_bytes = 0u64;
+    for i in 0..runs {
+        // Alternate the order so neither arm systematically inherits the other's
+        // warm-up, exactly as `exif_ab` does.
+        if i % 2 == 0 {
+            let (c, b) = fill(i, true);
+            cold_ms.push(c);
+            cold_bytes = b;
+            warm_ms.push(fill(i, false).0);
+        } else {
+            warm_ms.push(fill(i, false).0);
+            let (c, b) = fill(i, true);
+            cold_ms.push(c);
+            cold_bytes = b;
+        }
+    }
+
+    eprintln!(
+        "  {:>6}  {:>11}  {:>11}  {:>9}  {:>9}",
+        "run", "cold ms", "warm ms", "cold/cell", "warm/cell"
+    );
+    eprintln!("  {}", "-".repeat(54));
+    for i in 0..runs {
+        eprintln!(
+            "  {i:>6}  {:>11.0}  {:>11.0}  {:>9.1}  {:>9.2}",
+            cold_ms[i],
+            warm_ms[i],
+            cold_ms[i] / n as f64,
+            warm_ms[i] / n as f64
+        );
+    }
+    let cold = med(cold_ms.clone());
+    let warm = med(warm_ms.clone());
+    eprintln!(
+        "  {:>6}  {:>11.0}  {:>11.0}  {:>9.1}  {:>9.2}   <- median",
+        "-",
+        cold,
+        warm,
+        cold / n as f64,
+        warm / n as f64
+    );
+    eprintln!(
+        "  cache on disk after one fill: {:.1} MB ({:.0} bytes/cell)",
+        cold_bytes as f64 / (1024.0 * 1024.0),
+        cold_bytes as f64 / n as f64
+    );
+    eprintln!(
+        "  cold is {cold:.0} ms, which is the floor: nothing here makes a *first* visit\n  \
+         to a folder of large scans faster, and that is the honest limit of the change."
+    );
+    real_scan_cells();
+    eprintln!();
+}
+
+/// Total bytes under a directory, one level of fanout as the cache uses.
+fn dir_bytes(root: &std::path::Path) -> u64 {
+    let Ok(fanouts) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut total = 0;
+    for f in fanouts.flatten() {
+        let Ok(files) = std::fs::read_dir(f.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            total += file.metadata().map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    total
+}
+
+/// The per-cell cost on the real large scans in `test-images`, skipped if the
+/// directory is absent (it is gitignored, and a test that reads it passes on the
+/// machine that wrote it and dies with a bare `NotFound` on a fresh clone).
+///
+/// This is the number the fixture above deliberately does not try to reproduce: a
+/// synthetic gradient at 6 MP decodes in tens of milliseconds, where a 95 MP
+/// baseline scan takes 700-800 ms, because the cost is the entropy decode and that
+/// is a function of how much real detail is in the file. Skipped, not faked.
+fn real_scan_cells() {
+    let dir = std::path::Path::new("test-images");
+    if !dir.exists() {
+        eprintln!("  (no test-images/ — skipping the real-scan per-cell figure)");
+        return;
+    }
+    let mut big: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && std::fs::metadata(p).map(|m| m.len() > 8_000_000).unwrap_or(false)
+                && image_viewer::is_jpeg_bytes(&std::fs::read(p).unwrap_or_default())
+        })
+        .collect();
+    big.sort();
+    if big.is_empty() {
+        eprintln!("  (no large JPEGs in test-images/ — skipping)");
+        return;
+    }
+    eprintln!("  per cell, real files in test-images (no cache):");
+    for p in big {
+        let mb = std::fs::metadata(&p).map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(0.0);
+        // Warm the file cache so the figure is the decode and not the read, then
+        // take the min of three: a single sample on a shared machine is noise.
+        let _ = image_viewer::load_thumbnail(&p, 256);
+        let mut each = Vec::new();
+        let mut dims = (0, 0);
+        for _ in 0..3 {
+            let t = Instant::now();
+            let d = image_viewer::load_thumbnail(&p, 256).expect("cell");
+            each.push(t.elapsed().as_secs_f64() * 1000.0);
+            assert!(d.width.max(d.height) <= 256);
+            dims = (d.width, d.height);
+        }
+        eprintln!(
+            "    {:<44.44} {:>6.1} MB  {:>7.0} ms  cell {}x{}",
+            p.file_name().unwrap_or_default().to_string_lossy(),
+            mb,
+            med(each),
+            dims.0,
+            dims.1
+        );
+    }
 }

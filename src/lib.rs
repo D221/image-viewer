@@ -223,6 +223,16 @@ pub struct Config {
     #[serde(default)]
     pub crop_aspect: CropAspect,
 
+    /// Keep decoded grid thumbnails in `%LOCALAPPDATA%\image-viewer\thumbs`.
+    ///
+    /// On by default because a grid cell's cost is a full decode of the file and
+    /// a large scan has no cheaper decode — 700-800 ms for a 95 MP baseline JPEG,
+    /// measured — so a folder you have opened before is the only case that can be
+    /// made fast. Off means nothing is written outside the config folder and every
+    /// cell is decoded again, every time.
+    #[serde(default = "default_true")]
+    pub thumbnail_cache: bool,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -247,6 +257,7 @@ impl Config {
             renderer: RendererPref::default(),
             convert_wide_gamut: false,
             crop_aspect: CropAspect::default(),
+            thumbnail_cache: true,
             last_by_folder: std::collections::HashMap::new(),
         };
 
@@ -3760,6 +3771,31 @@ pub const FAST_FULL_MAX_PIXELS: u64 = 12_000_000;
 /// with tiles from the full-res data.
 pub const PREVIEW_TEXTURE_DIM: u32 = 4096;
 
+/// What a decode is *for*, which decides how much of it is kept.
+///
+/// A grid cell and the main view asked for the same function with the same target
+/// and used to get the same answer: a full-resolution buffer, *retained and sent
+/// back to the UI thread*, for a 150 px cell. For a 25 MP PNG that is 100 MB
+/// crossing a channel to be dropped, and for a 17000 px scan it is a 5851 KB GPU
+/// texture — 512 of which is the thumbnail cache's ceiling, so 2.9 GB. The cell
+/// genuinely never wants any of it, so the request now says so.
+///
+/// What this does **not** claim: that a cell never allocates at source size. For
+/// PNG, HEIC, JXL and TIFF the only reduced-size read the decoders in this tree
+/// offer is "decode it all, then resize", and that full-size buffer is still
+/// allocated inside `dynamic_to_image_data` and thrown away there. Changing that
+/// needs a row-streaming decode per format and is not attempted here; what is gone
+/// is the *retention*, the second downscale, and the 44x oversized texture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// The image on screen. `full` may be filled, and it rides along on the
+    /// preview so a second decode is not needed to zoom.
+    View,
+    /// One grid cell: a small picture, nothing else. Never returns `full` or
+    /// `anim`, and the result is at most the requested target on its long side.
+    Thumb,
+}
+
 /// Result of a single-pass preview load: the preview to show immediately, plus
 /// the full-res image when it was already decoded in the same pass.
 pub struct PreviewAndFull {
@@ -4212,6 +4248,53 @@ fn load_animation(
     }
 }
 
+/// Decode only the first frame of an animation, for a grid cell.
+///
+/// One `next()` and no loop, so this cannot hang on a truncated animation — the
+/// same reason [`is_animated`] asks for two frames rather than counting. A cell
+/// shows one picture, and the picture it has to match is `frames[0]` of
+/// [`load_animation`], so this returns the same pixels without decoding the rest.
+///
+/// Returns `None` rather than an error so the caller can fall through to the
+/// normal single-image path, which is what a *still* file of an animated format
+/// needs anyway.
+fn first_frame(
+    bytes: &[u8],
+    max_dim: u32,
+    start: std::time::Instant,
+    format: AnimatedFormat,
+) -> Option<ImageData> {
+    use image::AnimationDecoder;
+    let cur = std::io::Cursor::new(bytes);
+    let frame = match format {
+        AnimatedFormat::Gif => image::codecs::gif::GifDecoder::new(cur)
+            .ok()?
+            .into_frames()
+            .next()?,
+        AnimatedFormat::Png => image::codecs::png::PngDecoder::new(cur)
+            .ok()?
+            .apng()
+            .ok()?
+            .into_frames()
+            .next()?,
+        AnimatedFormat::Webp => image::codecs::webp::WebPDecoder::new(cur)
+            .ok()?
+            .into_frames()
+            .next()?,
+    };
+    let frame = frame.ok()?;
+    let mut data = ImageData {
+        width: frame.buffer().width(),
+        height: frame.buffer().height(),
+        rgba: frame.buffer().clone().into_raw(),
+        load_time: start.elapsed(),
+    };
+    if data.width.max(data.height) > max_dim {
+        data = downscale_image(&data, max_dim);
+    }
+    Some(normalized(data))
+}
+
 /// Whether this file has more than one frame, without decoding more than two of
 /// them.
 ///
@@ -4372,6 +4455,498 @@ fn decode_embedded_thumbnail(
     Some(data)
 }
 
+// ---------------------------------------------------------------------------
+// Grid thumbnails: the on-disk cache
+// ---------------------------------------------------------------------------
+//
+// **Why this exists at all, because the interesting number is a negative one.**
+// A 95 MP baseline JPEG takes ~700-800 ms to decode at 1/8 scale on this box, and
+// there is no cheaper way to get the whole picture out of it: every pixel needs
+// every DCT coefficient, so the entropy decode is the floor for *any* conformant
+// decoder. Measured, interleaved, min of 4:
+//
+//   0_booklet_inside.jpg  95.7 MP baseline 4:2:0, 27 MB
+//     fs::read 13 ms | DCT 1/8 833 ms | DCT 1/1 1242 ms | cell texture 5851 KB
+//
+// The DCT path saves RAM, not time — which is why the embedded EXIF thumbnail
+// (`decode_embedded_thumbnail`, 15-40x) is the only real answer for the files that
+// have one, and why the files that do not were the residue with nowhere to go.
+//
+// So the fix is not a faster decode. It is *not decoding it again*: a folder of
+// large scans is opened over and over, and the second open should cost a file
+// read. That is a cache, and the design of one is almost entirely about the ways
+// it can be **wrong**, which is what the rest of this section is about:
+//
+// * A stale entry must be a **miss**, never the wrong picture. The stamp
+//   (mtime + length) lives in the entry and is checked on every read, so a file
+//   edited on disk is re-decoded even if nothing remembered to invalidate it.
+// * A hash collision must be a **miss**, not a neighbour's thumbnail. The
+//   source path is stored in the entry and compared, so 64 bits of name is not
+//   the only thing standing between two files and each other's pictures.
+// * A half-written entry must be **unreadable**. Entries are written to a
+//   temporary name and renamed into place, so a reader — including a second
+//   instance of the app — sees either the old entry or the new one.
+// * Every failure is a **miss**. An unwritable cache directory, a full disk, a
+//   corrupt PNG: each one costs a decode, and none of them may fail the decode.
+//
+// What this does *not* do is make the first visit to a folder of large scans
+// fast. It cannot, and the honest number for a cold folder of 24 baseline scans
+// is still ~24 x 700 ms / 4 workers. See `tests/bench_browse.rs`
+// (`thumb_cache_ab`) for that A/B.
+
+/// Every entry starts with this, so a stray file, a directory, or a truncated
+/// write from a killed process is a miss and not a decode of whatever is there.
+const THUMB_MAGIC: [u8; 4] = *b"IVTC";
+
+/// Bumped whenever the header layout changes, which makes every existing entry a
+/// miss instead of being misread.
+const THUMB_HEADER_VERSION: u8 = 1;
+
+/// magic(4) + version(1) + reserved(3) + width(4) + height(4) + mtime(8)
+/// + len(8) + target(4) + path_len(2)
+const THUMB_HEADER_FIXED: usize = 4 + 1 + 3 + 4 + 4 + 8 + 8 + 4 + 2;
+
+/// The last 12 bytes of every complete PNG: a zero-length `IEND` chunk and its
+/// CRC. See [`read_cached_thumbnail`] for why this is load-bearing.
+const PNG_IEND: [u8; 12] = [0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82];
+
+/// Cap on the whole cache directory.
+///
+/// 256 MB is 3 000-19 000 cells at the 13-80 KB an entry measures (see
+/// [`encode_png`]), so it holds a large scan library rather than a photo archive,
+/// and it is trimmed oldest-first when it is reached. The number is stated in the
+/// settings panel next to the toggle, because a cache that silently takes a
+/// quarter of a disk is not something to enable quietly.
+pub const THUMB_CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How many writes happen between trims. A trim walks the whole cache, so doing
+/// it on every write would be absurd; doing it never would let the cache grow
+/// without bound, which is the failure mode a cache has to be designed against.
+const THUMB_TRIM_EVERY: u64 = 64;
+
+/// Fraction of the cap a trim aims back down to, so it is not repeated on the
+/// very next write.
+const THUMB_TRIM_TO_NUM: u64 = 4;
+const THUMB_TRIM_TO_DEN: u64 = 5;
+
+/// Root of the on-disk thumbnail cache.
+///
+/// **Local, not roaming, and deliberately not next to the config.** These are
+/// this machine's decodes of files that may well be on a network share, they are
+/// worthless on another machine, and a profile folder is the wrong place for
+/// something this size.
+pub fn thumb_cache_root() -> PathBuf {
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        PathBuf::from(local)
+            .join("image-viewer")
+            .join("thumbs")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home)
+            .join(".cache")
+            .join("image-viewer")
+            .join("thumbs")
+    } else {
+        PathBuf::from("image-viewer-thumbs")
+    }
+}
+
+/// On/off for the whole cache, so a user who wants the viewer to write nothing
+/// outside its config folder can say so. Mirrors [`set_linear_resample`]: a
+/// global the workers read, set once from config at start-up.
+static THUMB_CACHE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_thumbnail_cache(on: bool) {
+    THUMB_CACHE_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Is the on-disk cache in use? Public so a test can save and restore it around
+/// assertions that only hold with it off.
+pub fn thumbnail_cache_enabled() -> bool {
+    THUMB_CACHE_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What identifies the source file an entry was made from.
+///
+/// mtime + length, the same pair the file-change watcher compares
+/// (`Stamp` in main.rs). Length is in the pair because a save that lands inside
+/// one filesystem timestamp tick changes the bytes without changing the time,
+/// and that is the case that would otherwise show a stale picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbStamp {
+    pub mtime_secs: u64,
+    pub len: u64,
+}
+
+pub fn thumb_stamp(path: &Path) -> Option<ThumbStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some(ThumbStamp {
+        mtime_secs,
+        len: meta.len(),
+    })
+}
+
+/// Header of one cache entry: everything needed to decide whether it may be
+/// used, and nothing that is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThumbHeader {
+    width: u32,
+    height: u32,
+    stamp: ThumbStamp,
+    target: u32,
+    path: String,
+}
+
+/// Little-endian on purpose, so an entry written on one machine reads the same on
+/// another and the format does not depend on this host's byte order.
+fn encode_thumb_header(h: &ThumbHeader) -> Vec<u8> {
+    let path = h.path.as_bytes();
+    let path_len = u16::try_from(path.len()).unwrap_or(u16::MAX);
+    let mut b = Vec::with_capacity(THUMB_HEADER_FIXED + path.len());
+    b.extend_from_slice(&THUMB_MAGIC);
+    b.push(THUMB_HEADER_VERSION);
+    b.extend_from_slice(&[0u8; 3]);
+    b.extend_from_slice(&h.width.to_le_bytes());
+    b.extend_from_slice(&h.height.to_le_bytes());
+    b.extend_from_slice(&h.stamp.mtime_secs.to_le_bytes());
+    b.extend_from_slice(&h.stamp.len.to_le_bytes());
+    b.extend_from_slice(&h.target.to_le_bytes());
+    b.extend_from_slice(&path_len.to_le_bytes());
+    b.extend_from_slice(path);
+    b
+}
+
+/// Split an entry into its header and payload. `None` for anything that is not
+/// an entry this version wrote, including a short read, a bad magic, a version
+/// from the future, or a `path_len` that does not fit — all of which are simply
+/// "no entry here".
+fn decode_thumb_header(bytes: &[u8]) -> Option<(ThumbHeader, &[u8])> {
+    if bytes.len() < THUMB_HEADER_FIXED || bytes[..4] != THUMB_MAGIC {
+        return None;
+    }
+    if bytes[4] != THUMB_HEADER_VERSION {
+        return None;
+    }
+    // Bounds are already settled by the length check above: the largest read ends
+    // at 38, which is exactly `THUMB_HEADER_FIXED`. Spelled out rather than
+    // `try_into().ok()?` per field because a closure cannot return `Option` here
+    // and the invariant is worth stating once.
+    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let u64_at = |o: usize| u64::from_le_bytes(bytes[o..o + 8].try_into().unwrap());
+    let path_len = usize::from(u16::from_le_bytes(bytes[36..38].try_into().unwrap()));
+    let start = THUMB_HEADER_FIXED;
+    let end = start.checked_add(path_len)?;
+    let path = std::str::from_utf8(bytes.get(start..end)?).ok()?.to_owned();
+    Some((
+        ThumbHeader {
+            width: u32_at(8),
+            height: u32_at(12),
+            stamp: ThumbStamp {
+                mtime_secs: u64_at(16),
+                len: u64_at(24),
+            },
+            target: u32_at(32),
+            path,
+        },
+        bytes.get(end..)?,
+    ))
+}
+
+/// Where one source file's entry lives: `<root>/<2 hex>/<16 hex>.png`.
+///
+/// **The name is a hash of the path and nothing else, on purpose.** The stamp that
+/// decides whether the entry is still good lives inside the entry, so a file that
+/// is edited re-uses and overwrites its own slot instead of leaving one orphan
+/// behind per save — which is the difference between a cache that is bounded by
+/// the library size and one that is bounded by how many times you have hit save.
+///
+/// The two-hex fanout is not cosmetic either: a library of 30 000 files in one
+/// directory is a single NTFS directory big enough to make `read_dir` and every
+/// `create_dir` in it measurably slower.
+pub fn thumb_cache_entry(root: &Path, path: &Path) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    let name = format!("{:016x}", h.finish());
+    root.join(&name[..2]).join(format!("{name}.png"))
+}
+
+/// Read a cached thumbnail from `root`, or `None` for a miss of any kind.
+///
+/// Takes the root rather than resolving [`thumb_cache_root`] so a test can point
+/// it at a temp directory; the default-root path is [`load_grid_thumbnail`].
+pub fn read_cached_thumbnail(root: &Path, path: &Path, target: u32) -> Option<ImageData> {
+    let start = std::time::Instant::now();
+    let entry = thumb_cache_entry(root, path);
+    let bytes = std::fs::read(&entry).ok()?;
+    let (header, payload) = decode_thumb_header(&bytes)?;
+    // Every one of these is a miss, not a repair: a wrong picture in a grid is
+    // worse than a blank cell, and the decode that replaces it is the thing this
+    // cache exists to make rare.
+    if header.stamp != thumb_stamp(path)? {
+        return None;
+    }
+    if header.target != target || header.path != path.to_string_lossy() {
+        return None;
+    }
+    // **The payload must be complete before it is decoded.** This check is here
+    // because the obvious version of this function does not have it, and the test
+    // that found it says why: `image`'s PNG decoder accepts a stream whose last
+    // 64 bytes are missing, and hands back a full-size image with the tail zeroed.
+    // So a truncated entry — a half-copied file, a backup tool mid-write, a
+    // hydrated OneDrive placeholder — produced a *hit*, and a grid cell with a
+    // black band across it, with no error anywhere. PNG's own terminator is the
+    // exact and free way to ask "is all of this here?": a complete file ends with
+    // a zero-length IEND chunk and its CRC. (Bit flips inside the compressed data
+    // are a different question, and the `png` crate's per-chunk CRC answers those.)
+    if !payload.ends_with(&PNG_IEND) {
+        return None;
+    }
+    let img = image::load_from_memory_with_format(payload, image::ImageFormat::Png).ok()?;
+    let rgba = img.to_rgba8();
+    // The header's dims are a claim; the payload is the truth, and `normalized`
+    // is what keeps a disagreement from becoming an assert in
+    // `ColorImage::from_rgba_unmultiplied` on the UI thread.
+    let data = normalized(ImageData {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+        load_time: start.elapsed(),
+    });
+    if (data.width, data.height) != (header.width, header.height) {
+        return None;
+    }
+    Some(data)
+}
+
+/// Write a thumbnail into the cache at `root`. Best effort: every failure is
+/// silent, and none of them may affect the decode the caller already has.
+///
+/// Takes the root for the same reason as [`read_cached_thumbnail`].
+pub fn write_cached_thumbnail(root: &Path, path: &Path, target: u32, data: &ImageData) {
+    let Some(stamp) = thumb_stamp(path) else {
+        return;
+    };
+    let header = ThumbHeader {
+        width: data.width,
+        height: data.height,
+        stamp,
+        target,
+        path: path.to_string_lossy().into_owned(),
+    };
+    let Ok(png) = encode_png(&data.rgba, data.width, data.height) else {
+        return;
+    };
+    let entry = thumb_cache_entry(root, path);
+    let Some(parent) = entry.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let mut bytes = encode_thumb_header(&header);
+    bytes.extend_from_slice(&png);
+    // Write beside the entry and rename into place. `fs::rename` replaces on
+    // Windows, and a reader therefore sees either the previous entry or this one
+    // — never a half-written one, which matters because a second instance of the
+    // app reads these too.
+    //
+    // The temporary name is *not* made unique per writer, and that is deliberate:
+    // two writers of one entry are writing the same bytes (same path, same stamp,
+    // same target ⇒ the same header and the same encode), so clobbering the
+    // temporary file cannot produce a wrong entry — at worst one `rename` finds its
+    // source already gone and gives up, leaving the other's entry installed. A
+    // per-writer name would instead leave an orphan behind whenever a process died
+    // between the two calls.
+    let tmp = entry.with_extension("tmp");
+    if std::fs::write(&tmp, &bytes).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if std::fs::rename(&tmp, &entry).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    maybe_trim_thumb_cache(root);
+}
+
+/// RGBA -> PNG, losslessly, and *without storing information the viewer does not
+/// use*.
+///
+/// Lossless is the point and not an accident: a cache hit has to be **the same
+/// pixels** as the decode it replaced, or the grid would quietly show something
+/// the main view cannot reproduce — and a test could not tell the difference. That
+/// is also why a lossy thumbnail format (a q90 JPEG would be ~8x smaller) was
+/// rejected: it trades a property that is cheap to keep and easy to assert for one
+/// that is neither.
+///
+/// The alpha drop is not a compromise. An opaque thumbnail stores as RGB, which
+/// is 3 bytes per pixel before deflate instead of 4, and a cell draws an opaque
+/// image identically either way; the reader puts the alpha back at 255, so the
+/// RGBA the app receives is byte-for-byte what the decode produced. A thumbnail
+/// that *does* have alpha keeps it.
+///
+/// What a cell costs on disk, measured: **13-80 KB, call it 1.5 bytes per pixel**.
+/// Deflate is simply not good at photographic content, which is what a thumbnail
+/// of a photo is, and [`THUMB_CACHE_MAX_BYTES`] is chosen with that in mind.
+fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, image::ImageError> {
+    use image::codecs::png::{FilterType, PngEncoder};
+    use image::ExtendedColorType;
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    {
+        let enc =
+            PngEncoder::new_with_quality(&mut out, THUMB_PNG_COMPRESSION, FilterType::Adaptive);
+        if buffer_has_alpha(rgba) {
+            enc.write_image(rgba, width, height, ExtendedColorType::Rgba8)?;
+        } else {
+            let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+            for px in rgba.chunks_exact(4) {
+                rgb.extend_from_slice(&px[..3]);
+            }
+            enc.write_image(&rgb, width, height, ExtendedColorType::Rgb8)?;
+        }
+    }
+    Ok(out)
+}
+
+/// The one tunable number in the stored form, and its table is why it is not
+/// simply "the best compression available". Deflate effort, measured on real
+/// thumbnails (bytes / encode time, min of 3, release):
+///
+/// | thumb | `Default` | `Fast` | `Best` |
+/// |---|---|---|---|
+/// | 256x84, wide scan | 35 734 B / 11.3 ms | 34 938 B / **0.75 ms** | 35 649 B / 26.8 ms |
+/// | 107x160, embedded | 24 794 B / 6.8 ms | 32 994 B / **0.54 ms** | 24 328 B / 12.6 ms |
+/// | 256x170 | 79 346 B / 21.0 ms | 79 613 B / **1.41 ms** | 79 193 B / 28.7 ms |
+///
+/// `Best` buys under 1% of size for 15-36x the time, and that time lands *before*
+/// the cell's message is sent, so it is added to the one latency a user feels on a
+/// cold open. `Default` is the same size as `Best` and just as slow. `Fast` is the
+/// only one of the three that is not paying for nothing; the embedded-thumbnail row
+/// is the one case where it costs size, and 8 KB on a file that takes 12 ms to
+/// decode is not a trade worth optimising.
+const THUMB_PNG_COMPRESSION: image::codecs::png::CompressionType =
+    image::codecs::png::CompressionType::Fast;
+
+static THUMB_PUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Trim the cache off a background thread, every [`THUMB_TRIM_EVERY`] writes.
+///
+/// Off-thread because a trim walks the whole directory: on a full cache that is
+/// tens of thousands of `read_dir` and `metadata` calls, and doing it inline would
+/// add that to one unlucky thumbnail's latency. Detached rather than joined
+/// because nothing waits on it — at worst the process exits mid-trim, which
+/// leaves the cache slightly over its cap and perfectly valid.
+fn maybe_trim_thumb_cache(root: &Path) {
+    let n = THUMB_PUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if n % THUMB_TRIM_EVERY != 0 {
+        return;
+    }
+    let root = root.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("iv-thumb-trim".into())
+        .spawn(move || {
+            prune_thumb_cache(&root, THUMB_CACHE_MAX_BYTES);
+        });
+}
+
+/// Delete oldest-first until the cache is under `cap * THUMB_TRIM_TO_NUM/DEN`.
+/// Returns the number of bytes left.
+///
+/// Public so a test can trim a synthetic cache and assert the result, rather than
+/// trusting that a background thread eventually did it. Synchronous by design —
+/// the caller decides what thread it runs on.
+pub fn prune_thumb_cache(root: &Path, cap: u64) -> u64 {
+    let target = cap / THUMB_TRIM_TO_DEN * THUMB_TRIM_TO_NUM;
+    let mut entries: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = Vec::new();
+    let mut total = 0u64;
+    let Ok(fanouts) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for fanout in fanouts.flatten() {
+        let Ok(files) = std::fs::read_dir(fanout.path()) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let Ok(meta) = f.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            total = total.saturating_add(meta.len());
+            // An entry whose mtime cannot be read sorts as oldest, which is the
+            // safe direction: it is the one most likely to be junk.
+            let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            entries.push((mtime, meta.len(), f.path()));
+        }
+    }
+    if total > target {
+        entries.sort_by_key(|(mtime, _, _)| *mtime);
+        for (_, len, path) in entries {
+            if total <= target {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(len);
+            }
+        }
+        // Drop the fanout directories the trim just emptied, so the cache does not
+        // slowly accumulate 256 near-empty folders. `remove_dir` refuses a
+        // directory that still has anything in it, so the only casualty is a second
+        // instance that created a fanout microseconds ago and has not written yet:
+        // its rename fails, it caches nothing this once, and the next request for
+        // that cell writes it. A cache that occasionally misses is the design.
+        if let Ok(fanouts) = std::fs::read_dir(root) {
+            for fanout in fanouts.flatten() {
+                let _ = std::fs::remove_dir(fanout.path());
+            }
+        }
+    }
+    total
+}
+
+/// Drop `path`'s cached thumbnail, if it has one.
+///
+/// Called when the watcher sees the file change. Correctness does **not** depend
+/// on this: the stamp in the entry already makes a changed file a miss. It is
+/// here so a re-saved file does not sit on disk taking up space for a session
+/// that may never open that folder again.
+pub fn forget_thumbnail(path: &Path) {
+    if !thumbnail_cache_enabled() {
+        return;
+    }
+    let _ = std::fs::remove_file(thumb_cache_entry(&thumb_cache_root(), path));
+}
+
+/// The picture one grid cell shows, from the cache when it can be.
+///
+/// This is the whole grid-thumbnail entry point: a cache hit is a small file read,
+/// a miss is [`load_thumbnail`] plus a write. Both are best-effort around the
+/// edges — if the cache cannot be used the result is exactly what it was before
+/// this existed.
+pub fn load_grid_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadError> {
+    if !thumbnail_cache_enabled() {
+        return load_thumbnail(path, target);
+    }
+    let root = thumb_cache_root();
+    match read_cached_thumbnail(&root, path, target) {
+        Some(data) => {
+            perf::count(perf::C_THUMB_CACHE_HIT, 1);
+            Ok(data)
+        }
+        None => {
+            perf::count(perf::C_THUMB_CACHE_MISS, 1);
+            let data = load_thumbnail(path, target)?;
+            write_cached_thumbnail(&root, path, target, &data);
+            Ok(data)
+        }
+    }
+}
+
 /// Load a preview in one pass, decoding the file only once.
 ///
 /// * Large JPEGs get the cheap DCT-scaled preview; the full decode happens
@@ -4405,15 +4980,44 @@ pub fn load_page_preview_full(
     preview_max_dim: u32,
     page: u32,
 ) -> Result<PreviewAndFull, LoadError> {
-    let mut out = decode_page(path, preview_max_dim, page)?;
+    let mut out = decode_page(path, preview_max_dim, page, Purpose::View)?;
     apply_wide_gamut_conversion(path, &mut out);
     Ok(out)
+}
+
+/// The picture one grid cell shows: at most `target` on the long side, and never
+/// a full-resolution image.
+///
+/// A cell is one picture at a fixed small size, so unlike the main view it gains
+/// nothing from the full image — and the wide-gamut conversion is applied by the
+/// same wrapper that applies it everywhere else, because a cell that converted its
+/// neighbour differently from the image it opens would be its own bug.
+///
+/// **The downscale is here rather than inside `decode_page` on purpose.** It is the
+/// one step that has to happen after *every* one of that function's return points,
+/// and the same argument [`load_page_preview_full`] makes about the conversion. It
+/// is also not optional: `decode_jpeg_scaled` can only pick 1/8, 1/4, 1/2 or 1, so
+/// the smallest reduction that still covers a 256 px cell is 2100 px for a 17000 px
+/// scan — 6 MB of texture for a 150 pt cell, and 44x what was asked for. The main
+/// view deliberately does not do this: a preview is drawn at whatever density the
+/// display can use, and a cell is not.
+///
+/// Ordered before the conversion on purpose: 166 MP/s over 2100x700 is 9 ms, over
+/// 256x84 it is 0.2 ms.
+pub fn load_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadError> {
+    let mut out = decode_page(path, target, 0, Purpose::Thumb)?;
+    if out.preview.width.max(out.preview.height) > target {
+        out.preview = downscale_image(&out.preview, target);
+    }
+    apply_wide_gamut_conversion(path, &mut out);
+    Ok(out.preview)
 }
 
 fn decode_page(
     path: &Path,
     preview_max_dim: u32,
     page: u32,
+    purpose: Purpose,
 ) -> Result<PreviewAndFull, LoadError> {
     let start = std::time::Instant::now();
     let bytes = std::fs::read(path)?;
@@ -4472,7 +5076,29 @@ fn decode_page(
     // decoded twice: once as a "one frame animation" and again by the normal path
     // below.
     if let Some(fmt) = animated_format(&bytes) {
-        if is_animated(&bytes, fmt) {
+        if purpose == Purpose::Thumb {
+            // A cell is one picture. Decoding the loop to show frame 0 is the same
+            // mistake as decoding full-res for a 150 px cell, and worse: an APNG or
+            // animated WebP is capped at 240 frames and 256 MB, so a grid of cells
+            // could decode hundreds of megabytes to display a few kilobytes.
+            //
+            // `is_animated` is deliberately *not* asked first. It costs two frame
+            // decodes to answer a question a cell does not have: whether the file
+            // has one frame or many, the first frame is the same picture either
+            // way, and the fall-through below would decode it a second time.
+            if let Some(data) = first_frame(&bytes, max_dim, start, fmt) {
+                let dims = (data.width, data.height);
+                return Ok(PreviewAndFull {
+                    preview: data,
+                    full: None,
+                    anim: None,
+                    orig: Some(dims),
+                    below_target: true,
+                    exif_tag: tag,
+                    crop_grid,
+                });
+            }
+        } else if is_animated(&bytes, fmt) {
             if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start, fmt) {
                 if anim.frames.len() > 1 {
                     let dims = (anim.frames[0].width, anim.frames[0].height);
@@ -4538,6 +5164,19 @@ fn decode_page(
 
     // One full decode serves as both the full-res image and the preview.
     let (preview, full, below_target) = match orig {
+        // A grid cell: decode at the cell's size and stop. Ahead of the
+        // `MAX_FULL_PIXELS` arm below because it subsumes it — that arm decodes at
+        // `max_dim` too — and because a 256 px request has no use for the
+        // full-resolution `ImageData` that used to be built, returned and sent
+        // across a channel for every PNG, HEIC and JXL in a folder.
+        _ if purpose == Purpose::Thumb => {
+            let mut preview = normalized(decode_bytes(&bytes, max_dim, start)?);
+            apply_exif_orientation(&mut preview, tag);
+            // A cell is always below source density by construction, and nothing
+            // reads this for a cell; `true` says so rather than implying a
+            // re-decode is worth issuing.
+            (preview, None, true)
+        }
         // Too big to keep full-res: decode only a preview-sized copy, like the
         // old preview path did.
         Some((w, h)) if w as u64 * h as u64 > MAX_FULL_PIXELS => {

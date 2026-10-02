@@ -98,8 +98,15 @@ pub const C_FRAMES: usize = 9;
 /// separates "the user is driving" from "something is asking for frames by
 /// itself" — the question to ask before concluding the app burns CPU idly.
 pub const C_FRAMES_WITH_EVENTS: usize = 10;
+/// Grid thumbnails served from the on-disk cache, and grid thumbnails that had
+/// to be decoded. Their ratio is the only honest measure of whether the cache is
+/// doing anything: a cache that always misses looks fine in a latency histogram
+/// and is worthless, and a benchmark that fills the cache before it starts will
+/// happily report 100% hits forever.
+pub const C_THUMB_CACHE_HIT: usize = 11;
+pub const C_THUMB_CACHE_MISS: usize = 12;
 
-const N_COUNTERS: usize = 11;
+const N_COUNTERS: usize = 13;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
@@ -113,6 +120,8 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "frames built",
 
     "frames with input events",
+    "grid thumbnails from cache",
+    "grid thumbnails decoded (cache miss)",
 ];
 
 struct Metric {

@@ -32,11 +32,12 @@ use std::time::{Duration, Instant};
 
 use image_viewer::perf;
 use image_viewer::{
-    buffer_has_alpha, extract_zip, fit_scale_no_upscale, grid_cols, is_archive_path, load_image_full,
-    load_page_preview_full, protected_preview_keys, set_downscale_filter, set_linear_resample,
-    scan_folder_sorted, xformed_footprint, Animation, Config, DownscaleFilter, Gallery, ImgKey,
-    ImageData, SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS,
-    PREVIEW_TEXTURE_DIM,
+    buffer_has_alpha, extract_zip, fit_scale_no_upscale, forget_thumbnail, grid_cols,
+    is_archive_path, load_grid_thumbnail, load_image_full, load_page_preview_full,
+    protected_preview_keys, set_downscale_filter, set_linear_resample, set_thumbnail_cache,
+    scan_folder_sorted, thumb_cache_root, xformed_footprint, Animation, Config, DownscaleFilter,
+    Gallery, ImgKey, ImageData, SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H,
+    MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -739,6 +740,37 @@ struct PreviewData {
     crop_grid: (u32, u32),
 }
 
+/// What one grid cell needs, and nothing else.
+///
+/// A cell is 150 points of a fixed picture, so every field of [`PreviewData`]
+/// except the image is either meaningless for it (`orig`, `target`, `exif_tag` and
+/// `crop_grid` all describe the *displayed* image) or actively harmful: `full` is
+/// how a 256 px request ended up decoding at 4096 and shipping a 100 MB
+/// full-resolution image back to be dropped, and `anim` is how a cell ended up
+/// decoding 240 frames to show the first. Not having the fields is the point —
+/// there is no way to fill them by accident.
+struct ThumbData {
+    image: ColorImage,
+    load_ms: u64,
+}
+
+/// A byte count as something a person can read. Used by the settings panel to
+/// state the thumbnail cache's cap rather than printing 268435456.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.0} {}", UNITS[u])
+    }
+}
+
 enum Msg {
     Preview {
         key: ImgKey,
@@ -746,7 +778,7 @@ enum Msg {
     },
     Thumb {
         path: PathBuf,
-        result: Result<PreviewData, String>,
+        result: Result<ThumbData, String>,
     },
     Full {
         key: ImgKey,
@@ -817,7 +849,7 @@ fn run_job(job: &Job) -> (Msg, bool) {
         Kind::Thumb => Msg::Thumb {
             // A grid cell shows the file's first page, always — a cell is one
             // picture, and making it a slideshow would be worse than useless.
-            result: decode_preview(&path, job.target_dim, 0),
+            result: decode_thumb(&path, job.target_dim),
             path,
         },
         Kind::Full => Msg::Full {
@@ -858,6 +890,19 @@ fn decode_preview(path: &Path, target_dim: u32, page: u32) -> Result<PreviewData
         target: target_dim,
         exif_tag: r.exif_tag,
         crop_grid: r.crop_grid,
+    })
+}
+
+/// One grid cell, at the cell's own size.
+///
+/// Goes through [`load_grid_thumbnail`], so this is the only place a cell can be
+/// served from the on-disk cache, and the reason a cell is a different request
+/// from a preview rather than the same one with a smaller number.
+fn decode_thumb(path: &Path, target_dim: u32) -> Result<ThumbData, String> {
+    let d = load_grid_thumbnail(path, target_dim).map_err(|e| e.to_string())?;
+    Ok(ThumbData {
+        image: ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &d.rgba),
+        load_ms: d.load_time.as_millis() as u64,
     })
 }
 
@@ -1302,6 +1347,7 @@ impl MyApp {
         set_linear_resample(config.linear_resample);
         set_downscale_filter(config.downscale_filter);
         image_viewer::set_wide_gamut_conversion(config.convert_wide_gamut);
+        set_thumbnail_cache(config.thumbnail_cache);
 
         if !config_path.exists() {
             config.save(&config_path);
@@ -2081,6 +2127,12 @@ impl MyApp {
         self.thumbs.remove(p);
         self.thumb_tries.remove(p);
         self.failed.retain(|(q, _)| q.path != p);
+        // Drop the on-disk cell too. Nothing *depends* on this — the stamp in the
+        // entry already makes the changed file a cache miss on the next request,
+        // which is why the watcher being wrong cannot show a stale picture — but
+        // without it a re-saved file sits in the cache taking up space for a
+        // folder this session may never open again.
+        forget_thumbnail(p);
         // A re-export can turn a 12-page document into a 1-page one. Without this
         // the cursor would sit on a page that no longer exists and `next` would
         // walk off the end of a phantom document.
@@ -4300,6 +4352,28 @@ impl eframe::App for MyApp {
                 if self.config.convert_wide_gamut {
                     ui.small("Colours outside sRGB are clipped to fit, which is lossy.");
                 }
+                if ui
+                    .checkbox(
+                        &mut self.config.thumbnail_cache,
+                        "Cache grid thumbnails on disk",
+                    )
+                    .changed()
+                {
+                    // Nothing to invalidate. The cells in `thumbs` are decoded
+                    // pictures and stay correct whichever way this goes; only
+                    // whether *new* ones are written changes. Dropping them here
+                    // would cost a re-decode of every visible cell — up to 50 of
+                    // them at ~700 ms each on a folder of large scans — to buy
+                    // nothing at all.
+                    set_thumbnail_cache(self.config.thumbnail_cache);
+                    self.config.save(&self.config_path);
+                }
+                ui.small(format!(
+                    "Up to {} of cells, so a folder of large scans opens once at full \
+                     speed. Stored in {}.",
+                    human_bytes(image_viewer::THUMB_CACHE_MAX_BYTES),
+                    thumb_cache_root().display()
+                ));
                                 let mut new_filter = self.config.downscale_filter;
                 ui.horizontal(|ui| {
                     ui.label("Filter:");

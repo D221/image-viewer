@@ -144,18 +144,131 @@ it; a 24-bit CMYK scan is the common print case and it is already covered.
 
 ## 4. Smaller queued items
 
-- **Grid thumbnails of large scans are the grid's real bottleneck.** Files with
-  no embedded thumbnail take ~800 ms each even via the turbojpeg DCT path, which
-  still decompresses every coefficient. Embedded EXIF thumbnails took everything
-  else 15-40× faster; these are the residue and need a different approach.
-  Related: a multi-page document's thumbnail is page 1 at 256 px through the
-  full pipeline, which for a 25 MB scan dominates opening the grid.
 - **The file-change watcher is unverified** (`check_changed`, `invalidate_path` —
   both in `main.rs`, so no test can reach them). Worth one manual pass: change a
   file on disk, confirm it reloads within a few seconds, *including while it is
   mid-write* — that is the case which would poison the file if `invalidate_path`
   ever stopped clearing `failed`.
 - **Colour correctness has no ground truth** — blocked on decision 2 in §1.
+
+---
+
+## 5. Grid thumbnails: done, and the cold case is a floor rather than a bug
+
+Shipped: a grid cell is a **different request** from a preview (`Purpose::Thumb`
+in `lib.rs`), and there is a **persistent cache** in front of it
+(`%LOCALAPPDATA%\image-viewer\thumbs`). `AGENTS.md` has the traps, the tests are
+`tests/thumb_cache.rs`, the microbenchmark is `bench_browse thumb_cache_ab`, and
+the end-to-end check is `tests/probe_thumb_cache.ps1`.
+
+**Verified through the real app**, on a console session with no Remote Display
+Adapter (`probe_thumb_cache.ps1`, presses `G`, then reads the exit report):
+
+| | cold | warm |
+|---|---|---|
+| `grid thumbnails from cache` / `decoded (miss)` | 0 / 4 | **4 / 0** |
+| `gallery open -> first thumbs` | 46.7 ms | **8.7 ms** |
+| `worker: thumbnail decode` p50 | — | **1.0 ms** (p95 2.0 ms) |
+| entries on disk | 4 (0.2 MB) | 4 |
+| display-gap frames / stalls / worker panics | 0 / 0 / 0 | 0 / 0 / 0 |
+
+Screenshots of both runs are in `%TEMP%\iv-thumb-{cold,warm}.png` and the grids
+are pixel-identical, which is the visual half of "a hit is the same picture".
+
+**Read the cold `first thumbs` figure correctly: it is 46.7 ms and not ~700 ms
+because it measures the *first* cell, and with four cells queued at the same
+priority the cheap GIF wins the race.** It is not the grid filling. The fill is
+what `thumb_cache_ab` measures, and it is unchanged — see below.
+
+**The finding that shaped it is negative, and it is the whole item.** A 95 MP
+baseline JPEG has no cheaper full-image read in any conformant decoder: every
+pixel needs every DCT coefficient, so the entropy decode *is* the floor. Measured
+on this box, interleaved, min of 4, release:
+
+| | 95.7 MP baseline 4:2:0, 27 MB | 16.8 MP 4:4:4, 26 MB |
+|---|---|---|
+| `fs::read` | 13 ms | 11 ms |
+| DCT 1/8 (what the grid used) | **833 ms** | **580 ms** |
+| DCT 1/1 | 1242 ms | 677 ms |
+| cell texture that got uploaded | 5851 KB | 512 KB |
+
+DCT scaling buys 25-30% and no more, so "a different approach" could not mean
+"decode it more cheaply" — it had to mean *not decoding it again*, which is a
+cache. Measured over 24 synthetic cells: **cold 535 ms, warm 9 ms**, i.e. 1.14 ms
+per cell against 66.9 ms. On the real scans in `test-images` a warm cell is
+0.6-1.8 ms against 700-900 ms.
+
+What did **not** work, recorded so nobody re-derives it:
+
+- **The progressive DC-scan trick is real, and useless here.** Truncating a
+  progressive JPEG after its first DC-only scan and decoding that is **3.3x**
+  (24.2 MP: 148 ms against 474 ms, reading 429 KB of 3.1 MB) — but **every large
+  file in this library is baseline**: 0 of the 5 big scans in `test-images` and 0 of
+  the 5 big photographs in `phone_backup\Download\Ttg`. It also has a correctness
+  trap: a first scan with `Ns=1` is not interleaved, so truncating there yields one
+  component's DC and a plausible wrong picture. Not built.
+- **The transient full-size allocation is still there.** `dynamic_to_image_data`
+  decodes at source size and resizes for every format with no reduced-size read
+  (PNG, HEIC, JXL, TIFF). What the thumb path removed is the *retention* and the
+  *second* downscale, not the allocation. Fixing that needs a row-streaming decode
+  per format.
+
+**Known gap, stated rather than hidden:** the first visit to a folder of large
+scans is exactly as slow as it was — 24 cells at ~700 ms over 4 workers is still
+~4 s, and nothing here touches that. The only two ways to move it are a faster
+entropy decoder (there isn't one) or a thumbnail the file already carries
+(embedded EXIF, already used, 15-40x — and the residue has none).
+
+### Known, verified
+
+- **A cell's texture was 44x what the cell asked for.** 1/8 of a 17000 px scan is
+  2100 px, and `decode_jpeg_scaled` can only pick 1/8, 1/4, 1/2 or 1, so nothing
+  ever landed on 256. With `THUMB_CACHE_CAP` at 512 that is a **2.9 GB** ceiling on
+  the grid's texture cache. The downscale now happens in `load_thumbnail`, once,
+  after every return point of `decode_page` — the same argument the wide-gamut
+  wrapper makes.
+- **A cell of an animation used to decode the whole loop.** `Kind::Thumb` went
+  through `load_page_preview_full`, which decodes up to 240 frames and 256 MB and
+  then keeps frame 0. The 900x318 GIF in `test-images`: **344 ms → 7.9 ms**, and
+  1117 KB of texture → 90 KB.
+- **A lossy thumbnail format was rejected on purpose.** A q90 JPEG cell would be
+  ~8x smaller on disk and would give up the one property worth asserting: that a
+  cache hit is *byte for byte* the decode it replaced.
+- Deflate effort for the stored entry, measured (bytes / encode time): `Best` buys
+  under 1% of size for 15-36x the time, and that time lands *before* the cell's
+  message is sent. `Fast` it is. An entry is 13-80 KB, about 1.5 bytes/pixel —
+  deflate is bad at photographic content — so 256 MB is 3 000-19 000 cells.
+- **A truncated entry was a *hit*, not a miss.** `image`'s PNG decoder accepts a
+  stream missing its last 64 bytes and returns a full-size image with the tail
+  zeroed, so a half-copied file produced a cell with a black band across it and no
+  error anywhere. PNG's own `IEND` terminator is the exact and free check. Found by
+  the damaged-entry test, which is why that test enumerates damage instead of
+  asserting one case.
+
+### Still open, in order of value
+
+- **The animation speed claim is still microbenchmark-only.** Now that a console
+  session is available it *could* be measured end to end (a scratch folder of
+  only animations, `G`, and the exit report) the same way the cache was. It was
+  not done because `load_thumbnail` on a GIF is the exact code the app calls and
+  `thumb_cache_ab` measures it on this box in release — so the number is
+  legitimate, just not end-to-end. Worth doing only if the GIF case is ever
+  reported to a user.
+
+- **A timing-ratio unit test for the animation fix was tried and abandoned.** Two
+  consecutive artefacts: the arm that ran first absorbed every one-time cost in the
+  process (550 ms against 53 ms — a "10x regression" that was pure warm-up), and
+  after interleaving and min-of-two it was rayon's global thread pool being built by
+  the first `linear_resize` (~450 ms in debug), landing on whichever arm went first.
+  The speed claim lives in `bench_browse thumb_cache_ab`; the unit test pins the
+  pixels. Same class as the four RDP conclusions in `AGENTS.md`.
+- **`THUMB_TRIM_EVERY` (64 writes) is a guess** — it trades a directory walk against
+  how often the cache is over its cap. Nothing here has ever reached 256 MB, so the
+  trim is tested directly (`prune_thumb_cache`) but the *cadence* is unmeasured.
+- **Archive members cache under their temp path.** A `.cbz` extracts to
+  `%TEMP%\image-viewer\<hash(path, mtime, size)>` and that hash changes when the
+  archive does, so editing an archive orphans every member's cell. They age out
+  like anything else; no special case was written.
 
 ---
 
