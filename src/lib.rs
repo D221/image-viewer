@@ -1243,20 +1243,25 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
             let key = ImgKey::first(&p.files[idx]);
             // The partner is skipped by **key**, not by seeding `seen` with its
             // index. `seen` is the window's dedup of *indices* and the partner is a
-            // *key*, so that spelling costs a scan of `files` on the planning path;
-            // and `seen.insert` runs either way, so the window still walks the same
-            // indices and this only decides whether it pushes one of them.
+            // *key*, and `seen.insert` runs either way — so the window still walks
+            // the same indices it always did and this only decides whether it pushes
+            // one of them.
             //
-            // Skipping has to happen at all: the partner is normally the cursor's
-            // own next neighbour, and two jobs for one `(key, kind)` are two
-            // decodes of one picture. `replace` keeps both — it dedupes nothing —
-            // so the pool would run the partner twice on every navigation, and
-            // the second result would land over the first for nothing.
+            // Skipping has to happen at all, for two reasons that are both about the
+            // queue rather than about cost. The partner is normally the cursor's own
+            // next neighbour, so without this the plan holds two jobs with one
+            // `(key, kind)` and `replace` dedupes nothing: the pool decodes the
+            // partner **twice** on every navigation, the second result landing over
+            // the first. And `wanted` is a map keyed by `(key, kind)`, so the pair
+            // would collapse to one entry holding the *last* insert — the window's
+            // priority — and a give-up re-queue would then restore the window's copy
+            // rather than the partner's. One is wasted work; the other is a plan that
+            // heals itself back to the wrong priority after a failure.
             //
             // Compared as whole keys, and that is what makes it right for a
             // document: **the window deliberately prefetches page 0** (see
             // `cur_key`) while the partner carries its *real* page, because
-            // `turn_partner` hands over the key of the position it stepped to. A
+            // [`turn_partner`] hands over the key of the position it stepped to. A
             // partner on page 2 is a different image from that document's page-0
             // neighbour, so neither job duplicates the other and both are wanted.
             if seen.insert(idx) && need_preview(&key) && p.partner.as_ref() != Some(&key) {
@@ -1300,6 +1305,38 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
 ///   function rather than a `&&` at one call site.
 pub fn wants_exif(panel_visible: bool, exif_pending: bool) -> bool {
     panel_visible && exif_pending
+}
+
+/// Whether an arriving preview means the plan has to be built again.
+///
+/// A decode is not only an answer to the request that asked for it: it is also a
+/// **measurement**, and a measurement can change the pairing. That is the whole
+/// reason this asks about the partner and not about the cursor alone.
+///
+/// [`lone`] reads `flat`, [`shape_of`] and `pairable`, and `pairable` reads the
+/// dimensions of exactly two pages - the anchor and its successor. So **only
+/// those two pages can change the turn**, and no other neighbour can, however
+/// many of them land.
+///
+/// The partner's arrival is therefore a re-plan trigger, and the case it exists
+/// for is this: [`pairable`] treats unknown dimensions optimistically (nothing to
+/// compare against, so it pairs), so a same-document partner whose dimensions
+/// have not been learned yet is planned at priority 0 and turns out to be a wide
+/// page. Its decode lands, [`Gallery::note_shapes`] learns the real shape, and
+/// the turn now holds **one** page where two were painted. With no re-plan the
+/// spread stays wrong for as long as the reader sits on it, and nothing on
+/// screen says why - the failure mode this project keeps paying for.
+///
+/// The partner is passed in rather than asked for, because the app must answer
+/// this *before* absorbing the message: [`Gallery::note_shapes`] runs first, and
+/// it is the very call that can collapse the turn, so a query made afterwards
+/// would already be answering about the new turn and would miss its own trigger.
+///
+/// The cursor page was already a trigger - it is one of the four events
+/// `MyApp::schedule` re-runs on, the others being a step, the full-res dwell
+/// expiring and a resize - and it stays one. This adds the second.
+pub fn arrival_reschedules(key: &ImgKey, cur: Option<&ImgKey>, partner: Option<&ImgKey>) -> bool {
+    Some(key) == cur || Some(key) == partner
 }
 
 /// Long side of the preview texture for a display area, in physical pixels.
@@ -6916,6 +6953,46 @@ pub fn turn_len(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> usize {
     } else {
         2
     }
+}
+
+/// The other page of the turn anchored at `anchor`, or `None` when the turn holds
+/// one page. `anchor` itself is never returned: it is the cursor's job.
+///
+/// **This is the whole of the turn's second half in one expression**, and it lives
+/// here rather than in the app because every piece of it is a rule and every rule
+/// in this section is testable from a test. The app's version is the mode gate
+/// plus one call.
+///
+/// Three decisions, each of which has a wrong answer that looks right:
+///
+/// * **`turn_len` decides whether there is one at all**, and it is the same
+///   question [`lone`] answers, so there is no second opinion to reconcile. A
+///   lone turn - front matter, a spread, or a last page with nothing after it -
+///   has no other half and must not borrow one.
+/// * **`step_no_wrap(anchor, 1)`, not [`next_anchor`].** A turn is
+///   `[anchor] + maybe [anchor + 1]`, so its second page is the anchor's
+///   *successor*; `next_anchor` is the turn **after** this one, a whole
+///   `turn_len` away, which is two pages forward whenever the answer is `Some`.
+///   It is also documented as the only caller of the *wrapping* step, and a turn
+///   must not straddle the wrap - so using it here would both paint the wrong
+///   page and contradict [`lone`]'s own reason for asking
+///   `step_no_wrap`.
+/// * **`anchor` can never come back**, and that is a property of the step rather
+///   than a check: `step_no_wrap` does not wrap, so one page forward is either
+///   the next page of this document (`page + 1`) or the first page of the next
+///   file (`index + 1`), and neither can be the position already named. A
+///   guard would be a branch that cannot change an output.
+///
+/// **`None` for a one-page gallery is the same property, not a special case.**
+/// `step_no_wrap` runs off the end and answers `None`, so a lone page cannot be
+/// reported as its own partner - which is the artefact that made the two
+/// questions ("does this page have a partner" and "where does the cursor go")
+/// need separate steps in the first place.
+pub fn turn_partner(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<ImgKey> {
+    if turn_len(anchor, lead_lone, ctx) == 1 {
+        return None;
+    }
+    ctx.step_no_wrap(anchor, 1).and_then(|pos| ctx.key(pos))
 }
 
 /// The anchor after `a`, or `None` past the end with looping off.

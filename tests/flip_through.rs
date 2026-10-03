@@ -609,17 +609,14 @@ fn the_plan_wraps_around_a_short_folder() {
 // neighbour's — a partner that arrives on its own time is a spread that paints
 // one page and then the other, which is more visible than a slow first page
 // because the gap is *on screen* next to something that already arrived.
-
-/// Three files, so the whole gallery sits inside the default preload radius and
-/// the cursor page's partner is also the window's nearest "next" — which is the
-/// only case where planning the partner and prefetching it can collide.
-fn three_files() -> Vec<PathBuf> {
-    ["a.jpg", "b.jpg", "c.jpg"].iter().map(PathBuf::from).collect()
-}
+//
+// Three files throughout, so the whole gallery sits inside the default preload
+// radius and the cursor page's partner is also the window's nearest "next" —
+// the only case where planning the partner and prefetching it can collide.
 
 #[test]
 fn the_partner_of_a_turn_is_planned_at_the_current_priority() {
-    let f = three_files();
+    let f = files(3);
     let cached: HashSet<ImgKey> = HashSet::new();
     let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
     let mut p = plan(&f, 0, &cached, &failed);
@@ -648,8 +645,50 @@ fn the_partner_of_a_turn_is_planned_at_the_current_priority() {
 }
 
 #[test]
+fn a_partner_keeps_its_own_page_number() {
+    // **The whole key, never `Job::path()`.** `path()` is the filesystem half of
+    // the identity and drops the page, so every other test in this section reads
+    // the same for a page-0 key and a page-2 key — which is how `plan_jobs`
+    // pushing `ImgKey::first(&partner.path)` instead of the partner itself would
+    // have gone unnoticed: it asks the worker for page 0 of the right document,
+    // which paints without error and is a different picture.
+    let f = files(3);
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    // A same-document partner on page 2. The window never builds such a key — it
+    // prefetches page 0 — so this case cannot be satisfied by any window entry.
+    let partner = ImgKey {
+        path: f[1].clone(),
+        page: 2,
+    };
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(partner.clone());
+    let jobs = plan_jobs(&p);
+
+    let planned = jobs
+        .iter()
+        .find(|j| j.kind == Kind::Preview && j.key.path == f[1])
+        .expect("the partner's file must be planned");
+    assert_eq!(
+        planned.key, partner,
+        "the partner is planned under the key it was given, page number included"
+    );
+    assert_eq!(
+        planned.prio,
+        image_viewer::PRIO_CURRENT_PREVIEW,
+        "and still at the current image's priority"
+    );
+    assert_ne!(
+        partner,
+        ImgKey::first(&f[1]),
+        "test setup: a page-2 key must not equal `ImgKey::first` of the same path, \
+         or this assertion cannot fail"
+    );
+}
+
+#[test]
 fn a_partner_already_cached_is_not_planned_again() {
-    let f = three_files();
+    let f = files(3);
     let cached: HashSet<ImgKey> = [ImgKey::first(&f[1])].into_iter().collect();
     let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
     let mut p = plan(&f, 0, &cached, &failed);
@@ -670,7 +709,7 @@ fn a_failed_partner_is_not_retried() {
     // never will. The cursor page gets the same treatment (`failed` in the plan
     // above), and a partner without it would be the one place a spread retries
     // forever.
-    let f = three_files();
+    let f = files(3);
     let cached: HashSet<ImgKey> = HashSet::new();
     let failed: HashSet<(ImgKey, Kind)> =
         [(ImgKey::first(&f[1]), Kind::Preview)].into_iter().collect();
@@ -688,10 +727,15 @@ fn a_failed_partner_is_not_retried() {
 fn a_turn_partner_is_planned_once_not_also_by_the_preload_window() {
     // The partner is the file after the cursor, which is *also* the preload
     // window's nearest "next". Two jobs with one `(key, kind)` are two decodes
-    // of one picture: `replace` keeps both, and the pool runs them one after the
-    // other — so the reader waits for the partner twice, and the second result
-    // lands over the first for nothing.
-    let f = three_files();
+    // of one picture: `replace` checks only `busy` and dedupes nothing, so the
+    // pool runs them one after the other — the reader waits for the partner
+    // twice, and the second result lands over the first for nothing.
+    //
+    // The second consequence is worse and is why the fix is not "let the queue
+    // sort it out": `wanted` is keyed by `(key, kind)`, so of the pair it keeps
+    // the **last** insert — the window's copy — and a give-up re-queue restores
+    // the neighbour priority instead of the current one.
+    let f = files(3);
     let cached: HashSet<ImgKey> = HashSet::new();
     let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
     let mut p = plan(&f, 0, &cached, &failed);
@@ -701,9 +745,9 @@ fn a_turn_partner_is_planned_once_not_also_by_the_preload_window() {
     let mut seen = HashSet::new();
     for j in &jobs {
         assert!(
-            seen.insert((j.path().to_path_buf(), j.kind)),
+            seen.insert((j.key.clone(), j.kind)),
             "planned twice, so decoded twice: {:?} {:?}",
-            j.path(),
+            j.key,
             j.kind
         );
     }

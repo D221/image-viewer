@@ -36,7 +36,7 @@ use image_viewer::{
     is_archive_path, load_grid_thumbnail, load_image_full, load_page_preview_full,
     load_spread_overrides, protected_preview_keys, save_spread_overrides,
     set_downscale_filter, set_linear_resample, set_thumbnail_cache, scan_folder_sorted,
-    spread_root_key, spreads_root, thumb_cache_root, turn_len, xformed_footprint, Animation, Config,
+    spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
     DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, PageCtx, PagePos, Shape, SortMode,
     Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
@@ -1603,47 +1603,30 @@ impl MyApp {
         self.schedule();
     }
 
-    /// The other page of the turn the cursor is on, or `None` when there is
-    /// nothing to paint beside it.
+    /// The other page of the turn the cursor is on, in manga mode, or `None`
+    /// otherwise.
     ///
-    /// `None` in three cases, and the first is the one that matters:
+    /// **The mode gate is the whole of this method.** It is app state — a setting —
+    /// and the rule it guards is [`image_viewer::turn_partner`], which is a pure
+    /// function next to the rest of the pairing and is tested there. Splitting it
+    /// that way is what makes the rule falsifiable: the plan once specified this
+    /// as `next_anchor`, which is the turn *after* this one, and a test is what
+    /// would have caught that.
     ///
-    /// * **Manga mode is off.** Unconditionally, and before anything is asked. The
-    ///   planner then sees `partner: None`, which is the plan this app built
-    ///   before turns existed: the one term `plan_jobs` added is a comparison
-    ///   against `None`, and no key can equal it.
-    ///   `no_partner_leaves_the_plan_exactly_as_it_was` pins the result.
-    /// * **The turn holds one page**: a leading page, a spread wide enough to be a
-    ///   turn by itself, or a last page with nothing after it. `turn_len` is the
-    ///   same question `lone` asks, so there is no second opinion to reconcile.
-    /// * **The gallery is empty**, which `step_no_wrap` answers on its own.
-    ///
-    /// **The cursor page is never returned**, and that is a property of the step
-    /// rather than a check: `step_no_wrap` does not wrap, so one page forward is
-    /// either the next page of this document or the first page of the next file,
-    /// and neither can be the page the cursor is already on. Guarding it would be
-    /// a branch that cannot change an output.
-    ///
-    /// **One step and not `next_anchor`.** A turn is `[anchor] + maybe
-    /// [anchor + 1]`, so the partner is the anchor's *successor*; `next_anchor` is
-    /// the turn **after** this one, a whole `turn_len` away. Using it here would
-    /// paint the wrong page, and would break `lone`'s and `next_anchor`'s own
-    /// documented contract that `next_anchor` is the only caller of the *wrapping*
-    /// step — a turn must not straddle the wrap, which is why this asks
-    /// `step_no_wrap`.
+    /// `None` also when the turn holds one page or the gallery is empty — see the
+    /// library function for why those need no separate case here.
     fn turn_partner(&self) -> Option<ImgKey> {
         if !self.config.manga_mode {
             return None;
         }
-        let ctx = AppPageCtx {
-            gallery: &self.gallery,
-            spreads: &self.spreads,
-        };
-        let anchor = self.gallery.page_pos();
-        if turn_len(anchor, self.spreads.lead_lone, &ctx) != 2 {
-            return None;
-        }
-        ctx.step_no_wrap(anchor, 1).and_then(|pos| ctx.key(pos))
+        image_viewer::turn_partner(
+            self.gallery.page_pos(),
+            self.spreads.lead_lone,
+            &AppPageCtx {
+                gallery: &self.gallery,
+                spreads: &self.spreads,
+            },
+        )
     }
 
     fn step(&mut self, ctx: &Context, forward: bool) {
@@ -1808,6 +1791,15 @@ impl MyApp {
             return;
         }
         let mut resched = false;
+        // The turn's second half as the plan that queued this batch's decodes saw
+        // it, captured **before** any of the messages is absorbed: a preview's
+        // `note_shapes` is the very call that can collapse the turn, so a query
+        // made after absorbing would already be answering about the new turn and
+        // would miss its own trigger. Captured here rather than kept in a field
+        // because the pairing only changes inside this loop, and `schedule` runs
+        // after it — so at this point the pairing is exactly what the last
+        // `schedule` saw, with no second copy of it to fall out of step.
+        let turn_partner = self.turn_partner();
 
         for m in msgs {
             match m {
@@ -1862,7 +1854,15 @@ impl MyApp {
                         if Some(&key) == self.cur.as_ref() {
                             self.resize.landed();
                         }
-                        resched |= Some(&key) == self.cur.as_ref();
+                        // The cursor page was the only trigger; a *partner's* arrival
+                        // is one too, because it brings the measurement that can
+                        // collapse the turn it was planned into — see
+                        // `arrival_reschedules`.
+                        resched |= image_viewer::arrival_reschedules(
+                            &key,
+                            self.cur.as_ref(),
+                            turn_partner.as_ref(),
+                        );
                         // "Wait for load" mode: arrived preview for the
                         // current image unblocks; if the key is still held,
                         // queue one more advance — consumed next frame so the

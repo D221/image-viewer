@@ -22,8 +22,8 @@
 use image_viewer::{
     exif_orientation, load_spread_overrides, lone, next_anchor, page_dims, pairable, prev_anchor,
     save_spread_overrides, shape_of, spread_root_key, spreads_root, spreads_tmp, thumb_cache_root,
-    turn_len, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape, LEAD_LONE_DEFAULT,
-    LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
+    turn_len, turn_partner, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape,
+    LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -174,8 +174,18 @@ impl PageCtx for TestGallery {
         self.page_at(target as usize)
     }
 
-    fn key(&self, _pos: PagePos) -> Option<image_viewer::ImgKey> {
-        None
+    /// A real key per position, because [`turn_partner`] hands one back and the
+    /// planner cannot be shown right without it. `path` names the document and
+    /// `page` is the position's own page, which is what makes page 2
+    /// distinguishable from page 0 of the same file.
+    ///
+    /// Nothing else in the pairing reads this: `shape_of`, `pairable` and `lone`
+    /// go through `dims`, `override_shape` and `flat`, so giving it a real answer
+    /// cannot perturb a test that never asks for a key. `None` for a position
+    /// that does not exist, like every other `PageCtx` here.
+    fn key(&self, pos: PagePos) -> Option<ImgKey> {
+        self.shape_at(pos)?;
+        Some(key_of(pos.index, pos.page))
     }
 
     /// The dimensions a detected shape implies: portrait for a single page, and
@@ -625,6 +635,189 @@ fn a_one_page_gallery_is_a_turn_of_one_however_it_loops() {
             assert_eq!(g.turns(0), vec![vec![0]], "looping {looping} over {g:?}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The turn's second half
+// ---------------------------------------------------------------------------
+//
+// `turn_partner` is the one function here that hands back a *key* rather than a
+// position, because a key is what the loader and every pixel cache are keyed on.
+// That makes it the function the rest of the pipeline can get wrong silently: a
+// key built as `ImgKey::first` of the right path is the wrong picture of a
+// multi-page document, and `Job::path()` — which drops the page — cannot see the
+// difference. So the key is asserted whole, and never through `path()`.
+
+/// A key the way `turn_partner` must build it: the document's path and the
+/// position's **own page number**, which is the half `ImgKey::first` throws away.
+fn key_of(index: usize, page: u32) -> ImgKey {
+    ImgKey {
+        path: std::path::PathBuf::from(format!("/vol/doc{index}.tiff")),
+        page,
+    }
+}
+
+/// A lone turn has no other half, and there are three reasons to be lone, so all
+/// three are asserted rather than only the easiest. `Double` is the interesting
+/// one: it is the only reason that is not visible in `lead_lone`.
+#[test]
+fn a_lone_turn_has_no_partner() {
+    let partner = |g: &TestGallery, index: usize, page: u32, lead_lone: u32| {
+        turn_partner(PagePos { index, page }, lead_lone, g)
+    };
+
+    // One all-`Single` document covers two of the three reasons: page 0 is front
+    // matter at `lead_lone` 1 and page 2 is the last page. Both are alone for
+    // different reasons, and both would otherwise be the easy assertion.
+    let doc = TestGallery::one_doc(vec![Single, Single, Single]);
+    assert_eq!(partner(&doc, 0, 0, 1), None, "front matter stands alone");
+    assert_eq!(
+        partner(&doc, 0, 2, 0),
+        None,
+        "the last page has nothing after it, so it is not its own partner"
+    );
+
+    let wide = TestGallery::one_doc(vec![Double, Single, Single]);
+    assert_eq!(
+        partner(&wide, 0, 0, 0),
+        None,
+        "a spread takes a whole turn to itself, so it has no partner to name"
+    );
+
+    // A one-page gallery, both shapes, both loop settings. With looping on this is
+    // the case where the *wrapping* step would answer "page 0 again" and
+    // `pairable(0, 0)` would compare the page with itself and say yes — the
+    // artefact that made "does this page have a partner" and "where does the
+    // cursor go" two different questions in the first place.
+    for looping in [false, true] {
+        for shapes in [vec![Single], vec![Double]] {
+            let g = TestGallery {
+                docs: vec![shapes],
+                loop_back: looping,
+            };
+            assert_eq!(
+                partner(&g, 0, 0, 0),
+                None,
+                "one page must not be its own partner (looping {looping}, {g:?})"
+            );
+        }
+    }
+}
+
+/// A turn of two names its **successor**, with the successor's real page number.
+///
+/// Page **2** and not page 1, deliberately: a key assembled as `ImgKey::first`
+/// would satisfy an assertion about page 1 and mean nothing at all. The extra
+/// `assert_ne` is the point — it says the fixture cannot pass by accident, so a
+/// future edit that flattens every key to page 0 breaks here instead of quietly
+/// making the test weaker.
+#[test]
+fn the_partner_is_the_anchor_s_successor_with_its_own_page_number() {
+    let doc = TestGallery::one_doc(vec![Single, Single, Single, Single]);
+
+    assert_eq!(
+        turn_partner(PagePos { index: 0, page: 1 }, 0, &doc),
+        Some(key_of(0, 2)),
+        "page 1's partner is page 2 of the same document"
+    );
+    assert_ne!(
+        Some(key_of(0, 2)),
+        Some(ImgKey::first(std::path::Path::new("/vol/doc0.tiff"))),
+        "test setup: a page-2 key must not equal `ImgKey::first` of the same path"
+    );
+
+    // Across a file boundary, because a turn is not a file boundary: the last page
+    // of one document is the first page of a turn with the next one's first.
+    let two = TestGallery::docs(vec![vec![Single], vec![Single]]);
+    assert_eq!(
+        turn_partner(PagePos { index: 0, page: 0 }, 0, &two),
+        Some(key_of(1, 0)),
+        "the last page of one file pairs with the first page of the next"
+    );
+}
+
+/// The plan's interface notes specified `next_anchor` for this function, and
+/// `next_anchor(anchor)` is `step(anchor, turn_len(anchor))` — on any turn of two
+/// that is **two** pages forward, the start of the next turn. So the wrong answer
+/// is pinned here rather than left to review.
+///
+/// Each case is one where the two answers name different keys, and the last is
+/// where they differ most: `next_anchor` off the end of a document is `None`, so
+/// a function delegating to it would report *no partner at all* for the very turn
+/// that has one.
+#[test]
+fn the_partner_is_not_the_next_anchor() {
+    let doc = TestGallery::one_doc(vec![Single, Single, Single, Single]);
+    // Both are compared as page numbers because that is the only part that can
+    // differ: both keys name the same document, so a `path()`-only assertion would
+    // pass for either answer.
+    let next_turn_page = |anchor| {
+        next_anchor(anchor, 0, &doc).and_then(|p| doc.key(p)).map(|k| k.page)
+    };
+    let partner_page = |anchor| turn_partner(anchor, 0, &doc).map(|k| k.page);
+
+    let anchor = PagePos { index: 0, page: 0 };
+    assert_eq!(
+        next_turn_page(anchor),
+        Some(2),
+        "test setup: `next_anchor` really is two pages forward"
+    );
+    assert_eq!(
+        partner_page(anchor),
+        Some(1),
+        "the turn's second page is one"
+    );
+    assert_ne!(
+        next_turn_page(anchor),
+        partner_page(anchor),
+        "the two must differ, or this test proves nothing"
+    );
+
+    let last = PagePos { index: 0, page: 2 };
+    assert_eq!(
+        partner_page(last),
+        Some(3),
+        "the last turn of a document still has its second page"
+    );
+    assert_eq!(
+        next_turn_page(last),
+        None,
+        "test setup: `next_anchor` off the end of a document is `None`"
+    );
+}
+
+/// A decode is a measurement, and a measurement can change the pairing — so
+/// `arrival_reschedules` fires for the turn's *second* page, not only the cursor's.
+///
+/// The case it exists for is the optimistic half of `pairable`: a partner whose
+/// dimensions are unknown pairs, so it is planned at priority 0, and it turns out
+/// to be a wide page. Its decode lands, `note_shapes` learns the real shape, and
+/// the turn now holds **one** page where two were painted. If nothing re-plans,
+/// the wrongly paired spread stands with nothing on screen to say why.
+#[test]
+fn a_partners_arrival_re_plans_because_it_can_change_the_turn() {
+    let cur = key_of(0, 0);
+    let partner = key_of(0, 1);
+    let neighbour = key_of(0, 3);
+
+    assert!(
+        image_viewer::arrival_reschedules(&cur, Some(&cur), Some(&partner)),
+        "the cursor page was already a trigger"
+    );
+    assert!(
+        image_viewer::arrival_reschedules(&partner, Some(&cur), Some(&partner)),
+        "a partner's decode is the measurement that can collapse the turn, so it \
+         must re-plan or a wrongly paired spread stands with nothing to notice it"
+    );
+    assert!(
+        !image_viewer::arrival_reschedules(&neighbour, Some(&cur), Some(&partner)),
+        "`pairable` reads only the anchor's and its successor's dimensions, so no \
+         other page can change the turn and none may cost a re-plan"
+    );
+    assert!(
+        !image_viewer::arrival_reschedules(&partner, Some(&cur), None),
+        "single-image browsing has no partner, so a preview is not a re-plan trigger"
+    );
 }
 
 /// An unmeasured page is judged `Single` and **pairs** optimistically, so a turn
