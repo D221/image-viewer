@@ -5090,6 +5090,356 @@ pub fn load_grid_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadEr
     }
 }
 
+// ---------------------------------------------------------------------------
+// Spread overrides: what the user decided, persisted
+// ---------------------------------------------------------------------------
+//
+// The detector above reads a page's aspect ratio, which is a good guess and blind
+// to three things: a landscape insert that is not a scan of two pages, a page
+// cropped enough that its ratio no longer matches its partner's, and what a given
+// book wants at the front. So the user gets the last word — nudge how many
+// leading pages stand alone, and flip any one page between a page and a spread —
+// and this is where those decisions live.
+//
+// It is a small file, and it borrows the thumbnail cache's rules wholesale rather
+// than inventing its own:
+//
+// * **Local, not roaming.** `%LOCALAPPDATA%\image-viewer\spreads.json`, beside
+//   the thumbnail cache and *not* beside `config.json`. These are this machine's
+//   reading of files that may be on a network share; they are worthless on
+//   another machine, and a profile folder is the wrong place for them.
+// * **A half-written store is unreadable.** Written to `spreads.json.tmp` and
+//   renamed, and `fs::rename` replaces on Windows, so a reader — a second
+//   instance of the app — sees either the old file or the new one.
+// * **Every failure is an empty override set.** A missing file, a malformed one,
+//   a path that cannot be read at all. Nothing a user or an editor does to this
+//   file may be able to stop the app starting, and no failure here is worth a
+//   warning: the loss is a pairing the user can re-press, and the alternative is
+//   refusing to open a folder over a cache file.
+//
+// Two levels of key, and the second is a trap rather than a choice:
+//
+// * **The gallery's root, as the caller states it** ([`spread_root_key`]). One
+//   store holds every gallery, so a save reads the whole file and replaces exactly
+//   one entry: the folder, or the archive that an open gallery was extracted from.
+// * **A bare file name and a page number**, inside that entry. A member of an
+//   archive has no stable directory to record — the `%TEMP%` directory it was
+//   extracted into changes on every re-extract — so the directory component is
+//   dropped and the *root key* carries the gallery instead. Within one gallery
+//   the names are unique: a folder is scanned flat, and `extract_zip` flattens
+//   and de-duplicates the entries it writes.
+
+/// What identifies a gallery's entry in the store: the root path, as a string.
+///
+/// Deliberately a bare path and not a "folder or archive" enum, because the whole
+/// point of [`spread_root_key`] is that a caller cannot express the wrong one:
+/// there is no spelling here for "the directory an archive was extracted into",
+/// so the mistake the `%TEMP%` rule is about is not available to make at this
+/// layer.
+type SpreadStore = std::collections::BTreeMap<String, GallerySpreads>;
+
+/// Where the overrides live: `%LOCALAPPDATA%\image-viewer\spreads.json`.
+///
+/// **Local, not roaming, and deliberately not beside the config.** These are this
+/// machine's decisions about files that may well be on a network share, they are
+/// worthless on another machine, and a profile folder is the wrong place for
+/// something the user never asked to sync. `Config::default_path` is the opposite
+/// case and does live in `%APPDATA%`; keeping the two apart is the whole point of
+/// `AGENTS.md`'s "a cache of any sort is `%LOCALAPPDATA%`".
+///
+/// `HOME` is the same fallback [`thumb_cache_root`] uses, for the one environment
+/// where it is not `LOCALAPPDATA`. **No third arm**, unlike that function: it
+/// falls back to a directory beside the working copy, which is the right answer
+/// for a disposable cache and the wrong one for a file the settings panel tells
+/// the user to go and edit. `None` means "do not persist", and the caller keeps
+/// the decisions in memory for the session — the only cost is that they are
+/// forgotten at exit, which is a far smaller failure than an app that will not
+/// start.
+pub fn spreads_root() -> Option<PathBuf> {
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        Some(PathBuf::from(local).join("image-viewer").join("spreads.json"))
+    } else if let Some(home) = std::env::var_os("HOME") {
+        Some(PathBuf::from(home).join(".cache").join("image-viewer").join("spreads.json"))
+    } else {
+        None
+    }
+}
+
+/// Which gallery `archive`/`folder` names, as the store's key.
+///
+/// **For an open archive this is the archive's own path and never the `%TEMP%`
+/// directory its members were extracted into.** That directory's name is a hash of
+/// the archive's path, mtime and length, so it is stable only until the archive is
+/// touched — an override keyed by it would appear to work for as long as nobody
+/// edited the `.cbz` and then silently lose every override the first time they
+/// did. `MyApp` holds both, so the choice has to be made here rather than at each
+/// call site.
+///
+/// `None` for a root with no name at all (a file opened from a path with no
+/// parent), because the empty string is a real key: every such gallery would share
+/// one entry and each one's overrides would answer for the others.
+///
+/// A function rather than an expression at the one call site that needs it, because
+/// `MyApp` holds both paths and the wrong reading of which one is the gallery's is
+/// silent: overrides keyed by the extraction directory load fine right up until the
+/// archive is edited.
+pub fn spread_root_key(archive: Option<&Path>, folder: &Path) -> Option<String> {
+    let root = archive.unwrap_or(folder);
+    (!root.as_os_str().is_empty()).then(|| root.to_string_lossy().into_owned())
+}
+
+/// The user's decisions about one gallery: which pages take a whole turn, and how
+/// many leading pages stand alone.
+///
+/// Two independent things because they are two independent decisions. `lead_lone`
+/// is a property of the *book* and applies to the whole gallery; `pages` is a
+/// property of a *page* and names individual exceptions. They travel together
+/// only because they are written to the same place, and [`shape_for`] is the one
+/// function a pairing asks.
+///
+/// `Default` is spelled out rather than derived, and it is [`LEAD_LONE_DEFAULT`]
+/// rather than `0`. A derived `Default` would make "this gallery has no overrides"
+/// mean "pair the cover with page 2", and `load_spread_overrides` hands out exactly
+/// that value whenever the store is missing or unreadable — so every gallery would
+/// open with its cover paired to the page after it, with nothing on screen to say
+/// why.
+///
+/// `#[serde(default)]` is on the **container**, so both fields fall back to
+/// *this* `Default` and there is only one spelling of the default to keep
+/// correct: a file written before a field existed loads with the same values a
+/// fresh value has. There is deliberately no `deny_unknown_fields`, so a store
+/// from an older build — or one with a note in it — still loads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GallerySpreads {
+    /// How many leading pages are shown one to a turn, by flat ordinal.
+    /// Bounds: `0..=` [`LEAD_LONE_MAX`], enforced by [`Self::nudge_lead_lone`]
+    /// and again on load.
+    pub lead_lone: u32,
+    /// Per-page overrides, keyed by **bare file name and page number**.
+    ///
+    /// Not keyed by path, for the archive reason above; not keyed by page alone,
+    /// because a multi-page document's pages are separate decisions.
+    #[serde(with = "spread_pages")]
+    pub pages: HashMap<(String, u32), Shape>,
+}
+
+impl Default for GallerySpreads {
+    fn default() -> Self {
+        GallerySpreads {
+            lead_lone: LEAD_LONE_DEFAULT,
+            pages: HashMap::new(),
+        }
+    }
+}
+
+/// The on-disk form of [`GallerySpreads::pages`]: file name -> page -> shape.
+///
+/// A map keyed by a `(String, u32)` **pair** is not something `serde_json` can
+/// write: it refuses any map key that is not a string, and no derive avoids the
+/// key. So the pair is split into two nested objects and the page becomes a decimal
+/// string, which is also what makes the file readable — its path is disclosed in the
+/// settings panel, so somebody will open it in an editor.
+///
+/// ```text
+/// "pages": { "001.png": { "0": "double", "7": "single" } }
+/// ```
+///
+/// **An unparseable page key is dropped, not fatal.** One mistyped key must not
+/// cost a reader every override in the file, which is what the
+/// `unwrap_or_default` in [`load_spread_overrides`] would otherwise do — the same
+/// reasoning as a corrupt cache entry being a miss rather than a wrong answer.
+mod spread_pages {
+    use super::Shape;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::{BTreeMap, HashMap};
+
+    /// `file name -> page as a string -> shape`. `BTreeMap` so the written file's
+    /// key order is stable, which is what makes it reviewable in a diff.
+    type ByFile = BTreeMap<String, BTreeMap<String, Shape>>;
+
+    pub fn serialize<S: Serializer>(
+        pages: &HashMap<(String, u32), Shape>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut by_file: ByFile = BTreeMap::new();
+        for ((name, page), shape) in pages {
+            by_file
+                .entry(name.clone())
+                .or_default()
+                .insert(page.to_string(), *shape);
+        }
+        by_file.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<(String, u32), Shape>, D::Error> {
+        let by_file = ByFile::deserialize(deserializer)?;
+        let mut out = HashMap::with_capacity(by_file.len());
+        for (name, per_page) in by_file {
+            for (page, shape) in per_page {
+                // Dropped, as the module docs say. The alternative — failing the
+                // whole parse — hands back an empty store for one bad key.
+                if let Ok(page) = page.parse::<u32>() {
+                    out.insert((name.clone(), page), shape);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl GallerySpreads {
+    /// The user's decision about one page, or `None` when there is none.
+    ///
+    /// `None` is the ordinary answer and means "ask the detector": a page with no
+    /// override pairs by its aspect ratio like any other. So this is not a
+    /// fallback that guesses — an override *replaces* the detector rather than
+    /// breaking its ties.
+    pub fn shape_for(&self, path: &Path, page: u32) -> Option<Shape> {
+        self.pages.get(&(file_name_of(path), page)).copied()
+    }
+
+    /// Record the user's decision about one page.
+    pub fn set_shape(&mut self, path: &Path, page: u32, shape: Shape) {
+        self.pages.insert((file_name_of(path), page), shape);
+    }
+
+    /// Flip one page away from `detected`, store the answer, and return it.
+    ///
+    /// **`detected` is the whole answer, and it is the caller's**: what the page is
+    /// judged to be *now* — an existing override if there is one, the aspect ratio
+    /// otherwise. Two presses therefore flip and unflip, because the second press is
+    /// handed the first press's answer.
+    ///
+    /// It does not give the store a second vote, which is what makes the returned
+    /// shape worth anything: a `toggle` that read its own last answer back would
+    /// flip away from the *stored* shape, and those two only differ when the stored
+    /// override and the caller's judgement have parted company — an override set
+    /// against a page whose file has since been re-exported. The same call would
+    /// then answer two different questions, and only one of them was asked.
+    /// `tests/spreads.rs::toggling_a_page_reports_the_shape_it_landed_on` pins it.
+    pub fn toggle(&mut self, path: &Path, page: u32, detected: Shape) -> Shape {
+        let next = match detected {
+            Shape::Single => Shape::Double,
+            Shape::Double => Shape::Single,
+        };
+        self.set_shape(path, page, next);
+        next
+    }
+
+    /// Move the leading-lone offset by `by`, clamped to `0..=`[`LEAD_LONE_MAX`].
+    ///
+    /// Clamped in `i64` rather than with `saturating_*` on `u32`, because the
+    /// arithmetic has to happen before it is bounded: `0u32` minus `i32::MIN` wraps
+    /// to about two billion, which is *in* range and absurd, and the result would be
+    /// a gallery of nothing but single pages.
+    pub fn nudge_lead_lone(&mut self, by: i32) {
+        let next = self.lead_lone as i64 + by as i64;
+        self.lead_lone = next.clamp(0, LEAD_LONE_MAX as i64) as u32;
+    }
+
+    /// Drop every override for one file, for a file whose contents changed.
+    ///
+    /// **Every page, not one**, because the keys name pages: a path-keyed `remove`
+    /// would be a no-op for any page past the first.
+    ///
+    /// This is not the same as forgetting a *measurement*, and the difference is
+    /// why it is right to drop an override at all. A stale dimension is a wrong
+    /// answer to a question about the current file; a stale override is a decision
+    /// about pixels that no longer exist — a 12-page document re-exported as one
+    /// page has no page 3 to be a spread. And because an override beats the
+    /// detector outright, keeping it would hold a page a spread for the session no
+    /// matter what the file now contains.
+    ///
+    /// Entries for a *name* that has left the gallery are not pruned by anything
+    /// here: this store cannot tell a renamed file from a deleted one, and they are
+    /// a few bytes each in a file the user can delete wholesale.
+    pub fn forget_file(&mut self, path: &Path) {
+        let name = file_name_of(path);
+        self.pages.retain(|(n, _), _| *n != name);
+    }
+}
+
+/// The overrides for one gallery out of the store. **Never fails.**
+///
+/// Every error is the same value: a missing file, a read error, and a parse that
+/// did not produce the expected shape are all `GallerySpreads::default()`. That is
+/// the whole contract, and it is why this returns the value rather than a `Result`
+/// — a caller that could handle the error by refusing to open a folder would be a
+/// worse app.
+///
+/// `root` names the gallery the way [`spread_root_key`] produced it; `store` is
+/// the file, which the caller passes in so a test can point it at a temporary
+/// directory instead of the user's `%LOCALAPPDATA%`.
+pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
+    let Ok(text) = std::fs::read_to_string(store) else {
+        return GallerySpreads::default();
+    };
+    let all: SpreadStore = serde_json::from_str(&text).unwrap_or_default();
+    let mut g = all
+        .get(root.to_string_lossy().as_ref())
+        .cloned()
+        .unwrap_or_default();
+    // Clamped, not obeyed. This is a file a person can open and edit, so a
+    // `lead_lone` of 99 is a thing that will happen, and obeying it stands the
+    // first 99 pages of the gallery alone.
+    g.lead_lone = g.lead_lone.min(LEAD_LONE_MAX);
+    g
+}
+
+/// The store's own name plus `.tmp`, which is the half-written-entry guard.
+///
+/// **Appended, not `with_extension`.** `spreads.json`.with_extension("tmp") is
+/// `spreads.tmp`: a different name for the same thing, and one that reads as a
+/// different file in a directory listing. The thumbnail cache can afford that
+/// because its entry is a hash with no meaning, and this store's whole point is
+/// that a person can find and read it.
+fn spreads_tmp(store: &Path) -> PathBuf {
+    let mut name = store.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+/// Write one gallery's overrides into the store.
+///
+/// **A read-modify-write, not a whole-file overwrite.** One file holds every
+/// gallery, so writing one gallery's entry over the top of it would delete every
+/// other gallery's decisions — with no error and nothing on screen to say so. A
+/// store that cannot be read is treated as empty and replaced, which is the same
+/// rule [`load_spread_overrides`] reads it by.
+///
+/// Returns the error rather than swallowing it, but the app's caller ignores it:
+/// a read-only or full disk must not break browsing, and the decisions are still in
+/// memory for the session. There is no retry — the next change saves again.
+pub fn save_spread_overrides(
+    store: &Path,
+    root: &Path,
+    g: &GallerySpreads,
+) -> std::io::Result<()> {
+    let mut all: SpreadStore = std::fs::read_to_string(store)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    all.insert(root.to_string_lossy().into_owned(), g.clone());
+
+    if let Some(parent) = store.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&all)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    // Write beside the store and rename into place, the thumbnail cache's rule:
+    // `fs::rename` replaces on Windows, so a reader sees either the old file or
+    // this one. A partial temporary is never renamed, so nothing can read one — and
+    // it is not deleted on failure either, because the next save overwrites the
+    // same name.
+    let tmp = spreads_tmp(store);
+    std::fs::write(&tmp, json)?;
+    std::fs::rename(&tmp, store)
+}
+
 /// Load a preview in one pass, decoding the file only once.
 ///
 /// * Large JPEGs get the cheap DCT-scaled preview; the full decode happens
@@ -6112,7 +6462,16 @@ pub const LEAD_LONE_DEFAULT: u32 = 1;
 pub const LEAD_LONE_MAX: u32 = 4;
 
 /// What a page looks like, which decides whether it takes a whole turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialised, because the user's override for one page is written to disk (see
+/// [`GallerySpreads`]) in a file meant to be read by a person — its path is
+/// disclosed next to the settings, so somebody will open it in an editor.
+/// `rename_all = "lowercase"` is what makes the documented spelling (`"double"`)
+/// the one that *loads*; without it serde writes `"Double"` and refuses
+/// `"double"`, and a hand-edited file silently becomes no overrides at all. The
+/// same trap `WgpuBackend` fell into, which `AGENTS.md` records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Shape {
     Single,
     Double,

@@ -34,10 +34,11 @@ use image_viewer::perf;
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, forget_thumbnail, grid_cols,
     is_archive_path, load_grid_thumbnail, load_image_full, load_page_preview_full,
-    protected_preview_keys, set_downscale_filter, set_linear_resample, set_thumbnail_cache,
-    scan_folder_sorted, thumb_cache_root, xformed_footprint, Animation, Config, DownscaleFilter,
-    Gallery, ImgKey, ImageData, SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H,
-    MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    load_spread_overrides, protected_preview_keys, save_spread_overrides, set_downscale_filter,
+    set_linear_resample, set_thumbnail_cache, scan_folder_sorted, spread_root_key, spreads_root,
+    thumb_cache_root, xformed_footprint, Animation, Config, DownscaleFilter, Gallery, GallerySpreads,
+    ImgKey, ImageData, SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS,
+    PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -1244,6 +1245,19 @@ struct MyApp {
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
+    /// The user's own pairing decisions for the gallery on screen: which pages take
+    /// a whole turn, and how many leading pages stand alone. Loaded when a gallery
+    /// is opened, and one file's entries are dropped by `invalidate_path`, because
+    /// a re-export can change a file's page count and an override naming page 3 of
+    /// a one-page document is a decision about pixels that no longer exist.
+    spreads: GallerySpreads,
+    /// The gallery `spreads` belongs to, as the overrides file keys it. **For an
+    /// archive this is the ORIGINAL archive path**, never the `%TEMP%` extraction
+    /// directory, whose name changes on every re-extract and would orphan every
+    /// override the first time the `.cbz` was edited. It is a field rather than
+    /// something `save_spreads` re-derives so a save can never write to a different
+    /// key than the load read.
+    spreads_key: Option<String>,
     wheel_acc: f32, // accumulated wheel delta in wheel-navigation mode
     thumbs: HashMap<PathBuf, Thumb>, // grid thumbnails
     thumb_tries: HashMap<PathBuf, u8>, // per-path thumb attempts (bounded retry)
@@ -1404,6 +1418,8 @@ impl MyApp {
             pending_advance: None,
             zip_archive,
             zip_temp,
+            spreads: GallerySpreads::default(),
+            spreads_key: None,
             wheel_acc: 0.0,
             thumbs: HashMap::new(),
             thumb_tries: HashMap::new(),
@@ -1413,8 +1429,55 @@ impl MyApp {
             grid_page_rows: 1,
             gallery_view: false,
         };
-                app.goto(ctx);
+        // Loaded before the first `goto`, so the gallery opened at start-up has its
+        // own overrides in hand before anything is planned. `zip_archive` is already
+        // set above for a `.cbz` named on the command line, so this keys such a
+        // gallery by the archive rather than by the directory it was extracted into.
+        app.refresh_spreads();
+        app.goto(ctx);
         app
+    }
+
+    /// Point `spreads` at the gallery now on screen: its key first, then whatever
+    /// that key has stored.
+    ///
+    /// **One function, because key and contents cannot be set independently.** The
+    /// load names a key and the save writes under whatever `spreads_key` says, so
+    /// two sites each doing half of this would put one gallery's decisions under
+    /// another gallery's entry — silently, and only once the user had switched.
+    ///
+    /// Every site that opens a gallery calls this: `adopt_gallery` (which every
+    /// folder and file open already goes through, for the same reason the filter
+    /// cannot be forgotten), `open_archive` (which builds its own gallery instead of
+    /// adopting one), and the constructor.
+    fn refresh_spreads(&mut self) {
+        self.spreads_key = spread_root_key(self.zip_archive.as_deref(), &self.folder);
+        self.spreads = match (self.spreads_key.as_deref(), spreads_root()) {
+            (Some(key), Some(store)) => load_spread_overrides(&store, Path::new(key)),
+            // No root, or nowhere to persist: the decisions stay in memory for the
+            // session, which is a smaller loss than refusing to browse.
+            _ => GallerySpreads::default(),
+        };
+    }
+
+    /// Write the overrides out.
+    ///
+    /// **The error is swallowed on purpose.** A read-only or full disk must not
+    /// break browsing, and the decisions are still in memory for the session — the
+    /// same rule the thumbnail cache follows, for the same reason. There is no
+    /// retry and no warning: the next override saves again, and a pairing the user
+    /// has to press twice is a far smaller problem than an app that stops
+    /// responding because a file could not be written.
+    // Nothing calls this yet: no key changes an override yet, so there is nothing
+    // to write. It is here rather than written from the exit path because a
+    // save-on-exit would create the store on every run of the app to record that
+    // the user had decided nothing.
+    #[allow(dead_code)]
+    fn save_spreads(&self) {
+        let (Some(store), Some(key)) = (spreads_root(), self.spreads_key.as_deref()) else {
+            return;
+        };
+        let _ = save_spread_overrides(&store, Path::new(key), &self.spreads);
     }
 
     // ---- navigation -------------------------------------------------------
@@ -1539,6 +1602,11 @@ impl MyApp {
         self.all_files = self.gallery.files.clone();
         self.apply_filter();
         self.reset_display();
+        // Loaded before `goto`, so whatever the navigation plans sees this gallery's
+        // own overrides rather than the last folder's. `adopt_gallery` is the
+        // single site every open goes through, which is why it is here and not in
+        // each caller.
+        self.refresh_spreads();
         self.goto(ctx);
     }
 
@@ -1990,6 +2058,12 @@ impl MyApp {
                     }
                 }
                 self.reset_display();
+                // `zip_archive` was set above, so this keys the gallery by the
+                // archive's own path and not by `self.folder`, which is the temp
+                // directory `extract_zip` just wrote — a name that changes on every
+                // re-extract, so keying by it would lose every override the first
+                // time the archive was edited.
+                self.refresh_spreads();
                 self.goto(ctx);
                 let mut n = format!("Archive: {count} images");
                 if encrypted > 0 {
@@ -2165,6 +2239,12 @@ impl MyApp {
         // spread after this file stays mis-paired for the session, with no error
         // and nothing on screen to say so.
         self.gallery.forget_shapes(p);
+        // ...and the user's own decision about each of its pages, for a sharper
+        // reason than the dimensions above. A stale override is not a wrong answer
+        // to a question about the current file, it is a decision about pixels that
+        // no longer exist — and because an override beats the detector, keeping it
+        // holds that page a spread for the session whatever the file now contains.
+        self.spreads.forget_file(p);
         let shown_gone = self.shown.as_ref().is_some_and(|s| s.path == p);
         if self.full.as_ref().is_some_and(|f| f.path == p) {
             self.full = None;
