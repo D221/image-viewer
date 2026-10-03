@@ -248,6 +248,26 @@ pub struct Config {
     /// config written before this key existed still has to load.
     #[serde(default)]
     pub manga_mode: bool,
+
+    /// Pages meet **right to left** in manga mode: a turn's first page is on the
+    /// right, the second on its left.
+    ///
+    /// **On by default** (`default_true`), which is the opposite of every other
+    /// boolean here and the only field whose absence is answered `true`. It is
+    /// right because this field is only read while [`Config::manga_mode`] is on,
+    /// and someone who has asked for a manga reader has asked for the one thing
+    /// that makes it a manga reader: the order the pages meet in. It is not the
+    /// app's historical behaviour being changed, because with the mode off nothing
+    /// consults it.
+    ///
+    /// `#[serde(default = "default_true")]` therefore means both halves at once —
+    /// an old config loads *and* gets the direction a manga library reads in —
+    /// which is the pair `a_config_written_before_manga_mode_still_loads` pins.
+    /// Writing `#[serde(default)]` here would compile, pass every other test in
+    /// the suite, and hand every reader who never found the setting a
+    /// left-to-right one.
+    #[serde(default = "default_true")]
+    pub manga_rtl: bool,
 }
 
 fn default_true() -> bool {
@@ -272,6 +292,7 @@ impl Config {
             thumbnail_cache: true,
             last_by_folder: std::collections::HashMap::new(),
             manga_mode: false,
+            manga_rtl: true,
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {

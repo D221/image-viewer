@@ -1196,6 +1196,29 @@ struct MyApp {
     /// be lost the moment you moved to another one. The page has to be part of
     /// what "what is on screen" means.
     shown: Option<ImgKey>,
+    /// The turn's **other** page, in manga mode: `None` for a lone turn, and for
+    /// the whole feature off.
+    ///
+    /// **A second field rather than a second meaning on `shown`, and the reason
+    /// is the lag `shown` exists for.** `shown` lags `cur` until the wanted
+    /// preview has been adopted, so a spread needs its own lagging partner:
+    /// during the lag — every uncached navigation, so most of them — `shown`
+    /// names the previous turn's cursor page, and a partner read from `cur`
+    /// would be the new turn's. The reader would see one page of the turn they
+    /// left beside one page of the turn they asked for.
+    ///
+    /// **Set in the same act that adopts `shown`, and nowhere else.** Adopting
+    /// the two separately is how that happens: the partner lands first, or the
+    /// cursor does, and there is a frame where one is from this turn and one from
+    /// the last. So `sync_shown` assigns both inside its existing "adopt the
+    /// wanted preview" block, and `reset_display` / `invalidate_path` drop both
+    /// beside the existing `shown = None`.
+    ///
+    /// **Only the paint loop reads it.** Every view-shaped path — `footprint`,
+    /// the crop frame, `dim_bands`, the full-res tiles, `anim`, EXIF, the
+    /// latency commit — reads `shown` and is unchanged, which is why no crop,
+    /// tile or save code moves for this feature at all.
+    shown_partner: Option<ImgKey>,
     full: Option<FullImage>,
     full_due: Option<Instant>,
     view: View,
@@ -1435,6 +1458,7 @@ impl MyApp {
             frame: 0,
             cur: None,
             shown: None,
+            shown_partner: None,
             full: None,
             full_due: None,
             view: View {
@@ -1690,6 +1714,7 @@ impl MyApp {
     /// Forget what is on screen (used when switching folders).
     fn reset_display(&mut self) {
         self.shown = None;
+        self.shown_partner = None;
         self.full = None;
         self.anim = None;
     }
@@ -2020,9 +2045,17 @@ impl MyApp {
     }
 
     /// Switch what's on screen as soon as the requested image's preview exists.
+    ///
+    /// **The partner is adopted in the same act as the cursor**, and that is the
+    /// whole of what it takes: `shown` lags `cur` while the wanted preview
+    /// decodes, so the spread's other half must lag with it rather than arrive on
+    /// its own schedule. Adopting them separately is how a spread ends up showing
+    /// one page from this turn beside a stale page from the last, and the lag
+    /// makes that the common case rather than a race.
     fn sync_shown(&mut self, ctx: &Context) {
         let Some(cur) = self.cur.clone() else {
             self.shown = None;
+            self.shown_partner = None;
             self.anim = None;
             return;
         };
@@ -2035,6 +2068,11 @@ impl MyApp {
         // comparison cannot, because the two have the same path.
         if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
             self.shown = Some(cur.clone());
+            // Read here rather than in the paint loop, because `turn_partner`
+            // asks about the **cursor's** turn while this frame paints `shown`'s.
+            // Manga mode off answers `None` from the gate in that function, so
+            // this is not a branch on the setting and needs no comment of its own.
+            self.shown_partner = self.turn_partner();
             self.view.fit = true;
         }
         // Adopt the full image that came with the preview's decode pass
@@ -2367,6 +2405,21 @@ impl MyApp {
             // holdover: keeping old pixels for a re-exported file is the one
             // outcome that looks like a bug.
             self.shown = None;
+        }
+        // The partner goes too, **and on its own condition** — this function is
+        // told one path, and in a turn that path is either half. `shown` surviving
+        // says nothing about the partner's pixels: `previews.retain` above has
+        // already dropped them, so leaving `shown_partner` pointing at the file
+        // would have `central` lay out a two-page turn and paint a hole in one
+        // half, for as long as the reader stayed put.
+        //
+        // Clearing it reflows the turn to one page, which is the reflow-under-the-
+        // reader case `learn_shapes` calls worse than being wrong from the start.
+        // It is accepted because the alternative is not "wrong from the start", it
+        // is a blank half — and because `shown` is not cleared either, so the
+        // cursor page's pixels stay exactly as solid as they were.
+        if self.shown_partner.as_ref().is_some_and(|k| k.path == p) {
+            self.shown_partner = None;
         }
         if self.cur.as_ref().is_some_and(|c| c.path == p) {
             self.error = None;
@@ -2772,6 +2825,70 @@ impl MyApp {
         }
     }
 
+    /// The turn's pages — **cursor first** — as `(key, display dimensions)`.
+    ///
+    /// **Dimensions, not textures, and that is the whole point of the split.**
+    /// A layout read from the textures on screen would reflow the turn under the
+    /// reader the moment the partner's decode landed, because the two textures
+    /// have different sizes: the cursor's preview is already sized to the panel
+    /// and the partner's may not be, or may be an older, sharper decode. The
+    /// geometry therefore comes from the same measurement the pairing itself uses
+    /// (the gallery's shape cache, falling back to `orig`), and the textures are
+    /// only ever drawn *into* a rect that was decided before they arrived.
+    ///
+    /// **This is a lookup and never a measurement**, and that is what keeps it off
+    /// the UI thread's critical path: nothing here opens a file. The dimensions
+    /// have been put in the cache by the two callers that already read them —
+    /// `goto`'s `learn_shapes` for the page being arrived at and the page after it,
+    /// and `pump`'s `note_shapes` for any page whose decode has landed. The pairing
+    /// itself consumes the same entries (`pairable` reads *both* pages' dimensions
+    /// on every `schedule`), so the query that decides a turn is also the query
+    /// that needs them, and the pairing's read-ahead is this layout's prefetch.
+    ///
+    /// "Already known" is not "guaranteed": a partner nothing has measured yet
+    /// answers `None`, which is why the fallback below exists rather than a `?`.
+    ///
+    /// `cursor_dims` is passed in rather than looked up because the caller is
+    /// already holding the cursor page's `orig`, and this runs per frame.
+    ///
+    /// **Cursor first, and that order is load-bearing**: `spread_rects` returns
+    /// rects in *input* order, so index 0 is the cursor page's rect and every
+    /// view-shaped path downstream (the crop frame, the tiles, `footprint`) is
+    /// built from it.
+    fn turn_pages(&self, shown: &ImgKey, cursor_dims: (u32, u32)) -> Vec<(ImgKey, (u32, u32))> {
+        let Some(partner) = self.shown_partner.as_ref() else {
+            return vec![(shown.clone(), cursor_dims)];
+        };
+        let pos = self.gallery.page_pos();
+        // `step_no_wrap` rather than the wrapping step, because a turn must not
+        // straddle the wrap — the same rule `PageCtx::step_no_wrap` is built on and
+        // the same one `turn_partner` steps over. The `key` comparison is what
+        // makes this a lookup on the page `shown_partner` actually names rather
+        // than an assumption that "the page after the cursor" is still it.
+        let cached = self
+            .gallery
+            .step_no_wrap(pos, 1)
+            .filter(|p| PageCtx::key(&self.gallery, *p).as_ref() == Some(partner))
+            .and_then(|p| PageCtx::dims(&self.gallery, p));
+        // A partner with no cached dimensions and no preview is a page nothing has
+        // ever measured. The cursor page's own dimensions are the fallback, and
+        // they are a *principled* guess rather than a shrug: `pairable` treats an
+        // unmeasured page as pairing optimistically, which is exactly the claim
+        // that it looks like its partner.
+        //
+        // **What the wrong fallback would cost, precisely.** `spread_fit` takes a
+        // `min` over the pages, so a *too small* placeholder does not shrink the
+        // scale — `half_w / 1.0` is large and the other page wins the `min`. What
+        // it costs is the partner's own **rect**: `spread_rects` sizes a page by
+        // the dimensions it is handed, so a 1x1 placeholder is a 1-point sliver at
+        // the seam. That is the failure this line prevents, and not the one the
+        // `min` would suggest.
+        let dims = cached
+            .or_else(|| self.previews.get(partner).map(|pv| pv.orig))
+            .unwrap_or(cursor_dims);
+        vec![(shown.clone(), cursor_dims), (partner.clone(), dims)]
+    }
+
     // ---- drawing ----------------------------------------------------------
 
     fn status_text(&self) -> String {
@@ -2865,6 +2982,22 @@ impl MyApp {
             (panel.width() * ppp).round() as u32,
             (panel.height() * ppp).round() as u32,
         );
+        // **The half panel in manga mode**, and both halves of the change hang off
+        // the same number. `preview_target` takes the *long* side, so halving the
+        // width is what makes `display_dim`, `schedule`'s `target_dim` and the
+        // resize refine ask for half-width textures — and a page in a spread can
+        // never need more than half the panel's width, so decoding for the whole
+        // panel would make every turn cost twice what it needs to. It is the width
+        // that is halved and not the height because the seam runs vertically: the
+        // panel's full height is what one page is fitted into.
+        //
+        // `self.config.manga_mode` is read here, on the frame, rather than snapshotted
+        // at construction, so toggling it takes effect without a restart.
+        let panel_px = if self.config.manga_mode {
+            (panel_px.0 / 2, panel_px.1)
+        } else {
+            panel_px
+        };
         // Resize. The texture is re-fitted to the new area by the drawing code
         // below, which happens on this very frame and costs nothing — so the
         // picture is never blanked and never soft *as a choice*. The only thing
@@ -2939,6 +3072,12 @@ impl MyApp {
                 perf::count(perf::C_DISPLAY_GAP_FRAMES, 1);
                 return;
             };
+            // Stamped here, and this is where the **cursor** page's `used` clock
+            // moves — the partner's is stamped where it is painted below, for the
+            // same reason. `evict_previews` is an LRU on `used`, so a page on
+            // screen whose clock never advances is a page the cache is free to
+            // drop, and a spread whose second half evaporates and comes back
+            // re-decoded is the symptom.
             pv.used = self.clock;
             (
                 pv.orig,
@@ -2974,9 +3113,42 @@ impl MyApp {
         // What the image *occupies* on screen: four of the eight swap the axes.
         let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
         let display_px = Vec2::new(dw, dh);
-        let fit_scale = (panel.width() / display_px.x)
-            .min(panel.height() / display_px.y)
-            .clamp(1e-4, 8.0);
+
+        // The turn's pages, in manga mode: the cursor page and, when the turn
+        // holds two, the other one. **Empty with the mode off**, so every branch
+        // below falls through to the single-image path unchanged — that is the
+        // shape of the gate, not a coincidence.
+        let pages: Vec<(ImgKey, (u32, u32))> = if self.config.manga_mode {
+            self.turn_pages(&shown, orig)
+        } else {
+            Vec::new()
+        };
+        let spread_dims: Vec<(f32, f32)> = pages
+            .iter()
+            .map(|(_, (w, h))| (*w as f32, *h as f32))
+            .collect();
+        // The partner's dimensions as `f32`, for the pan clamp below. `spread_rects`
+        // sizes the partner's rect by exactly these numbers, so this is what the
+        // clamp has to measure: measuring the *cached* dims here while the cursor's
+        // rect uses its own `orig` would be a clamp that disagrees with the picture
+        // it is protecting. The two agree for every page measured from a header,
+        // which is every page of an ordinary image folder.
+        let partner_px = spread_dims.get(1).copied().unwrap_or((0.0, 0.0));
+
+        // One shared scale for the whole turn, and the cursor page's own fit when
+        // the mode is off. `spread_fit` clamps to the same `(1e-4, 8.0)` the
+        // single-image fit uses, and is used as this frame's `fit_scale` so the
+        // zoom clamp below, the 1:1 shortcut and the pan anchor all behave
+        // **exactly** as they do for one image — there is one `scale` and one
+        // `view`, and a turn has to share them or the two halves would drift
+        // apart as you zoom.
+        let fit_scale = if pages.is_empty() {
+            (panel.width() / display_px.x)
+                .min(panel.height() / display_px.y)
+                .clamp(1e-4, 8.0)
+        } else {
+            image_viewer::spread_fit((panel.width(), panel.height()), &spread_dims)
+        };
         let max_scale = MAX_SCALE.max(fit_scale);
 
         let mut scale = if self.view.fit {
@@ -3053,7 +3225,26 @@ impl MyApp {
         // Uses the *transformed* footprint, so panning limits and fit are correct
         // whichever way up the image is.
         let size = display_px * scale;
-        let max_off = ((size - panel.size()) * 0.5).max(Vec2::ZERO);
+        // **The turn's own footprint in manga mode**, so panning stops at the
+        // spread's edge rather than at the panel's. The panel is one page wide in
+        // the other direction and the turn is two, so clamping against the panel
+        // would let a reader drag a spread into empty space with no way back.
+        //
+        // Widths **sum** and heights **max**, which is what `spread_rects` builds:
+        // the pages sit on opposite sides of the seam at the same scale, sharing
+        // its top edge. And the cursor page contributes its *transformed* footprint
+        // while `spread_rects` places it by its stored one — the same distinction
+        // `size` above already draws, and for the same reason: `paint_tex` rotates
+        // about the rect's centre, so a turned page really does occupy the
+        // swapped rectangle and the pan limit has to know.
+        let clamp_px = if pages.is_empty() {
+            display_px
+        } else {
+            let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
+            let (pw, ph) = partner_px;
+            Vec2::new(dw + pw, dh.max(ph))
+        };
+        let max_off = ((clamp_px * scale - panel.size()) * 0.5).max(Vec2::ZERO);
         offset = offset.clamp(-max_off, max_off);
 
         let at_fit = scale <= fit_scale * 1.0001;
@@ -3071,14 +3262,169 @@ impl MyApp {
         let snap = |v: f32| (v * ppp).round() / ppp;
         let centre = panel.center() + offset;
         let src_size = img_px * scale;
-        let min = Pos2::new(
-            snap(centre.x - src_size.x * 0.5),
-            snap(centre.y - src_size.y * 0.5),
-        );
-        let rect = Rect::from_min_size(min, src_size);
+        // Where each page of the turn goes: one rect per page, in the order
+        // `turn_pages` gave them, so `rects[0]` is the **cursor** page.
+        //
+        // The panel handed in is **already translated by `self.view.offset`** — set
+        // a few lines above, this frame's clamped value — so the seam pans with
+        // the image rather than sitting still while the turn slides under it. It
+        // is the panel's *size* that is untouched, so `spread_fit`'s half-width
+        // rule is about the visible area and not about where the picture happens
+        // to be.
+        let mut rects: Vec<egui::Rect> = if pages.is_empty() {
+            Vec::new()
+        } else {
+            image_viewer::spread_rects(
+                [
+                    panel.min.x + offset.x,
+                    panel.min.y + offset.y,
+                    panel.width(),
+                    panel.height(),
+                ],
+                &spread_dims,
+                scale,
+                self.config.manga_rtl,
+            )
+            .into_iter()
+            // `x` and `y` snapped, and only those: 1:1 has to stay pixel-sharp,
+            // and snapping the far edge as well would move the size the tiles and
+            // the source-pixel mapping below are told to expect.
+            .map(|r| {
+                Rect::from_min_size(
+                    Pos2::new(snap(r[0]), snap(r[1])),
+                    Vec2::new(r[2], r[3]),
+                )
+            })
+            .collect()
+        };
+        // Close the seam. Snapping each page's `x` **independently** leaves a
+        // sub-pixel gap at the seam, because the two pages' shared edge is one
+        // number rounded twice: measured on the probe fixture at ppp 1.25, the
+        // cursor page's `x` snapped to 711.20 while the partner's inner edge
+        // landed on 710.81 — **0.39 points of bare panel between two pages of
+        // artwork that are supposed to touch**. A gap there is not a rounding
+        // detail, it is a hairline down the middle of every spread.
+        //
+        // **The cursor page owns the seam** and the partner is moved onto it, not
+        // the other way round, because the cursor page's `rect` is what
+        // `footprint`, the tiles and the crop frame are all derived from: letting
+        // the partner move it would shift the crop frame and re-cut the tiles by
+        // up to one physical pixel the first time a partner's texture arrived.
+        // The partner absorbs at most the sub-pixel the snap moved, which is
+        // invisible on a page edge and invisible in the page's own aspect.
+        //
+        // A lone turn has no second page, so there is nothing to close and the
+        // condition cannot fire — which is why it is an `if let` on two rects and
+        // not a guard on a value.
+        if let [cursor, partner] = rects.as_mut_slice() {
+            if self.config.manga_rtl {
+                // Page 0 hangs to the *right* of the seam: its `min.x` is the seam
+                // and the partner's `max.x` has to land on it.
+                partner.max.x = cursor.min.x;
+            } else {
+                // Page 0 hangs to the *left*: its `max.x` is the seam.
+                partner.min.x = cursor.right_bottom().x;
+            }
+        }
+        // The cursor page's rect. From `rects[0]` in a spread and from the centred panel
+        // otherwise, and **that is the whole difference**: every view-shaped thing
+        // below — the tiles, the crop frame, `dim_bands`, `crop_from_screen` —
+        // reads `rect` and `footprint`, so in manga mode they all describe the
+        // cursor page and none of them needed to change.
+        //
+        // `rects[0]` is used **whole**, seam edge included, and the size in it is
+        // exactly `src_size`: `turn_pages` is handed the cursor page's `orig` as
+        // its first source and uses it verbatim, so `spread_dims[0] == img_px` and
+        // rebuilding the rect from `src_size` would be the same rectangle computed
+        // twice. Keeping it whole matters because the width and the position are
+        // not independent — the page hangs off the seam, so a rect rebuilt at
+        // `r.min` from a *different* width would tear the pair apart at the seam
+        // rather than resize it.
+        let rect = match rects.first() {
+            Some(r) => *r,
+            None => Rect::from_min_size(
+                Pos2::new(
+                    snap(centre.x - src_size.x * 0.5),
+                    snap(centre.y - src_size.y * 0.5),
+                ),
+                src_size,
+            ),
+        };
         let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
         // The on-screen footprint, i.e. `rect` turned by `quarter`.
-        let footprint = Rect::from_center_size(centre, size);
+        //
+        // **Centred on `centre` when the mode is off, on `rect`'s own centre when
+        // it is on** — and the difference is deliberate rather than tidiness. With
+        // one image the rect's centre is the panel's centre *before* the snap, and
+        // `footprint` has always been the unsnapped one; deriving it from `rect`
+        // instead would move the crop frame and the four `dim_bands` by up to half
+        // a physical pixel on a path that is supposed to be untouched. In a spread
+        // there is no panel centre to speak of — the cursor page's rect sits off
+        // at the seam — so it has to come from `rect`, and coming from `rect` is
+        // also what keeps a turned page's paint rect and its footprint concentric,
+        // which is what makes the rotation cover `size` exactly instead of leaving
+        // a corner off-screen.
+        let footprint = if pages.is_empty() {
+            Rect::from_center_size(centre, size)
+        } else {
+            Rect::from_center_size(rect.center(), size)
+        };
+
+        // The turn's other half. Painted **before** the cursor page's own, so a
+        // missing partner texture costs a blank half rather than the whole turn —
+        // and painted **without** `xform`, as `Identity`, which is a decision and
+        // not an omission.
+        //
+        // The transform is per *picture* (`edits` is keyed by path) and there is
+        // exactly one `shown_xform`, keyed on `shown`. Applying the cursor's
+        // transform to the partner would be painting one image's turn on another
+        // image; looking the partner's own up is the honest answer but has nowhere
+        // to go, because every view-shaped path downstream — the tiles, the crop
+        // frame, `dim_bands` — reads the *cursor's* `rect` and `footprint`, so a
+        // turned partner would be painted turned inside a rect laid out for it
+        // un-turned. **A spread of un-turned pages, which is the entire feature,
+        // is identical under either reading**, and this one keeps the geometry
+        // answering to `spread_rects` alone.
+        //
+        // **A missing partner texture is not a display gap.** The counter further
+        // up is a regression guard on the *cursor* page, the one the reader asked
+        // for; the partner is a neighbour that is nearly always already decoded —
+        // it is planned at the current priority precisely so a turn paints whole —
+        // and counting it would make the guard cry wolf on every cold spread.
+        if let (Some(partner_rect), Some(partner)) = (rects.get(1), pages.get(1)) {
+            let painted = self
+                .previews
+                .get_mut(&partner.0)
+                // Stamped for the same reason the cursor's is: `evict_previews` is
+                // an LRU on `used`, and a page on screen whose clock never moves is
+                // a page the cache is allowed to drop.
+                .map(|pv| {
+                    pv.used = self.clock;
+                    (pv.tex.id(), pv.has_alpha)
+                });
+            if let Some((partner_tex, partner_alpha)) = painted {
+                if partner_alpha {
+                    if let Some(checker) = &self.checker {
+                        // From **this** page's rect, so the backdrop is under its
+                        // own page. A checkerboard sized for one page and drawn
+                        // under the other is a visible misalignment, not a subtle
+                        // one: the squares are a fixed size in page space.
+                        let ps = partner_rect.size();
+                        paint_tex(
+                            &painter,
+                            checker.id(),
+                            *partner_rect,
+                            Rect::from_min_max(
+                                Pos2::ZERO,
+                                Pos2::new(ps.x / 32.0, ps.y / 32.0),
+                            ),
+                            Xform::Identity,
+                        );
+                    }
+                }
+                paint_tex(&painter, partner_tex, *partner_rect, uv, Xform::Identity);
+            }
+        }
 
         // Always paint the preview first; tiles refine it where available.
         // Transparent images get a checkerboard backdrop underneath.

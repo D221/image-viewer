@@ -3237,3 +3237,29 @@ fn spread_fit_survives_an_empty_panel_and_a_zero_sized_page() {
     assert_eq!(spread_fit((0.0, 0.0), &[(400.0, 800.0)]), 1.0, "no panel, no fit");
     assert_eq!(spread_fit((800.0, 600.0), &[]), 1.0, "no pages, no fit");
 }
+
+// ---------------------------------------------------------------------------
+// The two settings
+// ---------------------------------------------------------------------------
+
+/// A config written before either manga key existed still loads, and gets the
+/// values a reader of a manga library wants rather than the ones an absent field
+/// would default to.
+///
+/// **The `#[serde(default)]` attributes are what this pins**, and both halves are
+/// pinned because they are opposites: `manga_mode` must be **off**, because
+/// single-image browsing is the app's original behaviour and every plan it makes
+/// is pinned by `tests/flip_through.rs` — a config that turned a spread on by
+/// omission would change that suite's meaning without changing a line of it. And
+/// `manga_rtl` must be **on**, because a left-to-right reader who turns manga
+/// mode on has asked for a manga reader and gets one; the order pages meet in is
+/// the single most load-bearing thing about the feature and it is not a thing to
+/// make someone find in the settings panel.
+#[test]
+fn a_config_written_before_manga_mode_still_loads() {
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert!(!cfg.manga_mode, "manga mode is opt-in");
+    assert!(cfg.manga_rtl, "right-to-left is the default for a manga library");
+}
