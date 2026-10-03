@@ -2418,8 +2418,29 @@ impl MyApp {
         // It is accepted because the alternative is not "wrong from the start", it
         // is a blank half — and because `shown` is not cleared either, so the
         // cursor page's pixels stay exactly as solid as they were.
+        //
+        // **And then it is re-asked, in the same breath, because the reflow is
+        // only acceptable if it is temporary.** The re-arm is *not* left to
+        // `sync_shown`: that arm is gated on `shown != cur`, and when the
+        // **partner** is the file that changed `shown` survives and still equals
+        // `cur`, so the gate is false from here to the end of the session and
+        // `shown_partner` is never assigned again. `turn_partner` has exactly one
+        // caller, so there is no other path back: the spread would collapse to one
+        // page and stay collapsed after the partner's fresh decode landed and was
+        // perfectly paintable, with no error and no perf counter. That is reachable
+        // from the ordinary watcher — re-save the page beside the cursor — and it
+        // is the "spread silently becomes a lone page for the session" failure this
+        // function's other half exists to prevent.
+        //
+        // The `shown.is_some()` guard is what keeps this from *inventing* a
+        // partner for a turn that is not on screen: with nothing adopted, the next
+        // `sync_shown` will do the adopting and set the partner with it.
         if self.shown_partner.as_ref().is_some_and(|k| k.path == p) {
-            self.shown_partner = None;
+            self.shown_partner = if self.shown.is_some() {
+                self.turn_partner()
+            } else {
+                None
+            };
         }
         if self.cur.as_ref().is_some_and(|c| c.path == p) {
             self.error = None;
@@ -2825,7 +2846,7 @@ impl MyApp {
         }
     }
 
-    /// The turn's pages — **cursor first** — as `(key, display dimensions)`.
+    /// The turn's pages — **cursor first** — as `(key, stored dimensions, xform)`.
     ///
     /// **Dimensions, not textures, and that is the whole point of the split.**
     /// A layout read from the textures on screen would reflow the turn under the
@@ -2835,6 +2856,27 @@ impl MyApp {
     /// geometry therefore comes from the same measurement the pairing itself uses
     /// (the gallery's shape cache, falling back to `orig`), and the textures are
     /// only ever drawn *into* a rect that was decided before they arrived.
+    ///
+    /// **Each page carries its own `Xform`, and that is the load-bearing half of
+    /// this function's signature.** A turn is a *set of pictures*, and each one
+    /// carries its own edit — the user turned this page, not the turn. `edits` is
+    /// keyed by path precisely so that turning one image must not turn the next,
+    /// and reading the partner's transform off the cursor is that rule broken one
+    /// page over: two different pictures, one transform.
+    ///
+    /// Which is not a cosmetic difference, because `spread_rects` sizes a page's
+    /// slot by the dimensions it is handed and `paint_tex` rotates about
+    /// `rect.center()`: lay a slot out from **stored** dims and paint a turned
+    /// page into it and the rotated picture lands on the *swapped* rectangle
+    /// centred on the same point, spilling `|w - h| * scale / 2` past the seam and
+    /// over the partner's half. On a 1000x1500 page at the fit scale that is
+    /// ~234 points of a turned page drawn on top of the facing page.
+    ///
+    /// **Page 0's xform is `shown_xform()`, and it is looked up here rather than
+    /// passed in** so that one expression answers for every page: `self.edits
+    /// .xform(&key.path)` is what `shown_xform` computes for `shown`, so the
+    /// cursor page's answer is the same value by construction and not by a second
+    /// spelling that could drift from it.
     ///
     /// **This is a lookup and never a measurement**, and that is what keeps it off
     /// the UI thread's critical path: nothing here opens a file. The dimensions
@@ -2855,9 +2897,14 @@ impl MyApp {
     /// rects in *input* order, so index 0 is the cursor page's rect and every
     /// view-shaped path downstream (the crop frame, the tiles, `footprint`) is
     /// built from it.
-    fn turn_pages(&self, shown: &ImgKey, cursor_dims: (u32, u32)) -> Vec<(ImgKey, (u32, u32))> {
+    fn turn_pages(
+        &self,
+        shown: &ImgKey,
+        cursor_dims: (u32, u32),
+    ) -> Vec<(ImgKey, (u32, u32), Xform)> {
+        let cursor_xform = self.edits.xform(&shown.path);
         let Some(partner) = self.shown_partner.as_ref() else {
-            return vec![(shown.clone(), cursor_dims)];
+            return vec![(shown.clone(), cursor_dims, cursor_xform)];
         };
         let pos = self.gallery.page_pos();
         // `step_no_wrap` rather than the wrapping step, because a turn must not
@@ -2886,7 +2933,10 @@ impl MyApp {
         let dims = cached
             .or_else(|| self.previews.get(partner).map(|pv| pv.orig))
             .unwrap_or(cursor_dims);
-        vec![(shown.clone(), cursor_dims), (partner.clone(), dims)]
+        vec![
+            (shown.clone(), cursor_dims, cursor_xform),
+            (partner.clone(), dims, self.edits.xform(&partner.path)),
+        ]
     }
 
     // ---- drawing ----------------------------------------------------------
@@ -3118,22 +3168,31 @@ impl MyApp {
         // holds two, the other one. **Empty with the mode off**, so every branch
         // below falls through to the single-image path unchanged — that is the
         // shape of the gate, not a coincidence.
-        let pages: Vec<(ImgKey, (u32, u32))> = if self.config.manga_mode {
+        let pages: Vec<(ImgKey, (u32, u32), Xform)> = if self.config.manga_mode {
             self.turn_pages(&shown, orig)
         } else {
             Vec::new()
         };
+        // **Transformed footprints, not stored dimensions** — and this is the one
+        // line the whole turned-page behaviour turns on. `spread_rects` sizes a
+        // page's slot by the dims it is handed and `paint_tex` rotates about
+        // `rect.center()`, so a slot laid out from *stored* dims is the wrong
+        // *shape* for a turned page and the rotated picture lands on the swapped
+        // rectangle centred on the same point, spilling `|w - h| * scale / 2` past
+        // the seam. Handing over each page's `xformed_footprint` instead makes the
+        // slot the right shape, and then the rotation fits inside it — which is
+        // exactly how the single-image path already works, where `rect` is in
+        // unrotated image space and `footprint` is the on-screen rect after
+        // rotation. Four of the eight `Xform`s swap the axes, so this is what a
+        // turned page in a turn looks like rather than an edge case.
+        //
+        // Page 0's entry is `display_px` exactly — `turn_pages` was handed `orig`
+        // for that page and looked up its own `shown_xform` — so the cursor page's
+        // slot and the `footprint` the view already had are the same rectangle.
         let spread_dims: Vec<(f32, f32)> = pages
             .iter()
-            .map(|(_, (w, h))| (*w as f32, *h as f32))
+            .map(|(_, (w, h), xf)| xformed_footprint(*w as f32, *h as f32, *xf))
             .collect();
-        // The partner's dimensions as `f32`, for the pan clamp below. `spread_rects`
-        // sizes the partner's rect by exactly these numbers, so this is what the
-        // clamp has to measure: measuring the *cached* dims here while the cursor's
-        // rect uses its own `orig` would be a clamp that disagrees with the picture
-        // it is protecting. The two agree for every page measured from a header,
-        // which is every page of an ordinary image folder.
-        let partner_px = spread_dims.get(1).copied().unwrap_or((0.0, 0.0));
 
         // One shared scale for the whole turn, and the cursor page's own fit when
         // the mode is off. `spread_fit` clamps to the same `(1e-4, 8.0)` the
@@ -3230,19 +3289,27 @@ impl MyApp {
         // the other direction and the turn is two, so clamping against the panel
         // would let a reader drag a spread into empty space with no way back.
         //
+        // Folded from `spread_dims` rather than recomputed, and that is not just
+        // tidiness: `spread_dims` is what `spread_rects` sized the actual slots
+        // with, so the clamp and the picture cannot disagree — including about a
+        // page the user has turned, whose slot is its *transformed* footprint. The
+        // previous spelling recomputed the cursor's `xformed_footprint` here and
+        // added the partner's **stored** width to it, which was a second statement
+        // of the same footprint and wrong for a turned partner.
+        //
         // Widths **sum** and heights **max**, which is what `spread_rects` builds:
         // the pages sit on opposite sides of the seam at the same scale, sharing
-        // its top edge. And the cursor page contributes its *transformed* footprint
-        // while `spread_rects` places it by its stored one — the same distinction
-        // `size` above already draws, and for the same reason: `paint_tex` rotates
-        // about the rect's centre, so a turned page really does occupy the
-        // swapped rectangle and the pan limit has to know.
+        // its top edge.
         let clamp_px = if pages.is_empty() {
             display_px
         } else {
-            let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
-            let (pw, ph) = partner_px;
-            Vec2::new(dw + pw, dh.max(ph))
+            let mut w = 0.0;
+            let mut h: f32 = 0.0;
+            for &(pw, ph) in &spread_dims {
+                w += pw;
+                h = h.max(ph);
+            }
+            Vec2::new(w, h)
         };
         let max_off = ((clamp_px * scale - panel.size()) * 0.5).max(Vec2::ZERO);
         offset = offset.clamp(-max_off, max_off);
@@ -3305,7 +3372,7 @@ impl MyApp {
         // artwork that are supposed to touch**. A gap there is not a rounding
         // detail, it is a hairline down the middle of every spread.
         //
-        // **The cursor page owns the seam** and the partner is moved onto it, not
+        // **The cursor page owns the seam** and the partner is slid onto it, not
         // the other way round, because the cursor page's `rect` is what
         // `footprint`, the tiles and the crop frame are all derived from: letting
         // the partner move it would shift the crop frame and re-cut the tiles by
@@ -3317,30 +3384,56 @@ impl MyApp {
         // condition cannot fire — which is why it is an `if let` on two rects and
         // not a guard on a value.
         if let [cursor, partner] = rects.as_mut_slice() {
-            if self.config.manga_rtl {
-                // Page 0 hangs to the *right* of the seam: its `min.x` is the seam
-                // and the partner's `max.x` has to land on it.
-                partner.max.x = cursor.min.x;
+            // A rigid slide, by the same amount on **both** edges — not one edge
+            // moved onto the seam. `Rect::width()` is `max.x - min.x`, so setting
+            // one edge and leaving the other *resizes* the rect, and a resized slot
+            // is a slot the painted picture no longer fits: measured on the probe
+            // fixture, moving only the partner's outer edge widened its slot from
+            // 571.31 to 571.42 points while the picture stayed 571.31.
+            //
+            // The *outer* edge is what absorbs the sub-pixel, which is the whole
+            // point of sliding rather than resizing: the page's own dimensions are
+            // untouched, so the two halves keep one shared scale exactly.
+            let d = if self.config.manga_rtl {
+                // Page 0 hangs to the *right* of the seam, so the partner's `max.x`
+                // is the edge that has to land on the cursor's `min.x`.
+                cursor.min.x - partner.max.x
             } else {
-                // Page 0 hangs to the *left*: its `max.x` is the seam.
-                partner.min.x = cursor.right_bottom().x;
-            }
+                // Page 0 hangs to the *left*: the partner's `min.x` is the edge.
+                cursor.right_bottom().x - partner.min.x
+            };
+            partner.min.x += d;
+            partner.max.x += d;
         }
-        // The cursor page's rect. From `rects[0]` in a spread and from the centred panel
-        // otherwise, and **that is the whole difference**: every view-shaped thing
-        // below — the tiles, the crop frame, `dim_bands`, `crop_from_screen` —
-        // reads `rect` and `footprint`, so in manga mode they all describe the
-        // cursor page and none of them needed to change.
-        //
-        // `rects[0]` is used **whole**, seam edge included, and the size in it is
-        // exactly `src_size`: `turn_pages` is handed the cursor page's `orig` as
-        // its first source and uses it verbatim, so `spread_dims[0] == img_px` and
-        // rebuilding the rect from `src_size` would be the same rectangle computed
-        // twice. Keeping it whole matters because the width and the position are
-        // not independent — the page hangs off the seam, so a rect rebuilt at
-        // `r.min` from a *different* width would tear the pair apart at the seam
-        // rather than resize it.
-        let rect = match rects.first() {
+        // **Two rectangles per page, and conflating them is the whole trap.** The
+        // **slot** is where the page goes on screen — its *transformed* footprint,
+        // which is what `spread_rects` placed and what has to fit the panel. The
+        // **paint rect** is what goes into `paint_tex`, and it stays in *unrotated
+        // image space*: the page's stored dimensions at `scale`, centred on the
+        // slot. `paint_tex` then rotates it about that shared centre into exactly
+        // the slot. This is the single-image path's own construction — `rect` is
+        // unrotated image space and `footprint` is the rect after rotation — and
+        // it is easy to get wrong in a way that looks fine, because handing
+        // `paint_tex` the *slot* paints the transform **twice**: the slot is
+        // already the transformed shape, so a `Rot90` page's slot comes out
+        // swapped back and spilling `|w - h| * scale / 2` off the panel. That was
+        // measured on this box before it was fixed — a `Rot90` page reported a
+        // painted rect of `380.87x571.20` inside a slot of `571.20x380.88`.
+        let page_rects: Vec<egui::Rect> = pages
+            .iter()
+            .zip(&rects)
+            .map(|((_, (w, h), _), slot)| {
+                Rect::from_center_size(
+                    slot.center(),
+                    Vec2::new(*w as f32 * scale, *h as f32 * scale),
+                )
+            })
+            .collect();
+        // The cursor page's paint rect — page 0's, because `pages` is cursor first.
+        // Everything view-shaped below (the tiles, the crop frame, `dim_bands`,
+        // `crop_from_screen`) reads `rect`, so in manga mode all of it describes
+        // the cursor page and none of it needed to change.
+        let rect = match page_rects.first() {
             Some(r) => *r,
             None => Rect::from_min_size(
                 Pos2::new(
@@ -3359,11 +3452,14 @@ impl MyApp {
         // `footprint` has always been the unsnapped one; deriving it from `rect`
         // instead would move the crop frame and the four `dim_bands` by up to half
         // a physical pixel on a path that is supposed to be untouched. In a spread
-        // there is no panel centre to speak of — the cursor page's rect sits off
-        // at the seam — so it has to come from `rect`, and coming from `rect` is
-        // also what keeps a turned page's paint rect and its footprint concentric,
-        // which is what makes the rotation cover `size` exactly instead of leaving
-        // a corner off-screen.
+        // there is no panel centre to speak of — the cursor page sits off at the
+        // seam — so it has to come from `rect`.
+        //
+        // **Concentric with `rect`, and that is what makes the rotation cover
+        // `size` exactly.** `paint_tex` rotates about `rect.center()`, so
+        // `footprint` being concentric with it is the whole of the guarantee — and
+        // `size` is `display_px * scale`, the cursor page's transformed footprint,
+        // which is its slot's size.
         let footprint = if pages.is_empty() {
             Rect::from_center_size(centre, size)
         } else {
@@ -3371,27 +3467,28 @@ impl MyApp {
         };
 
         // The turn's other half. Painted **before** the cursor page's own, so a
-        // missing partner texture costs a blank half rather than the whole turn —
-        // and painted **without** `xform`, as `Identity`, which is a decision and
-        // not an omission.
+        // missing partner texture costs a blank half rather than the whole turn.
         //
-        // The transform is per *picture* (`edits` is keyed by path) and there is
-        // exactly one `shown_xform`, keyed on `shown`. Applying the cursor's
-        // transform to the partner would be painting one image's turn on another
-        // image; looking the partner's own up is the honest answer but has nowhere
-        // to go, because every view-shaped path downstream — the tiles, the crop
-        // frame, `dim_bands` — reads the *cursor's* `rect` and `footprint`, so a
-        // turned partner would be painted turned inside a rect laid out for it
-        // un-turned. **A spread of un-turned pages, which is the entire feature,
-        // is identical under either reading**, and this one keeps the geometry
-        // answering to `spread_rects` alone.
+        // **With the partner's own `xform`,** which is the same rule the cursor
+        // page follows: a turn is a set of pictures and each carries its own edit.
+        // `turn_pages` looks that xform up by the partner's own path, and the slot
+        // it was given in `spread_rects` is that page's *transformed* footprint, so
+        // rotating about the rect's centre lands inside the slot rather than
+        // spilling across the seam.
+        //
+        // **The checkerboard takes the same xform as the page above it,** and that
+        // is not a detail: it is painted into the same rect, so leaving it
+        // `Identity` would rotate the squares with the page's slot but not with
+        // the page's picture, and a turned transparent page would show a backdrop
+        // that does not line up with the artwork on it.
         //
         // **A missing partner texture is not a display gap.** The counter further
         // up is a regression guard on the *cursor* page, the one the reader asked
         // for; the partner is a neighbour that is nearly always already decoded —
         // it is planned at the current priority precisely so a turn paints whole —
         // and counting it would make the guard cry wolf on every cold spread.
-        if let (Some(partner_rect), Some(partner)) = (rects.get(1), pages.get(1)) {
+        if let (Some(partner_rect), Some(partner)) = (page_rects.get(1), pages.get(1)) {
+            let partner_xform = partner.2;
             let painted = self
                 .previews
                 .get_mut(&partner.0)
@@ -3418,11 +3515,11 @@ impl MyApp {
                                 Pos2::ZERO,
                                 Pos2::new(ps.x / 32.0, ps.y / 32.0),
                             ),
-                            Xform::Identity,
+                            partner_xform,
                         );
                     }
                 }
-                paint_tex(&painter, partner_tex, *partner_rect, uv, Xform::Identity);
+                paint_tex(&painter, partner_tex, *partner_rect, uv, partner_xform);
             }
         }
 
