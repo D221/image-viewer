@@ -6643,15 +6643,55 @@ impl Gallery {
         self.page = 0;
     }
 
-    /// Find out how large page `page` of `path` displays at and remember it, for the
-    /// shape test.
+    /// Find out how large `pos` displays at and remember it for the shape test — **and
+    /// the next page's, because the pairing reads one page ahead.**
     ///
-    /// **The page asked about, not page 0.** `page` is 0 for every ordinary image, so
-    /// this is unchanged for a photo folder; for a multi-page document it is the
-    /// difference between knowing that page 3 is a landscape spread and judging it by
-    /// whatever page 0 happened to be. The caller is `goto`, so this is the "learn on
-    /// arrival" rule the page count has always followed, applied to the page that
+    /// A position rather than a `(path, page)` pair because the next-page step needs
+    /// the file's *index*: finding it from a path would be a scan of `files` on the
+    /// critical path of every keypress, and [`Self::page_pos`] already has it.
+    ///
+    /// **The page asked about, not page 0.** `pos.page` is 0 for every ordinary
+    /// image, so this is unchanged for a photo folder; for a multi-page document it is
+    /// the difference between knowing that page 3 is a landscape spread and judging it
+    /// by whatever page 0 happened to be. The caller is `goto`, so this is the "learn
+    /// on arrival" rule the page count has always followed, applied to the page that
     /// actually arrived.
+    ///
+    /// ## Why the next page too, and why it is not optional
+    ///
+    /// [`lone`] decides a turn by asking about `anchor + 1`, and an unknown `+1` reads
+    /// as [`Shape::Single`] — the optimistic default. So a turn is only correct if the
+    /// *next* page's dimensions are right, and learning only the page under the cursor
+    /// gets it wrong in the worst possible way: **arriving at page 5 changes page 5's
+    /// shape, which changes `lone`, which changes the turn the reader is already
+    /// looking at.** A spread that re-flows mid-read is worse than one that was wrong
+    /// from the start, because the reader watched it change.
+    ///
+    /// Three things bound the cost, so this is not a general "read ahead" policy:
+    ///
+    /// * **Only for a file known to have more than one page.** `pages_in` is 1 for
+    ///   every ordinary image and for every file whose count has not been learned, and
+    ///   an ordinary single-page file — the common case, and the whole of a photo
+    ///   folder — therefore pays exactly what it paid before.
+    /// * **One page, and inside the same document.** `step_no_wrap` rather than
+    ///   `step`, so the last page does not learn the *first page of the last file*;
+    ///   and a hop that crosses a file boundary is dropped, because the question is
+    ///   the next page of *this* document. Nothing is lost by that: the next file's
+    ///   first page is reported by its own preview landing (`note_shapes`) or measured
+    ///   when the cursor gets there.
+    /// * **Cache-first, per page**, so an already-known next page costs one map
+    ///   lookup.
+    ///
+    /// **Which of those bounds is load-bearing, measured rather than assumed:** the
+    /// same-document one. Dropping the page-count bound is a **no-op mutation** — a
+    /// one-page file's next page is necessarily in a *different* file, so the
+    /// same-document bound catches it too, and all 28 tests in `spreads.rs` stay green
+    /// with the page-count check deleted (run twice, including after the bounds test
+    /// was reordered). The page-count bound is kept because it states the read-ahead's
+    /// scope where it is decided and skips one in-memory hop, **not** because anything
+    /// depends on it — so do not read it as protection that is not there. The
+    /// same-document bound, by contrast, is caught by
+    /// `the_next_page_learn_stops_at_the_document`.
     ///
     /// **The EXIF orientation tag is applied here, and skipping it is the one
     /// mistake in this feature that is silent, total, and lands on real
@@ -6687,20 +6727,43 @@ impl Gallery {
     /// pairing is built to survive, so there is no error to report and nothing to
     /// retry: the arrived preview's `orig` will fill this in via
     /// [`Self::note_shapes`].
-    pub fn learn_shapes(&mut self, path: &Path, page: u32) {
+    pub fn learn_shapes(&mut self, pos: PagePos) {
+        self.learn_one_page(pos);
+        if self.pages_in(pos.index) <= 1 {
+            return;
+        }
+        let Some(next) = self.step_no_wrap(pos, 1) else {
+            return;
+        };
+        if next.index != pos.index {
+            return;
+        }
+        self.learn_one_page(next);
+    }
+
+    /// The measurement half of [`Self::learn_shapes`], for one page.
+    ///
+    /// Separate so the page being learned and the page learned *for* go through
+    /// byte-identical code: two copies of "read the header, apply the tag, store" is
+    /// exactly where a fix to one and not the other would live, and the whole reason
+    /// the EXIF swap is load-bearing is that both copies must do it.
+    fn learn_one_page(&mut self, pos: PagePos) {
+        let Some(path) = self.files.get(pos.index).cloned() else {
+            return;
+        };
         let key = ImgKey {
-            path: path.to_path_buf(),
-            page,
+            path: path.clone(),
+            page: pos.page,
         };
         if self.shapes.contains_key(&key) {
             return;
         }
-        let Some(((w, h), jpeg)) = page_dims_and_jpeg(path, page) else {
+        let Some(((w, h), jpeg)) = page_dims_and_jpeg(&path, pos.page) else {
             return;
         };
         // 0 for anything but a JPEG, matching `decode_page`: the tag is only ever
         // applied there, and `exif_orientation` costs a seek out of the file.
-        let tag = if jpeg { exif_orientation(path) } else { 0 };
+        let tag = if jpeg { exif_orientation(&path) } else { 0 };
         self.insert_shapes(key, if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
     }
 

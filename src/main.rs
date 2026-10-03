@@ -1432,13 +1432,16 @@ impl MyApp {
         // it is paid once per file rather than once per visit.
         if let Some(p) = self.gallery.current().map(|p| p.to_path_buf()) {
             self.gallery.learn_pages(&p);
-            // How large this page *displays* at, which is what the manga pairing
-            // judges a page by. Beside `learn_pages` because both are "measure what
-            // we are arriving at" and both answer from a cache. It may already be
-            // answered: `pump` records a page's dimensions as its preview lands, so
-            // a page in the preload window has them before the user gets there.
-            self.gallery.learn_shapes(&p, self.gallery.current_page());
         }
+        // How large this page *displays* at, and the next one's, which is what the
+        // manga pairing judges a page by: a turn is decided by asking about the page
+        // after it, so learning only this one would let a spread re-flow under the
+        // reader. Beside `learn_pages` because both are "measure what we are arriving
+        // at" and both answer from a cache, and `learn_shapes` reads the page count
+        // `learn_pages` just filled in, so it must come second. May already be
+        // answered: `pump` records a page's dimensions as its preview lands, so a
+        // page in the preload window has them before the user gets there.
+        self.gallery.learn_shapes(self.gallery.page_pos());
         self.cur = self
             .gallery
             .current()

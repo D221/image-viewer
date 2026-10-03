@@ -1053,7 +1053,7 @@ fn a_rotated_phone_scan_is_judged_as_it_displays() {
     );
 
     let mut gal = Gallery::from_file(p.clone());
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     let page = gal.page_pos();
     // Behaviour first, mechanism second: what a dropped orientation tag actually
     // breaks is the *verdict*, and the dimension is only how it gets there.
@@ -1081,7 +1081,7 @@ fn a_rotated_phone_scan_is_judged_as_it_displays() {
         let p = dir.path().join(format!("tag{tag}.jpg"));
         write_jpeg_with_orientation(&p, 1600, 900, tag);
         let mut gal = Gallery::from_file(p.clone());
-        gal.learn_shapes(&p, 0);
+        gal.learn_shapes(PagePos { index: 0, page: 0 });
         let pos = gal.page_pos();
         let swaps = (5..=8).contains(&tag);
         assert_eq!(
@@ -1139,8 +1139,12 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
     let mut gal = Gallery::from_file(p.clone());
     gal.learn_pages(&p);
     assert_eq!(gal.pages_in(0), 2, "the fixture is really two pages");
-    gal.learn_shapes(&p, 0);
-    gal.learn_shapes(&p, 1);
+    // **The second call is redundant since RULING 13** — learning page 0 of a
+    // two-page document already learns page 1 — and it is kept anyway, as a cache
+    // hit, so this test's subject stays unambiguously "the IFD walk reaches page 1"
+    // rather than "the next-page learn filled it".
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
+    gal.learn_shapes(PagePos { index: 0, page: 1 });
     assert_eq!(
         PageCtx::dims(&gal, PagePos { index: 0, page: 0 }),
         Some((900, 1200))
@@ -1203,9 +1207,12 @@ fn a_page_of_a_document_is_judged_by_its_own_dimensions() {
     gal.learn_pages(&p);
     assert_eq!(gal.pages_in(0), 4, "the fixture is really four pages");
 
-    // Arrive at each page in turn, the way `goto` does.
+    // Arrive at each page in turn, the way `goto` does. Since RULING 13 the first call
+    // already learns pages 0 and 1, so the loop is mostly cache hits — kept because
+    // this test's subject is "every page is judged on its own", and that should not
+    // depend on how many pages the next-page learn happens to cover.
     for page in 0..4u32 {
-        gal.learn_shapes(&p, page);
+        gal.learn_shapes(PagePos { index: 0, page });
     }
 
     for page in 0..3u32 {
@@ -1248,6 +1255,147 @@ fn a_page_of_a_document_is_judged_by_its_own_dimensions() {
     assert_eq!(turn_len(page(1), 1, &gal), 2, "and page 1 pairs with page 2");
 }
 
+/// A **two-page** document whose *second* page is a landscape spread. Page 1 is the
+/// shape the cursor has not reached yet, and it has to be right anyway.
+fn two_page_tiff_with_a_spread_on_page_1(dir: &std::path::Path) -> std::path::PathBuf {
+    use tiff::encoder::{colortype, TiffEncoder};
+    let p = dir.join("volume.tiff");
+    let mut bytes = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut bytes)).unwrap();
+        for &(w, h) in &[(900u32, 1200u32), (1600, 900)] {
+            let px: Vec<u8> = (0..(w * h)).flat_map(|_| [9u8, 9, 9, 255]).collect();
+            enc.write_image::<colortype::RGBA8>(w, h, &px)
+                .expect("one chained page");
+        }
+    }
+    std::fs::write(&p, &bytes).unwrap();
+    p
+}
+
+/// RULING 13: **the page after the cursor is already measured**, because the pairing
+/// query reads one page ahead.
+///
+/// `lone(anchor)` asks about `anchor + 1`, and an unknown `+1` reads as `Single`. So
+/// learning only the page under the cursor gets the turn wrong in the worst way
+/// available: arriving at page 1 changes page 1's shape, which changes `lone`, which
+/// **re-flows the turn the reader is already looking at**. A spread that changes
+/// under the reader is worse than one that was wrong from the start.
+///
+/// The cursor is asserted to be on page 0 throughout, because that is the whole
+/// claim: page 1 is judged without having been visited.
+///
+/// This is the regression the next-page learn exists to prevent, and nothing else
+/// pins it: removing the learn leaves page 1 at `None`, `shape_of` calls that
+/// `Single`, and the turn silently pairs the spread with the page after it.
+#[test]
+fn a_spread_on_the_next_page_is_known_before_the_cursor_reaches_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = two_page_tiff_with_a_spread_on_page_1(dir.path());
+    let at = |page: u32| PagePos { index: 0, page };
+
+    let mut gal = Gallery::from_file(p.clone());
+    gal.learn_pages(&p);
+    assert_eq!(gal.pages_in(0), 2, "the fixture is really two pages");
+
+    // The cursor arrives at page 0 and stops there.
+    gal.goto_index(0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
+    assert_eq!(gal.page_pos(), at(0), "the cursor has not moved to page 1");
+
+    assert_eq!(
+        PageCtx::dims(&gal, at(1)),
+        Some((1600, 900)),
+        "page 1 was measured without being visited"
+    );
+    assert_eq!(
+        shape_of(at(1), &gal),
+        Double,
+        "so the spread is detected before the reader reaches it"
+    );
+
+    // The consequence, in turns: page 0 does not pair with the spread, because a
+    // spread never shares a turn. Learning page 1 late would have made page 0 pair
+    // with it and then, on arrival, break that pair.
+    assert!(!pairable(at(0), at(1), &gal), "a wide page never shares a turn");
+    assert_eq!(turn_len(at(0), 0, &gal), 1, "so page 0 is alone in its turn");
+    assert_eq!(turn_len(at(1), 0, &gal), 1, "and so is the spread");
+}
+
+/// The next-page learn is bounded, and both bounds are pinned here.
+///
+/// **A one-page file pays nothing extra**, which is the ordinary case and the whole
+/// of a photo folder: the learn is guarded on the page count being greater than one,
+/// so a single-page image produces exactly one entry and no read of a page that does
+/// not exist. Dropping the guard is invisible in every other test here, because the
+/// fixtures that *have* a next page legitimately learn it.
+///
+/// **And the hop stays inside the document.** On the last page of a multi-page file,
+/// `step_no_wrap` points at the *next file's* first page; that is not this function's
+/// business, and nothing is lost by skipping it — the next file's first page is
+/// reported by its own preview landing, or measured when the cursor gets there.
+///
+/// `known_shapes` is what makes the second half visible. `dims` cannot: a page nobody
+/// learned answers `None` either way, which is exactly what an unmeasured page is
+/// supposed to look like.
+///
+/// **What this test does *not* establish, stated plainly:** the two bounds are not
+/// independently load-bearing, and only one of them can be caught here. Removing the
+/// page-count bound is a **no-op mutation** — a one-page file's next page is by
+/// definition in a *different* file, so the same-document bound always catches it too.
+/// Both mutations were run; that one leaves all 28 tests green. The page-count bound
+/// is kept because it states the read-ahead's scope at the point where it is decided
+/// and skips one in-memory hop, not because anything depends on it.
+#[test]
+fn the_next_page_learn_stops_at_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let doc = two_page_tiff_with_a_spread_on_page_1(dir.path());
+    let after = dir.path().join("after.tiff");
+    write_png(&after, 700, 1000);
+
+    // Two files: the document, then an ordinary image.
+    let mut gal = Gallery::from_file(doc.clone());
+    gal.files = vec![doc.clone(), after.clone()];
+    gal.learn_pages(&doc);
+    gal.learn_pages(&after);
+    assert_eq!(gal.pages_in(0), 2);
+
+    // **Order matters here, and getting it wrong hides the cross-file hop.** The
+    // document's last page is learned *first*, while the next file's page is still
+    // unknown. Learn it second instead and the cache-first check absorbs the hop —
+    // the entry is already there, so `known_shapes` cannot tell "did not learn it"
+    // from "learned it and it was a no-op", and a guard that was doing nothing looks
+    // exactly like a guard that is working. That is a no-op mutation wearing a green
+    // tick, and it is the reason this ordering is spelled out.
+    gal.learn_shapes(PagePos { index: 0, page: 1 });
+    assert_eq!(
+        gal.known_shapes(),
+        1,
+        "the document's last page was learned and it did not reach into the next file"
+    );
+    assert_eq!(
+        PageCtx::dims(&gal, PagePos { index: 1, page: 0 }),
+        None,
+        "the next file's first page is still unmeasured"
+    );
+
+    // Now the ordinary file. It has one page, so there is no next page of it to
+    // learn, and it is the last file, so there is no next file either.
+    gal.goto_index(1);
+    gal.learn_shapes(PagePos { index: 1, page: 0 });
+    assert_eq!(gal.known_shapes(), 2);
+    assert_eq!(
+        PageCtx::dims(&gal, PagePos { index: 1, page: 0 }),
+        Some((700, 1000)),
+        "learned directly this time"
+    );
+
+    // And a one-page file has no page 1 to invent.
+    gal.learn_shapes(PagePos { index: 1, page: 1 });
+    assert_eq!(gal.known_shapes(), 2, "a one-page file has no page 1 to learn");
+    assert_eq!(PageCtx::dims(&gal, PagePos { index: 1, page: 1 }), None);
+}
+
 /// `note_shapes` **fills a gap and never replaces a measurement**, so a decode
 /// cannot displace what `learn_shapes` read out of the source header.
 ///
@@ -1267,7 +1415,7 @@ fn a_decode_never_displaces_a_learned_dimension() {
     write_png(&p, 900, 1200);
 
     let mut gal = Gallery::from_file(p.clone());
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     let at = |page: u32| PagePos { index: 0, page };
     assert_eq!(gal.known_shapes(), 1, "the control: one page is known");
     assert_eq!(
@@ -1313,7 +1461,7 @@ fn a_learned_dimension_never_changes() {
     write_png(&p, 800, 1200);
 
     let mut gal = Gallery::from_file(p.clone());
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     let pos = gal.page_pos();
     assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)));
 
@@ -1321,7 +1469,7 @@ fn a_learned_dimension_never_changes() {
     // re-reading here would be a file open on the critical path of every
     // keypress to re-learn something already known.
     write_png(&p, 300, 200);
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     assert_eq!(
         PageCtx::dims(&gal, pos),
         Some((800, 1200)),
@@ -1339,17 +1487,17 @@ fn forget_shapes_makes_the_dimension_change_again() {
     write_png(&p, 800, 1200);
 
     let mut gal = Gallery::from_file(p.clone());
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     let pos = gal.page_pos();
     assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)));
 
     write_png(&p, 300, 200);
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)), "still the old one");
 
     gal.forget_shapes(&p);
     assert_eq!(PageCtx::dims(&gal, pos), None, "forgotten means unknown, not stale");
-    gal.learn_shapes(&p, 0);
+    gal.learn_shapes(PagePos { index: 0, page: 0 });
     assert_eq!(PageCtx::dims(&gal, pos), Some((300, 200)), "re-learned from the new bytes");
 }
 
