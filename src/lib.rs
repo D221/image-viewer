@@ -7147,14 +7147,14 @@ pub fn next_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
     ctx.step(a, turn_len(a, lead_lone, ctx) as isize)
 }
 
-/// How many anchors [`prev_anchor`] will consider before giving up.
+/// How many anchors a tiling walk will consider before giving up.
 ///
-/// **A bound on a walk that terminates on its own, not the walk's cost.** The
-/// walk exits as soon as [`PageCtx::step_no_wrap`] returns `None` at the front
-/// of the gallery, whatever `loop_back` says, so this only ever bites on a
-/// gallery larger than it names. Its value is deliberately far above any
-/// plausible gallery rather than tuned: being generous costs nothing, because
-/// the loop cannot reach the number without the answer already being known.
+/// **A bound on a walk that terminates on its own, not the walk's cost.** Every
+/// walk bounded by this exits as soon as [`PageCtx::step_no_wrap`] returns `None`
+/// at the front or the back of the gallery, whatever `loop_back` says, so this
+/// only ever bites on a gallery larger than it names. Its value is deliberately far
+/// above any plausible gallery rather than tuned: being generous costs nothing,
+/// because the loop cannot reach the number without the answer already being known.
 pub const PREV_SCAN_LIMIT: usize = 1 << 20;
 
 /// The anchor before `a`, or `None` before the start.
@@ -7233,6 +7233,75 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
         anchor = next;
     }
     None
+}
+
+/// The anchor of the gallery's final turn.
+///
+/// **Forward, not backward, and for [`prev_anchor`]'s reason read from the other
+/// end.** Which turn is last is a fact about the whole tiling, and nothing asked
+/// *at* the gallery's last page can answer it. `lone` there always says "alone" -
+/// it looks for a successor and there is none - so it says the same thing whether
+/// the last page opens the final turn or closes it. `prev_anchor` there answers
+/// `None` when the last page is a second half and the turn *before* the last one
+/// when it is not, and neither is the answer. So the walk starts at the front and
+/// reads forwards, the same way [`prev_anchor`] does.
+///
+/// **It does not see the wrap, and that is what makes a looping gallery's tiling
+/// the tiling it would have with looping off** - the property the round-trip test
+/// in `tests/spreads.rs` asserts. It walks with [`PageCtx::step_no_wrap`] for the
+/// same reason [`prev_anchor`] does: a turn must not name a page twice, and across
+/// the seam it would. It is also what makes the walk **end by itself**: a wrapping
+/// step on a looping gallery never answers `None`, so the loop would run to
+/// [`PREV_SCAN_LIMIT`] instead - measured at ~25 s before the test fails, which is
+/// the cost of getting this line wrong rather than of getting it right.
+///
+/// `None` for a gallery with nothing in it, checked rather than assumed: a gallery
+/// with no files has no last turn, and `(0, 0)` is not a page of it.
+pub fn last_anchor(lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
+    // `by` of 0 runs no iterations, so this is the "is there a first page at all"
+    // question answered by the same bounds check every step does.
+    let mut anchor = ctx.step_no_wrap(PagePos { index: 0, page: 0 }, 0)?;
+    for _ in 0..PREV_SCAN_LIMIT {
+        let Some(next) = ctx.step_no_wrap(anchor, turn_len(anchor, lead_lone, ctx) as isize) else {
+            return Some(anchor);
+        };
+        anchor = next;
+    }
+    None
+}
+
+/// Where one backward *step* lands: [`prev_anchor`], or - when there is no turn
+/// before this one and this context's step would wrap - the gallery's last turn.
+///
+/// **The wrap is this function's whole reason to exist, and it is the navigation
+/// layer's decision rather than the tiling's.** [`prev_anchor`] answers `None` at
+/// the first turn whatever `loop_back` says, and that is right for what it is: a
+/// tiling has no turn before its first, and letting the wrap into it would make the
+/// last turn of a looping gallery straddle the seam. Whether pressing left on the
+/// cover lands on the last spread or on nothing is a question about the *app*, and
+/// this is where the answer is written.
+///
+/// **The wrap is decided by asking [`PageCtx::step`], not by a `looping` argument**,
+/// so `loop_back` stays the single setting that decides it and this cannot disagree
+/// with [`Gallery::prev`] about whether the cursor wraps at all. A backward step that
+/// runs off the front while `step` would not wrap means the answer really is
+/// "nowhere" - so looping off still stops at both ends, which is the whole of what it
+/// has ever meant.
+///
+/// **There is no forward twin, and that is not an oversight.** [`next_anchor`] is
+/// already that answer: it asks the wrapping [`PageCtx::step`] for the next anchor
+/// directly, so with `loop_back` on it wraps from the last turn and with it off it
+/// runs out. Only the backward direction needs a second question, because
+/// `prev_anchor` cannot see the wrap - it walks with `step_no_wrap` so the tiling
+/// does not straddle the seam.
+pub fn prev_turn(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
+    if let Some(prev) = prev_anchor(a, lead_lone, ctx) {
+        return Some(prev);
+    }
+    // No turn before this one. If a one-page step backwards would wrap, the cursor's
+    // next position backwards is the last turn; if it would not, nothing moves.
+    ctx.step(a, -1)?;
+    last_anchor(lead_lone, ctx)
 }
 
 /// A simple gallery state: a list of files and a current index.
@@ -7657,6 +7726,32 @@ impl Gallery {
         if index < self.files.len() {
             self.index = index;
             self.page = 0;
+        }
+    }
+
+    /// Move to a `(file, page)` position, as the turn walk produces one.
+    ///
+    /// The counterpart of [`Self::next`]/[`Self::prev`] for a position that is not
+    /// one page away: manga mode's navigation hands the app the *anchor* of the next
+    /// turn, and in a multi-page document that is a page in the middle of the file,
+    /// which `next` can only reach by arriving there one page at a time.
+    ///
+    /// **A position is a whole answer, so this does not clamp the page** to
+    /// `pages_in_current`. Every caller gets its position out of [`PageCtx::step`]
+    /// or [`PageCtx::step_no_wrap`], which already respect the count, so a clamp
+    /// here would be a second rule that silently disagrees with the walk's - and a
+    /// disagreement here is a cursor somewhere the reader did not ask for.
+    ///
+    /// **Only a file index past the end of the list is refused**, and it changes
+    /// nothing. That case cannot come out of the walk, which answers `None` past
+    /// either end; it is here for a caller holding a stale position, because
+    /// `next`/`prev` from an out-of-range index wrap to the front rather than
+    /// refusing when `loop_back` is on - and this is the one of the three that does
+    /// nothing either way.
+    pub fn goto_page(&mut self, pos: PagePos) {
+        if pos.index < self.files.len() {
+            self.index = pos.index;
+            self.page = pos.page;
         }
     }
 

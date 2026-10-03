@@ -1643,14 +1643,7 @@ impl MyApp {
         if !self.config.manga_mode {
             return None;
         }
-        image_viewer::turn_partner(
-            self.gallery.page_pos(),
-            self.spreads.lead_lone,
-            &AppPageCtx {
-                gallery: &self.gallery,
-                spreads: &self.spreads,
-            },
-        )
+        image_viewer::turn_partner(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx())
     }
 
     fn step(&mut self, ctx: &Context, forward: bool) {
@@ -1658,16 +1651,79 @@ impl MyApp {
         if self.config.block_while_loading && self.waiting_load {
             return;
         }
-        // With looping off, stepping at either end goes nowhere. Returning
-        // without `goto` matters: it avoids resetting the full-res dwell timer
-        // and re-planning the queue for an image that did not change.
-        let moved = if forward {
+        // Manga mode moves a whole turn, which is one or two pages; single-image
+        // mode moves one page. With looping off, stepping at either end goes
+        // nowhere in both. Returning without `goto` matters: it avoids resetting
+        // the full-res dwell timer and re-planning the queue for an image that did
+        // not change.
+        let moved = if self.config.manga_mode {
+            if forward {
+                self.turn_forward()
+            } else {
+                self.turn_backward()
+            }
+        } else if forward {
             self.gallery.next()
         } else {
             self.gallery.prev()
         };
         if moved {
             self.goto(ctx);
+        }
+    }
+
+    /// The [`PageCtx`] the pairing is asked through: the gallery plus the
+    /// reader's stored shape decisions.
+    ///
+    /// Built in one place because that is what keeps the overrides in the pairing
+    /// everywhere it is asked for - navigation here, and the second half of a turn in
+    /// [`Self::turn_partner`], which is also what the plan is handed as its
+    /// `partner` - and a `Gallery` asked on its own answers `None` for
+    /// `override_shape`. See [`AppPageCtx`].
+    fn page_ctx(&self) -> AppPageCtx<'_> {
+        AppPageCtx {
+            gallery: &self.gallery,
+            spreads: &self.spreads,
+        }
+    }
+
+    /// One turn forwards: the anchor the next turn opens on, and whether the cursor
+    /// moved.
+    ///
+    /// Two lines and no rule. Which anchor the next turn opens on is
+    /// [`image_viewer::next_anchor`] - one `turn_len` from here, and it wraps when
+    /// `loop_back` is on - and the move is [`Self::goto_turn`]. Both are library
+    /// rules tested in `tests/spreads.rs`, which is what lets this method be two
+    /// lines without being untested logic.
+    fn turn_forward(&mut self) -> bool {
+        let to = image_viewer::next_anchor(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
+        self.goto_turn(to)
+    }
+
+    /// One turn backwards: the anchor before this one, or the gallery's last turn when
+    /// `loop_back` wraps, and whether the cursor moved.
+    ///
+    /// [`image_viewer::prev_turn`] rather than `prev_anchor`, because the wrap is
+    /// the navigation layer's decision and `prev_anchor` deliberately does not make
+    /// it - see that function's doc comment.
+    fn turn_backward(&mut self) -> bool {
+        let to = image_viewer::prev_turn(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
+        self.goto_turn(to)
+    }
+
+    /// Move the cursor onto a turn anchor the walk produced, reporting whether
+    /// there was one.
+    ///
+    /// Separate from the two walks above so "which anchor" and "move the cursor"
+    /// cannot drift apart, and so `None` has one spelling: a refusal changes
+    /// nothing at all, which is what lets [`Self::step`] skip `goto` for it.
+    fn goto_turn(&mut self, to: Option<PagePos>) -> bool {
+        match to {
+            Some(pos) => {
+                self.gallery.goto_page(pos);
+                true
+            }
+            None => false,
         }
     }
 
