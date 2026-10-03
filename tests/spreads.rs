@@ -1961,6 +1961,46 @@ fn invalidate_path_drops_the_overrides_and_saves_them() {
     );
 }
 
+/// ...and the same reasoning pins the other end of the turn: a **partner's** preview
+/// has to re-plan, or a spread that paired on an unmeasured page and then turned out
+/// to be a wide page stands wrong with nothing on screen to say why.
+///
+/// The rule is asserted by
+/// [`a_partners_arrival_re_plans_because_it_can_change_the_turn`], which is
+/// `image_viewer::arrival_reschedules` called directly. **What is pinned here is the
+/// call site**, because `MyApp::pump` is a binary and a call deleted from one is
+/// invisible to every behavioural test in the tree - `resched` would simply stop being
+/// set, and the app would go on looking correct.
+///
+/// A source scan is not behaviour, and it is weak in a specific way: **it cannot tell
+/// whether `pump` ever *reaches* this line** - only that the line is in the arm. A
+/// guard could fire the branch but never call this, or the call could sit behind a
+/// condition nobody exercises, and both pass here. What it does catch is the
+/// regression that actually happens, which is the deletion or the move out of the arm,
+/// and neither is visible at runtime. Deleting the call fails this test; that has been
+/// run.
+///
+/// Scoped to the **`Msg::Preview` arm's own body**, not to `pump` as a whole. That
+/// scoping is what `fn_body` gives here for free: the arm is
+/// `Msg::Preview { .. } => match result { ... }`, and the matching brace closes the
+/// `match` - so the `Msg::Full` and `Msg::Exif` arms, and the `turn_partner` capture
+/// above the loop, are all outside the span and cannot stand in for the call.
+#[test]
+fn arriving_previews_re_plan_through_the_partner() {
+    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let arm = fn_body(&src, "Msg::Preview { key, result } => match result {");
+
+    assert!(
+        arm.contains("image_viewer::arrival_reschedules("),
+        "the Msg::Preview arm no longer asks arrival_reschedules whether to re-plan,\n\
+         so a partner's decode no longer re-plans. That is the half that heals a turn:\n\
+         pairable treats unknown dimensions optimistically, so a partner planned at the\n\
+         current priority can turn out to be a wide page, note_shapes learns it, and the\n\
+         turn collapses to one page - with no re-plan the two-page spread stays painted\n\
+         until the reader moves, and nothing says why.\nBody was:\n{arm}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The overrides: what the user said, and where it is written
 // ---------------------------------------------------------------------------
