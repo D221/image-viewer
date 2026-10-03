@@ -1432,13 +1432,12 @@ impl MyApp {
         // it is paid once per file rather than once per visit.
         if let Some(p) = self.gallery.current().map(|p| p.to_path_buf()) {
             self.gallery.learn_pages(&p);
-            // How large the page *displays* at, which is what the manga pairing
-            // judges a page by. Beside `learn_pages` because both are "measure the
-            // file we are arriving at", both answer from a cache, and both are paid
-            // once per file rather than once per visit. It may already be answered:
-            // `pump` records a file's dimensions as its preview lands, so a file in
-            // the preload window has them before the user gets there.
-            self.gallery.learn_shapes(&p);
+            // How large this page *displays* at, which is what the manga pairing
+            // judges a page by. Beside `learn_pages` because both are "measure what
+            // we are arriving at" and both answer from a cache. It may already be
+            // answered: `pump` records a page's dimensions as its preview lands, so
+            // a page in the preload window has them before the user gets there.
+            self.gallery.learn_shapes(&p, self.gallery.current_page());
         }
         self.cur = self
             .gallery
@@ -1663,11 +1662,14 @@ impl MyApp {
                         // in the preload window are decoded anyway, so this is the
                         // cheapest source the manga pairing has.
                         //
-                        // Keyed by the path, not the `(file, page)` key, because the
-                        // cache judges a *file*: every page of a document shares one
-                        // entry. Which page's numbers land there is `note_shapes`'s
-                        // to document, not this call's.
-                        self.gallery.note_shapes(&key.path, p.orig);
+                        // Keyed by the `(file, page)` key, because the cache judges a
+                        // *page*: a document with a landscape spread among portrait
+                        // pages can only say so if each page has its own entry, and
+                        // crediting page 0's decode with page 5's dimensions would be
+                        // the wrong page's shape. `note_shapes` never replaces an
+                        // entry that is already there, so a page measured from its
+                        // own header keeps that number.
+                        self.gallery.note_shapes(key.clone(), p.orig);
                         self.previews.insert(
                             key.clone(),
                             Preview {

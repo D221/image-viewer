@@ -6480,20 +6480,26 @@ pub struct Gallery {
     /// opened, and pruned whenever `files` is rebuilt, so it cannot grow without
     /// bound as you browse.
     page_counts: std::collections::HashMap<PathBuf, u32>,
-    /// Display dimensions of each file whose shape has been asked for, keyed by
-    /// path and **one entry per file rather than per page**.
+    /// Display dimensions of each page whose shape has been asked for, keyed by
+    /// [`ImgKey`].
     ///
-    /// Per file because the shape test judges a *file*: for a multi-page document
-    /// page 1 is measured on arrival and its later pages are judged when they
-    /// arrive, by pressing right — the same argument `plan_jobs` makes about
-    /// prefetching page 0 of its neighbours (`src/lib.rs`, "the current image's
-    /// page"). A 200-page TIFF would otherwise want 200 reads to answer one
-    /// question about the document.
+    /// **Per page, not per file**, and the reason is a document with a fold-out. A
+    /// manga volume scanned as one multi-page TIFF can hold a landscape double-page
+    /// spread among portrait singles: page 3 is a spread, page 4 is a page, and one
+    /// entry for the file would judge both by page 0 and give every one of them the
+    /// wrong turn. `ImgKey { path, page }` is the identity every pixel cache here
+    /// already uses, and `PageCtx::dims` already has one in hand via `key(pos)`, so
+    /// this is the keying that needed no new concept.
     ///
-    /// Cleared with `page_counts` whenever `files` is rebuilt, for the same reason
-    /// a count must not outlive the list it describes: these are keyed on paths
-    /// and would otherwise accumulate every file the session ever opened.
-    shapes: std::collections::HashMap<PathBuf, (u32, u32)>,
+    /// What was traded for it: a 200-page document is measured as its pages are
+    /// reached rather than in one read, which is the same bargain `plan_jobs` makes
+    /// about prefetching only page 0 of a neighbour — you arrive at a later page by
+    /// pressing right, and `learn_shapes` runs on that arrival.
+    ///
+    /// Cleared with `page_counts` whenever `files` is rebuilt, for the same reason a
+    /// count must not outlive the list it describes: these are keyed on paths and
+    /// would otherwise accumulate every page the session ever opened.
+    shapes: std::collections::HashMap<ImgKey, (u32, u32)>,
 }
 
 impl Gallery {
@@ -6578,6 +6584,14 @@ impl Gallery {
         self.page_counts.len()
     }
 
+    /// How many **pages** have remembered dimensions. So a test can assert a
+    /// `forget_shapes` really dropped *every* page of a document rather than one —
+    /// the count is the only place that difference is visible, since a per-page map
+    /// and a per-file one answer the same single-page query identically.
+    pub fn known_shapes(&self) -> usize {
+        self.shapes.len()
+    }
+
     /// Whether advancing past either end wraps around. Separate from the field so
     /// a test can turn it off without reaching into the struct.
     pub fn set_loop_back(&mut self, on: bool) {
@@ -6629,7 +6643,15 @@ impl Gallery {
         self.page = 0;
     }
 
-    /// Find out how large `path` displays at and remember it, for the shape test.
+    /// Find out how large page `page` of `path` displays at and remember it, for the
+    /// shape test.
+    ///
+    /// **The page asked about, not page 0.** `page` is 0 for every ordinary image, so
+    /// this is unchanged for a photo folder; for a multi-page document it is the
+    /// difference between knowing that page 3 is a landscape spread and judging it by
+    /// whatever page 0 happened to be. The caller is `goto`, so this is the "learn on
+    /// arrival" rule the page count has always followed, applied to the page that
+    /// actually arrived.
     ///
     /// **The EXIF orientation tag is applied here, and skipping it is the one
     /// mistake in this feature that is silent, total, and lands on real
@@ -6657,30 +6679,51 @@ impl Gallery {
     /// and with more force: this runs on *every* navigation, and unlike the four
     /// bytes of a page count this is a bounded read plus a format sniff plus, for
     /// a JPEG, an APP1 seek. Re-reading per visit would put a file open on the
-    /// critical path of every keypress.
+    /// critical path of every keypress. The cache check is **per page**, so pressing
+    /// right through a document measures each page once and no more.
     ///
-    /// Does nothing for a file whose dimensions cannot be read. An unmeasured page
-    /// is [`Shape::Single`] and pairs optimistically, which is the state the whole
+    /// Does nothing for a page whose dimensions cannot be read. An unmeasured page is
+    /// [`Shape::Single`] and pairs optimistically, which is the state the whole
     /// pairing is built to survive, so there is no error to report and nothing to
-    /// retry: the arrived preview's `orig` will fill this in.
-    pub fn learn_shapes(&mut self, path: &Path) {
-        if self.shapes.contains_key(path) {
+    /// retry: the arrived preview's `orig` will fill this in via
+    /// [`Self::note_shapes`].
+    pub fn learn_shapes(&mut self, path: &Path, page: u32) {
+        let key = ImgKey {
+            path: path.to_path_buf(),
+            page,
+        };
+        if self.shapes.contains_key(&key) {
             return;
         }
-        let Some(((w, h), jpeg)) = page_dims_and_jpeg(path, 0) else {
+        let Some(((w, h), jpeg)) = page_dims_and_jpeg(path, page) else {
             return;
         };
         // 0 for anything but a JPEG, matching `decode_page`: the tag is only ever
         // applied there, and `exif_orientation` costs a seek out of the file.
         let tag = if jpeg { exif_orientation(path) } else { 0 };
-        self.note_shapes(path, if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
+        self.insert_shapes(key, if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
     }
 
     /// Record the size a page **displays** at, from a decode that already knows.
     ///
     /// A neighbour's preview reports its own dimensions on its way past, which makes
     /// this the cheapest source of the pairing's input there is, and it is what fills
-    /// a file in before the cursor arrives at it.
+    /// a page in before the cursor arrives at it.
+    ///
+    /// **Fill-only: this never replaces an entry that is already there.** `learn_shapes`
+    /// measures the source header and that is the better number, so a decode's
+    /// dimensions only fill a gap.
+    ///
+    /// The alternative — last writer wins — would let a decode that reported a
+    /// *downscaled* size replace a measurement, and `learn_shapes` short-circuits on
+    /// the entry existing, so the better number could never come back. **Refusing is
+    /// not free, and the trade is worth stating:** an approximation that arrives
+    /// first is kept and is never re-measured. What makes that acceptable is the next
+    /// paragraph — route 1 agrees with `learn_shapes` by construction, so the common
+    /// case has nothing to displace, and routes 2-4 are ratio-equivalent, so
+    /// `shape_of` reads them correctly either way. The case this actually gives up
+    /// is a route-4 fallback — a file whose header the decode could not sniff at all,
+    /// where the preview size is kept instead of a later header measurement.
     ///
     /// **What the caller passes, precisely.** `dims` must already be
     /// display-oriented, and there are four routes into it. Only the first is a
@@ -6698,49 +6741,54 @@ impl Gallery {
     ///    wider than that records a downscaled size.
     /// 3. A **page past the first of a TIFF**: `orig` is that page's *decoded*
     ///    dimensions, and `decode_tiff_page` has already downscaled it to the
-    ///    request's target. Because this cache is keyed by path, such a result
-    ///    overwrites the file's entry — with a ratio-equivalent number, but not with
-    ///    page 0's exact one, and `learn_shapes` will not put that back because it
-    ///    short-circuits on the entry existing.
+    ///    request's target.
     /// 4. The **caller's fallback** for a file whose header could not be sniffed at
     ///    all, which is the size of the *decoded preview*.
     ///
-    /// **Routes 2-4 are approximations, and that is why they are tolerable rather
-    /// than fixed.** All the downscaling in them goes through `downscale_image`,
-    /// which picks *one* scale factor and applies it to both axes, so the aspect
-    /// ratio survives up to integer rounding — and the aspect ratio is the only
-    /// thing [`shape_of`](crate::shape_of) reads. The verdict is therefore unchanged
-    /// except for a page landing within a pixel of [`SPREAD_ASPECT`]. So the number
-    /// in the cache is not always the source number, and nothing downstream needs it
-    /// to be: `dims` is asked for a shape, not for pixels.
-    ///
-    /// **Overwrites**, and that is the difference from `learn_shapes`: this is a
-    /// measurement, so it is the authority for the file it names. `learn_shapes`
-    /// consults the cache first and stores through here, but it skips an entry that
-    /// is already there — which is what stops a file open on the critical path of
-    /// every keypress, and what makes a learned dimension frozen until something
-    /// says the file changed.
+    /// **Routes 2-4 are approximations, and fill-only is what makes them safe.** All
+    /// the downscaling in them goes through `downscale_image`, which picks *one* scale
+    /// factor and applies it to both axes, so the aspect ratio survives up to integer
+    /// rounding — and the aspect ratio is the only thing
+    /// [`shape_of`](crate::shape_of) reads. So an approximation that gets here first
+    /// is still read correctly by `shape_of`, and one that arrives second is refused.
+    /// The number in the cache is not always the source number; the *verdict* it
+    /// produces is, which is all `dims` is asked for.
     ///
     /// Consequently a measurement taken from a decode that was already in flight
     /// carries that decode's bytes, so it inherits the preview cache's exposure to a
     /// result landing after the file was rewritten. Nothing here does anything about
     /// that: decodes are never abandoned, and the same exposure already exists for
     /// the texture those pixels become.
-    pub fn note_shapes(&mut self, path: &Path, dims: (u32, u32)) {
-        self.shapes.insert(path.to_path_buf(), dims);
+    pub fn note_shapes(&mut self, key: ImgKey, dims: (u32, u32)) {
+        if self.shapes.contains_key(&key) {
+            return;
+        }
+        self.shapes.insert(key, dims);
     }
 
-    /// Forget one file's remembered dimensions, so the next read measures the
-    /// file's current contents.
+    /// [`Self::note_shapes`] for a caller that has already established there is no
+    /// entry — [`Self::learn_shapes`], which is the only one.
+    fn insert_shapes(&mut self, key: ImgKey, dims: (u32, u32)) {
+        self.shapes.insert(key, dims);
+    }
+
+    /// Forget every page of one file's remembered dimensions, so the next read
+    /// measures the file's current contents.
+    ///
+    /// **Every page, not one.** The entries are keyed by [`ImgKey`], so a
+    /// path-keyed `remove` would be a no-op for any page past the first — and a
+    /// re-exported 200-page document would keep every one of its old shapes, with
+    /// only page 0 ever re-measured. The same "all pages, not one" rule
+    /// `invalidate_path` already applies to `previews`.
     ///
     /// **Must be called from `invalidate_path`,** beside `forget_page_count`. The
     /// file's *contents* changed, and only the caller knows that: a re-export can
     /// change a page's aspect from portrait to landscape, and the pairing is built
-    /// to trust what it was told. Without this the shape is frozen for the session
-    /// and **every turn after that file stays mis-paired**, with no error and
-    /// nothing on screen to say so.
+    /// to trust what it was told. Without this the shapes are frozen for the
+    /// session and **every turn after that file stays mis-paired**, with no error
+    /// and nothing on screen to say so.
     pub fn forget_shapes(&mut self, path: &Path) {
-        self.shapes.remove(path);
+        self.shapes.retain(|key, _| key.path != path);
     }
 
     /// Forget one file's page count, and clamp the cursor if it was on that file.
@@ -7085,17 +7133,16 @@ impl PageCtx for Gallery {
     /// those makes four `dims` calls. Reading a file here would turn a query into
     /// disk I/O in the middle of a keypress.
     ///
-    /// One entry per *file* (see `Gallery::shapes`), so every page of a document
-    /// gets the same answer. That is the same trade `plan_jobs` makes about
-    /// prefetching page 0: a document whose pages differ in size is legal and rare,
-    /// and the page you are looking at is judged by the document's measured first
-    /// page.
+    /// **Keyed by the position's own [`ImgKey`], not by its file** — so a page whose
+    /// dimensions have not been measured yet is `None` while its neighbour is
+    /// `Some`, and that is the whole point: a document with a landscape spread among
+    /// portrait pages has to be able to say so.
     ///
     /// `None` is a state the pairing is built to survive - an unmeasured page is
     /// `Single` and pairs optimistically - so it is not an error here, and there is
     /// nothing to fall back to.
     fn dims(&self, pos: PagePos) -> Option<(u32, u32)> {
-        self.files.get(pos.index).and_then(|p| self.shapes.get(p)).copied()
+        self.key(pos).and_then(|key| self.shapes.get(&key)).copied()
     }
 
     /// Always `None` today. The user's override is a separate feature and it is
