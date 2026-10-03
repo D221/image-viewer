@@ -1450,6 +1450,13 @@ impl MyApp {
     /// folder and file open already goes through, for the same reason the filter
     /// cannot be forgotten), `open_archive` (which builds its own gallery instead of
     /// adopting one), and the constructor.
+    ///
+    /// **It reads `zip_archive` first, so it depends on `close_zip()` having run when
+    /// leaving an archive.** Every caller that can follow one does: `open_folder` and
+    /// `open_file` close before adopting, and `open_archive` closes before
+    /// extracting. (The constructor has no archive to close.) A caller that opened a
+    /// gallery without closing would key it by a temp directory that is about to be
+    /// deleted, which is the exact mistake this function exists to prevent.
     fn refresh_spreads(&mut self) {
         self.spreads_key = spread_root_key(self.zip_archive.as_deref(), &self.folder);
         self.spreads = match (self.spreads_key.as_deref(), spreads_root()) {
@@ -1468,11 +1475,6 @@ impl MyApp {
     /// retry and no warning: the next override saves again, and a pairing the user
     /// has to press twice is a far smaller problem than an app that stops
     /// responding because a file could not be written.
-    // Nothing calls this yet: no key changes an override yet, so there is nothing
-    // to write. It is here rather than written from the exit path because a
-    // save-on-exit would create the store on every run of the app to record that
-    // the user had decided nothing.
-    #[allow(dead_code)]
     fn save_spreads(&self) {
         let (Some(store), Some(key)) = (spreads_root(), self.spreads_key.as_deref()) else {
             return;
@@ -2243,8 +2245,17 @@ impl MyApp {
         // reason than the dimensions above. A stale override is not a wrong answer
         // to a question about the current file, it is a decision about pixels that
         // no longer exist — and because an override beats the detector, keeping it
-        // holds that page a spread for the session whatever the file now contains.
+        // holds that page a spread whatever the file now contains.
         self.spreads.forget_file(p);
+        // Saved, not just dropped: a store that still holds the stale entry hands it
+        // back on the next launch, so dropping it in memory only would make "a
+        // re-export clears the override" true for one session and false across a
+        // restart. The cost is a write on the UI thread per changed file, bounded by
+        // `SPREADS_MAX_BYTES` — a departure from the rule that this thread does no
+        // I/O, taken because the alternative is an override that survives the restart
+        // it was cleared for. The thumbnail cache writes the same bytes on a worker;
+        // this cannot, because the state being written is the app's own.
+        self.save_spreads();
         let shown_gone = self.shown.as_ref().is_some_and(|s| s.path == p);
         if self.full.as_ref().is_some_and(|f| f.path == p) {
             self.full = None;

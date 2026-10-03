@@ -5131,11 +5131,13 @@ pub fn load_grid_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadEr
 
 /// What identifies a gallery's entry in the store: the root path, as a string.
 ///
-/// Deliberately a bare path and not a "folder or archive" enum, because the whole
-/// point of [`spread_root_key`] is that a caller cannot express the wrong one:
-/// there is no spelling here for "the directory an archive was extracted into",
-/// so the mistake the `%TEMP%` rule is about is not available to make at this
-/// layer.
+/// Deliberately a bare path and not a "folder or archive" enum. The mistake the
+/// `%TEMP%` rule exists to prevent is made *natural* by that choice rather than
+/// impossible: there is no field here to put an archive's extraction directory into,
+/// so reaching for it takes a deliberate argument instead of filling something in.
+/// It is still reachable — a caller can write any string it likes and the load will
+/// not notice — which is why [`spread_root_key`] is where the choice is actually
+/// made and tested.
 type SpreadStore = std::collections::BTreeMap<String, GallerySpreads>;
 
 /// Where the overrides live: `%LOCALAPPDATA%\image-viewer\spreads.json`.
@@ -5150,8 +5152,8 @@ type SpreadStore = std::collections::BTreeMap<String, GallerySpreads>;
 /// `HOME` is the same fallback [`thumb_cache_root`] uses, for the one environment
 /// where it is not `LOCALAPPDATA`. **No third arm**, unlike that function: it
 /// falls back to a directory beside the working copy, which is the right answer
-/// for a disposable cache and the wrong one for a file the settings panel tells
-/// the user to go and edit. `None` means "do not persist", and the caller keeps
+/// for a disposable cache and the wrong one for a file a person is meant to open
+/// and edit. `None` means "do not persist", and the caller keeps
 /// the decisions in memory for the session — the only cost is that they are
 /// forgotten at exit, which is a far smaller failure than an app that will not
 /// start.
@@ -5175,9 +5177,11 @@ pub fn spreads_root() -> Option<PathBuf> {
 /// did. `MyApp` holds both, so the choice has to be made here rather than at each
 /// call site.
 ///
-/// `None` for a root with no name at all (a file opened from a path with no
-/// parent), because the empty string is a real key: every such gallery would share
-/// one entry and each one's overrides would answer for the others.
+/// `None` only for the **empty** path, which is the one value that cannot name a
+/// gallery: the empty string is a real key, so every gallery with no name would
+/// share one entry and each one's overrides would answer for the others. Note that
+/// "no parent" is *not* the test — `Path::new(".")` has no parent and is not empty,
+/// so it keys as `"."`.
 ///
 /// A function rather than an expression at the one call site that needs it, because
 /// `MyApp` holds both paths and the wrong reading of which one is the gallery's is
@@ -5238,8 +5242,9 @@ impl Default for GallerySpreads {
 /// A map keyed by a `(String, u32)` **pair** is not something `serde_json` can
 /// write: it refuses any map key that is not a string, and no derive avoids the
 /// key. So the pair is split into two nested objects and the page becomes a decimal
-/// string, which is also what makes the file readable — its path is disclosed in the
-/// settings panel, so somebody will open it in an editor.
+/// string, which is also what keeps the file editable by hand: nested objects with
+/// string keys, rather than one flat map keyed by an invented separator nobody could
+/// type.
 ///
 /// ```text
 /// "pages": { "001.png": { "0": "double", "7": "single" } }
@@ -5297,13 +5302,28 @@ impl GallerySpreads {
     /// override pairs by its aspect ratio like any other. So this is not a
     /// fallback that guesses — an override *replaces* the detector rather than
     /// breaking its ties.
+    ///
+    /// Also `None` for a path with no file name, which cannot be in the store at
+    /// all: [`Self::set_shape`] refuses to write one.
     pub fn shape_for(&self, path: &Path, page: u32) -> Option<Shape> {
         self.pages.get(&(file_name_of(path), page)).copied()
     }
 
     /// Record the user's decision about one page.
+    ///
+    /// **A path with no file name is refused rather than stored.** `file_name_of`
+    /// answers `""` for one, and the store is keyed by that name — so every such
+    /// path would share the entry `("", page)` and one would silently overwrite the
+    /// others' decisions. Nothing reachable today produces such a path (a folder scan
+    /// and `extract_zip` both name every file they yield), but the same asymmetry
+    /// [`spread_root_key`] refuses for a *root* is worth refusing here too, and the
+    /// cost is one entry that could never have been addressed anyway.
     pub fn set_shape(&mut self, path: &Path, page: u32, shape: Shape) {
-        self.pages.insert((file_name_of(path), page), shape);
+        let name = file_name_of(path);
+        if name.is_empty() {
+            return;
+        }
+        self.pages.insert((name, page), shape);
     }
 
     /// Flip one page away from `detected`, store the answer, and return it.
@@ -5368,12 +5388,23 @@ impl GallerySpreads {
 /// did not produce the expected shape are all `GallerySpreads::default()`. That is
 /// the whole contract, and it is why this returns the value rather than a `Result`
 /// — a caller that could handle the error by refusing to open a folder would be a
-/// worse app.
+/// worse app. Two refusals join them: a store over [`SPREADS_MAX_BYTES`] is not read
+/// at all, and an entry over [`SPREADS_MAX_PAGES`] is dropped whole.
 ///
 /// `root` names the gallery the way [`spread_root_key`] produced it; `store` is
 /// the file, which the caller passes in so a test can point it at a temporary
 /// directory instead of the user's `%LOCALAPPDATA%`.
 pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
+    // Checked before the read, not by reading and measuring after: this runs while
+    // a gallery is opening, on the UI thread, and the point of the cap is to bound
+    // that work rather than to notice it afterwards. A directory's metadata reads
+    // fine and is tiny, so it falls through to the read below and fails there, as it
+    // should.
+    match std::fs::metadata(store) {
+        Ok(m) if m.len() > SPREADS_MAX_BYTES => return GallerySpreads::default(),
+        Ok(_) => {}
+        Err(_) => return GallerySpreads::default(),
+    }
     let Ok(text) = std::fs::read_to_string(store) else {
         return GallerySpreads::default();
     };
@@ -5386,19 +5417,72 @@ pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
     // `lead_lone` of 99 is a thing that will happen, and obeying it stands the
     // first 99 pages of the gallery alone.
     g.lead_lone = g.lead_lone.min(LEAD_LONE_MAX);
+    // Whole entry or nothing, as `SPREADS_MAX_PAGES` says: keeping "some" of them
+    // would mean keeping a different some on every launch.
+    if g.pages.len() > SPREADS_MAX_PAGES {
+        g.pages.clear();
+    }
     g
 }
 
-/// The store's own name plus `.tmp`, which is the half-written-entry guard.
+/// How big the store may be before [`load_spread_overrides`] stops reading it.
+///
+/// **A read on the UI thread, which is why it is bounded at all.** It happens while
+/// a gallery is being opened (`MyApp::refresh_spreads`), on a file whose size
+/// nothing else bounds.
+///
+/// The value is deliberately generous rather than tight, and deliberately *not*
+/// justified by a bytes-per-entry figure: the store holds one small object per
+/// gallery the user has ever overridden something in, and nothing in this app grows
+/// it except `set_shape`. What the cap buys is that a hand-edited or hostile file
+/// cannot make the app read an arbitrary amount of someone's disk.
+///
+/// Over the cap the load yields **nothing**, not a truncated read: a half-file does
+/// not parse, so "what was readable" of an oversized store is nothing either way.
+pub const SPREADS_MAX_BYTES: u64 = 1 << 20;
+
+/// Most page overrides one gallery's entry may hold, whatever the file's size.
+///
+/// The size cap already bounds what a *file* can produce, so this is the second
+/// line of defence for the in-memory store — and it exists because the two degrade
+/// differently. It is also deliberately **all or nothing**: past the cap the entry
+/// is dropped whole rather than truncated to some of its entries, because a
+/// `HashMap`'s iteration order is randomised per process, so a truncated load would
+/// hand back a *different* set of overrides on every launch and nothing would ever
+/// look wrong.
+pub const SPREADS_MAX_PAGES: usize = 20_000;
+
+/// The store's own name plus `.tmp.<pid>` — the half-written-entry guard, made
+/// unique per process.
+///
+/// **Per process, not per call.** A fixed name is what the thumbnail cache uses and
+/// it is safe *there* because two writers of one cache entry are writing the same
+/// bytes: same path, same stamp, same target, so the same payload. That reasoning
+/// does not transfer, because this file is neither content-addressed nor
+/// whole-overwritten — it is a **read-modify-write**, so two instances saving
+/// different galleries milliseconds apart both open the same name with `Create` /
+/// `TRUNCATE`, interleave their writes, and each renames the torn result over
+/// `spreads.json`. The reader guarantee (`fs::rename` replaces, atomically) holds
+/// throughout; what it hands over is a mixture. Then, because an unparseable store
+/// is treated as empty and replaced, the next override press rewrites the file with
+/// one gallery's entry and **every other gallery's decisions are gone**, silently
+/// and with no second copy anywhere. Per-process naming means a second instance
+/// writes its own temporary and renames a complete file over the first one's.
+///
+/// Per *process* rather than per call is enough because the app saves from one
+/// thread — the UI — and the collision that matters is between two instances of the
+/// app, not between two of its own threads.
 ///
 /// **Appended, not `with_extension`.** `spreads.json`.with_extension("tmp") is
-/// `spreads.tmp`: a different name for the same thing, and one that reads as a
-/// different file in a directory listing. The thumbnail cache can afford that
-/// because its entry is a hash with no meaning, and this store's whole point is
-/// that a person can find and read it.
-fn spreads_tmp(store: &Path) -> PathBuf {
+/// `spreads.tmp`: a different name for the same file, and one that reads as a
+/// different file in a directory listing.
+///
+/// Takes the id rather than reading [`std::process::id`] itself so the naming is a
+/// pure function of its arguments and a test can compare two ids' names. Public for
+/// that reason, as [`thumb_cache_entry`] is.
+pub fn spreads_tmp(store: &Path, pid: u32) -> PathBuf {
     let mut name = store.as_os_str().to_os_string();
-    name.push(".tmp");
+    name.push(format!(".tmp.{pid}"));
     PathBuf::from(name)
 }
 
@@ -5432,10 +5516,15 @@ pub fn save_spread_overrides(
 
     // Write beside the store and rename into place, the thumbnail cache's rule:
     // `fs::rename` replaces on Windows, so a reader sees either the old file or
-    // this one. A partial temporary is never renamed, so nothing can read one — and
-    // it is not deleted on failure either, because the next save overwrites the
-    // same name.
-    let tmp = spreads_tmp(store);
+    // this one, never a half-written one. The temporary carries this process's id
+    // (`spreads_tmp`) so a second instance of the app cannot tear this write — the
+    // one thing that is *not* inherited from the thumbnail cache, and the reason
+    // this is not a fixed name.
+    //
+    // A partial temporary is never renamed, so nothing can read one, and it is not
+    // deleted on failure either: the next save from this process overwrites the same
+    // name.
+    let tmp = spreads_tmp(store, std::process::id());
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, store)
 }
@@ -6464,12 +6553,12 @@ pub const LEAD_LONE_MAX: u32 = 4;
 /// What a page looks like, which decides whether it takes a whole turn.
 ///
 /// Serialised, because the user's override for one page is written to disk (see
-/// [`GallerySpreads`]) in a file meant to be read by a person — its path is
-/// disclosed next to the settings, so somebody will open it in an editor.
-/// `rename_all = "lowercase"` is what makes the documented spelling (`"double"`)
-/// the one that *loads*; without it serde writes `"Double"` and refuses
-/// `"double"`, and a hand-edited file silently becomes no overrides at all. The
-/// same trap `WgpuBackend` fell into, which `AGENTS.md` records.
+/// [`GallerySpreads`]) into a file meant to be read and edited by a person: the
+/// format is chosen so that a shape can be typed by hand. `rename_all =
+/// "lowercase"` is what makes the documented spelling (`"double"`) the one that
+/// *loads*; without it serde writes `"Double"` and refuses `"double"`, so a
+/// hand-edited file silently becomes no overrides at all — the same trap
+/// `WgpuBackend` fell into, which `AGENTS.md` records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Shape {

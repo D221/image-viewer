@@ -21,9 +21,9 @@
 
 use image_viewer::{
     exif_orientation, load_spread_overrides, lone, next_anchor, page_dims, pairable, prev_anchor,
-    save_spread_overrides, shape_of, spread_root_key, spreads_root, thumb_cache_root, turn_len,
-    Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX,
-    PROBE_PREFIX_BYTES,
+    save_spread_overrides, shape_of, spread_root_key, spreads_root, spreads_tmp, thumb_cache_root,
+    turn_len, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape, LEAD_LONE_DEFAULT,
+    LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -1652,6 +1652,53 @@ fn an_unknown_preceding_page_count_makes_flat_unavailable() {
     assert_eq!(PageCtx::flat(&gal, at(4, 0)), None);
 }
 
+/// The body of `fn <sig>` in a source file, found by **brace matching**.
+///
+/// Extracted so that a second scan of the same function is one assertion rather than
+/// a second copy of this, which is the whole reason
+/// [`invalidate_path_drops_the_cached_dimensions`] is not duplicated below.
+///
+/// **By brace matching, not by "up to the next `fn`".** The first version split
+/// on `"\n    fn "`, which is wrong in the direction that matters: `split` always
+/// yields at least one item, so when the delimiter did not match — `invalidate_path`
+/// last in the impl, or re-indented — the "body" became the whole rest of the
+/// file, the later call stood in for this one, and the scan passed
+/// **vacuously**. It could not fail; that is the opposite of what a guard is for.
+///
+/// The depth starts at **0**, not 1, and that is load-bearing rather than
+/// incidental. It is 0 because the scan starts *before* the opening brace — the
+/// signature's `&mut self, p: &Path, ctx: &Context` has none — so the first `{`
+/// is the function's and the matching `}` is the one that ends it. Starting at 1
+/// (the shape `keybindings.rs::dispatch_region` uses, correctly, because it
+/// begins *after* `if !typing {` and so has already consumed a brace) misses
+/// that closing brace and runs on until the file's own braces happen to balance,
+/// 60 KB later. **That was the second version of that test, and it passed with the
+/// call deleted.** Verified by mutation, not reasoned about.
+fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
+        + sig.len();
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, b) in src.as_bytes()[start..].iter().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.expect("could not find the end of the function: its braces do not \
+                         balance, or the signature changed shape. Update this test.");
+    &src[start..end]
+}
+
 /// A re-exported file must be re-judged, or its old page's shape is frozen for the
 /// session and **every spread after it stays mis-paired**.
 ///
@@ -1672,57 +1719,52 @@ fn an_unknown_preceding_page_count_makes_flat_unavailable() {
 /// other. What it does catch is the regression that actually happens — the call being
 /// deleted, or a later edit adding a cache here and forgetting this one — and neither
 /// is visible at runtime. Deleting the line fails this test; that has been run.
+///
+/// Scoped to `invalidate_path`'s own body so a `forget_shapes` anywhere else in
+/// the file cannot stand in for this one — and `remove_current_from_gallery`
+/// calls it too, so that is not hypothetical.
 #[test]
 fn invalidate_path_drops_the_cached_dimensions() {
-    // Scoped to `invalidate_path`'s own body so a `forget_shapes` anywhere else in
-    // the file cannot stand in for this one — and `remove_current_from_gallery`
-    // calls it too, so that is not hypothetical.
-    //
-    // **By brace matching, not by "up to the next `fn`".** The first version split
-    // on `"\n    fn "`, which is wrong in the direction that matters: `split` always
-    // yields at least one item, so when the delimiter did not match — `invalidate_path`
-    // last in the impl, or re-indented — the "body" became the whole rest of the
-    // file, the later `forget_shapes` stood in for this one, and the scan passed
-    // **vacuously**. It could not fail; that is the opposite of what a guard is for.
-    //
-    // The depth starts at **0**, not 1, and that is load-bearing rather than
-    // incidental. It is 0 because the scan starts *before* the opening brace — the
-    // signature's `&mut self, p: &Path, ctx: &Context` has none — so the first `{`
-    // is the function's and the matching `}` is the one that ends it. Starting at 1
-    // (the shape `keybindings.rs::dispatch_region` uses, correctly, because it
-    // begins *after* `if !typing {` and so has already consumed a brace) misses
-    // that closing brace and runs on until the file's own braces happen to balance,
-    // 60 KB later. **That was the second version of this test, and it passed with the
-    // call deleted.** Verified by mutation, not reasoned about.
     let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
-    let start = src
-        .find("fn invalidate_path(")
-        .expect("invalidate_path is gone; update this test to match")
-        + "fn invalidate_path(".len();
-    let mut depth = 0i32;
-    let mut end = None;
-    for (i, b) in src.as_bytes()[start..].iter().enumerate() {
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(start + i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let end = end.expect("could not find the end of invalidate_path: its braces do not \
-                         balance, or the signature changed shape. Update this test.");
-    let body = &src[start..end];
+    let body = fn_body(&src, "fn invalidate_path(");
 
     assert!(
         body.contains("forget_shapes("),
         "invalidate_path no longer forgets the cached dimensions, so a re-exported\n\
          file keeps its old page's shape and every spread after it stays mis-paired\n\
          for the session, with nothing on screen to say so.\nBody was:\n{body}"
+    );
+}
+
+/// ...and the same function is the only thing that can drop a file's *overrides*, so
+/// this is where the wiring for those lives too.
+///
+/// Two calls, and they are one feature: dropping the entry in memory without saving
+/// would make "a re-export clears the override" true for one session and false
+/// across a restart, because the next load would read the stale entry straight back
+/// out of the file. So the `save_spreads` assertion is not a separate concern from
+/// the `forget_file` one — it is the half that makes it durable.
+///
+/// The source scan is weak in the way [`invalidate_path_drops_the_cached_dimensions`]
+/// says, and for the same reason it exists at all. It has one advantage over that
+/// test, though: it reuses the brace matching already written there (see
+/// [`fn_body`]) rather than adding a second copy of it.
+#[test]
+fn invalidate_path_drops_the_overrides_and_saves_them() {
+    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let body = fn_body(&src, "fn invalidate_path(");
+
+    assert!(
+        body.contains("spreads.forget_file("),
+        "invalidate_path no longer forgets the user's overrides, so a re-exported\n\
+         file keeps page 3 a spread for the session whatever it now contains - and\n\
+         because an override beats the detector, nothing on screen says why.\n\
+         Body was:\n{body}"
+    );
+    assert!(
+        body.contains("save_spreads("),
+        "invalidate_path drops the override but does not save, so the stale entry is\n\
+         still in spreads.json and comes back on the next launch.\nBody was:\n{body}"
     );
 }
 
@@ -2045,6 +2087,269 @@ fn toggling_a_page_reports_the_shape_it_landed_on() {
     assert_eq!(g.shape_for(&page, 0), Some(Single));
 }
 
+/// Two instances of the app must not write the same temporary.
+///
+/// **The reader guarantee holds either way** — `fs::rename` replaces on Windows, so
+/// a reader sees either the old store or the new one, never a half-written file.
+/// What a *fixed* temporary name breaks is what gets renamed: `fs::write` opens with
+/// `Create`/`TRUNCATE`, so two savers milliseconds apart both hold a handle to the
+/// same file, both truncate it, and their writes interleave. The first to finish
+/// renames a mixture of the two over `spreads.json` — and because an unparseable
+/// store is treated as empty and replaced, the next override press then rewrites the
+/// file with one gallery's entry and every other gallery's decisions are gone. There
+/// is no second copy anywhere, so that is not recoverable.
+///
+/// **Two halves, because the property has two halves.** Naming is a pure function of
+/// the store path and an id, so "two ids, two names" is checkable — but that alone
+/// does not pin the id the app *passes*, and a call site passing a constant would
+/// sail past it. So the second half observes the real thing: a save whose rename
+/// cannot succeed leaves its temporary behind, and the name it leaves is
+/// `spreads.json.tmp.<this process's id>`.
+///
+/// The rename fails when the store path is a **directory**, which is also the only
+/// way to see a temporary at all — a successful save renames it away. Nothing here
+/// can see a *torn* write, and that is the part that stays untested: crash-atomicity
+/// is not observable without fault injection, and the thumbnail cache has no test for
+/// it either. Its fixed `.tmp` is not the precedent to copy, though — that is safe
+/// only because two writers of one entry write the same bytes, and this store is a
+/// read-modify-write, so they do not.
+#[test]
+fn two_instances_of_the_app_cannot_write_the_same_temporary() {
+    let store = std::path::Path::new(r"C:\Users\me\AppData\Local\image-viewer\spreads.json");
+
+    let one = spreads_tmp(store, 1000);
+    let two = spreads_tmp(store, 2000);
+
+    assert_ne!(one, two, "two processes must not share a temporary name");
+    assert_eq!(
+        one.parent(),
+        store.parent(),
+        "beside the store, so the rename is on one filesystem and therefore atomic"
+    );
+    assert_eq!(
+        one,
+        store.with_file_name("spreads.json.tmp.1000"),
+        "the store's own name with .tmp.<pid> appended - not with_extension, which \
+         would rewrite the .json and read as a different file"
+    );
+    assert!(two.to_string_lossy().ends_with(".tmp.2000"));
+
+    // ...and the id the app actually passes. The store path is a directory here, so
+    // the write succeeds and the rename cannot: `MoveFileEx` will not replace a
+    // directory with a file.
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("spreads.json");
+    std::fs::create_dir(&store).unwrap();
+    let g = GallerySpreads::default();
+    save_spread_overrides(&store, dir.path(), &g)
+        .expect_err("renaming a file over a directory must fail, or this test proves nothing");
+    // The `ErrorKind` is not asserted: Windows reports `ERROR_ACCESS_DENIED`, so it
+    // is `PermissionDenied` here, and pinning it would be pinning an OS's choice
+    // rather than this function's behaviour. That the save *reported* failure and
+    // still left the temporary behind is the whole of what is being checked.
+
+    let mut left: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    // The store path itself is in there too — it is the directory this test put
+    // there — so it is excluded rather than the assertion being weakened to
+    // "contains".
+    left.retain(|n| n != "spreads.json");
+    left.sort();
+    assert_eq!(
+        left,
+        vec![format!("spreads.json.tmp.{}", std::process::id())],
+        "the temporary this process left behind carries its own id, so a second \
+         instance of the app writes beside it rather than into it"
+    );
+}
+
+/// The written spelling of a shape is pinned, because the file is meant to be edited
+/// by hand.
+///
+/// `an_older_or_hand_edited_store_still_loads` proves that `"double"` *loads*, and a
+/// round trip stays green under any self-consistent serde setting — including one
+/// that writes `"Double"` and reads `"Double"`, which would leave a hand-edited file
+/// loading as nothing at all. So this asserts the bytes, not the round trip.
+#[test]
+fn the_written_shape_is_the_spelling_the_file_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("spreads.json");
+    let root = dir.path().join("books");
+
+    let mut g = GallerySpreads::default();
+    g.set_shape(&root.join("001.png"), 0, Double);
+    g.set_shape(&root.join("002.png"), 0, Single);
+    save_spread_overrides(&store, &root, &g).unwrap();
+
+    let text = std::fs::read_to_string(&store).unwrap();
+    assert!(
+        text.contains("\"double\""),
+        "the documented spelling must be what is written, not just what loads:\n{text}"
+    );
+    assert!(
+        !text.contains("\"Double\""),
+        "serde's own variant spelling leaked into the file:\n{text}"
+    );
+}
+
+/// A page key that is not a number costs **that page**, and nothing else.
+///
+/// This is the seam between two documented rules that pull in opposite directions,
+/// so it is worth naming rather than leaving to be discovered:
+///
+/// * A store that cannot be **read at all** — missing, malformed, the wrong shape —
+///   is an empty override set. One unusable byte costs the user every override.
+///
+/// * A store that reads, with one page key that is not a number, keeps every other
+///   override. The alternative is failing the parse over a key nothing can address
+///   anyway, which turns one typo into the whole-empty case above.
+///
+/// The second is the *tolerant* reading and it is the one implemented, because the
+/// cost asymmetry is not symmetric: dropping one unreachable key loses nothing, and
+/// failing the parse loses everything. (The thumbnail cache's "every failure is a
+/// miss" is a *per-entry* rule and its entries are separate files; here one file
+/// holds every gallery, so the same reasoning has to be applied at the key rather
+/// than at the file.)
+#[test]
+fn a_page_key_that_is_not_a_number_costs_that_page_and_no_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("spreads.json");
+    let root = std::path::PathBuf::from(r"C:\books\vol1.cbz");
+    std::fs::write(
+        &store,
+        concat!(
+            "{\n",
+            "  \"C:\\\\books\\\\vol1.cbz\": { \"lead_lone\": 3, \"pages\": {\n",
+            "    \"001.png\": { \"0\": \"double\", \"x\": \"single\", \"\": \"double\" },\n",
+            "    \"002.png\": { \"0\": \"single\" }\n  } }\n",
+            "}",
+        ),
+    )
+    .unwrap();
+
+    let g = load_spread_overrides(&store, &root);
+    assert_eq!(g.lead_lone, 3, "the rest of the entry is untouched");
+    assert_eq!(g.shape_for(&root.join("001.png"), 0), Some(Double));
+    assert_eq!(g.shape_for(&root.join("002.png"), 0), Some(Single));
+    assert_eq!(g.shape_for(&root.join("001.png"), 1), None, "no page 1 was ever named");
+    assert_eq!(
+        g.pages.len(),
+        2,
+        "the two keys that are not numbers are dropped, and nothing else is: {:?}",
+        g.pages
+    );
+}
+
+/// A store bigger than [`SPREADS_MAX_BYTES`] is not read, and an entry with more
+/// pages than [`SPREADS_MAX_PAGES`] is dropped whole.
+///
+/// **Premises are checked, not assumed.** Both fixtures are written *through the
+/// library*, so a typo in a hand-built JSON string could not be mistaken for a cap
+/// biting; and each half asserts the *other* cap is not the one firing, so "empty
+/// because it was capped" cannot pass for "empty because it did not parse".
+///
+/// Whole-entry-or-nothing for the entry cap is deliberate and load-bearing: a
+/// `HashMap`'s iteration order is randomised per process, so keeping "the first
+/// `SPREADS_MAX_PAGES` of them" would hand back a different set of overrides on
+/// every launch, and a user could never reproduce what they saw.
+#[test]
+fn the_two_caps_degrade_to_nothing_rather_than_to_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::path::PathBuf::from(r"C:\books\vol1.cbz");
+
+    // Entry cap: valid, and *under* the byte cap, so only the entry cap can fire.
+    let mut many = GallerySpreads::default();
+    let pages = SPREADS_MAX_PAGES + 1;
+    for page in 0..pages as u32 {
+        many.set_shape(&root.join("001.png"), page, Shape::Double);
+    }
+    let store = dir.path().join("entries.json");
+    save_spread_overrides(&store, &root, &many).unwrap();
+    let len = std::fs::metadata(&store).unwrap().len();
+    assert!(
+        len <= SPREADS_MAX_BYTES,
+        "this fixture must stay under the byte cap ({len} bytes) or the other cap \
+         would be what is being tested"
+    );
+    let g = load_spread_overrides(&store, &root);
+    assert!(
+        g.pages.is_empty(),
+        "an entry over the page cap is dropped whole, not truncated"
+    );
+    assert_eq!(g.lead_lone, LEAD_LONE_DEFAULT, "and the rest of the entry with it");
+
+    // Byte cap: over it, so the read is skipped whatever the contents are — and
+    // **under the page cap, so the other cap cannot be what empties it.** That
+    // attribution is the whole difficulty: the first version of this fixture was
+    // 40 000 short-named entries, which is over both caps, and it passed with the
+    // byte cap removed because the page cap caught it instead. A mutation-verified
+    // guard that another guard can satisfy is not one.
+    let mut huge = GallerySpreads::default();
+    let wide: String = "p".repeat(200);
+    let entries = 5_000usize;
+    for i in 0..entries {
+        huge.set_shape(&root.join(format!("{wide}{i}.png")), 0, Shape::Double);
+    }
+    let store = dir.path().join("huge.json");
+    save_spread_overrides(&store, &root, &huge).unwrap();
+    let len = std::fs::metadata(&store).unwrap().len();
+    assert!(
+        len > SPREADS_MAX_BYTES,
+        "this fixture must be over the byte cap ({len} bytes) or nothing is being tested"
+    );
+    assert!(
+        entries <= SPREADS_MAX_PAGES,
+        "this fixture must be under the page cap ({entries} entries) or the page cap \
+         would be what is being tested"
+    );
+    assert_empty(&load_spread_overrides(&store, &root));
+
+    // The control: the same shape of store, comfortably inside both caps, loads.
+    let mut few = GallerySpreads::default();
+    few.set_shape(&root.join("001.png"), 0, Shape::Double);
+    let store = dir.path().join("few.json");
+    save_spread_overrides(&store, &root, &few).unwrap();
+    assert_eq!(
+        load_spread_overrides(&store, &root).shape_for(&root.join("001.png"), 0),
+        Some(Double),
+        "a store inside both caps is not affected by either"
+    );
+}
+
+/// A path with no file name stores nothing, rather than colliding on the empty one.
+///
+/// `file_name_of` answers `""` for one, and the store is keyed by that name, so
+/// every such path would share the entry `("", page)` and the last write would
+/// silently replace the previous one's decision. `spread_root_key` refuses the same
+/// empty string for a *root*; this closes the same asymmetry one level down.
+///
+/// Nothing reachable today produces such a path — a folder scan and `extract_zip`
+/// both name every file they yield — which is why the guard is a refusal rather
+/// than an error: the entry could never have been addressed again anyway.
+#[test]
+fn a_path_with_no_file_name_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = GallerySpreads::default();
+
+    // Two different nameless paths: with the empty key they would share one entry.
+    g.set_shape(std::path::Path::new(r"C:\"), 0, Double);
+    g.set_shape(std::path::Path::new(".."), 0, Single);
+    assert!(
+        g.pages.is_empty(),
+        "nothing can address an entry keyed by an empty name, so none is written: {:?}",
+        g.pages
+    );
+    assert_eq!(g.shape_for(std::path::Path::new(".."), 0), None);
+
+    // The control: a name that merely *contains* a separator is fine, which is the
+    // whole point of keying on the file name rather than the path.
+    g.set_shape(&dir.path().join("sub").join("001.png"), 3, Double);
+    assert_eq!(g.shape_for(&dir.path().join("sub").join("001.png"), 3), Some(Double));
+    assert_eq!(g.pages.len(), 1);
+}
+
 /// An archive's overrides are keyed by the **archive**, and never by the `%TEMP%`
 /// directory its members were extracted into.
 ///
@@ -2227,7 +2532,16 @@ fn an_open_archive_is_keyed_by_its_own_path_not_its_extraction_directory() {
     assert_eq!(
         spread_root_key(None, std::path::Path::new("")),
         None,
-        "an unresolvable root keys nothing rather than one shared empty entry"
+        "the empty path is the one value that names no gallery, so it keys nothing \
+         rather than one shared empty entry"
+    );
+    // **No parent is not the test.** `.` has no parent and is not empty, so it is a
+    // name like any other - and the doc comment says so, because "a root with no
+    // name" reads like it covers this case and it does not.
+    assert_eq!(
+        spread_root_key(None, std::path::Path::new(".")),
+        Some(".".to_string()),
+        "a relative root is a name like any other"
     );
 }
 
@@ -2240,16 +2554,17 @@ fn an_open_archive_is_keyed_by_its_own_path_not_its_extraction_directory() {
 /// case and it does live in `%APPDATA%`, which is why the two being together
 /// would be a mistake rather than a tidiness question.
 ///
-/// The name is asserted because this is a path the user is meant to be able to
-/// find: it is disclosed beside the settings that turn the feature on, where
-/// deleting the one file clears every override.
+/// The file *name* is asserted because it is a published name, not an internal one:
+/// the store is meant to be found, opened, edited and deleted by whoever is reading
+/// it, and a path described three different ways in three places is a path nobody
+/// can follow.
 #[test]
 fn the_overrides_live_beside_the_thumbnail_cache_not_beside_the_config() {
     let store = spreads_root().expect("LOCALAPPDATA is set on Windows");
     assert_eq!(
         store.file_name().and_then(|n| n.to_str()),
         Some("spreads.json"),
-        "the settings panel prints this name: {store:?}"
+        "the documented file name: {store:?}"
     );
     assert_eq!(
         store.parent(),
