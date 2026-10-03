@@ -2250,11 +2250,12 @@ impl MyApp {
         // Saved, not just dropped: a store that still holds the stale entry hands it
         // back on the next launch, so dropping it in memory only would make "a
         // re-export clears the override" true for one session and false across a
-        // restart. The cost is a write on the UI thread per changed file, bounded by
-        // `SPREADS_MAX_BYTES` — a departure from the rule that this thread does no
-        // I/O, taken because the alternative is an override that survives the restart
-        // it was cleared for. The thumbnail cache writes the same bytes on a worker;
-        // this cannot, because the state being written is the app's own.
+        // restart. The cost is a write on the UI thread, which is a departure from
+        // the rule that this thread does no I/O — taken because the alternative is
+        // an override that survives the restart it was cleared for, and bounded in
+        // practice: `check_changed` only calls this for a file the app holds state
+        // for, so it is the handful of previewed or on-screen files rather than the
+        // folder, and the bytes are capped at `SPREADS_MAX_BYTES`.
         self.save_spreads();
         let shown_gone = self.shown.as_ref().is_some_and(|s| s.path == p);
         if self.full.as_ref().is_some_and(|f| f.path == p) {

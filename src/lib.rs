@@ -5389,7 +5389,16 @@ impl GallerySpreads {
 /// the whole contract, and it is why this returns the value rather than a `Result`
 /// — a caller that could handle the error by refusing to open a folder would be a
 /// worse app. Two refusals join them: a store over [`SPREADS_MAX_BYTES`] is not read
-/// at all, and an entry over [`SPREADS_MAX_PAGES`] is dropped whole.
+/// at all, and an entry over [`SPREADS_MAX_PAGES`] is emptied of its pages.
+///
+/// **An over-cap store is honoured as empty, and [`save_spread_overrides`] treats
+/// the same file as untouchable.** The asymmetry is deliberate and is the whole
+/// point of stating it in both places: returning empty here is safe because this
+/// function only *reads*. The decisions are not honoured this session, the pairings
+/// fall back to the detector, and the file is still on disk for next time. A save
+/// cannot afford the same shrug, because its read is the first half of a
+/// read-modify-write — so it refuses over the cap and writes nothing. Do not
+/// "simplify" this by having one helper serve both.
 ///
 /// `root` names the gallery the way [`spread_root_key`] produced it; `store` is
 /// the file, which the caller passes in so a test can point it at a temporary
@@ -5417,8 +5426,10 @@ pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
     // `lead_lone` of 99 is a thing that will happen, and obeying it stands the
     // first 99 pages of the gallery alone.
     g.lead_lone = g.lead_lone.min(LEAD_LONE_MAX);
-    // Whole entry or nothing, as `SPREADS_MAX_PAGES` says: keeping "some" of them
-    // would mean keeping a different some on every launch.
+    // All of them or none, as `SPREADS_MAX_PAGES` says: keeping a subset would
+    // mean keeping a different subset on every launch. `lead_lone` is untouched —
+    // it is one number, it is not what the cap is about, and a gallery whose pages
+    // were all dropped still has a front matter the reader chose.
     if g.pages.len() > SPREADS_MAX_PAGES {
         g.pages.clear();
     }
@@ -5445,11 +5456,11 @@ pub const SPREADS_MAX_BYTES: u64 = 1 << 20;
 ///
 /// The size cap already bounds what a *file* can produce, so this is the second
 /// line of defence for the in-memory store — and it exists because the two degrade
-/// differently. It is also deliberately **all or nothing**: past the cap the entry
-/// is dropped whole rather than truncated to some of its entries, because a
-/// `HashMap`'s iteration order is randomised per process, so a truncated load would
-/// hand back a *different* set of overrides on every launch and nothing would ever
-/// look wrong.
+/// differently. It is deliberately **all of them or none**: past the cap the whole
+/// page map is dropped rather than truncated to some of its entries, because a
+/// `HashMap`'s iteration order is randomised, so a truncated load would hand back a
+/// *different* set of overrides on every launch and nothing would ever look wrong.
+/// `lead_lone` survives; it is one number and it is not what the cap is about.
 pub const SPREADS_MAX_PAGES: usize = 20_000;
 
 /// The store's own name plus `.tmp.<pid>` — the half-written-entry guard, made
@@ -5491,17 +5502,45 @@ pub fn spreads_tmp(store: &Path, pid: u32) -> PathBuf {
 /// **A read-modify-write, not a whole-file overwrite.** One file holds every
 /// gallery, so writing one gallery's entry over the top of it would delete every
 /// other gallery's decisions — with no error and nothing on screen to say so. A
-/// store that cannot be read is treated as empty and replaced, which is the same
-/// rule [`load_spread_overrides`] reads it by.
+/// store that cannot be *parsed* is treated as empty and replaced, which is the
+/// same rule [`load_spread_overrides`] reads it by.
 ///
-/// Returns the error rather than swallowing it, but the app's caller ignores it:
-/// a read-only or full disk must not break browsing, and the decisions are still in
-/// memory for the session. There is no retry — the next change saves again.
+/// **An over-cap store is LEFT ALONE, and that is the opposite of what a load
+/// does with one.** [`load_spread_overrides`] over [`SPREADS_MAX_BYTES`] returns
+/// empty: the file is simply not honoured this session, which is visible (the
+/// pairings are the detected ones) and recoverable (the file is still there, and
+/// shrinking or deleting it brings the decisions back). A save cannot do that,
+/// because saving *is* this read: read-modify-write against a store it could not
+/// read would replace that gallery's real entry — and every other gallery's, since
+/// a parse failure takes the whole file — with what it read, which is nothing. That
+/// is the same silent, unrecoverable loss [`spreads_tmp`] exists to prevent, one
+/// level down, and it is why this returns an error over the cap instead of writing.
+///
+/// So: **no bytes are written, the file is left exactly as it was, and the caller
+/// is told the decision was not persisted.** The app's caller ignores that error —
+/// the decisions are still in memory for the session — but the contract is
+/// `Err`, because a save that did not happen should not report success.
+///
+/// A store within the cap but over [`SPREADS_MAX_PAGES`] for one gallery is a
+/// different case and is *not* refused: it parses, so replacing that one entry
+/// loses only that entry, which is what the user just asked to change anyway.
 pub fn save_spread_overrides(
     store: &Path,
     root: &Path,
     g: &GallerySpreads,
 ) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::metadata(store) {
+        if meta.len() > SPREADS_MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "the overrides file is {} bytes, over the {SPREADS_MAX_BYTES}-byte \
+                     cap, so it was not read and not written",
+                    meta.len()
+                ),
+            ));
+        }
+    }
     let mut all: SpreadStore = std::fs::read_to_string(store)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())

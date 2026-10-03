@@ -2165,6 +2165,103 @@ fn two_instances_of_the_app_cannot_write_the_same_temporary() {
     );
 }
 
+/// An over-cap store is **left alone by a save**, and honoured as empty by a load.
+///
+/// **The two halves are separate assertions because one cannot witness the other.**
+/// Both a load and a correctly-refusing save leave an over-cap store *looking* the
+/// same to the next load — empty either way — so an assertion on the load alone
+/// cannot tell "left alone" from "rewritten as empty", which is the failure that
+/// matters: the store is a read-modify-write, so a save that could not read it would
+/// replace that gallery's real entry, and every other gallery's with it, and then
+/// there is no second copy anywhere. (This is the same trap as the two caps in
+/// `the_two_caps_degrade_to_nothing_rather_than_to_an_error`, where one cap could
+/// satisfy the other's assertion; the remedy is the same — state what each half
+/// proves, and check the premises.)
+///
+/// The fixture is **hand-built**, because a correct save refuses to write a store
+/// over the cap — asking `save_spread_overrides` to produce one would be asking for
+/// the bug this test exists to catch. It is checked three ways before it is used:
+/// over the cap, parseable, and still holding the entry that a clobbering save would
+/// destroy.
+#[test]
+fn an_over_cap_store_is_left_alone_by_a_save_and_ignored_by_a_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("spreads.json");
+    let root = std::path::PathBuf::from(r"C:\books\vol1.cbz");
+
+    // Wide names rather than many of them, so the *page count* stays under
+    // `SPREADS_MAX_PAGES` and the byte cap is unambiguously the one in play.
+    let wide: String = "p".repeat(200);
+    // The root goes into a JSON string, so its backslashes are escaped. That is not
+    // a detail: the first version of this fixture wrote the raw path, and the
+    // "must be a valid store" premise check below caught it on the first run.
+    let key = root.to_string_lossy().replace('\\', "\\\\");
+    let mut json = format!(
+        "{{ \"{key}\": {{ \"lead_lone\": 2, \"pages\": {{ \"001.png\": {{ \"0\": \"double\" }}"
+    );
+    for i in 0..5_000usize {
+        json.push_str(&format!(", \"{wide}{i}.png\": {{ \"0\": \"double\" }}"));
+    }
+    json.push_str(" } } }");
+    std::fs::write(&store, &json).unwrap();
+
+    let len = std::fs::metadata(&store).unwrap().len();
+    assert!(
+        len > SPREADS_MAX_BYTES,
+        "this fixture must be over the byte cap ({len} bytes) or nothing is being tested"
+    );
+    let before = std::fs::read_to_string(&store).unwrap();
+    serde_json::from_str::<serde_json::Value>(&before).expect("the fixture must be a valid store");
+    let pages_in_fixture = before.matches("\": { \"0\": \"double\" }").count();
+    assert!(
+        pages_in_fixture <= SPREADS_MAX_PAGES,
+        "the fixture has {pages_in_fixture} page entries, over SPREADS_MAX_PAGES, so \
+         the page cap could be what is being tested instead of the byte cap"
+    );
+
+    // Half one: the load honours nothing, which is safe because a load only reads.
+    assert_empty(&load_spread_overrides(&store, &root));
+
+    // Half two: the save refuses, so the bytes are untouched. An `Err` *and* no
+    // write — both are asserted, because a save that reported success over the cap
+    // and one that reported failure after writing it are different bugs with the
+    // same consequence.
+    let mut small = GallerySpreads::default();
+    small.set_shape(&root.join("001.png"), 0, Shape::Single);
+    assert!(
+        save_spread_overrides(&store, &root, &small).is_err(),
+        "a save that cannot read the store must report that it did not persist, not \
+         return Ok and leave the caller thinking the decision was saved"
+    );
+    let after = std::fs::read_to_string(&store).unwrap();
+    assert_eq!(
+        after, before,
+        "an over-cap store must be left byte-for-byte intact: a save that read it as \
+         empty would have replaced this gallery's real entry with the value it just \
+         handed in, and every other gallery's with nothing"
+    );
+
+    // ...and "intact" is checked against the *current* file's content, not only
+    // against the bytes captured before: the entry that would have been destroyed is
+    // still in it, parsed independently of this library's own reader.
+    let parsed: serde_json::Value = serde_json::from_str(&after).expect("the file still parses");
+    assert_eq!(
+        parsed[&*root.to_string_lossy()]["pages"]["001.png"]["0"],
+        "double",
+        "the override a clobbering save would have destroyed is still in the file"
+    );
+
+    // The control, so "nothing was written" cannot be confused with "nothing could
+    // be written": a store inside the cap does take the new value.
+    let small_store = dir.path().join("small.json");
+    save_spread_overrides(&small_store, &root, &small).unwrap();
+    assert_eq!(
+        load_spread_overrides(&small_store, &root).shape_for(&root.join("001.png"), 0),
+        Some(Single),
+        "a store inside the cap is read-modify-written as usual"
+    );
+}
+
 /// The written spelling of a shape is pinned, because the file is meant to be edited
 /// by hand.
 ///
@@ -2278,7 +2375,10 @@ fn the_two_caps_degrade_to_nothing_rather_than_to_an_error() {
         g.pages.is_empty(),
         "an entry over the page cap is dropped whole, not truncated"
     );
-    assert_eq!(g.lead_lone, LEAD_LONE_DEFAULT, "and the rest of the entry with it");
+    assert_eq!(
+        g.lead_lone, LEAD_LONE_DEFAULT,
+        "the offset is not what the cap is about, so it survives the emptied page map"
+    );
 
     // Byte cap: over it, so the read is skipped whatever the contents are — and
     // **under the page cap, so the other cap cannot be what empties it.** That
