@@ -1117,6 +1117,19 @@ struct Preview {
     target: u32,
     // Pixel dimensions of the texture, for the same check.
     px: (u32, u32),
+    // Full-resolution tiles cut from `full` **for this page**, keyed in this
+    // page's own source pixels.
+    //
+    // **Why a page other than the cursor's keeps its own map.** The cursor page's
+    // tiles live on the adopted `FullImage`, which is rebuilt - and so cleared -
+    // whenever the cursor moves, and that is what bounds them. A turn's *other*
+    // half has no such slot, and its buffer is on this preview already (see
+    // `full` above), so without a map here a zoomed spread would have nowhere to
+    // keep what it cut. Every map in the app is counted against one `MAX_TILES`
+    // budget by the eviction pass in `central`, so this cannot raise the ceiling -
+    // see the comment there, because the obvious reading of "one map per cached
+    // page" is 16 x 64 tiles and that is not what this is.
+    tiles: HashMap<(u32, u32), Tile>,
     // The file's EXIF orientation tag and the block grid a lossless JPEG crop
     // aligns to. Cached with the preview so the crop UI never has to touch the
     // file: a rectangle drawn on the *displayed* picture must be expressed in
@@ -1137,6 +1150,30 @@ struct AnimView {
 struct Tile {
     tex: TextureHandle,
     last_drawn: u64,
+}
+
+/// One page of a turn, as the tile loop needs to see it: which buffer, how sharp
+/// that page's own preview already is, and where the page is.
+///
+/// Gathered as an owned value before the loop borrows the tile maps, so the loop can
+/// hold one page's tiles and the other's at the same time - two fields of `MyApp`,
+/// which one `&mut self` could not be.
+struct TilePage {
+    /// Full-resolution pixels for **this** page. An `Arc` clone, so holding it costs
+    /// a refcount.
+    data: Arc<ImageData>,
+    /// Texture px per source px, for this page's own preview: the density below
+    /// which the preview is already as sharp as the display and tiles are wasted.
+    preview_density: f32,
+    /// The page's picture in **unrotated** image space. The tile grid is in this
+    /// page's own source pixels, so this is the rectangle they are laid out from.
+    paint: egui::Rect,
+    /// The same rectangle after `xform` - the page's slot - which is what can be on
+    /// screen. Kept separate because painting the *slot* would apply the transform
+    /// twice; see the `page_rects` comment.
+    slot: egui::Rect,
+    /// The page's own transform, for `paint_tex`.
+    xform: Xform,
 }
 
 struct FullImage {
@@ -1871,12 +1908,22 @@ impl MyApp {
         let partner = self.turn_partner();
         // The plan is computed by the library so it can be tested; all this does
         // is describe the current state to it.
+        //
+        // `partner_needs_full` asks the *partner's* `needs_full`, which is the
+        // cursor's own question asked of a different key: `pv.full` is set by the
+        // single-pass decode, so for most sources this is `false` and the partner's
+        // full buffer is already in memory to cut tiles from. It is `true` for a
+        // source over `FAST_FULL_MAX_PIXELS`, whose preview is DCT-scaled and
+        // carries no full buffer — the common case for a manga scan.
         let jobs = match &cur {
             None => Vec::new(),
             Some(cur) => image_viewer::plan_jobs(&image_viewer::Plan {
                 files: &self.gallery.files,
                 index: i,
                 current_page: self.gallery.current_page(),
+                partner_needs_full: partner
+                    .as_ref()
+                    .is_some_and(|k| self.full_due.is_none() && self.needs_full(k)),
                 partner,
                 cached: &cached,
                 failed: &self.failed,
@@ -1975,6 +2022,7 @@ impl MyApp {
                                 exif_tag: p.exif_tag,
                                 crop_grid: p.crop_grid,
                                 px,
+                                tiles: HashMap::new(),
                             },
                         );
                         // A refine that lands clears the pending flag. If the
@@ -2082,6 +2130,29 @@ impl MyApp {
                                 load_ms,
                                 exif_tag,
                             });
+                        } else if let Some(pv) = self.previews.get_mut(&key) {
+                            // **Keep it anyway**, on the page it belongs to.
+                            //
+                            // A `Kind::Full` decode is now planned for the turn's
+                            // *other half* as well (`Plan::partner_needs_full`), and
+                            // dropping that result is what made the defect the user
+                            // reported permanent rather than slow: the partner's half
+                            // of a zoomed spread stayed at preview resolution for the
+                            // whole session, with no error and nothing to see. The
+                            // plan asks again on every schedule, so a discarded
+                            // partner decode was not one wasted decode - it was a
+                            // re-decode of a 30 MB page every time the user moved.
+                            //
+                            // **On the preview, which is where a single-pass decode
+                            // puts the same buffer**, so the two are indistinguishable
+                            // afterwards: `needs_full` answers "no" (the buffer is
+                            // there), `sync_shown` adopts it when the cursor arrives,
+                            // and the LRU drops it with the page it belongs to. A
+                            // decode for a page that is no longer on screen lands
+                            // here too, and that is the same state a neighbour's
+                            // single-pass decode has always left behind - so it is
+                            // kept rather than thrown away, on purpose.
+                            pv.full = Some(data);
                         }
                     }
                     Err(e) => {
@@ -3374,9 +3445,47 @@ impl MyApp {
             // input, not from when the tiles happen to finish.
             self.lat.t_zoom = Some(Instant::now());
             self.lat.want_viewport_tiles = true;
-            // Keep the point under the cursor fixed.
-            let c = anchor - panel.center();
-            offset = c - (c - offset) * (target_scale / scale);
+            // Keep the point under the cursor fixed — measured from the
+            // **content's** centre, not the panel's.
+            //
+            // `anchor - panel.center()` is right only when the content is centred on
+            // the panel, which a turn is not: `spread_rects` puts the seam on the
+            // panel's horizontal centre and extends each page outward, so the
+            // content's centre is the seam plus half the difference of the widths,
+            // and being top-aligned its vertical centre is the panel's top plus half
+            // the tallest page. Both are zero for a single image — which is the case
+            // that expression was written for, and the assumption that hid it.
+            //
+            // `spread_centre` derives its answer from `spread_rects`, so the anchor
+            // cannot drift from the layout the same frame draws.
+            //
+            // **The content's centre is asked twice, at two different scales**, and
+            // that is the whole of the remaining subtlety. A point under the cursor
+            // stays under the cursor if `offset' = anchor - C(s') - (s'/s)·(anchor -
+            // C(s) - offset)`, where `C` is the content's centre *at that scale*:
+            // the two terms bracket the same content point, and `C(s)` is a function
+            // of the scale because the pages are laid out at it. Reusing one `C` for
+            // both is exactly the old line again with a different centre — it agrees
+            // when `C` does not move, which a single image's does not and a turn's
+            // does (`C(s) = (seam ± Δw·s/2, top + h·s/2)`, so `Δ` is 0 only for two
+            // equal-width pages on the horizontal axis and the vertical `Δ` is
+            // non-zero for every turn). With manga mode off both calls answer the
+            // panel centre and the expression collapses to `c - (c - offset)·k`
+            // term for term, so **the single-image path is unchanged**, and
+            // `a_single_page_turn_anchors_on_the_panel_centre` is what says so.
+            let panel4 = [panel.min.x, panel.min.y, panel.width(), panel.height()];
+            let centre_at = |s: f32| {
+                let (cx, cy) = image_viewer::spread_centre(
+                    panel4,
+                    &spread_dims,
+                    s,
+                    self.config.manga_rtl,
+                );
+                Pos2::new(cx, cy)
+            };
+            let c_from = anchor - centre_at(scale);
+            let c_to = anchor - centre_at(target_scale);
+            offset = c_to - (c_from - offset) * (target_scale / scale);
             scale = target_scale;
         }
         if resp.dragged() && !self.crop_mode {
@@ -3647,34 +3756,159 @@ impl MyApp {
         }
 
         // --- full-resolution tiles ---
-        let preview_density = tex_w / img_px.x; // texture px per source px
+// --- full-resolution tiles ---
+        //
+        // **Over every page of the turn, not the cursor's alone.** This loop used to
+        // be filtered to `self.full` matching `shown.path` - the cursor - and that
+        // threw away a buffer which was *already in memory*: `sync_shown` adopts the
+        // cursor's full image by `Arc::clone` rather than moving it, and the
+        // single-pass decode hands every cached preview one, so a turn's second half
+        // has its own full-resolution buffer sitting on `previews[partner].full`. The
+        // expensive decode had already happened; nothing was looking at the result.
+        //
+        // For a source over `FAST_FULL_MAX_PIXELS` there is no such buffer - the
+        // preview is a DCT-scaled decode - so the plan asks for one
+        // (`Plan::partner_needs_full`) and `Msg::Full` keeps it on that page's own
+        // preview. Those are ordinary manga scans, so this is the common case and not
+        // a corner one. Until that decode lands the page is simply not sharpened, and
+        // its preview is on screen underneath.
+        //
+        // **`MAX_TILES` is still the single bound**, and it has to be counted across
+        // pages: cuts are on demand (`TILES_PER_FRAME`, and only over what is
+        // visible), so the steady state is "a zoomed spread" - 64 tiles between two
+        // pages, not 64 each - and the eviction pass below sums every page's map
+        // before dropping anything. What a page is *not* is a page that keeps its
+        // tiles after it leaves the screen, which is why the count is global rather
+        // than per page: one map per cached page, each with its own 64, is 16 x 256 MB
+        // and the ceiling would have been raised by accident.
         let screen_density = scale * ppp; // physical px per source px
         self.frame += 1;
         let frame = self.frame;
-        if let Some(full) = self.full.as_mut().filter(|f| f.path == shown.path) {
+
+        // What each page of the turn can be sharpened from, gathered **before** any
+        // mutable borrow and owned: an `Arc` clone (a refcount) plus that page's own
+        // density and its two rectangles. `None` is a page with no full buffer.
+        //
+        // **Page 0 is the cursor, and `pages` is cursor-first**, so the entry the old
+        // code computed for it is the one at index 0 - `pv.px.0 / ow` is the same
+        // `tex_w / img_px.x` (`px` *is* the texture's size, and `ow` is `orig`), and
+        // the single-image path below is spelled out separately so it does not depend
+        // on that being true.
+        // The cursor page's source, whether or not a turn is on screen: the adopted
+        // `FullImage`, at the density the single-image path has always used.
+        //
+        // **Page 0 of a turn reads this too**, and not `previews[shown].full` which
+        // holds the same buffer whenever the single-pass decode produced one. Two
+        // reasons, and the second is the load-bearing one: a source over
+        // `FAST_FULL_MAX_PIXELS` never gets a `pv.full` *at all* - its full decode
+        // lands in `self.full` - so the preview slot is empty for exactly the pages
+        // that need tiles most; and the cursor page's tiles are kept in
+        // `FullImage.tiles`, which `sync_shown` clears whenever the cursor moves.
+        // Two maps for one page would be two budgets' worth of GPU memory and a
+        // re-cut on every navigation.
+        let cursor_page = || {
+            self.full.as_ref().and_then(|f| {
+                (f.path == shown.path).then(|| TilePage {
+                    data: Arc::clone(&f.data),
+                    // texture px per source px
+                    preview_density: tex_w / img_px.x,
+                    paint: if pages.is_empty() { rect } else { page_rects[0] },
+                    slot: if pages.is_empty() { footprint } else { rects[0] },
+                    xform,
+                })
+            })
+        };
+        let tile_pages: Vec<Option<TilePage>> = if pages.is_empty() {
+            // Manga mode off. `self.full` and `rect`/`footprint` are the whole of
+            // what this has ever been given, and they are spelled that way on purpose.
+            Vec::from_iter([cursor_page()])
+        } else {
+            pages
+                .iter()
+                .enumerate()
+                .map(|(i, (key, (ow, _oh), xf))| {
+                    if i == 0 {
+                        return cursor_page();
+                    }
+                    let pv = self.previews.get(key)?;
+                    let data = Arc::clone(pv.full.as_ref()?);
+                    Some(TilePage {
+                        data,
+                        // **This page's** texture against **this page's** source. The
+                        // cursor's numbers on the partner's would decide whether to cut
+                        // tiles from a buffer that is a different size from the one the
+                        // decision was made about.
+                        preview_density: pv.px.0 as f32 / (*ow).max(1) as f32,
+                        // The picture in unrotated image space - the tile grid is in
+                        // this page's own source pixels - and the same rectangle after
+                        // `xform`, which is what can be on screen.
+                        paint: page_rects[i],
+                        slot: rects[i],
+                        xform: *xf,
+                    })
+                })
+                .collect()
+        };
+
+        // The map each page keeps its tiles in, **moved out** for the length of the
+        // loop and put back below: the cursor page's on the adopted `FullImage`
+        // (rebuilt, and so cleared, whenever the cursor moves - the rule that has
+        // always bounded it) and every other page's on its own preview.
+        //
+        // Moved rather than borrowed because two pages' worth have to be held **at
+        // once**, and the borrow checker will not lend `self.full` and
+        // `self.previews` mutably inside one loop even though they are different
+        // fields. `mem::take` leaves an empty map with no allocation, so this is a
+        // pointer move rather than a copy of anything.
+        enum TileMapOwner {
+            Full,
+            Page(ImgKey),
+        }
+        let mut maps: Vec<(HashMap<(u32, u32), Tile>, TileMapOwner)> =
+            Vec::with_capacity(tile_pages.len());
+        for (i, tp) in tile_pages.iter().enumerate() {
+            if tp.is_none() {
+                continue;
+            }
+            if i == 0 {
+                if let Some(f) = self.full.as_mut().filter(|f| f.path == shown.path) {
+                    maps.push((std::mem::take(&mut f.tiles), TileMapOwner::Full));
+                }
+            } else if let Some(pv) = self.previews.get_mut(&pages[i].0) {
+                let key = pages[i].0.clone();
+                maps.push((std::mem::take(&mut pv.tiles), TileMapOwner::Page(key)));
+            }
+        }
+
+        let mut budget = TILES_PER_FRAME;
+        let mut pending = false;
+        let mut sharpened = false;
+        for (tp, (tiles, _owner)) in tile_pages.iter().zip(maps.iter_mut()) {
+            let Some(tp) = tp else { continue };
+            let preview_density = tp.preview_density;
+            let (paint, slot, page_xform) = (tp.paint, tp.slot, tp.xform);
             if screen_density > preview_density {
-                let (fw, fh) = (full.data.width, full.data.height);
-                let vis = panel.intersect(footprint);
+                let (fw, fh) = (tp.data.width, tp.data.height);
+                let vis = panel.intersect(slot);
                 if vis.width() > 0.0 && vis.height() > 0.0 {
-                    let x0 = (((vis.min.x - rect.min.x) / scale).floor().max(0.0) as u32).min(fw);
-                    let y0 = (((vis.min.y - rect.min.y) / scale).floor().max(0.0) as u32).min(fh);
-                    let x1 = (((vis.max.x - rect.min.x) / scale).ceil().max(0.0) as u32).min(fw);
-                    let y1 = (((vis.max.y - rect.min.y) / scale).ceil().max(0.0) as u32).min(fh);
-                    let mut budget = TILES_PER_FRAME;
-                    let mut pending = false;
+                    sharpened = true;
+                    let x0 = (((vis.min.x - paint.min.x) / scale).floor().max(0.0) as u32).min(fw);
+                    let y0 = (((vis.min.y - paint.min.y) / scale).floor().max(0.0) as u32).min(fh);
+                    let x1 = (((vis.max.x - paint.min.x) / scale).ceil().max(0.0) as u32).min(fw);
+                    let y1 = (((vis.max.y - paint.min.y) / scale).ceil().max(0.0) as u32).min(fh);
 
                     if x1 > x0 && y1 > y0 {
                         for ty in (y0 / TILE)..=((y1 - 1) / TILE) {
                             for tx in (x0 / TILE)..=((x1 - 1) / TILE) {
-                                if !full.tiles.contains_key(&(tx, ty)) {
+                                if !tiles.contains_key(&(tx, ty)) {
                                     if budget == 0 {
                                         pending = true;
                                         continue;
                                     }
                                     budget -= 1;
-                                    let tex = make_tile(&ctx, &full.data, tx, ty);
+                                    let tex = make_tile(&ctx, &tp.data, tx, ty);
                                     perf::count(perf::C_TILES_CREATED, 1);
-                                    full.tiles.insert(
+                                    tiles.insert(
                                         (tx, ty),
                                         Tile {
                                             tex,
@@ -3682,43 +3916,103 @@ impl MyApp {
                                         },
                                     );
                                 }
-                                let tile = full.tiles.get_mut(&(tx, ty)).unwrap();
+                                let tile = tiles.get_mut(&(tx, ty)).unwrap();
                                 tile.last_drawn = frame;
                                 let (px, py) = (tx * TILE, ty * TILE);
                                 let (tw, th) = (TILE.min(fw - px), TILE.min(fh - py));
                                 let r = Rect::from_min_size(
-                                    rect.min + Vec2::new(px as f32, py as f32) * scale,
+                                    paint.min + Vec2::new(px as f32, py as f32) * scale,
                                     Vec2::new(tw as f32, th as f32) * scale,
                                 );
-                                paint_tex(&painter, tile.tex.id(), r, uv, xform);
+                                paint_tex(&painter, tile.tex.id(), r, uv, page_xform);
                             }
                         }
                     }
-                    if pending {
-                        ctx.request_repaint();
-                    } else {
-                        // Everything the viewport needs is on screen.
-                        self.lat.viewport_tiles_ready(Instant::now());
-                    }
-                }
-
-                // Bound GPU memory: drop the least recently drawn tiles.
-                if full.tiles.len() > MAX_TILES {
-                    let mut old: Vec<((u32, u32), u64)> = full
-                        .tiles
-                        .iter()
-                        .filter(|(_, t)| t.last_drawn < frame)
-                        .map(|(k, t)| (*k, t.last_drawn))
-                        .collect();
-                    old.sort_by_key(|(_, l)| *l);
-                    let excess = full.tiles.len() - MAX_TILES;
-                    for (k, _) in old.into_iter().take(excess) {
-                        full.tiles.remove(&k);
-                    }
                 }
             } else if screen_density < preview_density * 0.5 {
-                full.tiles.clear(); // zoomed well out: release tile textures
+                tiles.clear(); // zoomed well out: release tile textures
             }
+        }
+        // Put every page's tiles back where they came from, **before** the bound is
+        // counted - the count is over `self`, not over the locals above.
+        //
+        // A map whose owner has gone is dropped rather than put back anywhere else.
+        // `self.full` cannot be dropped between here and there (nothing in the loop
+        // touches it) and `previews` cannot lose an entry to `evict_previews` in the
+        // same breath, so this is belt-and-braces: a tile texture with no owner is
+        // released, which is the safe direction to be wrong in.
+        for (tiles, owner) in maps {
+            match owner {
+                TileMapOwner::Full => {
+                    if let Some(f) = self.full.as_mut() {
+                        f.tiles = tiles;
+                    }
+                }
+                TileMapOwner::Page(key) => {
+                    if let Some(pv) = self.previews.get_mut(&key) {
+                        pv.tiles = tiles;
+                    }
+                }
+            }
+        }
+
+        // Bound GPU memory: drop the least recently drawn tiles, **counting every
+        // page's map**. One page's map used to be the whole of it, and it is the
+        // whole of it in the single-image case still - so with manga mode off this is
+        // the rule that was always here, with an empty sum added.
+        //
+        // Counted over the whole cache rather than the pages on screen, because a
+        // page that leaves the screen keeps its tiles until it is evicted: counting
+        // only the visible pages would let each new turn start a fresh budget and the
+        // total would climb with every turn the reader flipped through.
+        let held: usize = self.full.as_ref().map_or(0, |f| f.tiles.len())
+            + self.previews.values().map(|pv| pv.tiles.len()).sum::<usize>();
+        if held > MAX_TILES {
+            enum Owner {
+                Full,
+                Page(ImgKey),
+            }
+            let mut old: Vec<(Owner, (u32, u32), u64)> = Vec::new();
+            if let Some(f) = self.full.as_ref() {
+                old.extend(
+                    f.tiles
+                        .iter()
+                        .filter(|(_, t)| t.last_drawn < frame)
+                        .map(|(k, t)| (Owner::Full, *k, t.last_drawn)),
+                );
+            }
+            for (key, pv) in self.previews.iter() {
+                old.extend(
+                    pv.tiles
+                        .iter()
+                        .filter(|(_, t)| t.last_drawn < frame)
+                        .map(|(k, t)| (Owner::Page(key.clone()), *k, t.last_drawn)),
+                );
+            }
+            old.sort_by_key(|(_, _, last)| *last);
+            for (owner, k, _) in old.into_iter().take(held - MAX_TILES) {
+                match owner {
+                    Owner::Full => {
+                        if let Some(f) = self.full.as_mut() {
+                            f.tiles.remove(&k);
+                        }
+                    }
+                    Owner::Page(key) => {
+                        if let Some(pv) = self.previews.get_mut(&key) {
+                            pv.tiles.remove(&k);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The two outcomes, once every borrow of `self` is done: `self.lat` cannot be
+        // touched while `self.previews` is lent out, which is why they are flags.
+        if pending {
+            ctx.request_repaint();
+        } else if sharpened {
+            // Everything the viewport needs is on screen, on every page of the turn.
+            self.lat.viewport_tiles_ready(Instant::now());
         }
 
         // --- crop ---

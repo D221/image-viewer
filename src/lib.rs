@@ -816,6 +816,54 @@ pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -
     }).collect()
 }
 
+/// Where a turn's content is centred when the view offset is zero, which is what a
+/// zoom measures from to keep the point under the cursor where it is.
+///
+/// **Not the panel centre in a spread, and that is the whole of it.** `spread_rects`
+/// puts the seam on the panel's horizontal centre and extends each page outward, so
+/// the content's centre is the seam plus half the difference of the two widths - zero
+/// for two pages of equal width, which is why the displacement is invisible on a
+/// clean pair and shows up the moment pages differ. Vertically it is not the panel's
+/// centre either: the turn is **top-aligned**, so the centre is the panel's top plus
+/// half the *tallest* page. For a lone page the content sits entirely on one side of
+/// the seam, displaced by up to half its own half. Both offsets are zero for a single
+/// image, which is the case the single-image view's own zoom maths was written for and
+/// the assumption this replaces.
+///
+/// ## Derived from `spread_rects`, not restated
+///
+/// The bounding box of the rects [`spread_rects`] actually returned. A second
+/// statement of the seam rule would be a second rule: `rtl` decides which page is
+/// which side, the sub-pixel seam slide in the paint path does not move any rect's
+/// centre away from what this returns, and a "centre" computed from the seam and the
+/// widths by hand agrees with the picture only until one of those changes. So the
+/// cost is one two-element `Vec` per zoom frame - nothing beside a decode - and the
+/// two cannot drift apart.
+///
+/// **A turn with no pages answers the panel centre**, exactly what `central` computed
+/// for itself before a turn existed, and bit for bit: `panel[0] + panel[2] * 0.5` is
+/// `Rect::center().x` spelled out with the same operations in the same order. That is
+/// the single-image path, so it must not move.
+///
+/// Same arguments as [`spread_rects`], and the same deliberate non-checks: a turn is
+/// one page or two by construction ([`turn_len`]), and a third page would land on top
+/// of the second rather than widening the box.
+pub fn spread_centre(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> (f32, f32) {
+    let rects = spread_rects(panel, pages, scale, rtl);
+    let Some(first) = rects.first() else {
+        return (panel[0] + panel[2] * 0.5, panel[1] + panel[3] * 0.5);
+    };
+    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+        (first[0], first[0] + first[2], first[1], first[1] + first[3]);
+    for r in &rects[1..] {
+        min_x = min_x.min(r[0]);
+        max_x = max_x.max(r[0] + r[2]);
+        min_y = min_y.min(r[1]);
+        max_y = max_y.max(r[1] + r[3]);
+    }
+    ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)
+}
+
 /// Footprint `(width, height)` an image of `w x h` occupies once `xform` has been
 /// applied to it.
 ///
@@ -1239,6 +1287,30 @@ pub struct Plan<'a> {
     /// it is handed, which is the property the stranding bug was untestable
     /// without.
     pub partner: Option<ImgKey>,
+    /// The partner has a preview but **no full-resolution buffer**, so the turn's
+    /// other half is painted from a scaled decode until it gets one.
+    ///
+    /// **A flag, not a key.** The key is [`Plan::partner`] itself, so a separate
+    /// `Option<ImgKey>` here could name a page the plan is not showing a partner of
+    /// ΓÇö the stranding failure this planner's purity exists to rule out, arrived at
+    /// through a field nobody cross-checks. `false` with `partner: None` is simply
+    /// not a state the app can produce: both come from one `turn_partner()` call.
+    ///
+    /// **A full decode, not another preview,** and the common case rather than the
+    /// corner one: a source over [`FAST_FULL_MAX_PIXELS`] is decoded DCT-scaled and
+    /// carries no full buffer at all, and manga scans are frequently large JPEGs.
+    /// When the single-pass decode *did* hand the partner a full buffer there is
+    /// nothing to ask for and the app says so ΓÇö [`MyApp::needs_full`] is the answer
+    /// for both halves.
+    ///
+    /// **Planned at [`PRIO_FULL`], unlike the partner's *preview*.** The preview is
+    /// what makes a half *appear*, so both halves need it before anything is on
+    /// screen and it sits at [`PRIO_CURRENT_PREVIEW`] with its counterpart. A full
+    /// decode is the same refinement the cursor page's own is, so it is a peer of
+    /// that one: at the current priority a 30 MB decode would outrank the cursor
+    /// page's own preview ΓÇö queued at 0 too, so insertion order would decide ΓÇö and
+    /// sit ahead of the entire preload window, to sharpen a page not yet drawn.
+    pub partner_needs_full: bool,
     /// Images that already have a cached preview.
     pub cached: &'a HashSet<ImgKey>,
     /// `(key, kind)` pairs known to be undecodable this session.
@@ -1327,6 +1399,27 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
                 kind: Kind::Preview,
                 prio: PRIO_CURRENT_PREVIEW,
                 target_dim: p.target_dim,
+            });
+        }
+        // ...and its full-resolution decode, so a **zoomed** turn is sharp on both
+        // halves. A partner's `pv.full` is usually already set - the single-pass
+        // decode hands every cached preview one - in which case `partner_needs_full`
+        // is false and there is nothing here, which is why this arm is not a cost in
+        // the common case. It is a cost for a source over `FAST_FULL_MAX_PIXELS`,
+        // whose preview is DCT-scaled and carries no full buffer, and those are
+        // ordinary manga scans.
+        //
+        // `target_dim: 0` like every other full job: a full decode is not asked for a
+        // preview size, and a nonzero one would be a lie about what it was asked for.
+        //
+        // Keyed on the whole `partner` key for the reason the preview above is - a
+        // partner on page 2 is a different picture from its file's page 0.
+        if p.partner_needs_full && !p.failed.contains(&(partner.clone(), Kind::Full)) {
+            jobs.push(Job {
+                key: partner.clone(),
+                kind: Kind::Full,
+                prio: PRIO_FULL,
+                target_dim: 0,
             });
         }
     }

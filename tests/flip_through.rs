@@ -152,6 +152,7 @@ fn plan<'a>(
         index,
         current_page: 0,
         partner: None,
+        partner_needs_full: false,
         cached,
         failed,
         wants_exif: false,
@@ -583,6 +584,7 @@ fn the_plan_wraps_around_a_short_folder() {
         index: 0,
         current_page: 0,
         partner: None,
+        partner_needs_full: false,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
@@ -797,6 +799,216 @@ fn no_partner_leaves_the_plan_exactly_as_it_was() {
             // f[0] is cached and f[4] failed, so distance 2 contributes nothing.
         ],
         "no partner must add, drop, reorder or re-prioritise a single job"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The partner's full-resolution decode
+// ---------------------------------------------------------------------------
+//
+// A turn is one picture to the reader, so both halves are shown at full resolution
+// or the zoom is blurry on one of them. The partner's full buffer is usually
+// **already in memory** - `sync_shown` adopts the cursor's by `Arc::clone`, and the
+// same single-pass decode hands every cached preview one - so most of this costs
+// nothing to ask for.
+//
+// **Not** most of the time, though, and that is the case this section exists for. A
+// scan over `FAST_FULL_PIXELS` (12 MP) is decoded DCT-scaled, so its preview carries
+// no full buffer at all, and manga scans are frequently large JPEGs. So the partner
+// also needs a `Kind::Full` job planned for it, or that half of a zoomed spread stays
+// at preview resolution for the whole session - which is exactly the defect the user
+// reported, on the common case rather than the corner one.
+//
+// **A different priority from the partner's *preview*, on purpose.** The preview is
+// what makes a half *appear*; both halves need it before anything is on screen, so it
+// sits at the current priority with its counterpart. A full decode is the same
+// refinement the cursor page's own is, and that one is [`PRIO_FULL`] - so a partner's
+// full decode is a peer of it. At [`PRIO_CURRENT_PREVIEW`] it would outrank the
+// cursor page's own preview (queued at 0 too, so insertion order would decide) and
+// sit ahead of the whole preload window, which is the cost of a second 30 MB decode
+// spent on a picture that has not been drawn yet.
+
+/// A partner with no full buffer gets a full decode planned - at the *full* priority,
+/// not the current one.
+#[test]
+fn a_partner_without_a_full_decode_gets_a_full_job() {
+    let f = files(3);
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    // A same-document partner on page 2, so the key carries its page: `Job::path()`
+    // drops it, and the job would then decode page 0 of the right file - a different
+    // picture, painted without error.
+    let partner = ImgKey {
+        path: f[1].clone(),
+        page: 2,
+    };
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(partner.clone());
+    p.partner_needs_full = true;
+    let jobs = plan_jobs(&p);
+
+    let full = jobs
+        .iter()
+        .find(|j| j.kind == Kind::Full)
+        .expect("the partner's half is on screen, so it must be sharpened too");
+    assert_eq!(
+        full.key, partner,
+        "planned under the whole key it was given, page number included"
+    );
+    assert_eq!(
+        full.prio,
+        image_viewer::PRIO_FULL,
+        "a full decode is a refinement of a picture already drawn, so it is a peer of the cursor \
+         page's own full decode and not of its preview"
+    );
+    assert_ne!(
+        full.prio,
+        image_viewer::PRIO_CURRENT_PREVIEW,
+        "the control: at the current priority a 30 MB decode would outrank the cursor page's own \
+         preview and the whole preload window"
+    );
+    assert_eq!(full.target_dim, 0, "and it is not a preview job in disguise");
+    // The partner's *preview* is still planned, still at the current priority: a full
+    // decode does not put a picture on screen.
+    assert!(
+        jobs.iter().any(|j| j.key == partner
+            && j.kind == Kind::Preview
+            && j.prio == image_viewer::PRIO_CURRENT_PREVIEW),
+        "both halves paint from their preview and sharpen from their full"
+    );
+}
+
+/// A partner that already has its full buffer is not decoded again.
+///
+/// `pv.full` is set by the single-pass decode, so for most files this is the state -
+/// planning a second decode of a picture whose full resolution is already sitting in
+/// memory would be the waste the single-pass design exists to avoid.
+#[test]
+fn a_partner_that_already_has_its_full_decode_is_not_planned_again() {
+    let f = files(3);
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(ImgKey::first(&f[1]));
+    // What the app passes when `needs_full` says the partner is covered: the buffer is
+    // already there, so there is nothing to ask for.
+    p.partner_needs_full = false;
+
+    let jobs = plan_jobs(&p);
+    assert!(
+        !jobs.iter().any(|j| j.path() == f[1] && j.kind == Kind::Full),
+        "the buffer is already in memory; a second full decode of the same page is pure cost"
+    );
+    // The premise, so the assertion above is not satisfied by a plan that forgot the
+    // partner entirely: it is still planned for its preview.
+    assert!(
+        jobs.iter().any(|j| j.path() == f[1] && j.kind == Kind::Preview),
+        "the partner is still planned - what it does not need is a *full* decode"
+    );
+    // ...and the control: the same plan with the field set does add exactly one job,
+    // so the two assertions above are about `partner_needs_full` and not about a plan that
+    // never mentions a partner's full decode at all.
+    p.partner_needs_full = true;
+    assert_eq!(
+        plan_jobs(&p).len(),
+        jobs.len() + 1,
+        "asking for it is exactly one more job, so the two assertions above are about the field"
+    );
+}
+
+/// A partner whose full decode failed is not retried, because `failed` is permanent
+/// for the session and a spread would otherwise retry a hopeless file on every
+/// navigation.
+#[test]
+fn a_partner_whose_full_decode_failed_is_not_retried() {
+    let f = files(3);
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> =
+        [(ImgKey::first(&f[1]), Kind::Full)].into_iter().collect();
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(ImgKey::first(&f[1]));
+    p.partner_needs_full = true;
+    let jobs = plan_jobs(&p);
+
+    assert!(
+        !jobs.iter().any(|j| j.path() == f[1] && j.kind == Kind::Full),
+        "a failure is remembered for the session; retrying it every navigation is the \
+         'a transient error poisons the image' failure in its other direction"
+    );
+    assert!(
+        jobs.iter().any(|j| j.path() == f[1] && j.kind == Kind::Preview),
+        "the control: this fixture failed only the *full* decode, so the preview is still \
+         wanted and planned. If this ever asserts, the guard above is filtering on more than \
+         `Kind::Full` and a failed full decode would take the page off screen"
+    );
+}
+
+/// Manga mode off: no partner, no partner full decode, and the plan is the one this
+/// file has always pinned.
+///
+/// The whole list again, deliberately. Comparing two plans that both hold no partner
+/// proves nothing about either of them - that is the variant `no_partner_leaves_the_
+/// plan_exactly_as_it_was` rejected and the reason is written down there - so this
+/// spells the jobs out and adds the control that makes the spelling mean something.
+#[test]
+fn no_partner_full_job_when_manga_mode_is_off() {
+    let f = files(6);
+    let cached: HashSet<ImgKey> = [ImgKey::first(&f[0])].into_iter().collect();
+    let failed: HashSet<(ImgKey, Kind)> =
+        [(ImgKey::first(&f[4]), Kind::Preview)].into_iter().collect();
+    let mut p = plan(&f, 2, &cached, &failed);
+    p.radius = 2;
+    p.wants_exif = true;
+    p.wants_full = true;
+    // Manga mode off is `turn_partner() == None`, and the full decode is planned from
+    // the same call - so both fields are `None` together.
+    p.partner = None;
+    p.partner_needs_full = false;
+
+    let listed = |jobs: &[Job]| {
+        jobs.iter()
+            .map(|j| (j.key.clone(), j.kind, j.prio, j.target_dim))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        listed(&plan_jobs(&p)),
+        vec![
+            (ImgKey::first(&f[2]), Kind::Preview, image_viewer::PRIO_CURRENT_PREVIEW, 1024),
+            (ImgKey::first(&f[2]), Kind::Exif, image_viewer::PRIO_CURRENT_EXIF, 0),
+            (ImgKey::first(&f[2]), Kind::Full, image_viewer::PRIO_FULL, 0),
+            (ImgKey::first(&f[3]), Kind::Preview, 12, 1024),
+            (ImgKey::first(&f[1]), Kind::Preview, 13, 1024),
+        ],
+        "the only `Kind::Full` job is the cursor page's own, at the cursor's own key"
+    );
+
+    // The control. With the mode off nothing sets the flag, so this half cannot happen -
+    // which is why the assertion above cannot be satisfied by a plan that adds a
+    // partner's full decode unconditionally. Compared against the *same* plan with a
+    // partner and no full buffer, so the only difference is the flag.
+    let with_partner_no_full = plan_jobs(&{
+        let mut q = plan(&f, 2, &cached, &failed);
+        q.radius = 2;
+        q.wants_exif = true;
+        q.wants_full = true;
+        q.partner = Some(ImgKey::first(&f[3]));
+        q.partner_needs_full = false;
+        q
+    });
+    p.partner = Some(ImgKey::first(&f[3]));
+    p.partner_needs_full = true;
+    assert_eq!(
+        listed(&plan_jobs(&p)).len(),
+        listed(&with_partner_no_full).len() + 1,
+        "so with a partner and no full buffer the plan really is one job longer"
+    );
+    assert_eq!(
+        plan_jobs(&p)
+            .iter()
+            .filter(|j| j.kind == Kind::Full)
+            .count(),
+        2,
+        "the cursor page's own and the partner's, and nothing else anywhere in the plan"
     );
 }
 
@@ -1060,6 +1272,7 @@ fn stale_current_is_planned_even_though_it_is_cached() {
         index: 0,
         current_page: 0,
         partner: None,
+        partner_needs_full: false,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
@@ -1099,6 +1312,7 @@ fn a_stale_current_is_not_planned_when_it_failed() {
         index: 0,
         current_page: 0,
         partner: None,
+        partner_needs_full: false,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
