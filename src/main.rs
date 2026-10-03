@@ -1432,6 +1432,13 @@ impl MyApp {
         // it is paid once per file rather than once per visit.
         if let Some(p) = self.gallery.current().map(|p| p.to_path_buf()) {
             self.gallery.learn_pages(&p);
+            // How large the page *displays* at, which is what the manga pairing
+            // judges a page by. Beside `learn_pages` because both are "measure the
+            // file we are arriving at", both answer from a cache, and both are paid
+            // once per file rather than once per visit. It may already be answered:
+            // `pump` records a file's dimensions as its preview lands, so a file in
+            // the preload window has them before the user gets there.
+            self.gallery.learn_shapes(&p);
         }
         self.cur = self
             .gallery
@@ -1651,6 +1658,24 @@ impl MyApp {
                             self.lat.preview(Instant::now());
                         }
                         self.clock += 1;
+                        // A decode that has already happened reports its own source
+                        // dimensions for free, so feed them to the shape cache. The
+                        // neighbours in the preload window are decoded anyway, so
+                        // this is the cheapest source the manga pairing has.
+                        //
+                        // `orig` is the size the decode reports *after* applying the
+                        // EXIF tag, under the same JPEG-only rule `learn_shapes`
+                        // applies, so this and `learn_shapes` compute the same thing
+                        // by two routes rather than being two opinions. An animation
+                        // is the one case that reaches it by a third: `orig` there is
+                        // frame 0's decoded size, which is the container's logical
+                        // screen for every GIF in practice.
+                        //
+                        // Keyed by the path, not the `(file, page)` key, because the
+                        // cache judges a *file*: every page of a document shares one
+                        // entry, and `orig` for a later page of a TIFF is already the
+                        // document's first-page size.
+                        self.gallery.note_shapes(&key.path, p.orig);
                         self.previews.insert(
                             key.clone(),
                             Preview {
@@ -2137,6 +2162,12 @@ impl MyApp {
         // the cursor would sit on a page that no longer exists and `next` would
         // walk off the end of a phantom document.
         self.gallery.forget_page_count(p);
+        // ...and the page's remembered dimensions, for the same reason. A
+        // re-export can change a page's aspect from portrait to landscape, and the
+        // manga pairing trusts what it was told: keep the old shape and every
+        // spread after this file stays mis-paired for the session, with no error
+        // and nothing on screen to say so.
+        self.gallery.forget_shapes(p);
         let shown_gone = self.shown.as_ref().is_some_and(|s| s.path == p);
         if self.full.as_ref().is_some_and(|f| f.path == p) {
             self.full = None;
@@ -2234,6 +2265,9 @@ impl MyApp {
         self.previews.retain(|k, _| k.path != p);
         self.failed.retain(|(k, _)| k.path != p);
         self.gallery.forget_page_count(&p);
+        // Same reason: the file is unreachable from here, so anything keyed on its
+        // path is unreachable too.
+        self.gallery.forget_shapes(&p);
         if !self.gallery.is_empty() {
             let i = self.gallery.index.min(self.gallery.len() - 1);
             self.gallery.files.remove(i);

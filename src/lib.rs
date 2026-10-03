@@ -3741,6 +3741,11 @@ pub fn is_jpeg_bytes(bytes: &[u8]) -> bool {
 
 /// Image dimensions sniffed from the file content, not the extension.
 /// Cheap: only the header is parsed.
+///
+/// Also the reason [`page_dims`] can read a prefix instead of the whole file: a
+/// stream too short to carry a format's dimension marker is a `None` here rather
+/// than a wrong number, so a header that falls outside the prefix costs one
+/// fallback read instead of a mismeasurement. See [`PROBE_PREFIX_BYTES`].
 pub fn image_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
     // Formats the `image` crate can't open get their own header probes.
     if is_jxl_bytes(bytes) {
@@ -4010,6 +4015,127 @@ pub fn tiff_page_count_bytes(bytes: &[u8]) -> u32 {
         n += 1;
     }
     n
+}
+
+/// How many bytes of a file [`page_dims`] reads.
+///
+/// 64 KB, chosen because every format's dimension marker sits near the front
+/// *usually* rather than always: PNG's IHDR is at byte 8 and a GIF's screen
+/// descriptor at byte 6, both fixed; a JPEG's SOF0 has to follow whatever metadata
+/// segments precede it, and the spec caps a segment's payload at 65533 bytes — so a
+/// camera that fills an APP1 right up to the limit puts SOF0 a few bytes **past**
+/// this. This is therefore a budget that is nearly always sufficient and
+/// provably not always sufficient, which is what the fallback below is for.
+///
+/// **A miss here is a `None`, never a wrong answer.** [`image_dims_bytes`] either
+/// finds a format's marker or reports that it did not, so a header that happens to
+/// sit further out falls through to a whole-file read rather than being measured
+/// wrong. That distinction is the whole reason the prefix read can be aggressive:
+/// the expensive path is only ever the price of being unlucky, and being unlucky
+/// costs one read of a file that is rare.
+///
+/// The fallback is not claimed to be unreachable, and no test asserts that it is —
+/// building a header past 64 KB to exercise it would mean writing a multi-megabyte
+/// fixture to cover a branch that costs nothing to be correct about.
+pub const PROBE_PREFIX_BYTES: usize = 65_536;
+
+/// Read up to [`PROBE_PREFIX_BYTES`] from `path`.
+///
+/// **Tolerates a short file**, which is most of them: a preallocated buffer is
+/// filled in a loop and truncated to what actually arrived, so a 300-byte PNG
+/// comes back as 300 bytes rather than as an error. `read_exact` is the wrong tool
+/// for that — it fails on a file shorter than the buffer, and a small image is not
+/// a failure.
+///
+/// A loop rather than one `read`, because a single `read` is free to return short
+/// on a file that is not short.
+fn read_prefix(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; PROBE_PREFIX_BYTES];
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+/// [`image_dims_bytes`] over the whole file, for a header that did not fit in
+/// [`PROBE_PREFIX_BYTES`]. Costs a `fs::read` of the file, so it is the fallback
+/// and not the path.
+fn image_dims_path(path: &Path) -> Option<(u32, u32)> {
+    image_dims_bytes(&std::fs::read(path).ok()?)
+}
+
+/// The stored dimensions of page `page`, without decoding it.
+///
+/// **Stored, not display-oriented.** The EXIF tag is *not* applied here, and that
+/// is deliberate: this is also what the decode reports (`PreviewAndFull::orig` is
+/// built from the same pair before the tag is applied to the pixels), and a
+/// function whose answer depended on where it was called from would have two
+/// spellings of one thing. Applying the tag is [`Gallery::learn_shapes`]' job, and
+/// it is load-bearing rather than cosmetic — see its doc.
+///
+/// Header only. This runs on arrival at a file, so it has to cost about what
+/// [`tiff_page_count`] costs rather than what a decode costs: a bounded read and a
+/// format sniff. The whole-file fallback is the exception, and only for a header
+/// that does not fit in the prefix.
+///
+/// `page > 0` is only meaningful for a TIFF, the one format in this tree with
+/// pages, and it walks the IFD chain because a document's pages may differ in size.
+/// Nothing else is asked for page > 0: an animation's frames all belong to one
+/// file, and a later page of one is answered by the decode itself, which has that
+/// page's real dimensions in hand.
+pub fn page_dims(path: &Path, page: u32) -> Option<(u32, u32)> {
+    page_dims_and_jpeg(path, page).map(|(dims, _)| dims)
+}
+
+/// [`page_dims`], plus whether the file is a JPEG.
+///
+/// One function rather than two because this runs on the arrival path and the
+/// JPEG flag has to come from **the same read**: the condition it gates is the
+/// condition `decode_page` applies the EXIF orientation under, and re-opening the
+/// file to ask a question the 64 KB already answered would be a second filesystem
+/// round trip for an answer we have.
+fn page_dims_and_jpeg(path: &Path, page: u32) -> Option<((u32, u32), bool)> {
+    if page > 0 {
+        return tiff_page_dim(path, page).map(|dims| (dims, false));
+    }
+    let buf = read_prefix(path).ok()?;
+    let jpeg = is_jpeg_bytes(&buf);
+    image_dims_bytes(&buf)
+        .or_else(|| image_dims_path(path))
+        .map(|dims| (dims, jpeg))
+}
+
+/// Page `page`'s stored dimensions out of a TIFF's IFD chain, or `None`.
+///
+/// A walk with the same shape as [`tiff_page_count`]'s — the crate reads
+/// directories, never pixels, and `BufReader` keeps it a few KB of reads on a
+/// 50 MB scan. `Decoder::new` has already read IFD 0, so `page` further steps
+/// land on the `page`th.
+///
+/// Bounded by the chain rather than by [`MAX_TIFF_PAGES`]: `more_images` is false
+/// at the end, and the crate's own cycle detector rejects an IFD that points at
+/// itself, so a caller passing an absurd `page` gets `None` rather than a walk
+/// that does not terminate.
+fn tiff_page_dim(path: &Path, page: u32) -> Option<(u32, u32)> {
+    let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(path).ok()?,
+    ))
+    .ok()?;
+    for _ in 0..page {
+        if !dec.more_images() || dec.next_image().is_err() {
+            return None;
+        }
+    }
+    dec.dimensions().ok()
 }
 
 /// Decode page `page` (0-based) of a TIFF, downscaled to `max_dim`.
@@ -6337,6 +6463,20 @@ pub struct Gallery {
     /// opened, and pruned whenever `files` is rebuilt, so it cannot grow without
     /// bound as you browse.
     page_counts: std::collections::HashMap<PathBuf, u32>,
+    /// Display dimensions of each file whose shape has been asked for, keyed by
+    /// path and **one entry per file rather than per page**.
+    ///
+    /// Per file because the shape test judges a *file*: for a multi-page document
+    /// page 1 is measured on arrival and its later pages are judged when they
+    /// arrive, by pressing right — the same argument `plan_jobs` makes about
+    /// prefetching page 0 of its neighbours (`src/lib.rs`, "the current image's
+    /// page"). A 200-page TIFF would otherwise want 200 reads to answer one
+    /// question about the document.
+    ///
+    /// Cleared with `page_counts` whenever `files` is rebuilt, for the same reason
+    /// a count must not outlive the list it describes: these are keyed on paths
+    /// and would otherwise accumulate every file the session ever opened.
+    shapes: std::collections::HashMap<PathBuf, (u32, u32)>,
 }
 
 impl Gallery {
@@ -6347,6 +6487,7 @@ impl Gallery {
             loop_back: true,
             page: 0,
             page_counts: std::collections::HashMap::new(),
+            shapes: std::collections::HashMap::new(),
         }
     }
 
@@ -6363,6 +6504,7 @@ impl Gallery {
             loop_back: true,
             page: 0,
             page_counts: std::collections::HashMap::new(),
+            shapes: std::collections::HashMap::new(),
         }
     }
 
@@ -6374,6 +6516,16 @@ impl Gallery {
             loop_back: true,
             page: 0,
             page_counts: std::collections::HashMap::new(),
+            shapes: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The current page's position in the flat page sequence, which is what the
+    /// pairing walk is expressed in terms of.
+    pub fn page_pos(&self) -> PagePos {
+        PagePos {
+            index: self.index,
+            page: self.page,
         }
     }
 
@@ -6453,7 +6605,91 @@ impl Gallery {
     /// on a page that no longer exists.
     fn forget_pages(&mut self) {
         self.page_counts.clear();
+        // The dimensions go with the counts, and for the same reason plus one
+        // more: they are keyed on paths, so keeping them would grow with every
+        // file the session ever opened rather than with `files`.
+        self.shapes.clear();
         self.page = 0;
+    }
+
+    /// Find out how large `path` displays at and remember it, for the shape test.
+    ///
+    /// **The EXIF orientation tag is applied here, and skipping it is the one
+    /// mistake in this feature that is silent, total, and lands on real
+    /// libraries.** A phone scan is stored landscape and tagged to display
+    /// portrait: stored 1600x900 with orientation 6, the *stored* pair's ratio is
+    /// 1.78, above [`SPREAD_ASPECT`], so a cache that stored what [`page_dims`]
+    /// reported would call every page in the volume a spread. Every page would
+    /// take a whole turn to itself, nothing would ever pair, and nothing on screen
+    /// would say why. That is why [`page_dims`] reports the *stored* size and this
+    /// is a separate step rather than one folded-together function: the decode
+    /// builds `PreviewAndFull::orig` from the same stored pair and applies the tag
+    /// separately for the same reason.
+    ///
+    /// The tag is read under exactly the condition `decode_page` applies it under —
+    /// JPEG only — because the dimensions have to be the ones the *pixels* end up
+    /// at. A WebP or HEIC carrying an orientation tag is displayed unrotated here
+    /// (the `heic` crate applies the container transforms itself), so judging it by
+    /// a rotated size would be a second, quieter version of the same bug.
+    ///
+    /// **Answers from the cache when it can**, for [`Self::learn_pages`]' reason
+    /// and with more force: this runs on *every* navigation, and unlike the four
+    /// bytes of a page count this is a bounded read plus a format sniff plus, for
+    /// a JPEG, an APP1 seek. Re-reading per visit would put a file open on the
+    /// critical path of every keypress.
+    ///
+    /// Does nothing for a file whose dimensions cannot be read. An unmeasured page
+    /// is [`Shape::Single`] and pairs optimistically, which is the state the whole
+    /// pairing is built to survive, so there is no error to report and nothing to
+    /// retry: the arrived preview's `orig` will fill this in.
+    pub fn learn_shapes(&mut self, path: &Path) {
+        if self.shapes.contains_key(path) {
+            return;
+        }
+        let Some(((w, h), jpeg)) = page_dims_and_jpeg(path, 0) else {
+            return;
+        };
+        // 0 for anything but a JPEG, matching `decode_page`: the tag is only ever
+        // applied there, and `exif_orientation` costs a seek out of the file.
+        let tag = if jpeg { exif_orientation(path) } else { 0 };
+        self.note_shapes(path, if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
+    }
+
+    /// Record the size a page **displays** at, from a decode that already knows.
+    ///
+    /// `dims` must already be display-oriented — [`PreviewAndFull::orig`] is, by
+    /// the same tag application [`Self::learn_shapes`] does — so nothing is applied
+    /// here. A neighbour's preview reports its own dimensions for free on its way
+    /// past, which makes this the cheapest source of the pairing's input there is,
+    /// and it is what fills a file in before the cursor arrives at it.
+    ///
+    /// **Overwrites**, and that is the difference from `learn_shapes`: this is a
+    /// *measurement*, so it is the authority for the file it names. `learn_shapes`
+    /// consults the cache first and stores through here, but it skips an entry that
+    /// is already there — which is what stops a file open on the critical path of
+    /// every keypress, and what makes a learned dimension frozen until something
+    /// says the file changed.
+    ///
+    /// Consequently a measurement taken from a decode that was already in flight
+    /// carries that decode's bytes, so it inherits the preview cache's exposure to a
+    /// result landing after the file was rewritten. Nothing here does anything about
+    /// that: decodes are never abandoned, and the same exposure already exists for
+    /// the texture those pixels become.
+    pub fn note_shapes(&mut self, path: &Path, dims: (u32, u32)) {
+        self.shapes.insert(path.to_path_buf(), dims);
+    }
+
+    /// Forget one file's remembered dimensions, so the next read measures the
+    /// file's current contents.
+    ///
+    /// **Must be called from `invalidate_path`,** beside `forget_page_count`. The
+    /// file's *contents* changed, and only the caller knows that: a re-export can
+    /// change a page's aspect from portrait to landscape, and the pairing is built
+    /// to trust what it was told. Without this the shape is frozen for the session
+    /// and **every turn after that file stays mis-paired**, with no error and
+    /// nothing on screen to say so.
+    pub fn forget_shapes(&mut self, path: &Path) {
+        self.shapes.remove(path);
     }
 
     /// Forget one file's page count, and clamp the cursor if it was on that file.
@@ -6527,26 +6763,50 @@ impl Gallery {
     /// `loop_back` off, so the caller can skip the work that a real change would
     /// justify.
     pub fn next(&mut self) -> bool {
-        if self.files.is_empty() {
+        let Some(to) = self.pos_next(self.index, self.page) else {
             return false;
+        };
+        self.index = to.index;
+        self.page = to.page;
+        true
+    }
+
+    /// The position one page on from `(index, page)`, or `None` past the end when
+    /// `loop_back` is off.
+    ///
+    /// [`Self::next`]'s arithmetic, written against a position rather than the
+    /// cursor so `PageCtx::step` can ask about a page it is not on **and get the
+    /// same answer**. There is one implementation of these rules on purpose: `prev`
+    /// from page 0 landing on the *last* page of the previous file is a
+    /// deliberate rule that exists because two presses per file feels broken, and a
+    /// second copy of it would be a second place for it to be wrong - silently, and
+    /// only in manga mode.
+    ///
+    /// It is a separate function rather than a clone-and-call for a measurable
+    /// reason: `PageCtx::step` is called once per page by `prev_anchor`'s rebuild,
+    /// and a `Gallery` clone is a deep copy of `files`, so that walk would be
+    /// quadratic in allocations over a folder.
+    fn pos_next(&self, index: usize, page: u32) -> Option<PagePos> {
+        if self.files.is_empty() {
+            return None;
         }
-        if self.page + 1 < self.pages_in_current() {
-            self.page += 1;
-            return true;
+        if page + 1 < self.pages_in(index) {
+            return Some(PagePos {
+                index,
+                page: page + 1,
+            });
         }
         // Last page (or an ordinary file): on to the next one, at its first page.
-        match self.index.checked_add(1) {
-            Some(i) if i < self.files.len() => {
-                self.index = i;
-                self.page = 0;
-                true
-            }
-            _ if self.loop_back => {
-                self.index = 0;
-                self.page = 0;
-                true
-            }
-            _ => false,
+        match index.checked_add(1) {
+            Some(i) if i < self.files.len() => Some(PagePos {
+                index: i,
+                page: 0,
+            }),
+            _ if self.loop_back => Some(PagePos {
+                index: 0,
+                page: 0,
+            }),
+            _ => None,
         }
     }
 
@@ -6557,29 +6817,43 @@ impl Gallery {
     /// through a folder need two presses per file, which is a small thing that
     /// feels broken.
     pub fn prev(&mut self) -> bool {
-        if self.files.is_empty() {
+        let Some(to) = self.pos_prev(self.index, self.page) else {
             return false;
+        };
+        self.index = to.index;
+        self.page = to.page;
+        true
+    }
+
+    /// The position one page back from `(index, page)`, or `None` before the front
+    /// when `loop_back` is off. [`Self::pos_next`]'s counterpart, for
+    /// [`Self::prev`]'s reasons.
+    fn pos_prev(&self, index: usize, page: u32) -> Option<PagePos> {
+        if self.files.is_empty() {
+            return None;
         }
-        if self.page > 0 {
-            self.page -= 1;
-            return true;
+        if page > 0 {
+            return Some(PagePos {
+                index,
+                page: page - 1,
+            });
         }
-        match self.index.checked_sub(1) {
-            Some(i) => {
-                self.index = i;
-                // The new file's page count is only known if it was visited, which
-                // it was, since the user is stepping back through where they came.
-                // `pages_in_current` falls back to 1 for anything unknown, so this
-                // is always in range.
-                self.page = self.pages_in_current().saturating_sub(1);
-                true
-            }
+        // The new file's page count is only known if it was visited, which it was,
+        // since the user is stepping back through where they came. `pages_in`
+        // falls back to 1 for anything unknown, so this is always in range.
+        match index.checked_sub(1) {
+            Some(i) => Some(PagePos {
+                index: i,
+                page: self.pages_in(i).saturating_sub(1),
+            }),
             None if self.loop_back => {
-                self.index = self.files.len() - 1;
-                self.page = self.pages_in_current().saturating_sub(1);
-                true
+                let last = self.files.len() - 1;
+                Some(PagePos {
+                    index: last,
+                    page: self.pages_in(last).saturating_sub(1),
+                })
             }
-            None => false,
+            None => None,
         }
     }
 
@@ -6686,6 +6960,108 @@ pub fn load_all_from_folder(&mut self, folder: &Path) {
         self.index = new_index;
         // The list these counts described is gone.
         self.forget_pages();
+    }
+}
+
+/// The real [`PageCtx`]: a gallery, its page counts, and the shape cache.
+///
+/// Each method answers from something that already exists — the position
+/// arithmetic `next`/`prev` and `step_no_wrap` share, or the two caches — which
+/// is the point of the trait having no default bodies: a default would be a guess
+/// about a gallery this section cannot see, and the guess would be silently wrong
+/// for archives and for a `page_counts` that has not been learned yet.
+///
+/// Two traps this impl walks straight into, both answered *here* rather than left
+/// for the next reader:
+///
+/// * **`pages_in`, never `pages_in_current`.** The latter is about `self.index`,
+///   so it is right for the cursor and wrong for every other position - and the
+///   pairing spends its whole life asking about positions it is not on.
+/// * **`flat` reads `page_counts` directly, not through `pages_in`.** The other
+///   way round: `pages_in` answers 1 for a file it knows nothing about, which is
+///   the right default for "how many pages does this file have" and a lie for
+///   "how many pages come before this one".
+impl PageCtx for Gallery {
+    fn step(&self, from: PagePos, by: isize) -> Option<PagePos> {
+        if from.index >= self.files.len() {
+            // `pos_next`/`pos_prev` would answer `Some(0, 0)` here rather than
+            // `None`: an index past the end finds no next file and falls into the
+            // `loop_back` arm. A position that does not exist has nothing to step
+            // from, and wrapping to the front would say a page exists that does not.
+            return None;
+        }
+        // A loop rather than a `match` on 1 and -1, for the reason
+        // `Gallery::step_no_wrap` gives: `prev_anchor`'s walk steps by a whole
+        // turn, and a turn is 1 or 2. `by` of 0 runs no iterations, so it answers
+        // `Some(from)`, which is also what `step_no_wrap` does.
+        let mut cur = from;
+        for _ in 0..by.unsigned_abs() {
+            cur = if by < 0 {
+                self.pos_prev(cur.index, cur.page)?
+            } else {
+                self.pos_next(cur.index, cur.page)?
+            };
+        }
+        Some(cur)
+    }
+
+    fn step_no_wrap(&self, from: PagePos, by: isize) -> Option<PagePos> {
+        Gallery::step_no_wrap(self, from, by)
+    }
+
+    fn key(&self, pos: PagePos) -> Option<ImgKey> {
+        self.files.get(pos.index).map(|path| ImgKey {
+            path: path.clone(),
+            page: pos.page,
+        })
+    }
+
+    /// The cached display dimensions, and **not** a re-read.
+    ///
+    /// A lookup and nothing else, because this is on the pairing's hot path:
+    /// `prev_anchor` calls `pairable` once per page of its O(n) walk, and each of
+    /// those makes four `dims` calls. Reading a file here would turn a query into
+    /// disk I/O in the middle of a keypress.
+    ///
+    /// One entry per *file* (see `Gallery::shapes`), so every page of a document
+    /// gets the same answer. That is the same trade `plan_jobs` makes about
+    /// prefetching page 0: a document whose pages differ in size is legal and rare,
+    /// and the page you are looking at is judged by the document's measured first
+    /// page.
+    ///
+    /// `None` is a state the pairing is built to survive - an unmeasured page is
+    /// `Single` and pairs optimistically - so it is not an error here, and there is
+    /// nothing to fall back to.
+    fn dims(&self, pos: PagePos) -> Option<(u32, u32)> {
+        self.files.get(pos.index).and_then(|p| self.shapes.get(p)).copied()
+    }
+
+    /// Always `None` today. The user's override is a separate feature and it is
+    /// asked for separately rather than folded into `dims`, because it beats the
+    /// detector outright - including when the detector is confidently wrong, which
+    /// is the case the override exists for.
+    fn override_shape(&self, _pos: PagePos) -> Option<Shape> {
+        None
+    }
+
+    /// The page's ordinal in the whole gallery, and `None` when a preceding file's
+    /// page count is unknown.
+    ///
+    /// `page_counts.get(..)?` rather than [`Gallery::pages_in`]: that answers 1 for
+    /// an unknown file, and substituting its default would turn "I do not know how
+    /// many pages this document has" into a confidently wrong ordinal. The walk only
+    /// ever asks about the leading pages, where the cursor's having arrived
+    /// guarantees the counts are known - so this is an optimisation in practice and
+    /// a lie avoided in principle.
+    fn flat(&self, pos: PagePos) -> Option<usize> {
+        if pos.index >= self.files.len() {
+            return None;
+        }
+        let mut n = pos.page as usize;
+        for path in &self.files[..pos.index] {
+            n += *self.page_counts.get(path)? as usize;
+        }
+        Some(n)
     }
 }
 

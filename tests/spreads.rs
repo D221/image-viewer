@@ -1,14 +1,26 @@
 //! Manga mode's pairing core: shapes, the anchor invariant, and the walk.
 //!
-//! Everything here runs against [`TestGallery`] rather than a filesystem, which
-//! is the point of `PageCtx`: the pairing is arithmetic over a flat page cursor,
-//! so random galleries of every shape mix can be driven through a property test
+//! Most of this runs against [`TestGallery`] rather than a filesystem, which is
+//! the point of `PageCtx`: the pairing is arithmetic over a flat page cursor, so
+//! random galleries of every shape mix can be driven through a property test
 //! without decoding anything. The property tests are **random, not exhaustive** -
-//! see `any_gallery` for what 256 cases do and do not cover - so where a specific
-//! shape matters it is spelled out in a named test.
+//! see `any_gallery` for what 256 cases do and do not cover - so where a
+//! specific shape matters it is spelled out in a named test.
+//!
+//! ## The one thing here that is not behavioural
+//!
+//! `invalidate_path_drops_the_cached_dimensions` reads `src/main.rs` as text, for
+//! the same reason `tests/renderer.rs` and `tests/keybindings.rs` do: the wiring
+//! it protects lives in the binary, which no integration test can reach, and
+//! adding a `#[cfg(test)]` module to a binary for this purpose would break a
+//! documented property of the project (`AGENTS.md`, "Tests"). The *behaviour* it
+//! calls - that dropping a file's remembered dimensions makes the next read
+//! report the new ones - is asserted against the real `Gallery` in the same
+//! test. What the source scan adds is only the call, which nothing else can see.
 
 use image_viewer::{
-    lone, next_anchor, pairable, prev_anchor, shape_of, turn_len, PageCtx, PagePos, Shape,
+    exif_orientation, lone, next_anchor, page_dims, pairable, prev_anchor, shape_of, turn_len, Gallery,
+    ImgKey, PageCtx, PagePos, Shape, PROBE_PREFIX_BYTES,
 };
 use proptest::prelude::*;
 
@@ -835,4 +847,504 @@ fn every_anchor_is_reached_from_the_anchor_before_it() {
             assert_eq!(prev_anchor(anchors[0], lead, &g), None, "{g:?} at lead {lead}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 2: reading a page's dimensions, and the cache that remembers them.
+// ---------------------------------------------------------------------------
+
+/// A file of `w` x `h` grey pixels, written as a PNG.
+///
+/// `image` is the crate the whole tree already decodes PNGs with, so the fixture
+/// is built the same way a real file is rather than hand-assembled.
+fn write_png(path: &std::path::Path, w: u32, h: u32) {
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(w, h, image::Luma([128])))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// A JPEG of `w` x `h` pixels carrying a real APP1/Exif block whose IFD0 has the
+/// single Orientation entry `tag`.
+///
+/// Hand-built for the same reason as everywhere else in this tree
+/// (`tests/rotate_save.rs`, `tests/unit.rs`): `image`'s encoder writes no EXIF, so
+/// there is nothing to configure and the only way to get a tagged JPEG is to
+/// splice the segment in. Big-endian so the bytes are readable.
+fn write_jpeg_with_orientation(path: &std::path::Path, w: u32, h: u32, tag: u16) {
+    let mut jpeg = Vec::new();
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(w, h, image::Luma([128])))
+        .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+        .unwrap();
+
+    // APP1 payload: "Exif\0\0", then a TIFF header, then IFD0 with one SHORT.
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"MM\x00\x2a"); // big-endian, version 42
+    tiff.extend_from_slice(&8u32.to_be_bytes()); // IFD0 at offset 8
+    tiff.extend_from_slice(&1u16.to_be_bytes()); // one entry
+    tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // Orientation
+    tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
+    tiff.extend_from_slice(&1u32.to_be_bytes()); // one value
+    // A SHORT's value lives in the first 2 bytes of its 4-byte field.
+    tiff.extend_from_slice(&tag.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0]);
+    tiff.extend_from_slice(&0u32.to_be_bytes()); // no IFD1
+
+    let mut app1 = Vec::new();
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(&tiff);
+    let mut seg = Vec::new();
+    seg.extend_from_slice(&[0xFF, 0xE1]);
+    seg.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    seg.extend_from_slice(&app1);
+
+    // Straight after SOI, where a camera puts it.
+    let mut out = Vec::new();
+    out.extend_from_slice(&jpeg[0..2]);
+    out.extend_from_slice(&seg);
+    out.extend_from_slice(&jpeg[2..]);
+    std::fs::write(path, out).unwrap();
+}
+
+/// The pages of `paths`, as a `Gallery` with `counts` pages each. The files on
+/// disk are deliberately not real images: these tests are about the arithmetic,
+/// and `set_page_counts` exists so a navigation test does not also depend on the
+/// IFD walker being right.
+fn gallery_of(paths: &[std::path::PathBuf], counts: &[u32]) -> Gallery {
+    let mut gal = Gallery::from_file(paths[0].clone());
+    gal.files = paths.to_vec();
+    gal.set_page_counts(counts.iter().copied());
+    gal.goto_index(0);
+    gal
+}
+
+/// `page_dims` reads a header, not pixels.
+///
+/// The control matters as much as the assertion: the file is **provably
+/// undecodable** (its compressed image data is scrambled) and `image::open`
+/// refuses it, so an answer here cannot have come from decoding it. `image`'s
+/// `into_dimensions` stops at the header, which is the whole point - the pairing
+/// query has to be cheap enough to run on arrival rather than on arrival *plus*
+/// a decode.
+///
+/// An aspect of the header, so the value is not a shape the reader could get by
+/// luck: 800x1200 is portrait and 0.667, well under [`SPREAD_ASPECT`], so it
+/// would also be judged `Single` - which is what makes the *rotation* test's
+/// failure mode below legible rather than a coincidence.
+///
+/// **The fixture is shorter than the 64 KB prefix, so this also pins the prefix
+/// read's tolerance of a short file** - and the test checks that premise rather
+/// than asserting it in a comment. `read_exact` into the preallocated buffer
+/// would fail here; `read_prefix` truncates to what actually arrived. A uniform
+/// 800x1200 grey PNG compresses to about 8 KB, which is not an accident of the
+/// fixture: it is what a *small* image is, and a small image is the common case.
+#[test]
+fn page_dims_reads_stored_dimensions_without_decoding() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("page.png");
+    write_png(&p, 800, 1200);
+
+    // The premise of the short-file half of this test, checked rather than
+    // asserted in the doc comment.
+    let len = std::fs::metadata(&p).unwrap().len() as usize;
+    assert!(
+        len < PROBE_PREFIX_BYTES,
+        "this fixture must be shorter than the prefix ({len} bytes), or the \
+         short-file tolerance is not being exercised"
+    );
+    assert_eq!(page_dims(&p, 0), Some((800, 1200)));
+
+    // Now break the pixels. IHDR is at a fixed offset and stays intact; the
+    // entropy-coded data after it does not.
+    let mut bytes = std::fs::read(&p).unwrap();
+    let idat = bytes
+        .windows(4)
+        .position(|w| w == b"IDAT")
+        .expect("the fixture has no IDAT chunk");
+    for b in bytes[idat + 4..].iter_mut() {
+        *b ^= 0xA5;
+    }
+    std::fs::write(&p, &bytes).unwrap();
+
+    assert!(image::open(&p).is_err(), "the control: this file must not decode");
+    assert_eq!(
+        page_dims(&p, 0),
+        Some((800, 1200)),
+        "the header is still readable from a file whose pixels are nonsense"
+    );
+}
+
+/// Unreadable is `None`, not a guess. A shape judged from dimensions nobody could
+/// read is a shape nobody can correct, and the pairing is built to survive
+/// `dims` being `None` (see `an_unknown_page_pairs_and_is_a_turn_of_two_until_it_is_measured`),
+/// so there is nothing to gain by inventing a pair.
+#[test]
+fn page_dims_returns_none_for_a_file_that_is_not_an_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("notes.txt");
+    std::fs::write(&p, b"this folder is not an image folder, it is a folder").unwrap();
+    assert_eq!(page_dims(&p, 0), None);
+
+    // And a file that is not there at all is the same answer, not a panic: this
+    // is called on arrival, and a file can be deleted between being listed and
+    // being opened.
+    assert_eq!(page_dims(&dir.path().join("gone.png"), 0), None);
+
+    // And so is a file too short to hold any header, which is the short-file case
+    // the prefix read has to tolerate rather than treat as an error.
+    let stub = dir.path().join("stub.png");
+    std::fs::write(&stub, b"\x89PNG").unwrap();
+    assert_eq!(page_dims(&stub, 0), None);
+}
+
+/// A `PageCtx` that reports one fixed pair for every position.
+///
+/// Exists so a test can ask *what the detector would say about a different set of
+/// dimensions* - which is how the orientation test below states its own bug as an
+/// executable assertion rather than a comment.
+struct FixedDims((u32, u32));
+
+impl PageCtx for FixedDims {
+    fn step(&self, _from: PagePos, _by: isize) -> Option<PagePos> {
+        None
+    }
+    fn step_no_wrap(&self, _from: PagePos, _by: isize) -> Option<PagePos> {
+        None
+    }
+    fn key(&self, _pos: PagePos) -> Option<ImgKey> {
+        None
+    }
+    fn dims(&self, _pos: PagePos) -> Option<(u32, u32)> {
+        Some(self.0)
+    }
+    fn override_shape(&self, _pos: PagePos) -> Option<Shape> {
+        None
+    }
+    fn flat(&self, pos: PagePos) -> Option<usize> {
+        Some(pos.index)
+    }
+}
+
+/// Review Focus 1, and the highest-consequence line in the whole plan: a
+/// phone-scanned page is stored **landscape** and tagged to display **portrait**.
+///
+/// Stored 1600x900 with orientation 6, the stored pair's ratio is 1.78 - above
+/// [`SPREAD_ASPECT`](image_viewer::SPREAD_ASPECT) - so judging the stored size
+/// calls *every* page in the volume a spread. Every page then takes a whole turn
+/// to itself, nothing ever pairs, and nothing on screen says why. It is silent,
+/// and it lands on the largest category of real manga library there is.
+///
+/// So `page_dims` deliberately reports the **stored** size and `learn_shapes`
+/// applies the tag, and this test pins both halves plus the converse: feeding the
+/// stored pair to the detector is the bug, asserted directly rather than
+/// described.
+#[test]
+fn a_rotated_phone_scan_is_judged_as_it_displays() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("scan.jpg");
+    write_jpeg_with_orientation(&p, 1600, 900, 6);
+    assert_eq!(exif_orientation(&p), 6, "the fixture must really carry the tag");
+
+    assert_eq!(
+        page_dims(&p, 0),
+        Some((1600, 900)),
+        "`page_dims` reports the *stored* size; applying the tag is a separate step"
+    );
+
+    let mut gal = Gallery::from_file(p.clone());
+    gal.learn_shapes(&p);
+    let page = gal.page_pos();
+    // Behaviour first, mechanism second: what a dropped orientation tag actually
+    // breaks is the *verdict*, and the dimension is only how it gets there.
+    assert_eq!(shape_of(page, &gal), Single, "a portrait page is not a spread");
+    assert_eq!(
+        PageCtx::dims(&gal, page),
+        Some((900, 1600)),
+        "the cache holds the size the page *displays* at"
+    );
+
+    // The converse, and the reason the assertion above is worth anything: the
+    // stored pair is exactly what a dropped orientation tag feeds the detector,
+    // and it says the opposite.
+    assert_eq!(
+        shape_of(page, &FixedDims((1600, 900))),
+        Double,
+        "the stored size is the bug this cache exists to prevent"
+    );
+
+    // The whole tag table, so the swap is pinned as a property of the tags rather
+    // than of the one example. 5-8 rotate by a quarter turn and swap; 2-4 do not,
+    // and a 180 rotation keeps the aspect ratio, so a landscape stored page is
+    // still a spread under tag 3.
+    for tag in 1u16..=8 {
+        let p = dir.path().join(format!("tag{tag}.jpg"));
+        write_jpeg_with_orientation(&p, 1600, 900, tag);
+        let mut gal = Gallery::from_file(p.clone());
+        gal.learn_shapes(&p);
+        let pos = gal.page_pos();
+        let swaps = (5..=8).contains(&tag);
+        assert_eq!(
+            PageCtx::dims(&gal, pos),
+            Some(if swaps { (900, 1600) } else { (1600, 900) }),
+            "tag {tag}"
+        );
+        assert_eq!(shape_of(pos, &gal), if swaps { Single } else { Double }, "tag {tag}");
+    }
+}
+
+/// A learned dimension is **frozen** until it is dropped.
+///
+/// This is the same rule the on-disk thumbnail cache follows and for the same
+/// reason: correctness must not depend on something remembering to invalidate.
+/// Here the thing that would have to remember is the 2 s folder watcher, and a
+/// pairing that reads a stale shape mis-pairs every turn *after* the changed
+/// file with nothing on screen to say so.
+#[test]
+fn a_learned_dimension_never_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("page.png");
+    write_png(&p, 800, 1200);
+
+    let mut gal = Gallery::from_file(p.clone());
+    gal.learn_shapes(&p);
+    let pos = gal.page_pos();
+    assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)));
+
+    // Same path, different picture. `learn_shapes` runs on *every* navigation, so
+    // re-reading here would be a file open on the critical path of every
+    // keypress to re-learn something already known.
+    write_png(&p, 300, 200);
+    gal.learn_shapes(&p);
+    assert_eq!(
+        PageCtx::dims(&gal, pos),
+        Some((800, 1200)),
+        "a learned dimension is not re-read behind its own back"
+    );
+}
+
+/// ...and `forget_shapes` is what makes it move again. The file's *contents*
+/// changed, which is the only signal anything has: `invalidate_path` sees a
+/// changed stamp and knows nothing about which dimension it implies.
+#[test]
+fn forget_shapes_makes_the_dimension_change_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("page.png");
+    write_png(&p, 800, 1200);
+
+    let mut gal = Gallery::from_file(p.clone());
+    gal.learn_shapes(&p);
+    let pos = gal.page_pos();
+    assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)));
+
+    write_png(&p, 300, 200);
+    gal.learn_shapes(&p);
+    assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)), "still the old one");
+
+    gal.forget_shapes(&p);
+    assert_eq!(PageCtx::dims(&gal, pos), None, "forgotten means unknown, not stale");
+    gal.learn_shapes(&p);
+    assert_eq!(PageCtx::dims(&gal, pos), Some((300, 200)), "re-learned from the new bytes");
+}
+
+/// `PageCtx::step` on a real `Gallery` is the same walk `Gallery::next` and
+/// `Gallery::prev` do, so the two cannot disagree about where a page is.
+///
+/// It is `next`/`prev` on a copy rather than a reimplementation, because the rules
+/// that are easy to get wrong are all in them: from page 0 `prev` lands on the
+/// **last** page of the *previous* file, not its first; the file boundary is not
+/// a turn boundary; and `loop_back` decides what happens at either end. Page
+/// counts are deliberately uneven (2, 1, 3) so a step that crossed a file
+/// boundary and a step that stayed inside a document are both exercised, and the
+/// cursor is parked *after* the step in each direction.
+///
+/// Asserted in both directions over the whole gallery rather than at one position:
+/// `prev`'s page-before-file rule only shows up somewhere in the middle, and the
+/// second assertion is what proves `step` is not a `next` that happens to look
+/// right forwards.
+#[test]
+fn a_gallery_walks_pages_the_same_way_the_planner_sees_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg"]
+        .iter()
+        .map(|n| dir.path().join(n))
+        .collect();
+    for p in &paths {
+        std::fs::write(p, b"not really a jpeg").unwrap();
+    }
+    let mut gal = gallery_of(&paths, &[2, 1, 3]);
+    gal.set_loop_back(false);
+
+    let start = gal.page_pos();
+    assert_eq!(start, PagePos { index: 0, page: 0 });
+    let mut forwards = vec![start];
+    while gal.next() {
+        forwards.push(gal.page_pos());
+    }
+    // 2 + 1 + 3 pages, in reading order, with no page named twice.
+    assert_eq!(
+        forwards,
+        vec![
+            PagePos { index: 0, page: 0 },
+            PagePos { index: 0, page: 1 },
+            PagePos { index: 1, page: 0 },
+            PagePos { index: 2, page: 0 },
+            PagePos { index: 2, page: 1 },
+            PagePos { index: 2, page: 2 },
+        ]
+    );
+
+    for pair in forwards.windows(2) {
+        assert_eq!(
+            PageCtx::step(&gal, pair[0], 1),
+            Some(pair[1]),
+            "step forwards from {pair:?}"
+        );
+        assert_eq!(
+            PageCtx::step(&gal, pair[1], -1),
+            Some(pair[0]),
+            "step back from {pair:?}"
+        );
+    }
+
+    // And `prev` retraces the entire walk, which is the half `step` could have
+    // been wrong about in a way the loop above would not show: from page 0 of
+    // file 1 it goes to the *last* page of file 0, not to file 0's first.
+    for &expected in forwards[..forwards.len() - 1].iter().rev() {
+        assert!(gal.prev(), "there is a previous page before {expected:?}");
+        assert_eq!(gal.page_pos(), expected);
+    }
+    assert!(!gal.prev(), "nothing before the first page");
+    assert_eq!(gal.page_pos(), start, "a refused `prev` does not move the cursor");
+
+    // Multi-page steps, because `prev_anchor`'s walk steps by a whole turn and a
+    // turn is 1 or 2. Same reason `step_no_wrap` is a loop rather than a `match`.
+    assert_eq!(PageCtx::step(&gal, PagePos { index: 0, page: 0 }, 2), Some(PagePos { index: 1, page: 0 }));
+    assert_eq!(PageCtx::step(&gal, PagePos { index: 2, page: 2 }, -2), Some(PagePos { index: 2, page: 0 }));
+    // Off either end is `None`, not a wrap, with looping off.
+    assert_eq!(PageCtx::step(&gal, PagePos { index: 2, page: 2 }, 1), None);
+    assert_eq!(PageCtx::step(&gal, PagePos { index: 0, page: 0 }, -1), None);
+    // An index that does not exist is `None` rather than a wrap to page 0, which
+    // is what the raw `next`/`prev` arithmetic would do on its own: `next` from
+    // an out-of-range index finds no next file and loops.
+    assert_eq!(PageCtx::step(&gal, PagePos { index: 9, page: 0 }, 1), None);
+
+    // With `loop_back` on, `step` wraps where `step_no_wrap` does not - the whole
+    // reason there are two methods, so both are asserted rather than one.
+    gal.set_loop_back(true);
+    let last = *forwards.last().unwrap();
+    assert_eq!(PageCtx::step(&gal, last, 1), Some(start), "forward wraps");
+    assert_eq!(
+        PageCtx::step(&gal, start, -1),
+        Some(last),
+        "and backwards wraps to the last page, not to file 0's first"
+    );
+    assert_eq!(
+        PageCtx::step_no_wrap(&gal, last, 1),
+        None,
+        "while the partner test must not see across the seam"
+    );
+}
+
+/// `flat` is the page's ordinal in the whole gallery, so it can be compared with
+/// `lead_lone` - and a *sum* of page counts is only a sum if they are known.
+/// A file whose count has not been learned contributes an unknown number of
+/// pages, so the answer is `None` rather than a number that quietly assumes one.
+///
+/// Both halves are asserted, and the difference between them is the point: the
+/// same position goes `None` -> `Some` as the missing count is supplied, so the
+/// test cannot be passing because the position was always unanswerable.
+///
+/// `None` for the first page is the optimisation the walk depends on: it is only
+/// ever asked about the leading pages, where nothing precedes the position, and
+/// there is nothing to be uncertain about.
+#[test]
+fn an_unknown_preceding_page_count_makes_flat_unavailable() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+        .iter()
+        .map(|n| dir.path().join(n))
+        .collect();
+    for p in &paths {
+        std::fs::write(p, b"not really a jpeg").unwrap();
+    }
+    let mut gal = gallery_of(&paths, &[2, 1, 1, 1]);
+    let at = |i: usize, page: u32| PagePos { index: i, page };
+
+    // Every count known: the sum is real, and it counts pages rather than files.
+    assert_eq!(PageCtx::flat(&gal, at(0, 0)), Some(0));
+    assert_eq!(PageCtx::flat(&gal, at(0, 1)), Some(1));
+    assert_eq!(PageCtx::flat(&gal, at(1, 0)), Some(2), "file 0 has two pages");
+    assert_eq!(PageCtx::flat(&gal, at(3, 0)), Some(2 + 1 + 1));
+
+    // Forget file 0's count. Nothing about file 1 changes, but its ordinal now
+    // depends on a number nobody has.
+    gal.forget_page_count(&paths[0]);
+    assert_eq!(PageCtx::flat(&gal, at(0, 0)), Some(0), "nothing precedes the first page");
+    assert_eq!(PageCtx::flat(&gal, at(0, 1)), Some(1));
+    assert_eq!(PageCtx::flat(&gal, at(1, 0)), None, "file 0's count is unknown");
+    assert_eq!(PageCtx::flat(&gal, at(3, 0)), None);
+
+    // Supplying it again resolves the same positions. `learn_pages` reads four
+    // bytes and this file is not a TIFF, so it learns 1 - which is why the
+    // assertion is `Some(1)` and not `Some(2)`.
+    gal.learn_pages(&paths[0]);
+    assert_eq!(PageCtx::flat(&gal, at(1, 0)), Some(1));
+
+    // A position that does not exist is `None`, and is not a panic.
+    assert_eq!(PageCtx::flat(&gal, at(4, 0)), None);
+}
+
+/// A re-exported file must be re-judged, or its old page's shape is frozen for the
+/// session and **every spread after it stays mis-paired**.
+///
+/// The behaviour half of this is [`forget_shapes_makes_the_dimension_change_again`];
+/// what is pinned here is the *call*, because the thing that decides when a file
+/// changed is `MyApp::invalidate_path`, and that lives in `src/main.rs` - a binary
+/// no integration test can reach. Adding a `#[cfg(test)]` module to it for this
+/// would break a documented property of the project (`AGENTS.md`, "Tests"), so
+/// the call is asserted against the source as text, for the same reason
+/// `tests/renderer.rs` and `tests/keybindings.rs` do.
+///
+/// A source scan is not behaviour, and it is weak in a specific way: it cannot
+/// tell whether `invalidate_path` *reaches* `forget_shapes` on this path or on
+/// some other. What it does catch is the regression that actually happens - the
+/// call being deleted, or a later edit adding a cache here and forgetting this
+/// one - and neither is visible at runtime.
+#[test]
+fn invalidate_path_drops_the_cached_dimensions() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("page.png");
+    write_png(&p, 800, 1200);
+
+    // The behaviour: what `invalidate_path` calls drops the entry, and the next
+    // read sees the file's new contents.
+    let mut gal = Gallery::from_file(p.clone());
+    gal.learn_shapes(&p);
+    let pos = gal.page_pos();
+    assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)));
+    write_png(&p, 300, 200);
+    gal.forget_shapes(&p);
+    assert_eq!(
+        PageCtx::dims(&gal, pos),
+        None,
+        "the shape is re-learned from the new contents, not served stale"
+    );
+
+    // The call. Read as text, and scoped to `invalidate_path`'s own body so a
+    // `forget_shapes` anywhere else in the file cannot stand in for this one.
+    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let body = src
+        .split("fn invalidate_path(")
+        .nth(1)
+        .expect("invalidate_path is gone; update this test")
+        .split("\n    fn ")
+        .next()
+        .expect("could not delimit the function body");
+    assert!(
+        body.contains("forget_shapes("),
+        "invalidate_path no longer forgets the cached dimensions, so a re-exported\n\
+         file keeps its old page's shape and every spread after it stays mis-paired\n\
+         for the session, with nothing on screen to say so.\nBody was:\n{body}"
+    );
 }
