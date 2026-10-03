@@ -7157,7 +7157,31 @@ pub fn next_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
 /// because the loop cannot reach the number without the answer already being known.
 pub const PREV_SCAN_LIMIT: usize = 1 << 20;
 
-/// The anchor before `a`, or `None` before the start.
+/// The anchor of the turn before `a`'s turn, or `None` when there is none.
+///
+/// **`None` has two causes, and they are different questions.** It answers `None` at
+/// the first turn - there is no turn before it - **and** for a position that is not
+/// an anchor at all: the walk compares successors, so a second half is never the `a`
+/// it is looking for, the walk runs off the end, and the answer is the same `None`.
+/// So `prev_anchor(a).is_none()` does **not** mean "`a` is the first anchor", and a
+/// caller that needs that has to ask [`anchor_of`] first and compare:
+///
+/// ```text
+/// 8 single-page files, lead_lone = 1  ->  turns {0} {1,2} {3,4} {5,6} {7}
+///   a = (2, 0): the second half of {1,2}, and there are two turns behind it.
+///     prev_anchor walks 0 -> 1 -> 3 -> 5 -> 7 -> off the end, and answers None.
+///   a = (0, 0): the first anchor, and there is nothing behind it.
+///     prev_anchor answers None for the same reason and the same value.
+/// ```
+///
+/// **A cursor can be on a second half without this section's help**, which is why
+/// that distinction is load-bearing rather than theoretical: three ways into the app
+/// assign the cursor by file index rather than by turn - a grid pick, a start-up or
+/// resume, and a `Del` that keeps the freed index - and at the default
+/// `lead_lone` of 1 an ordinary folder of single pages has a lone cover, so "file 3"
+/// is page 2 of the turn `{1,2}`. Reading `None` as "at the front" is how a backward
+/// step from such a position jumps to the last spread of the volume, which is what
+/// [`prev_turn`] exists to prevent.
 ///
 /// **Backward is O(distance from the front), and it has to be.** Forward is one
 /// addition, because an anchor knows its own turn length without asking anything.
@@ -7195,8 +7219,10 @@ pub const PREV_SCAN_LIMIT: usize = 1 << 20;
 ///
 /// **Returns `None` at the first anchor even when `loop_back` is on.** There is
 /// no turn before the first one; whether the *app* should jump back to the last
-/// turn of a looping gallery is the navigation layer's decision, and Task 7
-/// makes it. This function only ever reports the tiling.
+/// turn of a looping gallery is the navigation layer's decision, and
+/// [`prev_turn`] makes it. This function only ever reports the tiling - and, as
+/// its summary says, it reports `None` for a non-anchor as well, so it is
+/// [`anchor_of`] that decides whether a `None` means the front of the gallery.
 pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
     let mut anchor = PagePos { index: 0, page: 0 };
     for _ in 0..PREV_SCAN_LIMIT {
@@ -7235,6 +7261,52 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
     None
 }
 
+/// The turn anchor at or before `pos`: the anchor of the turn `pos` is on.
+///
+/// **Total, because the turns partition the gallery.** Every page is in exactly one
+/// turn and the walk from the first anchor visits every anchor, so the answer always
+/// exists for a position that does - which is what makes it usable as the thing to
+/// call *before* asking anything else about a cursor.
+///
+/// **It walks forward, for the same reason [`prev_anchor`] walks forward**, and the
+/// two together are the whole of anchor arithmetic: this one answers "which turn is
+/// this page on", and `prev_anchor` answers "which turn is before that one". Asking
+/// them of a position that is not an anchor is exactly what [`prev_anchor`] cannot
+/// do, and the failure it causes is worse than a wrong page number: see its summary.
+///
+/// **Total does not mean correct for a position that does not exist.** A `pos` past
+/// the end of the gallery is answered with the last turn's anchor, because that is
+/// the walk's final answer and inventing a second failure mode for it would only give
+/// callers something else to get wrong. Every caller in this crate passes a position
+/// the walk produced or a cursor, and [`Gallery::goto_page`] refuses an index past the
+/// end of the list, so nothing can observe the difference.
+///
+/// **O(distance from `pos`), like every other walk here, and no worse:** it reads the
+/// same cached dimensions the rest of the section does, and it stops at the turn `pos`
+/// is on rather than reading to the end of the volume.
+pub fn anchor_of(pos: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> PagePos {
+    let mut anchor = PagePos { index: 0, page: 0 };
+    for _ in 0..PREV_SCAN_LIMIT {
+        if anchor == pos {
+            return anchor;
+        }
+        // The turn holds two pages when `lone` says so, and its second one is
+        // `step_no_wrap(anchor, 1)` - the same spelling [`turn_partner`] uses, and
+        // for the same reason: the wrapping step would answer across the seam.
+        if turn_len(anchor, lead_lone, ctx) == 2 && ctx.step_no_wrap(anchor, 1) == Some(pos) {
+            return anchor;
+        }
+        // `turn_len` is asked twice for the same anchor, which is one wasted local
+        // test per iteration - not hoisted because hoisting it would only move the
+        // cost inside the loop, and the loop's cost is the walk, not this call.
+        let Some(next) = ctx.step_no_wrap(anchor, turn_len(anchor, lead_lone, ctx) as isize) else {
+            return anchor;
+        };
+        anchor = next;
+    }
+    anchor
+}
+
 /// The anchor of the gallery's final turn.
 ///
 /// **Forward, not backward, and for [`prev_anchor`]'s reason read from the other
@@ -7259,7 +7331,9 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
 /// with no files has no last turn, and `(0, 0)` is not a page of it.
 pub fn last_anchor(lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
     // `by` of 0 runs no iterations, so this is the "is there a first page at all"
-    // question answered by the same bounds check every step does.
+    // question answered by the same bounds check every step does. Not a formality: a
+    // gallery with no files has no page 0, and a walk that started at `(0, 0)` without
+    // asking would answer `Some` for it.
     let mut anchor = ctx.step_no_wrap(PagePos { index: 0, page: 0 }, 0)?;
     for _ in 0..PREV_SCAN_LIMIT {
         let Some(next) = ctx.step_no_wrap(anchor, turn_len(anchor, lead_lone, ctx) as isize) else {
@@ -7270,37 +7344,76 @@ pub fn last_anchor(lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
     None
 }
 
-/// Where one backward *step* lands: [`prev_anchor`], or - when there is no turn
-/// before this one and this context's step would wrap - the gallery's last turn.
+/// Where one forward *step* lands: the anchor of the next turn.
 ///
-/// **The wrap is this function's whole reason to exist, and it is the navigation
-/// layer's decision rather than the tiling's.** [`prev_anchor`] answers `None` at
-/// the first turn whatever `loop_back` says, and that is right for what it is: a
-/// tiling has no turn before its first, and letting the wrap into it would make the
-/// last turn of a looping gallery straddle the seam. Whether pressing left on the
-/// cover lands on the last spread or on nothing is a question about the *app*, and
-/// this is where the answer is written.
+/// **[`next_anchor`] snapped to the anchor first**, and that is the whole difference
+/// between the two. `next_anchor` is a question about the tiling asked of a position
+/// the caller believes to be an anchor; this is the navigation layer's step, asked of
+/// a cursor that may not be one - and at a second half, `turn_len` is the second half's
+/// own answer, so `next_anchor` returns a position one page past the turn on screen and
+/// every step after that is off by the same page.
+///
+/// The snap costs one walk from the front ([`anchor_of`]); `next_anchor` itself is one
+/// `turn_len`, so a forward step is that walk and nothing else. It is the same walk
+/// [`prev_anchor`] makes for a backward step, and the same price in both directions —
+/// paid to be callable with any cursor, rather than the alternative: a navigation layer
+/// that silently mis-navigates on every second half, which at the default `lead_lone`
+/// of 1 is every other page of an ordinary folder.
+pub fn next_turn(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
+    next_anchor(anchor_of(a, lead_lone, ctx), lead_lone, ctx)
+}
+
+/// Where one backward *step* lands: the anchor of the turn before the one `a` is on,
+/// or - when that is the gallery's first turn and this context's step would wrap -
+/// the gallery's last turn.
+///
+/// **`prev_anchor` is asked first, and its `Some` is a proof rather than a lucky
+/// answer.** The walk compares successors, so it can only return `Some` for a position
+/// that *is* an anchor - a second half is never the successor it is looking for. So
+/// when it answers, there is nothing to disambiguate and no second walk to pay for,
+/// which is the case every step after the first is in (the walks always land on an
+/// anchor, and `MyApp::goto` snaps whatever did not).
+///
+/// **`None` is the ambiguous one, and that is the bug this function was corrected
+/// for.** `None` means "the first turn" *or* "`a` is not an anchor at all", and three
+/// ways into the app put the cursor in the second case without asking: a grid pick
+/// leaves `page` alone, a start-up or resume lands on page 0, and a `Del` keeps the
+/// freed index. At the default `lead_lone` of 1 an ordinary folder of single pages
+/// tiles `{0} {1,2} {3,4} {5,6} {7}`, so "the third file" is page 2 - the second half
+/// of `{1,2}` - and reading its `None` as "at the front" sent a backward step to the
+/// last spread of the volume, with `loop_back` on **and** off. [`anchor_of`] is what
+/// separates the two, and it is only asked when there is a `None` to interpret.
+///
+/// **A second half of the *first* turn still reaches the wrap arm**, because its own
+/// anchor is the first anchor and there is nothing before that either. Written as a
+/// fall-through rather than an early return, and the case is real rather than
+/// theoretical: on a two-file gallery with `loop_back` on, page 1 is the first turn's
+/// second half, and the answer is the only turn in the volume.
 ///
 /// **The wrap is decided by asking [`PageCtx::step`], not by a `looping` argument**,
 /// so `loop_back` stays the single setting that decides it and this cannot disagree
-/// with [`Gallery::prev`] about whether the cursor wraps at all. A backward step that
-/// runs off the front while `step` would not wrap means the answer really is
-/// "nowhere" - so looping off still stops at both ends, which is the whole of what it
-/// has ever meant.
-///
-/// **There is no forward twin, and that is not an oversight.** [`next_anchor`] is
-/// already that answer: it asks the wrapping [`PageCtx::step`] for the next anchor
-/// directly, so with `loop_back` on it wraps from the last turn and with it off it
-/// runs out. Only the backward direction needs a second question, because
-/// `prev_anchor` cannot see the wrap - it walks with `step_no_wrap` so the tiling
-/// does not straddle the seam.
+/// with [`Gallery::prev`] about whether the cursor wraps at all. **The question is
+/// asked of the anchor, not of `a`**, because `a` may be a second half: one page back
+/// from page 1 of `{0,1}` is page 0 of the same gallery, not past its front, so asking
+/// `a` would wrap (or refuse) where the answer is "nowhere". A backward step at the
+/// front with looping off still stops, which is the whole of what `loop_back` has ever
+/// meant.
 pub fn prev_turn(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePos> {
     if let Some(prev) = prev_anchor(a, lead_lone, ctx) {
         return Some(prev);
     }
-    // No turn before this one. If a one-page step backwards would wrap, the cursor's
-    // next position backwards is the last turn; if it would not, nothing moves.
-    ctx.step(a, -1)?;
+    let at = anchor_of(a, lead_lone, ctx);
+    if at != a {
+        // A second half: the answer is the turn before the one *it* is on, which is
+        // a second walk and the price of accepting a cursor that is not on an anchor.
+        if let Some(prev) = prev_anchor(at, lead_lone, ctx) {
+            return Some(prev);
+        }
+        // `at` is the first anchor and `a` its turn's second half: still the front.
+    }
+    // If a one-page step backwards from the first turn would wrap, the cursor's next
+    // position backwards is the last turn; if it would not, nothing moves.
+    ctx.step(at, -1)?;
     last_anchor(lead_lone, ctx)
 }
 

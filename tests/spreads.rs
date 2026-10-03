@@ -20,11 +20,11 @@
 //! test. What the source scan adds is only the call, which nothing else can see.
 
 use image_viewer::{
-    exif_orientation, last_anchor, load_spread_overrides, lone, next_anchor, page_dims, pairable,
-    prev_anchor, prev_turn, save_spread_overrides, shape_of, spread_fit, spread_rects,
-    spread_root_key, spreads_root, spreads_tmp, thumb_cache_root, turn_len, turn_partner, Gallery,
-    GallerySpreads, ImgKey, PageCtx, PagePos, Rect4, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX,
-    PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
+    anchor_of, exif_orientation, last_anchor, load_spread_overrides, lone, next_anchor, next_turn,
+    page_dims, pairable, prev_anchor, prev_turn, save_spread_overrides, shape_of, spread_fit,
+    spread_rects, spread_root_key, spreads_root, spreads_tmp, thumb_cache_root, turn_len,
+    turn_partner, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Rect4, Shape,
+    LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -408,6 +408,79 @@ proptest! {
         }
         backwards.reverse();
         prop_assert_eq!(backwards, forwards, "lead {} over {:?}", lead, g);
+    }
+
+    /// One backward turn-step lands on the turn immediately before the turn the
+    /// position is on — from **every** position, anchor or not.
+    ///
+    /// **This is the guard for the bug `prev_anchor`'s ambiguous `None` caused.** Its
+    /// first version read `prev_anchor(a).is_none()` as "`a` is the first turn", so a
+    /// backward step from a *second half* — which `prev_anchor` also answers `None`
+    /// for — wrapped to `last_anchor` and put the reader on the last spread of the
+    /// volume, with `loop_back` on and off. Stated as a property rather than as one
+    /// fixture, because the property is the thing the navigation rests on: a step goes
+    /// to the previous turn or nowhere, never forwards.
+    ///
+    /// Two assertions, because "lands on an anchor" alone would be satisfied by the
+    /// first anchor of the gallery — which is what the bug returned.
+    ///
+    /// * `anchor_of(prev) == prev`: the position handed back is an anchor, so the
+    ///   cursor is somewhere the pairing's rules are valid at.
+    /// * `next_anchor(prev) == anchor_of(at)`: the turn *after* the one it landed on
+    ///   is the turn the position was on, so it is exactly one turn back. Under
+    ///   `loop_back` this also covers the wrap: stepping forward from the last turn
+    ///   arrives at the first, which is the right answer when the step came from the
+    ///   first turn.
+    ///
+    /// Every position of every random gallery is checked, not a sample, because the
+    /// bug needs a second half and a hand-picked fixture does not reliably contain one
+    /// at every `lead_lone`. Positions that do not move are skipped — with `loop_back`
+    /// off that is the first turn, and there is nothing to assert about it.
+    ///
+    /// **Verified to fail against the version this replaced**: `prev_turn` without the
+    /// snap, run over the same 256 cases, fails on the first second half it meets.
+    #[test]
+    fn a_backward_turn_step_lands_on_the_turn_before_the_one_it_came_from((g, lead) in any_gallery()) {
+        let mut checked = 0usize;
+        for n in 0..g.total_pages() {
+            let at = g.page_at(n).unwrap();
+            let Some(prev) = prev_turn(at, lead, &g) else { continue };
+            checked += 1;
+            prop_assert_eq!(
+                anchor_of(prev, lead, &g),
+                prev,
+                "a backward step from page {} (lead {}) landed on {:?}, which is not an anchor, over {:?}",
+                n,
+                lead,
+                prev,
+                g
+            );
+            prop_assert_eq!(
+                next_anchor(prev, lead, &g),
+                Some(anchor_of(at, lead, &g)),
+                "a backward step from page {} (lead {}) landed on {:?}, whose next turn is not the one it is on, over {:?}",
+                n,
+                lead,
+                prev,
+                g
+            );
+            // The same trap forwards, and it is quieter: at a second half `turn_len`
+            // is that page's *own* answer, so an unsnapped `next_anchor` steps a page
+            // too far and lands on an anchor of the wrong turn. Asserted as agreement
+            // with the step from the anchor rather than against a spelled-out list,
+            // because the list is what the pairing is for and this is the navigation.
+            prop_assert_eq!(
+                next_turn(at, lead, &g),
+                next_turn(anchor_of(at, lead, &g), lead, &g),
+                "a forward step from page {} (lead {}) disagrees with the same step from its anchor, over {:?}",
+                n,
+                lead,
+                g
+            );
+        }
+        // So a case whose positions all refuse still asserts something: without it a
+        // gallery of one page with `loop_back` off would run no assertion at all.
+        prop_assert!(checked <= g.total_pages(), "one landing per position at most");
     }
 }
 
@@ -3327,12 +3400,12 @@ fn mark_wide(gal: &mut Gallery, index: usize, page: u32) {
 
 /// One step forwards, as `MyApp::turn_forward` performs it.
 ///
-/// Two lines and no rule: which anchor the next turn opens on is [`next_anchor`],
-/// and the move is `Gallery::goto_page`. The app's copies of both are in the binary,
-/// and the mode gate that chooses between this and `Gallery::next` is the source
-/// scan at the end of this section.
+/// Two lines and no rule: which anchor the next turn opens on is [`next_turn`], and
+/// the move is `Gallery::goto_page`. The app's copies of both are in the binary, and
+/// the mode gate that chooses between this and `Gallery::next` is the source scan at
+/// the end of this section.
 fn step_forward(gal: &mut Gallery, lead_lone: u32) -> bool {
-    let Some(to) = next_anchor(gal.page_pos(), lead_lone, &*gal) else {
+    let Some(to) = next_turn(gal.page_pos(), lead_lone, &*gal) else {
         return false;
     };
     gal.goto_page(to);
@@ -3368,30 +3441,64 @@ fn step_backward(gal: &mut Gallery, lead_lone: u32) -> bool {
 /// that stopped only on `false` would spin forever on a looping gallery, and a test
 /// that hangs is worse than one that fails.
 fn assert_turn_step_landings_exist(gal: &mut Gallery, lead_lone: u32, forward: bool) {
-    let mut seen = vec![gal.page_pos()];
-    while if forward {
-        step_forward(gal, lead_lone)
-    } else {
-        step_backward(gal, lead_lone)
-    } {
-        let at = gal.page_pos();
-        if seen.contains(&at) {
-            break;
+    for from in walk_start_positions(gal) {
+        let mut gal = gal.clone();
+        gal.goto_page(from);
+        let mut seen = vec![gal.page_pos()];
+        while if forward {
+            step_forward(&mut gal, lead_lone)
+        } else {
+            step_backward(&mut gal, lead_lone)
+        } {
+            let at = gal.page_pos();
+            if seen.contains(&at) {
+                break;
+            }
+            assert!(
+                at.index < gal.len(),
+                "a step landed on file {} of a gallery of {} (from {from:?})",
+                at.index,
+                gal.len()
+            );
+            assert!(
+                at.page < gal.pages_in_current(),
+                "a step landed on page {} of a {}-page file: {at:?} (from {from:?})",
+                at.page,
+                gal.pages_in_current()
+            );
+            seen.push(at);
         }
-        assert!(
-            at.index < gal.len(),
-            "a step landed on file {} of a gallery of {}",
-            at.index,
-            gal.len()
-        );
-        assert!(
-            at.page < gal.pages_in_current(),
-            "a step landed on page {} of a {}-page file: {at:?}",
-            at.page,
-            gal.pages_in_current()
-        );
-        seen.push(at);
     }
+}
+
+/// The positions a walk is started from: the first page, and **one second half from
+/// the middle**.
+///
+/// The second half is the whole point, and it is here rather than in each test because
+/// a cursor off an anchor is what three ways into the app produce - a grid pick leaves
+/// `page` alone, a start-up or resume lands on page 0, and a `Del` keeps the freed
+/// index. Paging forward to reach one would stop at the first anchor, so it is named as
+/// a position instead: the third page of a gallery of at least three pages is a second
+/// half whenever `lead_lone` is 0 (turns `{0,1} {2,3}...`) and the second page is one
+/// whenever `lead_lone` is 1 (`{0} {1,2}...`), so both are covered by the two starts
+/// below across the leads this section walks.
+fn walk_start_positions(gal: &Gallery) -> Vec<PagePos> {
+    let mut out = vec![PagePos { index: 0, page: 0 }];
+    for n in [1usize, 2] {
+        let mut seen = 0usize;
+        for (index, _) in gal.files.iter().enumerate() {
+            let pages = gal.pages_in(index);
+            if n < seen + pages as usize {
+                out.push(PagePos {
+                    index,
+                    page: (n - seen) as u32,
+                });
+                break;
+            }
+            seen += pages as usize;
+        }
+    }
+    out
 }
 
 /// One press moves a whole turn: two pages, not one.
@@ -3404,6 +3511,11 @@ fn assert_turn_step_landings_exist(gal: &mut Gallery, lead_lone: u32, forward: b
 /// and every rule in the pairing is written on the promise that the cursor is never
 /// there (`lone` answers "is this page alone?" wrongly at a non-anchor, which is
 /// what the section header of `src/lib.rs` is about).
+///
+/// **Both `lead_lone` values, and the second half of this test is the app's default.**
+/// At `lead_lone` 1 the tiling is `{0} {1,2} {3,4} {5,6} {7}` - the cover alone, which
+/// is the only case in the whole section where the *first* turn is not a pair - so the
+/// second anchor is page 1 rather than page 2 and the step still moves a whole turn.
 #[test]
 fn a_step_forward_advances_a_whole_turn() {
     let mut gal = turns_gallery(&[1; 8]);
@@ -3420,6 +3532,32 @@ fn a_step_forward_advances_a_whole_turn() {
         PagePos { index: 2, page: 0 },
         "the second anchor - not page 1, which is this turn's own second half"
     );
+
+    // The same gallery at the app's default lead_lone, where the cover is a turn of
+    // one: the second anchor is page 1, and the step still moves a whole turn rather
+    // than a page.
+    let mut cover = turns_gallery(&[1; 8]);
+    cover.set_loop_back(false);
+    assert_eq!(
+        turn_len(cover.page_pos(), LEAD_LONE_DEFAULT, &cover),
+        1,
+        "the premise: the cover goes alone at lead_lone 1"
+    );
+    assert!(step_forward(&mut cover, LEAD_LONE_DEFAULT), "there is a second turn");
+    assert_eq!(
+        cover.page_pos(),
+        PagePos { index: 1, page: 0 },
+        "which opens {{1,2}}: two pages, and page 2 is the turn's second half"
+    );
+    assert_eq!(
+        turn_partner(cover.page_pos(), LEAD_LONE_DEFAULT, &cover),
+        Some(ImgKey {
+            path: cover.files[2].clone(),
+            page: 0
+        }),
+        "and its other half is the third file: every file here is one page, so the \
+         turn's second page is a page number of 0 in a different file"
+    );
 }
 
 /// Back one turn, not back one page.
@@ -3430,6 +3568,10 @@ fn a_step_forward_advances_a_whole_turn() {
 /// Backwards there is no local test for that (see `prev_anchor`'s doc comment for
 /// the three formulations that were tried and are all wrong), so the anchor walk is
 /// the only way to answer it.
+///
+/// The default `lead_lone` case is here for the same reason it is in the forward test:
+/// at 1 the anchors are `0,1,3,5,7`, so back from the second anchor is the lone cover
+/// rather than a pair's first page.
 #[test]
 fn a_step_backward_returns_to_the_previous_turn_and_not_the_previous_page() {
     let mut gal = turns_gallery(&[1; 8]);
@@ -3449,6 +3591,17 @@ fn a_step_backward_returns_to_the_previous_turn_and_not_the_previous_page() {
         "and no turn before the first one, with looping off"
     );
     assert_eq!(gal.page_pos(), PagePos { index: 0, page: 0 }, "which did not move the cursor");
+
+    let mut cover = turns_gallery(&[1; 8]);
+    cover.set_loop_back(false);
+    step_forward(&mut cover, LEAD_LONE_DEFAULT);
+    assert_eq!(cover.page_pos(), PagePos { index: 1, page: 0 }, "on {{1,2}}'s anchor");
+    assert!(step_backward(&mut cover, LEAD_LONE_DEFAULT), "there is the cover before it");
+    assert_eq!(
+        cover.page_pos(),
+        PagePos { index: 0, page: 0 },
+        "which is a turn of one, so back one turn is back to page 0"
+    );
 }
 
 /// A page that is itself a scan of two printed pages takes a whole turn, and
@@ -3529,56 +3682,155 @@ fn a_wide_page_is_stepped_past_as_one_turn() {
 /// from rather than on a refusal** - a looping gallery never refuses, so a walk
 /// that waited for `false` would go round for ever. Four forwards is a full round:
 /// three steps reach the last turn and the fourth is the wrap.
+///
+/// **Both `lead_lone` values, with the whole anchor list spelled out for each.** At
+/// the app's default of 1 the tiling is `{0} {1,2} {3,4} {5,6} {7}` - five turns, the
+/// lone cover included - so the round is five steps rather than four, and the two
+/// walks have to agree on *that* count as well as on the tiling. Pinning the count per
+/// lead is the point: a walk that agreed with itself about the wrong number of turns
+/// would still come back to the start.
 #[test]
 fn navigating_a_full_round_returns_to_the_start() {
-    let mut gal = turns_gallery(&[1; 8]);
     // `loop_back` on, which is what `Gallery::from_file` leaves: the setting under
     // test is that a step wraps, and the alternative would be
     // `nothing_moves_with_looping_off_at_the_end`'s case.
-    assert!(gal.loop_back, "the premise: looping is on");
-    let lead = 0;
-    let start = gal.page_pos();
+    for (lead, anchors, last_anchor_pos) in [
+        (
+            0u32,
+            vec![PagePos { index: 0, page: 0 }, PagePos { index: 2, page: 0 },
+                 PagePos { index: 4, page: 0 }, PagePos { index: 6, page: 0 }],
+            PagePos { index: 6, page: 0 },
+        ),
+        (
+            LEAD_LONE_DEFAULT,
+            vec![PagePos { index: 0, page: 0 }, PagePos { index: 1, page: 0 },
+                 PagePos { index: 3, page: 0 }, PagePos { index: 5, page: 0 },
+                 PagePos { index: 7, page: 0 }],
+            PagePos { index: 7, page: 0 },
+        ),
+    ] {
+        let mut gal = turns_gallery(&[1; 8]);
+        assert!(gal.loop_back, "the premise: looping is on");
+        let start = gal.page_pos();
+        let rounds = anchors.len();
 
-    // At least one step: the cursor starts *on* `start`, so the walk is a do-while
-    // rather than a while.
-    let mut forwards = 0usize;
-    loop {
-        assert!(step_forward(&mut gal, lead), "a looping gallery never runs out of turns");
-        forwards += 1;
-        assert!(forwards <= 8, "the forward walk does not come back round");
-        if gal.page_pos() == start {
-            break;
+        // The anchor list itself, reached by stepping - one fewer step than a round,
+        // because the last step of the round *is* the wrap.
+        let mut walked = vec![gal.page_pos()];
+        for _ in 1..rounds {
+            assert!(step_forward(&mut gal, lead), "lead {lead}: there is a turn after each anchor");
+            walked.push(gal.page_pos());
         }
-    }
-    assert_eq!(forwards, 4, "three steps to the last turn, and the fourth is the wrap");
+        assert_eq!(walked, anchors, "lead {lead}: the anchors in reading order");
+        // Back to the front for the round trip: the walk above has left the cursor on
+        // the last anchor, and the round is measured from the first.
+        gal.goto_index(0);
+        assert_eq!(gal.page_pos(), start, "lead {lead}: back at the first turn");
 
-    let mut backwards = 0usize;
-    loop {
-        assert!(step_backward(&mut gal, lead), "a looping gallery never runs out of turns");
-        backwards += 1;
-        assert!(backwards <= 8, "the backward walk does not come back round");
-        if gal.page_pos() == start {
-            break;
+        // At least one step: the cursor starts *on* `start`, so the walk is a do-while
+        // rather than a while.
+        let mut forwards = 0usize;
+        loop {
+            assert!(step_forward(&mut gal, lead), "a looping gallery never runs out of turns");
+            forwards += 1;
+            assert!(forwards <= rounds, "lead {lead}: the forward walk does not come back round");
+            if gal.page_pos() == start {
+                break;
+            }
         }
+        assert_eq!(forwards, rounds, "lead {lead}: one step per turn, the last being the wrap");
+
+        let mut backwards = 0usize;
+        loop {
+            assert!(step_backward(&mut gal, lead), "a looping gallery never runs out of turns");
+            backwards += 1;
+            assert!(backwards <= rounds, "lead {lead}: the backward walk does not come back round");
+            if gal.page_pos() == start {
+                break;
+            }
+        }
+        assert_eq!(backwards, forwards, "lead {lead}: as many turns backwards as forwards");
+        assert_eq!(
+            gal.page_pos(),
+            start,
+            "lead {lead}: so a full round trip is a round trip, which is what makes looping usable"
+        );
+
+        // The turn both walks met at the far end is the same one either way round the
+        // gallery, which is the property `last_anchor` exists to preserve: `lone` asks
+        // for a partner with `step_no_wrap`, so a looping gallery tiles exactly as a
+        // non-looping one does. A `last_anchor` that consulted the wrap would make the
+        // last turn depend on `loop_back` and put the gallery's last page beside its
+        // first.
+        let mut unlooped = turns_gallery(&[1; 8]);
+        unlooped.set_loop_back(false);
+        assert_eq!(last_anchor(lead, &unlooped), Some(last_anchor_pos), "lead {lead}");
+        assert_eq!(last_anchor(lead, &gal), Some(last_anchor_pos), "lead {lead}, looping");
     }
-    assert_eq!(backwards, 4, "as many turns backwards as forwards");
+}
+
+/// `last_anchor`'s other three fixtures, and the `None` its doc comment promises.
+///
+/// The eight-single-page gallery above is one case; this is an empty gallery, a
+/// multi-page document, and a turn of two at the very end - the last three shapes
+/// where the answer could be a page that is not on screen. **`prev_turn` calls this on
+/// the keypress path**, on every backward step off the first turn of a looping gallery,
+/// so "it answers for a gallery with nothing in it" is a claim about the hot path and
+/// not about a corner nobody reaches.
+///
+/// The empty gallery is the one that matters most: its answer is `None` because the
+/// walk asks `step_no_wrap` whether page 0 exists rather than starting there, and a
+/// walk that started there would answer `Some((0, 0))` - a position that is not on
+/// screen, for a gallery with nothing on it.
+#[test]
+fn the_last_turn_is_the_same_with_looping_on_and_off_and_an_empty_gallery_has_none() {
+    // An empty gallery, from both ends of the API that reaches for it.
+    let empty = Gallery::empty();
+    assert!(empty.is_empty(), "the premise: nothing is in this gallery");
+    assert_eq!(last_anchor(0, &empty), None, "no gallery, no last turn");
+    assert_eq!(last_anchor(LEAD_LONE_DEFAULT, &empty), None, "whatever the lead_lone");
     assert_eq!(
-        gal.page_pos(),
-        start,
-        "so a full round trip is a round trip, which is what makes looping usable"
+        prev_turn(PagePos { index: 0, page: 0 }, 0, &empty),
+        None,
+        "and no backward step either, rather than a panic or a move"
     );
 
-    // The turn both walks met at the far end is the same one either way round the
-    // gallery, which is the property `last_anchor` exists to preserve: `lone` asks
-    // for a partner with `step_no_wrap`, so a looping gallery tiles exactly as a
-    // non-looping one does. A `last_anchor` that consulted the wrap would make the
-    // last turn depend on `loop_back` and put the gallery's last page beside its
-    // first.
-    let mut unlooped = turns_gallery(&[1; 8]);
-    unlooped.set_loop_back(false);
-    let last = Some(PagePos { index: 6, page: 0 });
-    assert_eq!(last_anchor(lead, &unlooped), last, "eight pages: the last turn opens on page 6");
-    assert_eq!(last_anchor(lead, &gal), last, "and a looping gallery's last turn is that one too");
+    for counts in [vec![3u32, 1], vec![1, 4], vec![2, 2], vec![1, 1, 1]] {
+        let lead = 0;
+        let mut unlooped = turns_gallery(&counts);
+        unlooped.set_loop_back(false);
+        // The expected answer, read off the flat sequence: the anchor of the last turn
+        // is the last page, or the page before it when that pair holds.
+        let flat: usize = counts.iter().map(|c| *c as usize).sum();
+        let expected = if flat % 2 == 0 {
+            flat_position(&unlooped, flat - 2)
+        } else {
+            flat_position(&unlooped, flat - 1)
+        };
+        assert_eq!(
+            last_anchor(lead, &unlooped),
+            Some(expected),
+            "{counts:?}: the last turn opens on {expected:?}"
+        );
+        // The whole point of the `step_no_wrap` walk: the answer does not depend on
+        // `loop_back`, or the last turn would straddle the seam.
+        let mut looping = turns_gallery(&counts);
+        looping.set_loop_back(true);
+        assert_eq!(
+            last_anchor(lead, &looping),
+            Some(expected),
+            "{counts:?}: a looping gallery's last turn is the same one"
+        );
+        // And the turn it names really does reach the gallery's last page, which is
+        // what "last" has to mean for a wrap to land somewhere sensible: either it is
+        // that page, or it is the one before it in a pair.
+        let last = last_anchor(lead, &unlooped).unwrap();
+        let final_page = flat_position(&unlooped, flat - 1);
+        assert!(
+            last == final_page || PageCtx::step_no_wrap(&unlooped, last, 1) == Some(final_page),
+            "{counts:?}: the last turn {last:?} does not reach page {flat} ({final_page:?})"
+        );
+    }
 }
 
 /// A turn is not a file, so the walk crosses a document's page boundary the same
@@ -3642,6 +3894,13 @@ fn a_multi_page_document_is_navigated_by_turn_too() {
 /// partner is left alone on screen" and "there is nothing left at all" are different
 /// answers - and the test asserts the file list as well as the turn length, because
 /// `turn_len == 1` is also what a gallery emptied of both pages would report.
+///
+/// **What this models is a `Del` on a whole file, and only because every page in the
+/// fixture is page 0.** `MyApp::remove_current_from_gallery` keeps `gallery.page`, so a
+/// delete *inside* a document leaves a page number the file that slides into the freed
+/// index may not have - which is `Gallery::learn_pages`' clamp in `goto` to repair, and
+/// `MyApp::snap_to_turn_anchor`'s snap on top of that. Neither is in the model here, so
+/// this test says nothing about a `Del` on page 3 of a four-page document.
 #[test]
 fn removing_the_cursor_page_leaves_its_partner_a_turn_of_one() {
     let mut gal = turns_gallery(&[1, 1]);
@@ -3701,39 +3960,274 @@ fn removing_the_cursor_page_leaves_its_partner_a_turn_of_one() {
 /// The refused step is checked to leave the cursor where it was, which is the other
 /// half: `MyApp::step` skips `goto` on a refusal, so that the full-res dwell timer
 /// and the queue plan are not reset for an image that did not change.
+///
+/// **Both `lead_lone` values**, because the last turn is a different turn under each:
+/// at 1 the final page is alone (`{0} {1,2} {3,4} {5,6} {7}`) and at 0 the last two
+/// pages are a pair, so "the end" is two different positions and a refusal has to hold
+/// at both.
 #[test]
 fn nothing_moves_with_looping_off_at_the_end() {
-    let mut gal = turns_gallery(&[1; 8]);
-    gal.set_loop_back(false);
+    for (lead, steps_to_the_end, last) in [
+        (0u32, 3usize, PagePos { index: 6, page: 0 }),
+        (LEAD_LONE_DEFAULT, 4usize, PagePos { index: 7, page: 0 }),
+    ] {
+        let mut gal = turns_gallery(&[1; 8]);
+        gal.set_loop_back(false);
+
+        let mut forwards = 0usize;
+        while step_forward(&mut gal, lead) {
+            forwards += 1;
+            assert!(forwards <= 8, "lead {lead}: the forward walk does not terminate");
+        }
+        assert_eq!(
+            forwards, steps_to_the_end,
+            "lead {lead}: one step fewer than the turn count, since the first turn is where it starts"
+        );
+        assert_eq!(gal.page_pos(), last, "lead {lead}: the last turn opens here");
+        assert!(
+            !step_forward(&mut gal, lead),
+            "lead {lead}: and there is nothing after it"
+        );
+        assert_eq!(gal.page_pos(), last, "lead {lead}: a refused step does not move the cursor");
+
+        let mut backwards = 0usize;
+        while step_backward(&mut gal, lead) {
+            backwards += 1;
+            assert!(backwards <= 8, "lead {lead}: the backward walk does not terminate");
+        }
+        assert_eq!(backwards, steps_to_the_end, "lead {lead}: back to the first turn");
+        assert_eq!(gal.page_pos(), PagePos { index: 0, page: 0 }, "lead {lead}");
+        assert!(!step_backward(&mut gal, lead), "lead {lead}: and nothing before it");
+        assert_eq!(
+            gal.page_pos(),
+            PagePos { index: 0, page: 0 },
+            "lead {lead}: which did not move it either"
+        );
+    }
+}
+
+/// The bug this section's second round of tests exists for: a backward step from a
+/// **second half** landed on the last spread of the volume.
+///
+/// `prev_anchor` answers `None` for two different reasons - the first turn, and a
+/// position that is not an anchor - and reading it as "at the front" sent the cursor
+/// to `last_anchor` instead. At the app's default `lead_lone` of 1 an ordinary folder
+/// of eight single pages tiles `{0} {1,2} {3,4} {5,6} {7}`, so **the third file is
+/// page 2, the second half of `{1,2}`**, and three ways into the app put the cursor
+/// there without asking: a grid pick leaves `page` alone, a start-up or resume lands on
+/// page 0 of the file it resumed, and a `Del` keeps the freed index. Left from there
+/// jumped to page 7 with `loop_back` on **and** off.
+///
+/// The premise is asserted rather than assumed - `prev_anchor` really does answer
+/// `None` for this position, and `anchor_of` really does say it is not an anchor -
+/// because a test that only checked where the cursor went would pass against a
+/// `prev_anchor` that answered `Some` and simply gave a different wrong answer.
+#[test]
+fn a_backward_step_from_a_second_half_does_not_jump_to_the_last_spread() {
+    let lead = LEAD_LONE_DEFAULT;
+    for looping in [true, false] {
+        let mut gal = turns_gallery(&[1; 8]);
+        gal.set_loop_back(looping);
+        gal.goto_index(2);
+
+        // The premise: page 2 is a second half at the default lead_lone, and
+        // `prev_anchor` cannot tell that from "at the front".
+        let second_half = PagePos { index: 2, page: 0 };
+        assert_eq!(
+            anchor_of(second_half, lead, &gal),
+            PagePos { index: 1, page: 0 },
+            "the turn page 2 is on opens on page 1"
+        );
+        assert_ne!(anchor_of(second_half, lead, &gal), second_half, "so page 2 is not an anchor");
+        assert!(
+            prev_anchor(second_half, lead, &gal).is_none(),
+            "and prev_anchor answers None for it - the same answer it gives at the front"
+        );
+        assert_eq!(turn_len(anchor_of(second_half, lead, &gal), lead, &gal), 2, "which is a pair");
+
+        assert!(step_backward(&mut gal, lead), "a backward step from a second half moves");
+        assert_ne!(
+            gal.page_pos(),
+            PagePos { index: 7, page: 0 },
+            "looping {looping}: Left from the second half must not land on the last spread"
+        );
+        assert_eq!(
+            gal.page_pos(),
+            PagePos { index: 0, page: 0 },
+            "looping {looping}: it lands on the turn before {{1,2}}, which is {{0}} alone"
+        );
+    }
+}
+
+/// A backward step from the **second half of the first turn** still reaches the wrap.
+///
+/// The one case `prev_anchor` cannot answer and neither can `anchor_of` alone: the
+/// cursor is on page 1 of a two-page first turn, so there is no turn before it *and*
+/// the position is not an anchor. Resolving the turn with `anchor_of` gets as far as
+/// the first anchor, whose predecessor is also nothing - so the wrap question still has
+/// to be asked, and the answer has to be the gallery's last turn rather than "nowhere".
+///
+/// On this fixture the last turn *is* the first, so the walk comes back to where it
+/// started: which is exactly what `Gallery::prev` does from the same position (it goes
+/// back one page, inside the turn), and what a reader pressing Left twice in a row
+/// expects. With looping off there is nothing to wrap to and nothing moves.
+///
+/// **Written after a mutation came back green.** `prev_turn`'s second branch was
+/// mutated to `return None` - refusing rather than falling through to the wrap - and
+/// every test in the file passed, because the proptest below skips positions that do
+/// not move and the two walk tests all start at an anchor. A guard that cannot see a
+/// step *not happening* is not a guard.
+#[test]
+fn a_backward_step_from_the_first_turns_second_half_still_wraps() {
     let lead = 0;
 
-    let mut forwards = 0usize;
-    while step_forward(&mut gal, lead) {
-        forwards += 1;
-        assert!(forwards <= 8, "the forward walk does not terminate");
-    }
-    assert_eq!(forwards, 3, "three steps from the first turn to the last of four");
-    let last = PagePos { index: 6, page: 0 };
-    assert_eq!(gal.page_pos(), last, "the last turn holds the last two pages");
-    assert!(!step_forward(&mut gal, lead), "and there is nothing after it");
-    assert_eq!(gal.page_pos(), last, "so a refused step does not move the cursor");
+    let mut looping = turns_gallery(&[1, 1]);
+    looping.set_loop_back(true);
+    looping.goto_index(1);
+    // The premise: page 1 is the first turn's second half, so neither of the two
+    // `None`-disambiguating answers comes back on its own.
+    let second_half = PagePos { index: 1, page: 0 };
+    assert_ne!(anchor_of(second_half, lead, &looping), second_half, "it is a second half");
+    assert_eq!(anchor_of(second_half, lead, &looping), PagePos { index: 0, page: 0 });
+    assert!(prev_anchor(second_half, lead, &looping).is_none(), "and there is no anchor before it");
+    assert!(prev_anchor(PagePos { index: 0, page: 0 }, lead, &looping).is_none(), "nor before the first turn");
 
-    let mut backwards = 0usize;
-    while step_backward(&mut gal, lead) {
-        backwards += 1;
-        assert!(backwards <= 8, "the backward walk does not terminate");
+    assert!(step_backward(&mut looping, lead), "looping on: a backward step still moves");
+    assert_eq!(
+        looping.page_pos(),
+        PagePos { index: 0, page: 0 },
+        "looping on: to the first page of the only turn, as Gallery::prev would"
+    );
+
+    // And with looping off the same position refuses, which is the other half of the
+    // wrap decision: `loop_back` is the only thing that separates these two answers.
+    let mut stopped = turns_gallery(&[1, 1]);
+    stopped.set_loop_back(false);
+    stopped.goto_index(1);
+    assert!(!step_backward(&mut stopped, lead), "looping off: there is nowhere to go");
+    assert_eq!(stopped.page_pos(), second_half, "looping off: and the cursor does not move");
+}
+
+/// The same trap in the forward direction: a step from a second half lands where the
+/// same step from that turn's anchor lands.
+///
+/// Quieter than the backward case, which is why it needs its own test. `turn_len` at a
+/// second half is *that page's* answer - it looks for a partner after itself and finds
+/// one - so `next_anchor` accepts it and steps by two, which from `{0,1}`'s page 1
+/// lands on page 3 where the turn on screen is `{0,1}` and the next turn opens on page
+/// 2. Nothing crashes, every position exists, and the reader skips a spread per press.
+///
+/// Stated as agreement with the step from the anchor rather than as a spelled-out
+/// position, so the same fixture works at either `lead_lone`.
+#[test]
+fn a_forward_step_from_a_second_half_lands_where_its_anchor_would() {
+    // (lead_lone, the second half to start from, the turn after it opens on page)
+    for (lead, from, to) in [(0u32, 1usize, 2usize), (LEAD_LONE_DEFAULT, 2usize, 3usize)] {
+        let mut gal = turns_gallery(&[1; 8]);
+        gal.set_loop_back(false);
+        gal.goto_index(from);
+        assert_ne!(
+            anchor_of(gal.page_pos(), lead, &gal),
+            gal.page_pos(),
+            "lead {lead}: page {from} is a second half"
+        );
+
+        assert!(step_forward(&mut gal, lead), "lead {lead}: there is a next turn");
+        assert_eq!(
+            gal.page_pos(),
+            PagePos { index: to, page: 0 },
+            "lead {lead}: a step from a second half lands on the turn after its own, not a page further"
+        );
+        assert_eq!(
+            anchor_of(gal.page_pos(), lead, &gal),
+            gal.page_pos(),
+            "lead {lead}: and it lands on an anchor, which is what the cursor needs"
+        );
     }
-    // Three backwards steps for four turns: the last turn holds two pages and the
-    // first is one step away, so the anchors are 0, 2, 4, 6 and going back from 0
-    // is nothing.
-    assert_eq!(backwards, 3, "back to the first turn");
-    assert_eq!(gal.page_pos(), PagePos { index: 0, page: 0 });
-    assert!(!step_backward(&mut gal, lead), "and nothing before it");
-    assert_eq!(gal.page_pos(), PagePos { index: 0, page: 0 }, "which did not move it either");
+}
+
+/// `anchor_of` is total and idempotent: it answers an anchor, for every position in
+/// the gallery, and that anchor is the one whose turn holds the position.
+///
+/// **Both halves, because either alone is half a claim.** A function that returned
+/// *some* anchor would satisfy "always an anchor" while pointing at a turn the reader
+/// is not on - which is the failure `prev_anchor`'s `None` caused, one function over.
+/// And idempotence is what makes it safe to call defensively: `anchor_of(anchor_of(x))
+/// == anchor_of(x)` says a second snap cannot move the cursor again, so a caller that
+/// snaps twice is not a caller with a new bug.
+///
+/// Checked over three gallery shapes and both `lead_lone` values, because the lone
+/// front page at `lead_lone` 1 is the only case where the *first* anchor is not the
+/// first pair, and a document in the middle is the only case where the turn holding a
+/// position is in another file.
+#[test]
+fn every_position_is_on_the_turn_its_anchor_opens() {
+    for counts in [vec![1u32; 8], vec![3, 1, 1], vec![1, 4]] {
+        for lead in [0, LEAD_LONE_DEFAULT] {
+            let gal = turns_gallery(&counts);
+            let flat: usize = counts.iter().map(|c| *c as usize).sum();
+            for n in 0..flat {
+                let pos = flat_position(&gal, n);
+                let at = anchor_of(pos, lead, &gal);
+
+                assert_eq!(
+                    anchor_of(at, lead, &gal),
+                    at,
+                    "not idempotent at {pos:?} (lead {lead}, {counts:?}): {at:?}"
+                );
+                // `pos` is in `at`'s turn: either it is the anchor, or it is the
+                // second half of a turn of two. Stated through `turn_partner` and the
+                // successor rather than through `turn_len` alone, because
+                // `turn_len(anchor) == 2` alone would also be satisfied by the
+                // neighbouring page, which is what makes a wrong anchor invisible.
+                let holds = pos == at
+                    || (turn_len(at, lead, &gal) == 2 && PageCtx::step_no_wrap(&gal, at, 1) == Some(pos));
+                assert!(
+                    holds,
+                    "{pos:?} (lead {lead}, {counts:?}) is not in the turn anchored at {at:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The `n`th page of a gallery, as a `PagePos` - the same ordering the pairing sees.
+fn flat_position(gal: &Gallery, n: usize) -> PagePos {
+    let mut seen = 0usize;
+    for (index, _) in gal.files.iter().enumerate() {
+        let pages = gal.pages_in(index) as usize;
+        if n < seen + pages {
+            return PagePos {
+                index,
+                page: (n - seen) as u32,
+            };
+        }
+        seen += pages;
+    }
+    panic!("page {n} does not exist in a gallery of {seen}");
 }
 
 /// Every landing of a turn-step is a position that exists: a file in the list and a
 /// page of it.
+///
+/// **Written after the `Del`-on-a-second-half bug, so the walk is driven from
+/// positions that are not anchors on purpose.** The walk a cursor takes in manga mode
+/// starts at an anchor, so a test that only ever starts there would never have caught
+/// the bug this file now pins in
+/// [`a_backward_step_from_a_second_half_does_not_jump_to_the_last_spread`] - and the
+/// cursor in the app is not always on one, for three reasons [`MyApp::goto`] now
+/// handles. Every shape below is walked from a mid-gallery second half as well as
+/// from the front.
+///
+/// Four gallery shapes - all single pages, a document at the front, a document at the
+/// back, and two documents of different lengths - in both directions, with
+/// looping on and off. The shapes are chosen so a walk crosses a file boundary, a
+/// page boundary and the end of the gallery, which is where a page number past the
+/// end would come from.
+///
+/// **This is the property `goto_page` deliberately does not enforce for itself**,
+/// which is the reason it is asserted rather than assumed - see
+/// [`goto_page_refuses_a_file_that_is_not_there_and_trusts_the_page`].
 ///
 /// Four gallery shapes - all single pages, a document at the front, a document at
 /// the back, and two documents of different lengths - in both directions, with
@@ -3831,10 +4325,16 @@ fn goto_page_refuses_a_file_that_is_not_there_and_trusts_the_page() {
 /// * `Gallery::next`/`prev` in `step`, for the other half of the same question: with
 ///   manga mode off, navigation must still be the per-page one `tests/flip_through.rs`
 ///   pins.
-/// * `next_anchor`/`prev_turn` and `goto_page` in the two walks, because a walk that
+/// * `next_turn`/`prev_turn` and `goto_page` in the two walks, because a walk that
 ///   computed the right anchor and then assigned `gallery.index` instead of moving the
 ///   cursor would drop the page of a multi-page document's turn while looking
-///   correct everywhere else.
+///   correct everywhere else, and because `next_anchor` in `turn_forward` would be a
+///   walk from a position that may be a second half - which is the bug
+///   `a_backward_step_from_a_second_half_does_not_jump_to_the_last_spread` traces.
+/// * `snap_to_turn_anchor` in `goto` and `anchor_of` in the snap, because the
+///   three ways into the app that assign the cursor by file index are only corrected
+///   by that one call, and a `goto` that stopped calling it would leave every one of
+///   them off an anchor with nothing in the tree to notice.
 #[test]
 fn manga_mode_makes_a_step_walk_a_turn() {
     let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
@@ -3852,7 +4352,7 @@ fn manga_mode_makes_a_step_walk_a_turn() {
         ),
         (
             "fn turn_forward(&mut self)",
-            &["next_anchor(", "goto_turn("][..],
+            &["next_turn(", "goto_turn("][..],
         ),
         (
             "fn turn_backward(&mut self)",
@@ -3861,6 +4361,11 @@ fn manga_mode_makes_a_step_walk_a_turn() {
         (
             "fn goto_turn(&mut self, to: Option<PagePos>)",
             &["self.gallery.goto_page(pos)"][..],
+        ),
+        ("fn goto(&mut self, ctx: &Context)", &["self.snap_to_turn_anchor();"][..]),
+        (
+            "fn snap_to_turn_anchor(&mut self)",
+            &["self.config.manga_mode", "image_viewer::anchor_of(", "self.gallery.goto_page(at)"][..],
         ),
     ] {
         let body = fn_body(&src, sig);

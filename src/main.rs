@@ -1564,6 +1564,16 @@ impl MyApp {
         // (0 ms) is the common one for navigation.
         let is_nav = self.lat.t_request.is_some();
         self.lat.begin(Instant::now(), is_nav);
+        // Manga mode only: the cursor is only ever on a turn anchor, and this is the
+        // one place every way into the app passes through - `step`, the grid pick,
+        // and `Del`'s reschedule all end in a `goto`. The three of them assign the
+        // cursor by file index, and at the default `lead_lone` of 1 an ordinary folder
+        // of single pages tiles `{0} {1,2} {3,4} ...`, so file 3 is page 2: a second
+        // half, where every pairing rule is written on the cursor *not* being
+        // (lone's own doc calls this out), and where a backward step used to jump to
+        // the last spread of the volume. Snapping here rather than at those three call
+        // sites is what keeps a fourth from forgetting.
+        self.snap_to_turn_anchor();
         // Learn how many pages the file we are arriving at has, *before* the page
         // is read, so `next` knows whether there is a page 2 to go to. This is
         // four bytes for anything that is not a TIFF, and the answer is cached, so
@@ -1687,36 +1697,75 @@ impl MyApp {
         }
     }
 
+    /// Put the cursor on the anchor of the turn it is already on. Nothing unless
+    /// manga mode is on, and nothing at all when it is already there.
+    ///
+    /// **This is the invariant the whole pairing rests on, enforced in one place.**
+    /// `lone` is only correct at an anchor - it decides "is this page alone?" with a
+    /// look at `anchor + 1`, which is wrong for a second half - so a cursor off an
+    /// anchor means the turn painted beside the cursor, the `partner` the planner is
+    /// given and the preload window are all one page right of the turn on screen.
+    ///
+    /// Called from [`Self::goto`], which every way into the app passes through, and
+    /// **not** from the walks: `image_viewer::next_turn` and
+    /// [`image_viewer::prev_turn`] snap defensively themselves, so a caller that
+    /// navigates without a `goto` is still right. The two are deliberately
+    /// independent rather than one calling the other - a `goto` snap would hide a
+    /// broken walk behind a working snap, and the walk is the thing with the trap in
+    /// it.
+    fn snap_to_turn_anchor(&mut self) {
+        if !self.config.manga_mode {
+            return;
+        }
+        let here = self.gallery.page_pos();
+        let at = image_viewer::anchor_of(here, self.spreads.lead_lone, &self.page_ctx());
+        if at != here {
+            self.gallery.goto_page(at);
+        }
+    }
+
     /// One turn forwards: the anchor the next turn opens on, and whether the cursor
     /// moved.
     ///
     /// Two lines and no rule. Which anchor the next turn opens on is
-    /// [`image_viewer::next_anchor`] - one `turn_len` from here, and it wraps when
-    /// `loop_back` is on - and the move is [`Self::goto_turn`]. Both are library
-    /// rules tested in `tests/spreads.rs`, which is what lets this method be two
-    /// lines without being untested logic.
+    /// [`image_viewer::next_turn`] - which snaps to the current turn's anchor first,
+    /// wraps when `loop_back` is on, and refuses past the end with it off - and the
+    /// move is [`Self::goto_turn`]. Both are library rules tested in
+    /// `tests/spreads.rs`, which is what lets this method be two lines without being
+    /// untested logic.
     fn turn_forward(&mut self) -> bool {
-        let to = image_viewer::next_anchor(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
+        let to = image_viewer::next_turn(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
         self.goto_turn(to)
     }
 
-    /// One turn backwards: the anchor before this one, or the gallery's last turn when
-    /// `loop_back` wraps, and whether the cursor moved.
+    /// One turn backwards: the anchor of the turn before this one, or the gallery's
+    /// last turn when `loop_back` wraps, and whether the cursor moved.
     ///
-    /// [`image_viewer::prev_turn`] rather than `prev_anchor`, because the wrap is
-    /// the navigation layer's decision and `prev_anchor` deliberately does not make
-    /// it - see that function's doc comment.
+    /// [`image_viewer::prev_turn`] rather than `prev_anchor`, for two reasons that
+    /// are the same reason: it snaps to the current turn's anchor (so a cursor left on
+    /// a second half cannot answer "there is no turn before me" about the wrong turn),
+    /// and the wrap is the navigation layer's decision, which `prev_anchor`
+    /// deliberately does not make. See that function's doc comment.
     fn turn_backward(&mut self) -> bool {
         let to = image_viewer::prev_turn(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
         self.goto_turn(to)
     }
 
-    /// Move the cursor onto a turn anchor the walk produced, reporting whether
-    /// there was one.
+    /// Move the cursor onto a turn anchor the walk produced, reporting whether there
+    /// was one.
+    ///
+    /// **What the `bool` means: the walk produced a position, not that the view
+    /// moved.** They differ in exactly one case - a one-page gallery with `loop_back`
+    /// on, where the walk wraps to the position the cursor is already on - and this
+    /// reports `true` there. That is [`Gallery::next`]'s and [`Gallery::prev`]'s
+    /// behaviour too (both return `true` from a one-page looping gallery), so it is
+    /// parity rather than a new quirk, and parity is the right answer here: the
+    /// alternative would be a rule that holds for turns and not for pages.
     ///
     /// Separate from the two walks above so "which anchor" and "move the cursor"
-    /// cannot drift apart, and so `None` has one spelling: a refusal changes
-    /// nothing at all, which is what lets [`Self::step`] skip `goto` for it.
+    /// cannot drift apart, and so `None` has one spelling: a refusal changes nothing
+    /// at all, which is what lets [`Self::step`] skip `goto` for it and leave the
+    /// full-res dwell timer and the queue plan alone.
     fn goto_turn(&mut self, to: Option<PagePos>) -> bool {
         match to {
             Some(pos) => {
