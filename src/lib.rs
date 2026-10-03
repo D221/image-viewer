@@ -6976,7 +6976,8 @@ pub fn turn_len(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> usize {
 ///   It is also documented as the only caller of the *wrapping* step, and a turn
 ///   must not straddle the wrap - so using it here would both paint the wrong
 ///   page and contradict [`lone`]'s own reason for asking
-///   `step_no_wrap`.
+///   `step_no_wrap`. (The wrapping step taken *on its own* is a different matter,
+///   and equivalent: see the last paragraph.)
 /// * **`anchor` can never come back**, and that is a property of the step rather
 ///   than a check: `step_no_wrap` does not wrap, so one page forward is either
 ///   the next page of this document (`page + 1`) or the first page of the next
@@ -6988,6 +6989,27 @@ pub fn turn_len(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> usize {
 /// reported as its own partner - which is the artefact that made the two
 /// questions ("does this page have a partner" and "where does the cursor go")
 /// need separate steps in the first place.
+///
+/// **`step` would give the same answer here, and that is not an unpinned
+/// constraint - it is an equivalence.** There is no test that can tell this
+/// function's step from the wrapping one, and looking for one is a waste of a
+/// review round: the two differ only at the two ends of a gallery, and this
+/// function never reaches an end.
+///
+/// * It steps at all only when `turn_len == 2`, that is when [`lone`] is false.
+/// * [`lone`]'s front-matter arm and its `Double` arm each make it true on their
+///   own, so when it is false it must be the third arm that failed - which means
+///   `step_no_wrap(anchor, 1)` did return a position, and [`pairable`] accepted
+///   it.
+/// * And `step_no_wrap` answers `None` only at the end of the gallery, where
+///   `lone` is true and `turn_len` is 1, so the function has already returned.
+///
+/// So an interior anchor is the only one that gets here, and at an interior anchor
+/// `step` and `step_no_wrap` are the same walk. `step_no_wrap` is the spelling to
+/// keep anyway, for two reasons that are about the code rather than the answer: it
+/// says out loud that a turn must not straddle the wrap, which is the property
+/// [`lone`] is built on; and it keeps this function asking `lone`'s own question,
+/// so the two cannot drift apart.
 pub fn turn_partner(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<ImgKey> {
     if turn_len(anchor, lead_lone, ctx) == 1 {
         return None;

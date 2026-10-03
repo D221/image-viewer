@@ -1980,11 +1980,16 @@ fn invalidate_path_drops_the_overrides_and_saves_them() {
 /// and neither is visible at runtime. Deleting the call fails this test; that has been
 /// run.
 ///
-/// Scoped to the **`Msg::Preview` arm's own body**, not to `pump` as a whole. That
-/// scoping is what `fn_body` gives here for free: the arm is
-/// `Msg::Preview { .. } => match result { ... }`, and the matching brace closes the
-/// `match` - so the `Msg::Full` and `Msg::Exif` arms, and the `turn_partner` capture
-/// above the loop, are all outside the span and cannot stand in for the call.
+/// Scoped to the **`Ok` half of the `Msg::Preview` arm**, not to `pump` as a whole,
+/// and narrower than that sounds. Brace matching starts after the signature, whose
+/// trailing `{` is the `match result`'s own, so the next brace it meets is the one
+/// that opens `Ok(p) => {` — and the brace it stops on is that arm's. The span is
+/// therefore the `Ok` arm's body and nothing more: the `Err` arm, the `Msg::Full`
+/// and `Msg::Exif` arms, and the `turn_partner` capture above the message loop are
+/// all outside it and cannot stand in for the call. (The existing `fn_body` doc
+/// records that a naive "up to the next `fn`" split once made a scan of this shape
+/// pass **vacuously**; the brace match is what makes this one falsifiable, and the
+/// guard is the proof.)
 #[test]
 fn arriving_previews_re_plan_through_the_partner() {
     let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
