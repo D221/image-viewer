@@ -1659,22 +1659,14 @@ impl MyApp {
                         }
                         self.clock += 1;
                         // A decode that has already happened reports its own source
-                        // dimensions for free, so feed them to the shape cache. The
-                        // neighbours in the preload window are decoded anyway, so
-                        // this is the cheapest source the manga pairing has.
-                        //
-                        // `orig` is the size the decode reports *after* applying the
-                        // EXIF tag, under the same JPEG-only rule `learn_shapes`
-                        // applies, so this and `learn_shapes` compute the same thing
-                        // by two routes rather than being two opinions. An animation
-                        // is the one case that reaches it by a third: `orig` there is
-                        // frame 0's decoded size, which is the container's logical
-                        // screen for every GIF in practice.
+                        // dimensions, so feed them to the shape cache. The neighbours
+                        // in the preload window are decoded anyway, so this is the
+                        // cheapest source the manga pairing has.
                         //
                         // Keyed by the path, not the `(file, page)` key, because the
                         // cache judges a *file*: every page of a document shares one
-                        // entry, and `orig` for a later page of a TIFF is already the
-                        // document's first-page size.
+                        // entry. Which page's numbers land there is `note_shapes`'s
+                        // to document, not this call's.
                         self.gallery.note_shapes(&key.path, p.orig);
                         self.previews.insert(
                             key.clone(),

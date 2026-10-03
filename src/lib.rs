@@ -4076,11 +4076,17 @@ fn image_dims_path(path: &Path) -> Option<(u32, u32)> {
 /// The stored dimensions of page `page`, without decoding it.
 ///
 /// **Stored, not display-oriented.** The EXIF tag is *not* applied here, and that
-/// is deliberate: this is also what the decode reports (`PreviewAndFull::orig` is
-/// built from the same pair before the tag is applied to the pixels), and a
-/// function whose answer depended on where it was called from would have two
-/// spellings of one thing. Applying the tag is [`Gallery::learn_shapes`]' job, and
-/// it is load-bearing rather than cosmetic — see its doc.
+/// is deliberate. `decode_page` reads the *same* pair with the same
+/// [`image_dims_bytes`] call and applies the tag itself, so `orig` and this agree by
+/// construction rather than by convention — one source measurement, presented in two
+/// forms, because the two callers each need a different one.
+///
+/// **So do not "fix" a caller by folding the tag in here.** The swap is its own
+/// inverse, so a second application is not a doubled value to be noticed: it is the
+/// identity, which quietly puts the *stored* pair back in the shape cache and
+/// restores exactly the silent failure [`Gallery::learn_shapes`] exists to prevent.
+/// Applying the tag is that function's job, and it is load-bearing rather than
+/// cosmetic.
 ///
 /// Header only. This runs on arrival at a file, so it has to cost about what
 /// [`tiff_page_count`] costs rather than what a decode costs: a bounded read and a
@@ -4098,11 +4104,22 @@ pub fn page_dims(path: &Path, page: u32) -> Option<(u32, u32)> {
 
 /// [`page_dims`], plus whether the file is a JPEG.
 ///
-/// One function rather than two because this runs on the arrival path and the
-/// JPEG flag has to come from **the same read**: the condition it gates is the
-/// condition `decode_page` applies the EXIF orientation under, and re-opening the
-/// file to ask a question the 64 KB already answered would be a second filesystem
-/// round trip for an answer we have.
+/// One function rather than two because the JPEG flag falls out of the bytes the
+/// read already returned, and the condition it gates is the one `decode_page`
+/// applies the EXIF orientation under — so this is the file's answer, from the same
+/// bytes as its dimensions, rather than a second sniff that could disagree with them.
+///
+/// **It does not save the whole open.** `learn_shapes` still opens the file again
+/// for `exif_orientation`, because `nom_exif::read_exif` takes a path and not bytes.
+/// That call is ~0.1-0.2 ms against a 10-17 ms `fs::read`, and it happens once per
+/// file rather than once per visit, so this is still a net win — but the honest
+/// version is "one read for the dimensions *and* the format", not "one read instead
+/// of two, full stop".
+///
+/// The obvious follow-up is an `exif_orientation_bytes(&[u8])` over the prefix. Not
+/// done here: `find_embedded_thumbnail` already walks the APP1 block in hand, so the
+/// work would be to hand *that* walk's answer out rather than to reach for `nom_exif`
+/// a third time.
 fn page_dims_and_jpeg(path: &Path, page: u32) -> Option<((u32, u32), bool)> {
     if page > 0 {
         return tiff_page_dim(path, page).map(|dims| (dims, false));
@@ -6622,9 +6639,13 @@ impl Gallery {
     /// reported would call every page in the volume a spread. Every page would
     /// take a whole turn to itself, nothing would ever pair, and nothing on screen
     /// would say why. That is why [`page_dims`] reports the *stored* size and this
-    /// is a separate step rather than one folded-together function: the decode
-    /// builds `PreviewAndFull::orig` from the same stored pair and applies the tag
-    /// separately for the same reason.
+    /// is a separate step rather than one folded-together function:
+    /// `decode_page` reads the same pair and applies the same tag to produce
+    /// `PreviewAndFull::orig`, so the two routes agree by construction rather than
+    /// by convention. **Do not fold the tag into `page_dims` to "fix" this** — the
+    /// swap is its own inverse, so applying it a second time is not a wrong value to
+    /// be spotted but the identity, which puts the *stored* pair in the cache and
+    /// reproduces the failure above exactly.
     ///
     /// The tag is read under exactly the condition `decode_page` applies it under —
     /// JPEG only — because the dimensions have to be the ones the *pixels* end up
@@ -6657,14 +6678,44 @@ impl Gallery {
 
     /// Record the size a page **displays** at, from a decode that already knows.
     ///
-    /// `dims` must already be display-oriented — [`PreviewAndFull::orig`] is, by
-    /// the same tag application [`Self::learn_shapes`] does — so nothing is applied
-    /// here. A neighbour's preview reports its own dimensions for free on its way
-    /// past, which makes this the cheapest source of the pairing's input there is,
-    /// and it is what fills a file in before the cursor arrives at it.
+    /// A neighbour's preview reports its own dimensions on its way past, which makes
+    /// this the cheapest source of the pairing's input there is, and it is what fills
+    /// a file in before the cursor arrives at it.
+    ///
+    /// **What the caller passes, precisely.** `dims` must already be
+    /// display-oriented, and there are four routes into it. Only the first is a
+    /// source measurement:
+    ///
+    /// 1. [`PreviewAndFull::orig`] as `decode_page` builds it for an ordinary
+    ///    decode: `image_dims_bytes` plus the JPEG-only tag swap. A measurement, and
+    ///    the same one [`Self::learn_shapes`] would compute from the same header — so
+    ///    the two routes agree by construction rather than by convention. The
+    ///    DCT-preview and embedded-thumbnail paths report this too: they change the
+    ///    *pixels*, not the reported source size.
+    /// 2. An **animation**: `orig` comes from `anim.frames[0]`, and
+    ///    `collect_animation` has already downscaled that frame to
+    ///    [`PREVIEW_TEXTURE_DIM`](crate::PREVIEW_TEXTURE_DIM) (4096). An animation
+    ///    wider than that records a downscaled size.
+    /// 3. A **page past the first of a TIFF**: `orig` is that page's *decoded*
+    ///    dimensions, and `decode_tiff_page` has already downscaled it to the
+    ///    request's target. Because this cache is keyed by path, such a result
+    ///    overwrites the file's entry — with a ratio-equivalent number, but not with
+    ///    page 0's exact one, and `learn_shapes` will not put that back because it
+    ///    short-circuits on the entry existing.
+    /// 4. The **caller's fallback** for a file whose header could not be sniffed at
+    ///    all, which is the size of the *decoded preview*.
+    ///
+    /// **Routes 2-4 are approximations, and that is why they are tolerable rather
+    /// than fixed.** All the downscaling in them goes through `downscale_image`,
+    /// which picks *one* scale factor and applies it to both axes, so the aspect
+    /// ratio survives up to integer rounding — and the aspect ratio is the only
+    /// thing [`shape_of`](crate::shape_of) reads. The verdict is therefore unchanged
+    /// except for a page landing within a pixel of [`SPREAD_ASPECT`]. So the number
+    /// in the cache is not always the source number, and nothing downstream needs it
+    /// to be: `dims` is asked for a shape, not for pixels.
     ///
     /// **Overwrites**, and that is the difference from `learn_shapes`: this is a
-    /// *measurement*, so it is the authority for the file it names. `learn_shapes`
+    /// measurement, so it is the authority for the file it names. `learn_shapes`
     /// consults the cache first and stores through here, but it skips an entry that
     /// is already there — which is what stops a file open on the critical path of
     /// every keypress, and what makes a learned dimension frozen until something
@@ -6782,10 +6833,12 @@ impl Gallery {
     /// second copy of it would be a second place for it to be wrong - silently, and
     /// only in manga mode.
     ///
-    /// It is a separate function rather than a clone-and-call for a measurable
-    /// reason: `PageCtx::step` is called once per page by `prev_anchor`'s rebuild,
-    /// and a `Gallery` clone is a deep copy of `files`, so that walk would be
-    /// quadratic in allocations over a folder.
+    /// It is a separate function rather than a clone-and-call because
+    /// `PageCtx::step` has to answer about a position the cursor is **not** on, and
+    /// the state `next`/`prev` read beyond `(index, page)` — `files` and
+    /// `page_counts` — is already available on `&self`. A clone would be a way of
+    /// manufacturing a `&mut self` cursor to answer a question that needs neither
+    /// the cursor nor the mutation.
     fn pos_next(&self, index: usize, page: u32) -> Option<PagePos> {
         if self.files.is_empty() {
             return None;
@@ -6994,6 +7047,15 @@ impl PageCtx for Gallery {
         // `Gallery::step_no_wrap` gives: `prev_anchor`'s walk steps by a whole
         // turn, and a turn is 1 or 2. `by` of 0 runs no iterations, so it answers
         // `Some(from)`, which is also what `step_no_wrap` does.
+        //
+        // `by.unsigned_abs()` is undefended here for the reason it is undefended
+        // there: no caller can produce `isize::MIN` without writing it out by hand,
+        // and a saturating bound would be a branch that cannot change an output for
+        // any reachable input. **Unlike `step_no_wrap`'s loop, this one could spin**
+        // — `pos_next` and `pos_prev` both wrap when `loop_back` is on, so a `by` of
+        // `isize::MIN` would not return. Nothing reaches that: the only caller of
+        // `PageCtx::step` is `next_anchor`, which passes `turn_len`, and `turn_len`
+        // returns 1 or 2 by construction.
         let mut cur = from;
         for _ in 0..by.unsigned_abs() {
             cur = if by < 0 {

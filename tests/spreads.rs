@@ -1093,6 +1093,71 @@ fn a_rotated_phone_scan_is_judged_as_it_displays() {
     }
 }
 
+/// A multi-page TIFF whose pages are **different sizes**, which is legal and which
+/// `tiff_page_dim` exists to see. The pages differ in aspect on purpose, so a
+/// walker that answered every page with the first page's size would report a shape
+/// the pairing then trusts for the session.
+///
+/// `write_image` is the whole page in one call and it *chains* into the IFD
+/// sequence, so calling it in a loop is what produces a multi-page file.
+/// `new_directory()` per page would not: an unlinked IFD is invisible to
+/// `more_images()`, so the file comes out single-page however many times the loop
+/// runs (`tests/multiframe.rs` records that the hard way).
+#[test]
+fn a_later_page_of_a_document_is_measured_as_its_own_page() {
+    use tiff::encoder::{colortype, TiffEncoder};
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("doc.tiff");
+
+    let mut bytes = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut bytes)).unwrap();
+        for &(w, h) in &[(900u32, 1200u32), (1600, 900)] {
+            let px: Vec<u8> = (0..(w * h)).flat_map(|_| [9u8, 9, 9, 255]).collect();
+            enc.write_image::<colortype::RGBA8>(w, h, &px)
+                .expect("one chained page");
+        }
+    }
+    std::fs::write(&p, &bytes).unwrap();
+
+    assert_eq!(page_dims(&p, 0), Some((900, 1200)), "page 0 is portrait");
+    assert_eq!(
+        page_dims(&p, 1),
+        Some((1600, 900)),
+        "page 1 is walked to its own directory, not page 0's"
+    );
+    // A page that does not exist is `None` rather than the last one that does: the
+    // walk is bounded by the chain, so this also says the walk terminates.
+    assert_eq!(page_dims(&p, 2), None);
+    assert_eq!(page_dims(&p, 99), None);
+
+    // **The cache is per *file*, so page 1 is judged by page 0's dimensions — and
+    // that is the design, not an accident.** `Gallery::shapes` is keyed by path and
+    // holds one entry, so a document whose pages differ in size is judged on its
+    // first page throughout. Pinned because it is the claim that is easiest to
+    // "fix": a reader who sees a landscape second page judged portrait will reach
+    // for a per-page key, and the reason not to is that it would mean measuring
+    // every page of a 200-page document to answer one question about it.
+    //
+    // The premise is `decode_page`'s: pages of one document are near enough always
+    // the same size. When they are not, the page is judged by the *nearby* number,
+    // which costs that one page a turn rather than costing the pairing a turn — the
+    // containment argument at the top of this section.
+    let mut gal = Gallery::from_file(p.clone());
+    gal.learn_pages(&p);
+    assert_eq!(gal.pages_in(0), 2, "the fixture is really two pages");
+    gal.learn_shapes(&p);
+    assert_eq!(
+        PageCtx::dims(&gal, PagePos { index: 0, page: 0 }),
+        Some((900, 1200))
+    );
+    assert_eq!(
+        PageCtx::dims(&gal, PagePos { index: 0, page: 1 }),
+        Some((900, 1200)),
+        "one entry per file: page 1 is judged by page 0's dimensions"
+    );
+}
+
 /// A learned dimension is **frozen** until it is dropped.
 ///
 /// This is the same rule the on-disk thumbnail cache follows and for the same
@@ -1298,49 +1363,69 @@ fn an_unknown_preceding_page_count_makes_flat_unavailable() {
 /// A re-exported file must be re-judged, or its old page's shape is frozen for the
 /// session and **every spread after it stays mis-paired**.
 ///
-/// The behaviour half of this is [`forget_shapes_makes_the_dimension_change_again`];
-/// what is pinned here is the *call*, because the thing that decides when a file
-/// changed is `MyApp::invalidate_path`, and that lives in `src/main.rs` - a binary
-/// no integration test can reach. Adding a `#[cfg(test)]` module to it for this
-/// would break a documented property of the project (`AGENTS.md`, "Tests"), so
-/// the call is asserted against the source as text, for the same reason
-/// `tests/renderer.rs` and `tests/keybindings.rs` do.
+/// What is pinned here is the **call**, and nothing else. The behaviour it calls is
+/// asserted once, by [`forget_shapes_makes_the_dimension_change_again`], and repeating
+/// it here would only be a second copy to keep in step — so this test is *only* the
+/// source scan, and it says why.
 ///
-/// A source scan is not behaviour, and it is weak in a specific way: it cannot
-/// tell whether `invalidate_path` *reaches* `forget_shapes` on this path or on
-/// some other. What it does catch is the regression that actually happens - the
-/// call being deleted, or a later edit adding a cache here and forgetting this
-/// one - and neither is visible at runtime.
+/// The reason it needs one: the thing that decides a file changed is
+/// `MyApp::invalidate_path`, and that lives in `src/main.rs` — a binary no
+/// integration test can reach. Adding a `#[cfg(test)]` module to it for this would
+/// break a documented property of the project (`AGENTS.md`, "Tests"), so the call is
+/// asserted against the source as text, for the same reason `tests/renderer.rs` and
+/// `tests/keybindings.rs` do.
+///
+/// A source scan is not behaviour, and it is weak in a specific way: it cannot tell
+/// whether `invalidate_path` *reaches* `forget_shapes` on this path or on some
+/// other. What it does catch is the regression that actually happens — the call being
+/// deleted, or a later edit adding a cache here and forgetting this one — and neither
+/// is visible at runtime. Deleting the line fails this test; that has been run.
 #[test]
 fn invalidate_path_drops_the_cached_dimensions() {
-    let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("page.png");
-    write_png(&p, 800, 1200);
-
-    // The behaviour: what `invalidate_path` calls drops the entry, and the next
-    // read sees the file's new contents.
-    let mut gal = Gallery::from_file(p.clone());
-    gal.learn_shapes(&p);
-    let pos = gal.page_pos();
-    assert_eq!(PageCtx::dims(&gal, pos), Some((800, 1200)));
-    write_png(&p, 300, 200);
-    gal.forget_shapes(&p);
-    assert_eq!(
-        PageCtx::dims(&gal, pos),
-        None,
-        "the shape is re-learned from the new contents, not served stale"
-    );
-
-    // The call. Read as text, and scoped to `invalidate_path`'s own body so a
-    // `forget_shapes` anywhere else in the file cannot stand in for this one.
+    // Scoped to `invalidate_path`'s own body so a `forget_shapes` anywhere else in
+    // the file cannot stand in for this one — and `remove_current_from_gallery`
+    // calls it too, so that is not hypothetical.
+    //
+    // **By brace matching, not by "up to the next `fn`".** The first version split
+    // on `"\n    fn "`, which is wrong in the direction that matters: `split` always
+    // yields at least one item, so when the delimiter did not match — `invalidate_path`
+    // last in the impl, or re-indented — the "body" became the whole rest of the
+    // file, the later `forget_shapes` stood in for this one, and the scan passed
+    // **vacuously**. It could not fail; that is the opposite of what a guard is for.
+    //
+    // The depth starts at **0**, not 1, and that is load-bearing rather than
+    // incidental. It is 0 because the scan starts *before* the opening brace — the
+    // signature's `&mut self, p: &Path, ctx: &Context` has none — so the first `{`
+    // is the function's and the matching `}` is the one that ends it. Starting at 1
+    // (the shape `keybindings.rs::dispatch_region` uses, correctly, because it
+    // begins *after* `if !typing {` and so has already consumed a brace) misses
+    // that closing brace and runs on until the file's own braces happen to balance,
+    // 60 KB later. **That was the second version of this test, and it passed with the
+    // call deleted.** Verified by mutation, not reasoned about.
     let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
-    let body = src
-        .split("fn invalidate_path(")
-        .nth(1)
-        .expect("invalidate_path is gone; update this test")
-        .split("\n    fn ")
-        .next()
-        .expect("could not delimit the function body");
+    let start = src
+        .find("fn invalidate_path(")
+        .expect("invalidate_path is gone; update this test to match")
+        + "fn invalidate_path(".len();
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, b) in src.as_bytes()[start..].iter().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end.expect("could not find the end of invalidate_path: its braces do not \
+                         balance, or the signature changed shape. Update this test.");
+    let body = &src[start..end];
+
     assert!(
         body.contains("forget_shapes("),
         "invalidate_path no longer forgets the cached dimensions, so a re-exported\n\
