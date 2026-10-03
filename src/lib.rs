@@ -713,14 +713,19 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
 // single-image view fits itself at. Plain floats on purpose — `Rect4` and no egui,
 // so a whole turn's layout is a thing a test can check without a window.
 //
-// Three decisions, each of them invisible until a reader is well into a book:
+// Three decisions. Only two of them are quiet — the shared scale is loud, because it
+// shows the moment the two halves differ in shape:
 //
-// * **One shared scale.** Not a fit per page. See `spread_fit`.
+// * **One shared scale.** Not a fit per page; see `spread_fit`. `pairable` pairs
+//   pages whose aspect ratios are merely *close* (`PAIR_ASPECT_TOLERANCE`) rather
+//   than equal, so a turn of two differently shaped pages is ordinary, not exotic.
 // * **The seam is the panel's horizontal centre, always.** Zero gutter, so two
 //   facing pages touch and a drawing across the seam is unbroken; and no special
 //   case for a lone page, because a page with nothing on the far side of the seam
-//   *is* the lone-page case.
-// * **Input order out, screen order never.** See `spread_rects`.
+//   *is* the lone-page case. Getting this wrong shows as a picture a reader only
+//   notices pages later.
+// * **Input order out, screen order never.** See `spread_rects` — a swap that is
+//   wrong in one reading direction and right in the other.
 
 /// The scale a whole turn is drawn at: the more constrained fit of every page
 /// present into *its half* of the panel, so every page fits at one shared factor.
@@ -775,8 +780,12 @@ pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)]) -> f32 {
 /// the difference at its outer edge.
 ///
 /// `scale` is the single factor [`spread_fit`] chose, applied to both axes, so a
-/// fitted turn cannot overflow the panel. At most two pages: a turn is one page or
-/// two by construction (`turn_len`), and a third would land on top of the second.
+/// fitted turn cannot overflow the panel. At most two pages, and **this does not
+/// enforce it**: a turn is one page or two by construction ([`turn_len`]), so a third
+/// page takes page 1's side and lands on top of it. That is the honest answer to an
+/// input that cannot happen — the alternative is a `take(2)` that silently drops a
+/// page — and the rule stays in `turn_len` rather than restated here where the two
+/// copies could drift apart.
 pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> Vec<Rect4> {
     let seam = panel[0] + panel[2] * 0.5;
     pages.iter().enumerate().map(|(i, &(pw, ph))| {

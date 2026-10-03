@@ -3004,13 +3004,13 @@ fn overlap(a: Rect4, b: Rect4) -> f32 {
     right(a).min(right(b)) - a[0].max(b[0])
 }
 
-/// The scale is deliberately 1.0 here so the seam is isolated from the fit: at the
-/// fitted scale a turn cannot overflow the panel, and a test about which side a page
-/// is on should not depend on how the fit turned out.
+/// The scale is deliberately **not** 1.0. At 1.0 a rect's width and height equal the
+/// page's own, so an implementation that ignored `scale` on either axis would satisfy
+/// the assertions below just as well; where the seam falls does not depend on it.
 #[test]
 fn a_two_page_turn_meets_at_the_seam() {
     let pages = [(600.0, 800.0), (600.0, 800.0)];
-    let rects = spread_rects(PANEL, &pages, 1.0, false);
+    let rects = spread_rects(PANEL, &pages, 0.5, false);
 
     assert_eq!(rects.len(), 2);
     // Zero gutter: the two halves touch at exactly the panel's centre, so a drawing
@@ -3023,9 +3023,9 @@ fn a_two_page_turn_meets_at_the_seam() {
         "touching is not overlapping: both pages starting on the seam would satisfy the two \
          assertions above and stack one on top of the other"
     );
-    // The scale applies to both axes, which is the difference between a scale and a
-    // width.
-    assert_eq!((rects[0][2], rects[0][3]), (600.0, 800.0));
+    // One factor on both axes, which is the difference between a scale and a width:
+    // 600x800 at 0.5 is 300x400, and neither of those is the page's own size.
+    assert_eq!((rects[0][2], rects[0][3]), (300.0, 400.0));
 }
 
 /// Which page is the right-hand one is `rtl`'s decision, and it is the only thing
