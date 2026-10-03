@@ -732,7 +732,10 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   accident. The geometry this task consumes is already pinned by Task 5's pure tests;
   the wiring is verified by the suite plus the console-session check in Step 6.
 
-- [ ] **Step 1: Add the two config fields, and prove an old config still loads**
+- [ ] **Step 1: Add `Config::manga_rtl`, and prove an old config still loads**
+
+  `Config::manga_mode` was added in **Task 4**, because `turn_partner` gates on it and the
+  field had to exist for that task to compile. So only `manga_rtl` is new here.
 
   In `tests/spreads.rs`:
   ```rust
@@ -744,12 +747,12 @@ Five input classes the spec implies but does not spell out, most likely to bite 
       assert!(cfg.manga_rtl, "right-to-left is the default for a manga library");
   }
   ```
-  Then add the fields to `Config` with the two `serde` attributes above.
+  If `manga_mode` is not already present, add it too, with both `serde` attributes above.
 
 - [ ] **Step 2: Run to verify it fails, then passes**
 
   Run: `cargo test --test spreads a_config_written_before_manga_mode_still_loads`
-  Expected: compile error on the two missing fields; then PASS.
+  Expected: compile error on the missing field; then PASS.
 
 - [ ] **Step 3: Add the field and set it**
 
