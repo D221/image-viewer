@@ -21,9 +21,10 @@
 
 use image_viewer::{
     exif_orientation, load_spread_overrides, lone, next_anchor, page_dims, pairable, prev_anchor,
-    save_spread_overrides, shape_of, spread_root_key, spreads_root, spreads_tmp, thumb_cache_root,
-    turn_len, turn_partner, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape,
-    LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
+    save_spread_overrides, shape_of, spread_fit, spread_rects, spread_root_key, spreads_root,
+    spreads_tmp, thumb_cache_root, turn_len, turn_partner, Gallery, GallerySpreads, ImgKey, PageCtx,
+    PagePos, Rect4, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES,
+    SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -2965,4 +2966,274 @@ fn an_older_or_hand_edited_store_still_loads() {
     let two = load_spread_overrides(&store, std::path::Path::new(r"C:\books\vol2.cbz"));
     assert!(two.pages.is_empty(), "a missing `pages` key is no pages");
     assert_eq!(two.lead_lone, LEAD_LONE_MAX, "a hand-edited 99 is clamped, not obeyed");
+}
+
+// ---------------------------------------------------------------------------
+// Where a turn's pages go
+// ---------------------------------------------------------------------------
+//
+// Two pure functions and no egui: the panel is `[x, y, width, height]` in plain
+// floats and the rects come back the same way, so a whole turn's layout is checked
+// without a window. What is pinned here is the three decisions the pairing walk
+// above cannot see:
+//
+// * **one shared scale** — two halves cannot be drawn at two different zoom
+//   levels, so the constrained page decides and the other gets a margin under it;
+// * **input order out** — `rtl` decides which *side* a page lands on, so a
+//   function returning screen order swaps which page is which in exactly one
+//   reading direction, and nowhere else;
+// * **the seam at the centre, always** — zero gutter, and no special case for a
+//   lone page, which is the case that reads as a bug.
+
+/// The panel every layout test below uses. Its seam is `x + width / 2` = 400.
+const PANEL: Rect4 = [0.0, 0.0, 800.0, 600.0];
+
+/// A rect's right-hand edge: every assertion below is about which side of the seam
+/// something landed on, so this names the line instead of spelling `x + width` out
+/// at each one.
+fn right(r: Rect4) -> f32 {
+    r[0] + r[2]
+}
+
+/// How much two rects overlap horizontally, or 0.0 for rects that merely touch.
+///
+/// Used instead of comparing edges so "neither overlaps the other" is a claim
+/// about the two rects together — two pages drawn at the same `x` overlap no matter
+/// how their edges compare to each other.
+fn overlap(a: Rect4, b: Rect4) -> f32 {
+    right(a).min(right(b)) - a[0].max(b[0])
+}
+
+/// The scale is deliberately 1.0 here so the seam is isolated from the fit: at the
+/// fitted scale a turn cannot overflow the panel, and a test about which side a page
+/// is on should not depend on how the fit turned out.
+#[test]
+fn a_two_page_turn_meets_at_the_seam() {
+    let pages = [(600.0, 800.0), (600.0, 800.0)];
+    let rects = spread_rects(PANEL, &pages, 1.0, false);
+
+    assert_eq!(rects.len(), 2);
+    // Zero gutter: the two halves touch at exactly the panel's centre, so a drawing
+    // that crosses the seam is unbroken.
+    assert_eq!(right(rects[0]), 400.0, "the left page ends on the seam");
+    assert_eq!(rects[1][0], 400.0, "the right page begins on the seam");
+    assert_eq!(
+        overlap(rects[0], rects[1]),
+        0.0,
+        "touching is not overlapping: both pages starting on the seam would satisfy the two \
+         assertions above and stack one on top of the other"
+    );
+    // The scale applies to both axes, which is the difference between a scale and a
+    // width.
+    assert_eq!((rects[0][2], rects[0][3]), (600.0, 800.0));
+}
+
+/// Which page is the right-hand one is `rtl`'s decision, and it is the only thing
+/// `rtl` decides: the seam and the fit are the same either way.
+#[test]
+fn a_right_to_left_turn_opens_on_the_right() {
+    let pages = [(600.0, 800.0), (600.0, 800.0)];
+    let rects = spread_rects(PANEL, &pages, 1.0, true);
+
+    assert_eq!(rects[0][0], 400.0, "page 0 starts at the seam");
+    assert_eq!(
+        right(rects[1]),
+        400.0,
+        "page 1 ends on it, so page 0 is the right-hand page and the reader opens on it"
+    );
+    assert_eq!(overlap(rects[0], rects[1]), 0.0, "still no gutter and still no overlap");
+}
+
+/// A lone page keeps the half its reading direction puts it in.
+///
+/// Mihon's note on why a lone page is **not** centred: centring the span would pull
+/// it to the middle, indistinguishable from a page with no partner. So the
+/// assertions are that it hangs off the seam and stops there — and the control
+/// below, because the centred version is the change somebody would make to "fix"
+/// this.
+#[test]
+fn a_lone_page_rests_with_the_seam_on_the_centre() {
+    let pages = [(400.0, 800.0)];
+    let scale = spread_fit((PANEL[2], PANEL[3]), &pages);
+    let rects = spread_rects(PANEL, &pages, scale, true);
+
+    assert_eq!(rects.len(), 1);
+    assert_eq!(rects[0][0], 400.0, "the lone page's inner edge is the seam");
+    assert!(
+        rects[0][2] <= 400.0,
+        "and it keeps to its own half of the panel: {} wide",
+        rects[0][2]
+    );
+    assert_ne!(
+        rects[0][0] + rects[0][2] / 2.0,
+        400.0,
+        "the control: a centred lone page is indistinguishable from a page with no partner"
+    );
+}
+
+/// The same rule reading the other way, so "the lone page rests somewhere" is not
+/// satisfied by a lone page that is simply always on one side.
+#[test]
+fn a_lone_page_rests_on_the_left_when_reading_left_to_right() {
+    let pages = [(400.0, 800.0)];
+    let scale = spread_fit((PANEL[2], PANEL[3]), &pages);
+    let rects = spread_rects(PANEL, &pages, scale, false);
+
+    assert_eq!(rects.len(), 1);
+    assert_eq!(
+        right(rects[0]),
+        400.0,
+        "reading left to right the lone page is the left-hand one, so its inner edge is the seam"
+    );
+    assert_ne!(rects[0][0] + rects[0][2] / 2.0, 400.0, "still not centred");
+}
+
+/// Both halves' top edges are the panel's top edge, so a page shorter than its
+/// partner leaves a gap beneath rather than being centred.
+///
+/// The panel's `y` is non-zero on purpose: a layout that placed pages at the window
+/// origin rather than in the panel would agree with everything else here.
+#[test]
+fn the_whole_turn_is_top_aligned() {
+    let panel: Rect4 = [0.0, 40.0, 800.0, 600.0];
+    let pages = [(400.0, 800.0), (400.0, 200.0)];
+    let rects = spread_rects(panel, &pages, 0.5, false);
+
+    assert_eq!(rects.len(), 2);
+    for (i, r) in rects.iter().enumerate() {
+        assert_eq!(r[1], panel[1], "page {i} starts at the panel's top edge, not at the window's");
+    }
+    // Their own heights, not one shared height: stretching the short page would
+    // distort it, and centring it would float it in the middle of its half.
+    assert_eq!(rects[0][3], 400.0);
+    assert_eq!(rects[1][3], 100.0);
+    assert_ne!(
+        rects[1][1] + rects[1][3] / 2.0,
+        panel[1] + panel[3] / 2.0,
+        "the short page is top aligned, not centred"
+    );
+}
+
+/// The rects come back in **input** order, whatever side each page landed on.
+///
+/// This is the footgun guard. `rtl` puts page 0's rect to the *right* of page 1's, so
+/// screen order is the reverse of input order under `rtl` and identical to it under
+/// `ltr`: a layout that collected its rects by side is therefore right in one reading
+/// direction and silently swapped in the other, and a caller zipping the result
+/// against the turn's page list paints the wrong half of the spread with nothing on
+/// screen to say which. The pages here are different widths so that "rect 0" and "the
+/// rect of page 0" cannot be the same thing by accident.
+#[test]
+fn rects_come_back_in_input_order() {
+    // Asymmetric, so "the first one" and "the narrow one" cannot be confused.
+    let pages = [(400.0, 800.0), (700.0, 800.0)];
+    for rtl in [false, true] {
+        let rects = spread_rects(PANEL, &pages, 1.0, rtl);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0][2], 400.0, "rtl={rtl}: rect 0 is the 400-wide page");
+        assert_eq!(rects[1][2], 700.0, "rtl={rtl}: rect 1 is the 700-wide page");
+    }
+
+    // ...and the two orders really are opposite under `rtl`, which is what makes the
+    // assertions above mean something. Screen order fails them there.
+    let ltr = spread_rects(PANEL, &pages, 1.0, false);
+    let rtl = spread_rects(PANEL, &pages, 1.0, true);
+    assert!(ltr[0][0] < ltr[1][0], "ltr: page 0 is leftmost, so input order is screen order");
+    assert!(
+        rtl[0][0] > rtl[1][0],
+        "rtl: page 0 is rightmost, so screen order is the reverse of input order - and the \
+         return value is still input order"
+    );
+}
+
+/// One scale for the whole turn: the **constrained** page decides it.
+///
+/// A per-page fit would give the tall page 0.375 and the short one 0.75, and two
+/// halves at two scales is not a layout — it is one zoom level for the reader.
+#[test]
+fn spread_fit_is_the_more_constrained_of_the_pages() {
+    let panel = (800.0, 600.0);
+    let pages = [(400.0, 800.0), (400.0, 1600.0)];
+
+    assert_eq!(
+        spread_fit(panel, &pages),
+        0.375,
+        "600.0 / 1600.0: the tall page's own fit decides the turn"
+    );
+    assert_eq!(
+        spread_fit(panel, &pages[..1]),
+        0.75,
+        "the short page alone would be drawn larger, which is exactly the per-page fit this is not"
+    );
+    assert!(
+        spread_fit(panel, &pages) < spread_fit(panel, &pages[..1]),
+        "so the turn's scale is the constrained page's and the short page keeps a margin"
+    );
+}
+
+/// A page wider than its half — a fold-out insert, a landscape layout page — is
+/// fitted into its half and laid out there.
+///
+/// The case a naive fit gets wrong: fitting it into the *whole* panel gives
+/// `800 / 1200 = 0.667` and hands it the entire screen, and the page then reads as a
+/// two-page scan drawn across both halves.
+#[test]
+fn a_wide_insert_page_lays_out_at_the_half_the_seam_is_on() {
+    let panel: (f32, f32) = (800.0, 600.0);
+    let pages = [(1200.0, 800.0)];
+    let fit = spread_fit(panel, &pages);
+    let naive = (panel.0 / 1200.0).min(panel.1 / 800.0);
+    assert!(
+        (fit - naive / 2.0).abs() < 1e-6,
+        "fitted into its half, not into the panel: {fit} against {naive} for the whole panel"
+    );
+
+    let rtl = spread_rects(PANEL, &pages, fit, true);
+    assert_eq!(rtl.len(), 1, "a page comes back, not an empty vector");
+    assert_eq!(rtl[0][0], 400.0, "its inner edge is the seam");
+    assert!((rtl[0][2] - 400.0).abs() < 1e-3, "as wide as the half it is on");
+    assert!(rtl[0][3] <= PANEL[3], "and no taller than the panel");
+
+    let ltr = spread_rects(PANEL, &pages, fit, false);
+    assert_eq!(right(ltr[0]), 400.0, "the seam side under ltr is the left half");
+}
+
+/// No degenerate input may produce a scale or a rect that cannot be painted, and a
+/// panel or a turn with nothing in it answers the one value that means "as drawn".
+///
+/// The finiteness half is the property the layout depends on — a `NaN` scale reaches
+/// every rect and leaves an unpaintable page with no error to point at — and the two
+/// `1.0`s are what keep the guard in `spread_fit` from being mistaken for decoration:
+/// the clamp alone would answer `1e-4` for an empty panel and `8.0` for no pages, both
+/// finite, and `1e-4` draws a page a fraction of a point across.
+#[test]
+fn spread_fit_survives_an_empty_panel_and_a_zero_sized_page() {
+    for (panel, pages) in [
+        ((0.0, 0.0), vec![(0.0, 0.0)]),
+        ((0.0, 0.0), vec![]),
+        ((800.0, 600.0), vec![(0.0, 0.0)]),
+        ((400.0, 800.0), vec![(400.0, 0.0)]),
+        ((800.0, 0.0), vec![(400.0, 800.0)]),
+    ] {
+        let scale = spread_fit(panel, &pages);
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "panel {panel:?} pages {pages:?} gave the scale {scale}"
+        );
+        let rects = spread_rects([0.0, 0.0, panel.0, panel.1], &pages, scale, false);
+        assert_eq!(rects.len(), pages.len(), "one rect per page, at any size");
+        for r in &rects {
+            assert!(
+                r.iter().all(|v| v.is_finite()),
+                "panel {panel:?} pages {pages:?} laid out at {scale} gave {r:?}, which is a rect \
+                 nothing can paint"
+            );
+        }
+    }
+
+    // The value itself, which the loop above cannot see: the clamp would hand back
+    // 1e-4 for an empty panel and 8.0 for no pages, and both are finite, so only
+    // these two assertions tell the early return apart from its absence.
+    assert_eq!(spread_fit((0.0, 0.0), &[(400.0, 800.0)]), 1.0, "no panel, no fit");
+    assert_eq!(spread_fit((800.0, 600.0), &[]), 1.0, "no pages, no fit");
 }

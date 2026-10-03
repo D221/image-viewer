@@ -702,6 +702,90 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
     (area.0 / w).min(area.1 / h).min(1.0)
 }
 
+// ---------------------------------------------------------------------------
+// Manga spreads: laying one turn out on screen
+// ---------------------------------------------------------------------------
+//
+// Beside `fit_scale_no_upscale` rather than beside the pairing walk further down,
+// because this is that function's sibling and its own claim about where pages go:
+// the same `(panel.width() / w).min(panel.height() / h)` fit, with the panel's
+// **half** width in place of its width, and the same `clamp(1e-4, 8.0)` the
+// single-image view fits itself at. Plain floats on purpose — `Rect4` and no egui,
+// so a whole turn's layout is a thing a test can check without a window.
+//
+// Three decisions, each of them invisible until a reader is well into a book:
+//
+// * **One shared scale.** Not a fit per page. See `spread_fit`.
+// * **The seam is the panel's horizontal centre, always.** Zero gutter, so two
+//   facing pages touch and a drawing across the seam is unbroken; and no special
+//   case for a lone page, because a page with nothing on the far side of the seam
+//   *is* the lone-page case.
+// * **Input order out, screen order never.** See `spread_rects`.
+
+/// The scale a whole turn is drawn at: the more constrained fit of every page
+/// present into *its half* of the panel, so every page fits at one shared factor.
+///
+/// A `min` over the pages rather than a fit per page, and that is the load-bearing
+/// part. The reference reader does the same thing — `webgpuviewer`'s `ImagePage.kt`
+/// takes a `minOf` over its pages while its own comment describes the fit as
+/// happening "independently" — and **the code is the honest reading of the two**,
+/// because two halves drawn at two scales cannot share one zoom level: there is one
+/// `scale` and one `view`, so the constrained page sets the factor and the other one
+/// keeps a margin under it. Fitting each page independently would mean fitting each
+/// page independently on *paper* and nowhere else.
+///
+/// It asks for no [`PageCtx`] and knows nothing about pairing: a turn is a list of
+/// page sizes and that is the whole of what a layout needs to know.
+///
+/// Unlike [`fit_scale_no_upscale`] this **may exceed 1.0**, as the single-image
+/// view's own fit does: a page is drawn to fill its half. The clamp is the same
+/// `(1e-4, 8.0)` that view uses.
+///
+/// A panel with no area, or a turn with no pages, answers **1.0**, exactly as
+/// [`fit_scale_no_upscale`] does for its own degenerate cases. Not a `NaN` guard —
+/// `w.max(1.0)` is what stops a division by zero here — but a *value* guard: without
+/// the early return the clamp answers `1e-4` for an empty panel, which draws a page a
+/// fraction of a point across, and `8.0` for a turn with no pages, where no rect is wrong
+/// either way. `1.0` is the one answer that means "as drawn".
+pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)]) -> f32 {
+    let half_w = panel.0 / 2.0;
+    if half_w <= 0.0 || panel.1 <= 0.0 || pages.is_empty() {
+        return 1.0;
+    }
+    pages.iter()
+        .map(|&(w, h)| (half_w / w.max(1.0)).min(panel.1 / h.max(1.0)))
+        .fold(f32::INFINITY, f32::min)
+        .clamp(1e-4, 8.0)
+}
+
+/// Where each page of a turn goes, **in input order**, not screen order.
+///
+/// One shared scale, zero gutter, top-aligned. The seam is always at the panel's
+/// horizontal centre: page 0 extends from the seam outward in `rtl`'s direction and
+/// page 1 the other way, so a lone page needs no special case — it simply has nothing
+/// on the far side of the seam, and renders at no more than half the panel's width,
+/// hanging off the seam, which is what a book's cover does. Centring a lone page
+/// instead is the tempting "fix" and it is wrong twice over: it stops sharing the
+/// seam that every other turn's pages meet on, and a centred lone page is
+/// indistinguishable from a page with no partner.
+///
+/// Top-aligned rather than centred, so a page shorter than its partner leaves its
+/// gap beneath instead of floating in the middle of its half. A page narrower than
+/// its half is not stretched to fill it either — it keeps its own width and leaves
+/// the difference at its outer edge.
+///
+/// `scale` is the single factor [`spread_fit`] chose, applied to both axes, so a
+/// fitted turn cannot overflow the panel. At most two pages: a turn is one page or
+/// two by construction (`turn_len`), and a third would land on top of the second.
+pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> Vec<Rect4> {
+    let seam = panel[0] + panel[2] * 0.5;
+    pages.iter().enumerate().map(|(i, &(pw, ph))| {
+        let w = pw * scale;
+        let on_right = if i == 0 { rtl } else { !rtl };
+        [if on_right { seam } else { seam - w }, panel[1], w, ph * scale]
+    }).collect()
+}
+
 /// Footprint `(width, height)` an image of `w x h` occupies once `xform` has been
 /// applied to it.
 ///
