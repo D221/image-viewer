@@ -2255,7 +2255,8 @@ impl MyApp {
         // an override that survives the restart it was cleared for, and bounded in
         // practice: `check_changed` only calls this for a file the app holds state
         // for, so it is the handful of previewed or on-screen files rather than the
-        // folder, and the bytes are capped at `SPREADS_MAX_BYTES`.
+        // folder. And `SPREADS_MAX_BYTES` is what the save refuses *over*, not a
+        // promise about how big a write may come out.
         self.save_spreads();
         let shown_gone = self.shown.as_ref().is_some_and(|s| s.path == p);
         if self.full.as_ref().is_some_and(|f| f.path == p) {

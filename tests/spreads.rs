@@ -2373,7 +2373,8 @@ fn the_two_caps_degrade_to_nothing_rather_than_to_an_error() {
     let g = load_spread_overrides(&store, &root);
     assert!(
         g.pages.is_empty(),
-        "an entry over the page cap is dropped whole, not truncated"
+        "every page override is dropped over the page cap, not a subset of them: a \
+         subset would be a different subset on every launch"
     );
     assert_eq!(
         g.lead_lone, LEAD_LONE_DEFAULT,

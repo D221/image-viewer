@@ -5198,8 +5198,8 @@ pub fn spread_root_key(archive: Option<&Path>, folder: &Path) -> Option<String> 
 /// Two independent things because they are two independent decisions. `lead_lone`
 /// is a property of the *book* and applies to the whole gallery; `pages` is a
 /// property of a *page* and names individual exceptions. They travel together
-/// only because they are written to the same place, and [`shape_for`] is the one
-/// function a pairing asks.
+/// only because they are written to the same place, and [`Self::shape_for`] is the
+/// one function a pairing asks.
 ///
 /// `Default` is spelled out rather than derived, and it is [`LEAD_LONE_DEFAULT`]
 /// rather than `0`. A derived `Default` would make "this gallery has no overrides"
@@ -5436,7 +5436,8 @@ pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
     g
 }
 
-/// How big the store may be before [`load_spread_overrides`] stops reading it.
+/// How big the store may be before [`load_spread_overrides`] stops reading it — and
+/// before [`save_spread_overrides`] stops writing to it.
 ///
 /// **A read on the UI thread, which is why it is bounded at all.** It happens while
 /// a gallery is being opened (`MyApp::refresh_spreads`), on a file whose size
@@ -5450,6 +5451,14 @@ pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
 ///
 /// Over the cap the load yields **nothing**, not a truncated read: a half-file does
 /// not parse, so "what was readable" of an oversized store is nothing either way.
+///
+/// **A threshold, not a write invariant — and the two directions differ because they
+/// must.** A load may treat an over-cap store as empty (it only reads; the file is
+/// still there); a save may not (its read is the first half of a read-modify-write,
+/// so writing what it could not read would destroy what it could not read). What
+/// nothing does is keep *writes* under the cap: a save whose serialised result would
+/// exceed it is not refused, and can leave a store that every later save then
+/// refuses. See [`save_spread_overrides`] for what that costs and why it is accepted.
 pub const SPREADS_MAX_BYTES: u64 = 1 << 20;
 
 /// Most page overrides one gallery's entry may hold, whatever the file's size.
@@ -5524,6 +5533,17 @@ pub fn spreads_tmp(store: &Path, pid: u32) -> PathBuf {
 /// A store within the cap but over [`SPREADS_MAX_PAGES`] for one gallery is a
 /// different case and is *not* refused: it parses, so replacing that one entry
 /// loses only that entry, which is what the user just asked to change anyway.
+///
+/// **What is accepted, deliberately, because it is the mirror of the rule above.**
+/// Nothing refuses a write whose serialised result would exceed
+/// [`SPREADS_MAX_BYTES`], so a save *can* leave the store over the cap — and after
+/// that every later save refuses, until the file is shrunk or deleted. Nothing is
+/// ever corrupted: the decisions stay in the file, and they come back the moment it
+/// is under the cap. So the visible consequence is that the override key appears to
+/// do nothing, which is bounded and points the safe way — the alternative rule
+/// (refuse the oversized write) would mean refusing to save at all once a store had
+/// drifted over, which loses the very decisions the cap exists to protect. The
+/// threshold is deliberately not an invariant on writes; see [`SPREADS_MAX_BYTES`].
 pub fn save_spread_overrides(
     store: &Path,
     root: &Path,
