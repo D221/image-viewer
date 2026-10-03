@@ -151,6 +151,7 @@ fn plan<'a>(
         files: f,
         index,
         current_page: 0,
+        partner: None,
         cached,
         failed,
         wants_exif: false,
@@ -581,6 +582,7 @@ fn the_plan_wraps_around_a_short_folder() {
         files: &f,
         index: 0,
         current_page: 0,
+        partner: None,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
@@ -595,6 +597,163 @@ fn the_plan_wraps_around_a_short_folder() {
     }
     assert_eq!(jobs.len(), 3, "3 images, each once");
     assert_eq!(jobs[0].path(), f[0], "current image still first");
+}
+
+// ---------------------------------------------------------------------------
+// The turn's other half
+// ---------------------------------------------------------------------------
+//
+// Manga mode shows a turn as one picture: either a single page or two side by
+// side. So the two halves are one unit of work to the reader, and the planner
+// gives the second half the current image's own priority rather than a
+// neighbour's — a partner that arrives on its own time is a spread that paints
+// one page and then the other, which is more visible than a slow first page
+// because the gap is *on screen* next to something that already arrived.
+
+/// Three files, so the whole gallery sits inside the default preload radius and
+/// the cursor page's partner is also the window's nearest "next" — which is the
+/// only case where planning the partner and prefetching it can collide.
+fn three_files() -> Vec<PathBuf> {
+    ["a.jpg", "b.jpg", "c.jpg"].iter().map(PathBuf::from).collect()
+}
+
+#[test]
+fn the_partner_of_a_turn_is_planned_at_the_current_priority() {
+    let f = three_files();
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(ImgKey::first(&f[1]));
+    let jobs = plan_jobs(&p);
+
+    let partner = jobs
+        .iter()
+        .find(|j| j.path() == f[1] && j.kind == Kind::Preview)
+        .expect("the partner must be planned at all");
+    assert_eq!(
+        partner.prio,
+        image_viewer::PRIO_CURRENT_PREVIEW,
+        "a partner decoded at neighbour priority leaves a half-painted spread"
+    );
+    assert_eq!(
+        jobs.iter().filter(|j| j.prio == image_viewer::PRIO_CURRENT_PREVIEW).count(),
+        2,
+        "both halves of the turn, and nothing else at the current priority"
+    );
+    assert_eq!(
+        partner.target_dim, 1024,
+        "one target for the whole turn: a second half decoded for a different size \
+         would not sit beside the first"
+    );
+}
+
+#[test]
+fn a_partner_already_cached_is_not_planned_again() {
+    let f = three_files();
+    let cached: HashSet<ImgKey> = [ImgKey::first(&f[1])].into_iter().collect();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(ImgKey::first(&f[1]));
+    let jobs = plan_jobs(&p);
+
+    assert!(
+        !jobs.iter().any(|j| j.path() == f[1]),
+        "the partner is already decoded and on screen; asking again is the whole \
+         cost this test exists to rule out"
+    );
+}
+
+#[test]
+fn a_failed_partner_is_not_retried() {
+    // `failed` is permanent for the session, so a partner that could not decode
+    // must not turn every single navigation into another attempt at a file that
+    // never will. The cursor page gets the same treatment (`failed` in the plan
+    // above), and a partner without it would be the one place a spread retries
+    // forever.
+    let f = three_files();
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> =
+        [(ImgKey::first(&f[1]), Kind::Preview)].into_iter().collect();
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(ImgKey::first(&f[1]));
+    let jobs = plan_jobs(&p);
+
+    assert!(
+        !jobs.iter().any(|j| j.path() == f[1]),
+        "a failed image is not retried, on either half of a turn"
+    );
+}
+
+#[test]
+fn a_turn_partner_is_planned_once_not_also_by_the_preload_window() {
+    // The partner is the file after the cursor, which is *also* the preload
+    // window's nearest "next". Two jobs with one `(key, kind)` are two decodes
+    // of one picture: `replace` keeps both, and the pool runs them one after the
+    // other — so the reader waits for the partner twice, and the second result
+    // lands over the first for nothing.
+    let f = three_files();
+    let cached: HashSet<ImgKey> = HashSet::new();
+    let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
+    let mut p = plan(&f, 0, &cached, &failed);
+    p.partner = Some(ImgKey::first(&f[1]));
+    let jobs = plan_jobs(&p);
+
+    let mut seen = HashSet::new();
+    for j in &jobs {
+        assert!(
+            seen.insert((j.path().to_path_buf(), j.kind)),
+            "planned twice, so decoded twice: {:?} {:?}",
+            j.path(),
+            j.kind
+        );
+    }
+}
+
+#[test]
+fn no_partner_leaves_the_plan_exactly_as_it_was() {
+    // The whole list, spelled out — which is stronger than comparing two plans
+    // that both hold no partner, and stronger than the comparison it replaced.
+    // That replacement was tried first: a plan with `partner: None` against the
+    // same plan carrying a *cached* partner, on the reasoning that a partner
+    // nothing is planned for must be inert. It is inert, and it catches nothing.
+    // A cached partner's window entry is already suppressed by `need_preview`, so
+    // suppressing it again by any other route cannot change the list — which is
+    // why the variant that was run against it (seeding `seen` with the partner's
+    // index) left this whole file green. A test that cannot fail is decoration, so
+    // this pins the actual jobs.
+    //
+    // Six files, cursor on 2, radius 2, one neighbour already cached and one
+    // known-bad, with the metadata read and the full decode both wanted — so the
+    // list covers all four sources a plan draws from, in the order it draws them.
+    let f = files(6);
+    let cached: HashSet<ImgKey> = [ImgKey::first(&f[0])].into_iter().collect();
+    let failed: HashSet<(ImgKey, Kind)> =
+        [(ImgKey::first(&f[4]), Kind::Preview)].into_iter().collect();
+    let mut p = plan(&f, 2, &cached, &failed);
+    p.radius = 2;
+    p.wants_exif = true;
+    p.wants_full = true;
+    p.partner = None;
+
+    let listed: Vec<(ImgKey, Kind, u32, u32)> = plan_jobs(&p)
+        .iter()
+        .map(|j| (j.key.clone(), j.kind, j.prio, j.target_dim))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            // The cursor page: priority 0, and the full decode rides the preview.
+            (ImgKey::first(&f[2]), Kind::Preview, image_viewer::PRIO_CURRENT_PREVIEW, 1024),
+            // EXIF describes the file, so the key is page 1 whatever is on screen.
+            (ImgKey::first(&f[2]), Kind::Exif, image_viewer::PRIO_CURRENT_EXIF, 0),
+            (ImgKey::first(&f[2]), Kind::Full, image_viewer::PRIO_FULL, 0),
+            // The window, "next" slightly ahead of "previous" at each distance.
+            (ImgKey::first(&f[3]), Kind::Preview, 12, 1024),
+            (ImgKey::first(&f[1]), Kind::Preview, 13, 1024),
+            // f[0] is cached and f[4] failed, so distance 2 contributes nothing.
+        ],
+        "no partner must add, drop, reorder or re-prioritise a single job"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -856,6 +1015,7 @@ fn stale_current_is_planned_even_though_it_is_cached() {
         files: &files,
         index: 0,
         current_page: 0,
+        partner: None,
         cached: &cached,
         failed: &failed,
         wants_exif: false,
@@ -894,6 +1054,7 @@ fn a_stale_current_is_not_planned_when_it_failed() {
         files: &files,
         index: 0,
         current_page: 0,
+        partner: None,
         cached: &cached,
         failed: &failed,
         wants_exif: false,

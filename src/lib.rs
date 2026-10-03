@@ -236,6 +236,18 @@ pub struct Config {
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
+
+    /// Show images as **turns** of one or two pages instead of one picture at a time.
+    ///
+    /// **Off by default**, and opt-in because single-image browsing is the app's
+    /// original behaviour: every plan it makes is pinned by
+    /// `tests/flip_through.rs`, so a turn has to be something the reader asks for
+    /// rather than a mode the setting file turns on by accident.
+    ///
+    /// `#[serde(default)]` for the reason every added field here carries it: a
+    /// config written before this key existed still has to load.
+    #[serde(default)]
+    pub manga_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -259,6 +271,7 @@ impl Config {
             crop_aspect: CropAspect::default(),
             thumbnail_cache: true,
             last_by_folder: std::collections::HashMap::new(),
+            manga_mode: false,
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {
@@ -1102,6 +1115,16 @@ pub struct Plan<'a> {
     /// Page of `files[index]` to decode. 0 for everything but a multi-page TIFF.
     /// The preload window ignores this and prefetches page 0.
     pub current_page: u32,
+    /// The other page of the current turn, in a spread. Planned at the current
+    /// image's own priority so both halves arrive as a pair; a neighbour-priority
+    /// decode would leave the spread half-painted.
+    ///
+    /// **A key, not a position**, because the plan is expressed in keys and the
+    /// walk that decides whether a partner exists at all belongs to the app
+    /// (`MyApp::turn_partner`) — so `Plan` is still a pure function of the state
+    /// it is handed, which is the property the stranding bug was untestable
+    /// without.
+    pub partner: Option<ImgKey>,
     /// Images that already have a cached preview.
     pub cached: &'a HashSet<ImgKey>,
     /// `(key, kind)` pairs known to be undecodable this session.
@@ -1174,6 +1197,25 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
             target_dim: p.target_dim,
         });
     }
+    // The turn's other half, at the current image's own priority. A turn is one
+    // picture to the reader, so the cursor page arriving without its partner is a
+    // half-painted spread — and unlike a slow neighbour it is visibly *wrong*,
+    // because the empty half is on screen beside the half that did arrive.
+    //
+    // Deliberately **not** gated on `current_stale`. Staleness is a claim about
+    // the *current* image's texture being softer than the display, and refining
+    // the partner as well would double every decode a window drag issues for
+    // sharpness nobody asked for.
+    if let Some(partner) = &p.partner {
+        if need_preview(partner) {
+            jobs.push(Job {
+                key: partner.clone(),
+                kind: Kind::Preview,
+                prio: PRIO_CURRENT_PREVIEW,
+                target_dim: p.target_dim,
+            });
+        }
+    }
     if p.wants_exif {
         jobs.push(Job {
             // Exif describes the *file*, so it is read once and not per page.
@@ -1199,7 +1241,25 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
             ((i + n - d % n) % n, 11 + 2 * d as u32),
         ] {
             let key = ImgKey::first(&p.files[idx]);
-            if seen.insert(idx) && need_preview(&key) {
+            // The partner is skipped by **key**, not by seeding `seen` with its
+            // index. `seen` is the window's dedup of *indices* and the partner is a
+            // *key*, so that spelling costs a scan of `files` on the planning path;
+            // and `seen.insert` runs either way, so the window still walks the same
+            // indices and this only decides whether it pushes one of them.
+            //
+            // Skipping has to happen at all: the partner is normally the cursor's
+            // own next neighbour, and two jobs for one `(key, kind)` are two
+            // decodes of one picture. `replace` keeps both — it dedupes nothing —
+            // so the pool would run the partner twice on every navigation, and
+            // the second result would land over the first for nothing.
+            //
+            // Compared as whole keys, and that is what makes it right for a
+            // document: **the window deliberately prefetches page 0** (see
+            // `cur_key`) while the partner carries its *real* page, because
+            // `turn_partner` hands over the key of the position it stepped to. A
+            // partner on page 2 is a different image from that document's page-0
+            // neighbour, so neither job duplicates the other and both are wanted.
+            if seen.insert(idx) && need_preview(&key) && p.partner.as_ref() != Some(&key) {
                 jobs.push(Job {
                     key,
                     kind: Kind::Preview,

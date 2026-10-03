@@ -379,6 +379,10 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
             files: &files,
             index,
             current_page: 0,
+            // No turn's second half: this benchmark measures single-image
+            // browsing, which is what the planner planned before manga mode and
+            // what `turn_partner` still answers for whenever the mode is off.
+            partner: None,
             cached: &cached_set,
             failed: &failed,
             wants_exif: exif,

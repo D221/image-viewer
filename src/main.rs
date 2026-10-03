@@ -34,11 +34,11 @@ use image_viewer::perf;
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, forget_thumbnail, grid_cols,
     is_archive_path, load_grid_thumbnail, load_image_full, load_page_preview_full,
-    load_spread_overrides, protected_preview_keys, save_spread_overrides, set_downscale_filter,
-    set_linear_resample, set_thumbnail_cache, scan_folder_sorted, spread_root_key, spreads_root,
-    thumb_cache_root, xformed_footprint, Animation, Config, DownscaleFilter, Gallery, GallerySpreads,
-    ImgKey, ImageData, SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS,
-    PREVIEW_TEXTURE_DIM,
+    load_spread_overrides, protected_preview_keys, save_spread_overrides,
+    set_downscale_filter, set_linear_resample, set_thumbnail_cache, scan_folder_sorted,
+    spread_root_key, spreads_root, thumb_cache_root, turn_len, xformed_footprint, Animation, Config,
+    DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, PageCtx, PagePos, Shape, SortMode,
+    Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1277,55 @@ struct MyApp {
     grid_page_rows: usize,
 }
 
+/// The app's [`PageCtx`]: the gallery, plus the pairing decisions the reader has
+/// stored for it.
+///
+/// A wrapper rather than an `impl PageCtx for Gallery` because the gallery cannot
+/// reach the overrides — they live on `MyApp`, beside the gallery they describe.
+/// That matters more than it looks: an override **replaces** the aspect-ratio
+/// detector, including when the detector is confidently wrong, which is the whole
+/// reason the setting exists. A `Gallery` asked on its own answers `None` and the
+/// user's decision is dropped from every pairing.
+///
+/// Private, like every other item in this binary: nothing outside the crate can
+/// name it. And `main.rs` is unreachable from every integration test, which is
+/// this project's stated reason for keeping the pairing *rules* in `lib.rs`
+/// where `tests/spreads.rs` can drive them.
+struct AppPageCtx<'a> {
+    gallery: &'a Gallery,
+    spreads: &'a GallerySpreads,
+}
+
+impl PageCtx for AppPageCtx<'_> {
+    fn step(&self, from: PagePos, by: isize) -> Option<PagePos> {
+        self.gallery.step(from, by)
+    }
+
+    fn step_no_wrap(&self, from: PagePos, by: isize) -> Option<PagePos> {
+        self.gallery.step_no_wrap(from, by)
+    }
+
+    fn key(&self, pos: PagePos) -> Option<ImgKey> {
+        self.gallery.key(pos)
+    }
+
+    fn dims(&self, pos: PagePos) -> Option<(u32, u32)> {
+        self.gallery.dims(pos)
+    }
+
+    /// The one method that does not delegate, for the reason the struct exists:
+    /// the store is keyed by file name and page, so the key the position already
+    /// resolved to is what it is looked up by.
+    fn override_shape(&self, pos: PagePos) -> Option<Shape> {
+        let key = self.key(pos)?;
+        self.spreads.shape_for(&key.path, key.page)
+    }
+
+    fn flat(&self, pos: PagePos) -> Option<usize> {
+        self.gallery.flat(pos)
+    }
+}
+
 impl MyApp {
     fn new_with_renderer(cc: &eframe::CreationContext<'_>, restart: RestartSlot) -> Self {
         let ctx = &cc.egui_ctx;
@@ -1554,6 +1603,49 @@ impl MyApp {
         self.schedule();
     }
 
+    /// The other page of the turn the cursor is on, or `None` when there is
+    /// nothing to paint beside it.
+    ///
+    /// `None` in three cases, and the first is the one that matters:
+    ///
+    /// * **Manga mode is off.** Unconditionally, and before anything is asked. The
+    ///   planner then sees `partner: None`, which is the plan this app built
+    ///   before turns existed: the one term `plan_jobs` added is a comparison
+    ///   against `None`, and no key can equal it.
+    ///   `no_partner_leaves_the_plan_exactly_as_it_was` pins the result.
+    /// * **The turn holds one page**: a leading page, a spread wide enough to be a
+    ///   turn by itself, or a last page with nothing after it. `turn_len` is the
+    ///   same question `lone` asks, so there is no second opinion to reconcile.
+    /// * **The gallery is empty**, which `step_no_wrap` answers on its own.
+    ///
+    /// **The cursor page is never returned**, and that is a property of the step
+    /// rather than a check: `step_no_wrap` does not wrap, so one page forward is
+    /// either the next page of this document or the first page of the next file,
+    /// and neither can be the page the cursor is already on. Guarding it would be
+    /// a branch that cannot change an output.
+    ///
+    /// **One step and not `next_anchor`.** A turn is `[anchor] + maybe
+    /// [anchor + 1]`, so the partner is the anchor's *successor*; `next_anchor` is
+    /// the turn **after** this one, a whole `turn_len` away. Using it here would
+    /// paint the wrong page, and would break `lone`'s and `next_anchor`'s own
+    /// documented contract that `next_anchor` is the only caller of the *wrapping*
+    /// step — a turn must not straddle the wrap, which is why this asks
+    /// `step_no_wrap`.
+    fn turn_partner(&self) -> Option<ImgKey> {
+        if !self.config.manga_mode {
+            return None;
+        }
+        let ctx = AppPageCtx {
+            gallery: &self.gallery,
+            spreads: &self.spreads,
+        };
+        let anchor = self.gallery.page_pos();
+        if turn_len(anchor, self.spreads.lead_lone, &ctx) != 2 {
+            return None;
+        }
+        ctx.step_no_wrap(anchor, 1).and_then(|pos| ctx.key(pos))
+    }
+
     fn step(&mut self, ctx: &Context, forward: bool) {
         // "Wait for load" mode: throttle stepping to decode completion.
         if self.config.block_while_loading && self.waiting_load {
@@ -1661,6 +1753,9 @@ impl MyApp {
         let cached: HashSet<ImgKey> = self.previews.keys().cloned().collect();
         let i = self.gallery.index.min(self.gallery.files.len().saturating_sub(1));
         let cur = self.gallery.files.get(i).cloned();
+        // The turn's second half, when there is one. `None` with manga mode off,
+        // so every plan below is the one this function has always produced.
+        let partner = self.turn_partner();
         // The plan is computed by the library so it can be tested; all this does
         // is describe the current state to it.
         let jobs = match &cur {
@@ -1669,6 +1764,7 @@ impl MyApp {
                 files: &self.gallery.files,
                 index: i,
                 current_page: self.gallery.current_page(),
+                partner,
                 cached: &cached,
                 failed: &self.failed,
                 // Hidden panel: nobody can read the result, and the read is a
