@@ -6900,134 +6900,158 @@ pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
 /// is read from inside the resampler.
 static PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// Width or height the linear-light prefilter reduces to: **at most 2x the
+/// target**, and never larger than the dimension itself.
+///
+/// This is the memory bound for `linear_resize`. The 12-bit linear conversion is
+/// the expensive step, so it runs on the pre-reduced buffer rather than on the
+/// full-resolution source: on a 6.9 MP page that is 26.7 MB instead of 55 MB,
+/// and deleting the step roughly doubles the conversion cost as well. It is a
+/// function rather than an inline expression so a test can pin it — nothing
+/// observable from outside says how big the intermediate is, and a single kernel
+/// pass scores the same or better on every quality measurement, so a deleted
+/// pre-reduction is invisible except in memory.
+///
+/// `saturating_mul`, not `*`: `target` is a display dimension and the largest
+/// this codebase can be handed is `MAX_TEXTURE_DIM`, but the arithmetic should
+/// not depend on that staying true.
+pub fn prefilter_dim(dim: u32, target: u32) -> u32 {
+    dim.min(target.saturating_mul(2)).max(1)
+}
+
 /// Source span `(start, len)` covered by each of `n` output samples when
-/// reducing `src` samples to `n`. Precomputed once, so the hot loops never
-/// divide.
-fn box_spans(n: usize, src: usize) -> Vec<(usize, usize)> {
-    (0..n)
-        .map(|i| {
-            let a = (i * src) / n;
-            let b = (((i + 1) * src) / n).max(a + 1).min(src);
-            (a, b - a)
-        })
-        .collect()
-}
-
-/// `1 << 32 / len`, so the inner loops average with a multiply instead of a
-/// divide. Integer division in the innermost loop cost more than the whole
-/// rest of the resample. Add [`ROUND`] before shifting: truncating instead
-/// biases every average down by up to 1 (a 255/255 average came out 254).
-fn box_reciprocal(len: usize) -> u64 {
-    (1u64 << 32) / len.max(1) as u64
-}
-
-/// Rounding term for the reciprocal-multiply average.
-const ROUND: u64 = 1u64 << 31;
-
-/// Separable box reduction of an RGBA8 buffer to `pre_w x pre_h`.
+/// Separable **kernel** pre-reduction of an RGBA8 buffer to `pre_w x pre_h`,
+/// averaging in 12-bit linear light and handing back sRGB8 at exactly the size
+/// the box this replaced used.
 ///
-/// Stays in sRGB8 with integer sums, the way a GPU mip chain does: the
-/// expensive step downstream is the 12-bit linear conversion, and doing *that*
-/// on the reduced buffer rather than the full-resolution source is the point.
+/// **Why a kernel and not a box.** A box average's sinc sidelobes sit near
+/// -13 dB and do not roll off, so at the 2.879x reduction of a 2223x3109 page
+/// (the manga half-panel target of 1080) the prefilter was aliasing *more* than
+/// the Hermite pass it fed. Measured as the output amplitude of a 100-code
+/// sinusoid — i.e. the transfer function — the box left 21-29 codes in the band
+/// below source period 4 px, where a widened kernel leaves 2-11, and the two
+/// tie above source period ~6 px. At every reduction from 2x to 16x the kernel
+/// is lower or equal.
 ///
-/// The vertical pass keeps a running column accumulator so it reads the
-/// intermediate buffer strictly in order; summing each output row from scratch
-/// instead strides by `pre_w * 4` bytes and misses cache on every pixel.
-fn box_reduce_srgb(data: &ImageData, pre_w: u32, pre_h: u32) -> Vec<u8> {
+/// **Why linear light, and not sRGB.** A weighted average is exposure-preserving
+/// only in the space it averages in. Averaging *gamma-encoded* values of a 50%
+/// near-Nyquist dither gives ~128 — the pattern's own sRGB mean — where the
+/// tone's true average reflectance is 50% linear, i.e. sRGB ~188. Measured on
+/// real manga pages, an sRGB-space kernel prefilter came out **5-7 codes darker
+/// per page** than the box it replaced, which is a far worse bug than the
+/// sparkle it removes. In linear light the same prefilter lands within 0.3
+/// codes of what a single kernel pass over the whole source produces, i.e. it
+/// stops second-guessing the space the rest of the path works in.
+///
+/// The taps are converted per tap rather than by buffering the source in 12-bit:
+/// a full-resolution 12-bit buffer is 55 MB on a 6.9 MP page against 26.7 MB
+/// for the intermediate, and AGENTS.md's memory section is explicit that this
+/// conversion must not run over the full-resolution source. Row-converting
+/// first (one `u16` row per worker) was measured and is *slower* — 565-707 ms
+/// against 428-519 ms on the 6.9 MP page — so the LUT stays in the inner loop.
+///
+/// Both passes are row-parallel, which the box's vertical pass could not be: it
+/// summed a sliding window down a column accumulator, so it ran on one thread.
+/// That, not the arithmetic, is where the speedup comes from.
+fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32) -> Vec<u8> {
+    let (to_lin, to_srgb) = lin_tables();
     let (sw, sh) = (data.width as usize, data.height as usize);
     let (pw, ph) = (pre_w as usize, pre_h as usize);
-    let src_stride = sw * 4;
-    let xs = box_spans(pw, sw);
-    // Reciprocals next to the spans: `box_reciprocal` is a 64-bit division, and
-    // calling it per output pixel cost more than everything else combined.
-    let xrecip: Vec<u64> = xs.iter().map(|&(_, l)| box_reciprocal(l)).collect();
+    let (kern, support) = kernel(downscale_filter());
+    let horizontal = contributions(sw as u32, pw as u32, &kern, support);
+    let vertical = contributions(sh as u32, ph as u32, &kern, support);
 
-    // Horizontal: sw -> pw, still at full height. Row-parallel: each output row
-    // is independent, and this is the single hottest loop in the viewer.
+    // Horizontal: source width -> pre_w, at full height.
     let mut tmp = vec![0u8; pw * sh * 4];
+    let src_stride = sw * 4;
     let src = &data.rgba;
     tmp.par_chunks_mut(pw * 4)
         .enumerate()
         .for_each(|(y, out_row)| {
             let row = &src[y * src_stride..(y + 1) * src_stride];
-            for (px, (&(x0, len), &inv)) in xs.iter().zip(xrecip.iter()).enumerate() {
-                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
-                for x in x0..x0 + len {
-                    let p = &row[x * 4..x * 4 + 4];
-                    r += p[0] as u32;
-                    g += p[1] as u32;
-                    b += p[2] as u32;
-                    a += p[3] as u32;
+            for (x, con) in horizontal.iter().enumerate() {
+                let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+                for &(si, w) in con {
+                    let p = &row[si * 4..si * 4 + 4];
+                    r += to_lin[p[0] as usize] as f32 * w;
+                    g += to_lin[p[1] as usize] as f32 * w;
+                    b += to_lin[p[2] as usize] as f32 * w;
+                    a += (p[3] as f32) * 16.0 * w;
                 }
-                let o = px * 4;
-                out_row[o] = (((r as u64 * inv) + ROUND) >> 32) as u8;
-                out_row[o + 1] = (((g as u64 * inv) + ROUND) >> 32) as u8;
-                out_row[o + 2] = (((b as u64 * inv) + ROUND) >> 32) as u8;
-                out_row[o + 3] = (((a as u64 * inv) + ROUND) >> 32) as u8;
+                let o = x * 4;
+                out_row[o] = to_srgb[r.max(0.0).min(4095.0) as usize];
+                out_row[o + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
+                out_row[o + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
+                out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
             }
         });
-    // Vertical: sh -> ph, with a running column accumulator.
     if ph == sh {
         return tmp;
     }
-    let ys = box_spans(ph, sh);
-    let tmp_stride = pw * 4;
+
+    // Vertical: source height -> pre_h. Alpha is linear by definition and needs
+    // no LUT; it rides the same 0..4080 scale `lin` uses for it.
     let mut out = vec![0u8; pw * ph * 4];
-    let mut acc = vec![0u32; pw * 4];
-    for (oy, &(y0, len)) in ys.iter().enumerate() {
-        if oy == 0 {
-            for y in y0..y0 + len {
-                let row = &tmp[y * tmp_stride..(y + 1) * tmp_stride];
-                for (i, v) in row.iter().enumerate() {
-                    acc[i] += *v as u32;
+    let tmp_stride = pw * 4;
+    out.par_chunks_mut(tmp_stride)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            for x in 0..pw {
+                let i = x * 4;
+                let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+                for &(si, w) in &vertical[y] {
+                    let p = &tmp[si * tmp_stride + i..si * tmp_stride + i + 4];
+                    r += to_lin[p[0] as usize] as f32 * w;
+                    g += to_lin[p[1] as usize] as f32 * w;
+                    b += to_lin[p[2] as usize] as f32 * w;
+                    a += (p[3] as f32) * 16.0 * w;
                 }
+                out_row[i] = to_srgb[r.max(0.0).min(4095.0) as usize];
+                out_row[i + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
+                out_row[i + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
+                out_row[i + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
             }
-        } else {
-            // Slide the window. Spans are contiguous and increasing, so the
-            // previous window is [py0, py0+plen) and the new one is a sub-range
-            // of it: drop the rows that left at the top, add the ones that
-            // arrived at the bottom.
-            let (py0, plen) = ys[oy - 1];
-            for y in py0..y0 {
-                let row = &tmp[y * tmp_stride..(y + 1) * tmp_stride];
-                for (i, v) in row.iter().enumerate() {
-                    acc[i] -= *v as u32;
-                }
-            }
-            for y in py0 + plen..y0 + len {
-                let row = &tmp[y * tmp_stride..(y + 1) * tmp_stride];
-                for (i, v) in row.iter().enumerate() {
-                    acc[i] += *v as u32;
-                }
-            }
-        }
-        let inv = box_reciprocal(len);
-        let base = oy * pw * 4;
-        for i in 0..pw * 4 {
-            out[base + i] = (((acc[i] as u64 * inv) + ROUND) >> 32) as u8;
-        }
-    }
+        });
     out
 }
 
+
 /// Resample in 12-bit linear light with a separable kernel.
 ///
-/// Large reductions get a cheap **box pre-reduction** first (down to at most
-/// 2x the target). Measured on a 40 MP source this took the resample from
-/// ~790ms to well under 200ms, and it is a quality *win* too: a big reduction
+/// Large reductions get a **kernel pre-reduction** first, down to at most 2x the
+/// target ([`prefilter_dim`]). Measured on a 40 MP source this took the resample
+/// from ~790ms to well under 200ms, and it is a quality win too: a big reduction
 /// straight into Lanczos undersamples and aliases, because its ~6 taps end up
 /// spread over thousands of source pixels.
+///
+/// Two things about the shape are load-bearing and both were measured rather than
+/// chosen. **The intermediate size is the memory bound**: the 12-bit conversion
+/// runs on the pre-reduced buffer, never on the full-resolution source (55 MB vs
+/// 26.7 MB on a 6.9 MP page), so the pre-reduction cannot be deleted for quality
+/// — a single kernel pass scores the *same or better* on every quality probe and
+/// still costs twice the memory. **The prefilter averages in linear light**:
+/// `kernel_reduce_linear` is a wrapper for the same reason
+/// `apply_wide_gamut_conversion` is, because the conversion has to be applied at
+/// the one place the values are combined rather than at each of a function's
+/// return points.
+///
+/// The final pass therefore still sees `dFactor` 2.0000 and Hermite's 4-5 taps,
+/// unchanged from when the prefilter was a box.
 fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     let (to_lin, to_srgb) = lin_tables();
 
-    // Pass 1: reduce to at most 2x the target (sRGB box, integer maths), then
-    // convert *that* to 12-bit linear. The conversion is the expensive part, so
-    // it must not run over the full-resolution source.
-    let pre_w = data.width.min(new_w.saturating_mul(2)).max(1);
-    let pre_h = data.height.min(new_h.saturating_mul(2)).max(1);
+    // Pass 1: reduce to at most 2x the target, in linear light, then convert
+    // *that* to 12-bit linear. The conversion is the expensive part, so it must
+    // not run over the full-resolution source.
+    let pre_w = prefilter_dim(data.width, new_w);
+    let pre_h = prefilter_dim(data.height, new_h);
     let t0 = std::time::Instant::now();
     let (small, lw, lh): (Cow<'_, [u8]>, u32, u32) = if pre_w < data.width || pre_h < data.height {
-        (Cow::Owned(box_reduce_srgb(data, pre_w, pre_h)), pre_w, pre_h)
+        (
+            Cow::Owned(kernel_reduce_linear(data, pre_w, pre_h)),
+            pre_w,
+            pre_h,
+        )
     } else {
         (Cow::Borrowed(&data.rgba), data.width, data.height)
     };
@@ -7103,7 +7127,7 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     });
     if *PHASE_TIMING.get_or_init(|| std::env::var("PERF_PHASE").is_ok()) {
         eprintln!(
-            "  linear_resize {}x{}->{}x{}: box={:?} to_linear={:?} weights={:?} hpass={:?} vpass={:?}",
+            "  linear_resize {}x{}->{}x{}: prefilter={:?} to_linear={:?} weights={:?} hpass={:?} vpass={:?}",
             data.width, data.height, new_w, new_h,
             t1 - t0, t2 - t1, t3 - t2, t3.elapsed(), t3.elapsed()
         );

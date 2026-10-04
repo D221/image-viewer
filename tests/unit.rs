@@ -408,6 +408,447 @@ fn test_downscale_output_buffer_matches_its_dimensions() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The linear-light prefilter
+//
+// `linear_resize` is two steps: reduce the full-resolution source to at most 2x
+// the target, then two Hermite passes in 12-bit linear light down to the target.
+// The first step used to be an sRGB **box** average, and a box's sinc sidelobes
+// sit near -13 dB without rolling off, so it was aliasing *more* than the kernel
+// pass it fed. On a 2223x3109 page at the real 2.879x reduction (the manga
+// half-panel target of 1080) the residual in the alias band, measured as the
+// output amplitude of a 100-code sinusoid, was 21-29 codes; with a widened
+// kernel in the prefilter it is 2-11.
+//
+// The measurements below were taken with a harness mirroring `linear_resize`
+// verbatim (same f32 order, same normalisation, byte-exact against
+// `downscale_image` for the box variant), one variable changed at a time. The
+// "box" column is what the code did before; the pins are the kernel numbers plus
+// two codes of slack, so a later filter tweak fails loudly rather than silently.
+//
+// **What is not claimed.** This reduces the artefact, it does not abolish it. A
+// tone at the source Nyquist cannot survive a 2.879x downscale without
+// aliasing; at source period 5 (1.7 output px) 23 codes still get through, and
+// the artefact is a hard 1-2 px sparkle, not a slow beat.
+// ---------------------------------------------------------------------------
+
+/// The geometry the probes below use: the same 2.880x reduction as the real
+/// 2223x3109 manga page at the 1080 half-panel target, at a tenth of the pixels.
+/// `downscale_image` scales so the **long** side is `max_dim`, so 1244/432 is
+/// 2.880 and the result is 309x431.
+const PROBE_W: u32 = 890;
+const PROBE_H: u32 = 1244;
+const PROBE_TARGET: u32 = 432;
+
+/// Horizontal tone of source period `p` px, `amp` codes peak-to-peak. Varying
+/// along x only makes the measurement the horizontal transfer function.
+fn probe_sinusoid(w: u32, h: u32, p: f32, amp: f32) -> image_viewer::ImageData {
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let t = (2.0 * std::f32::consts::PI * x as f32 / p).sin();
+            let v = (128.0 + amp * 0.5 * t).round().clamp(0.0, 255.0) as u8;
+            let o = (y * w as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    }
+}
+
+/// Dot lattice: 1-px dots of `hi` every `p` source px, `lo` between them. A
+/// square wave rather than a tone, so it puts energy at every odd harmonic of
+/// the pitch and exercises more of the alias band than a single frequency.
+fn probe_dots(w: u32, h: u32, p: f32, lo: u8, hi: u8) -> image_viewer::ImageData {
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    let half = (p / 2.0).max(1.0);
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let v = if (x as f32) % p < half { hi } else { lo };
+            let o = (y * w as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    }
+}
+
+/// Stochastic 50% black/white dither, the shape a screentone's fine dither
+/// actually has. A strict period-2 lattice is *not* used for the exposure probe
+/// on purpose: the box prefilter has an exact null at it whose depth depends on
+/// whether a given output pixel's span happens to cover 1 or 2 source pixels, so
+/// the same pattern measures 128 or 162 codes purely from the phase. A hashed
+/// one averages over every alignment, which is also why it is the more honest
+/// stand-in for a tone.
+fn probe_dither(w: u32, h: u32) -> image_viewer::ImageData {
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            // xorshift-ish hash of the coordinate: no lattice period to alias.
+            let mut n = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ (y as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            n ^= n >> 29;
+            n = n.wrapping_mul(0x94D0_49BB_1331_11EB);
+            n ^= n >> 31;
+            let v = if n & 1 == 0 { 0u8 } else { 255 };
+            let o = (y * w as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    }
+}
+
+/// p95 - p5 of the red channel down the middle row: the amplitude statistic.
+/// The row is read whole, and the whole row is one period-multiple of a
+/// horizontal tone, so this is the tone's amplitude as the resampler left it.
+fn probe_amplitude(d: &image_viewer::ImageData) -> f32 {
+    let w = d.width as usize;
+    let mid = (d.rgba.len() / 4 / w / 2) * w * 4;
+    let mut v: Vec<u8> = d.rgba[mid..mid + w * 4]
+        .iter()
+        .step_by(4)
+        .copied()
+        .collect();
+    v.sort_unstable();
+    let p = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize] as f32;
+    p(0.95) - p(0.05)
+}
+
+fn probe_mean(d: &image_viewer::ImageData) -> f32 {
+    d.rgba.iter().step_by(4).map(|&v| v as f32).sum::<f32>() / (d.rgba.len() / 4) as f32
+}
+
+fn probe_resize(src: &image_viewer::ImageData) -> image_viewer::ImageData {
+    with_linear_resample(true, || {
+        image_viewer::downscale_image(src, PROBE_TARGET)
+    })
+}
+
+/// Print the numbers every probe above is pinned against. `cargo test --test unit
+/// -- --ignored --nocapture print_prefilter_pins`. Kept in the file so a filter
+/// change can be re-pinned from a printout rather than from a bisect.
+#[test]
+#[ignore]
+fn print_prefilter_pins() {
+    let out = probe_resize(&probe_sinusoid(PROBE_W, PROBE_H, 1.0, 100.0));
+    println!(
+        "geometry: {}x{} -> {}x{}  R {:.4} x {:.4}",
+        PROBE_W,
+        PROBE_H,
+        out.width,
+        out.height,
+        PROBE_W as f32 / out.width as f32,
+        PROBE_H as f32 / out.height as f32
+    );
+    print!("sinusoid 100 codes: ");
+    for p in [2.5f32, 3.0, 3.5, 4.0, 5.0, 6.0] {
+        let src = probe_sinusoid(PROBE_W, PROBE_H, p, 100.0);
+        print!(
+            "{}:{:.0} ",
+            p,
+            probe_amplitude(&probe_resize(&src))
+        );
+    }
+    println!();
+    print!("dots 0/100 codes:  ");
+    for p in [2.5f32, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0] {
+        let src = probe_dots(PROBE_W, PROBE_H, p, 0, 100);
+        print!(
+            "{}:{:.0} ",
+            p,
+            probe_amplitude(&probe_resize(&src))
+        );
+    }
+    println!();
+    print!("8x reduction:      ");
+    for p in [2.5f32, 3.0, 5.0, 6.0, 11.0] {
+        let src = probe_sinusoid(1200, 1200, p, 100.0);
+        let out = with_linear_resample(true, || image_viewer::downscale_image(&src, 150));
+        print!("{}:{:.0} ", p, probe_amplitude(&out));
+    }
+    println!();
+    let dither = probe_dither(PROBE_W, PROBE_H);
+    let flat = probe_resize(&{
+        let mut rgba = vec![0u8; (PROBE_W as usize) * (PROBE_H as usize) * 4];
+        for p in rgba.chunks_exact_mut(4) {
+            p.copy_from_slice(&[128, 128, 128, 255]);
+        }
+        image_viewer::ImageData {
+            width: PROBE_W,
+            height: PROBE_H,
+            rgba,
+            load_time: std::time::Duration::ZERO,
+        }
+    });
+    println!(
+        "50% dither mean {:.2} (in {:.2}); flat 128 mean {:.2}",
+        probe_mean(&probe_resize(&dither)),
+        probe_mean(&dither),
+        probe_mean(&flat)
+    );
+}
+
+#[test]
+fn the_prefilter_low_passes_the_alias_band_far_deeper_than_a_box() {
+    // Source periods 2.5-6 px land at 0.87-2.08 *output* px, i.e. at or below
+    // the output Nyquist: everything that survives here is foldover, and it is
+    // the 1-2 px sparkle the manga pages show as a lattice.
+    //
+    // box -> kernel prefilter, 100-code sinusoid, codes:
+    //   2.5: 29 -> 4    3.0: 25 -> 2    3.5: 21 -> 5
+    //   4.0: 29 -> 11   5.0: 28 -> 23   6.0: 41 -> 35
+    // Pins are the kernel numbers plus one code, which is the most a different
+    // target's f32 contraction could move a weighted sum.
+    let cases = [
+        (2.5f32, 5.0f32),
+        (3.0, 3.0),
+        (3.5, 6.0),
+        (4.0, 12.0),
+        (5.0, 24.0),
+        (6.0, 36.0),
+    ];
+    for (period, max_codes) in cases {
+        let src = probe_sinusoid(PROBE_W, PROBE_H, period, 100.0);
+        let out = probe_resize(&src);
+        let amp = probe_amplitude(&out);
+        assert!(
+            amp <= max_codes,
+            "source period {period} px ({:.2} output px): {} codes of alias \
+             survived, want <= {max_codes}",
+            period * out.width as f32 / src.width as f32,
+            amp
+        );
+    }
+}
+
+#[test]
+fn a_dot_lattice_leaves_far_less_sparkle_than_a_box_prefilter() {
+    // The same probe as a real dot lattice (1-px dots, 50% duty) rather than a
+    // tone, over the alias band and a little above it.
+    //
+    // box -> kernel prefilter, 0/100 codes, codes:
+    //   2.5: 24 -> 9    3.0: 13 -> 2    3.5: 28 -> 15   4.0: 22 -> 8
+    //   5.0: 35 -> 20   6.0: 46 -> 40   8.0: 65 -> 60
+    let cases = [
+        (2.5f32, 10.0f32),
+        (3.0, 3.0),
+        (3.5, 16.0),
+        (4.0, 9.0),
+        (5.0, 21.0),
+        (6.0, 41.0),
+        (8.0, 61.0),
+    ];
+    for (period, max_codes) in cases {
+        let src = probe_dots(PROBE_W, PROBE_H, period, 0, 100);
+        let out = probe_resize(&src);
+        let amp = probe_amplitude(&out);
+        assert!(
+            amp <= max_codes,
+            "dot lattice at source period {period} px ({:.2} output px): {} codes \
+             survived, want <= {max_codes}",
+            period * out.width as f32 / src.width as f32,
+            amp
+        );
+    }
+}
+
+#[test]
+fn a_large_reduction_is_no_worse_than_the_box_prefilter_was() {
+    // 1200 -> 150 is 8x. At that reduction the prefilter reduces by 2x and the
+    // final pass by 4x, so this is where a widened filter could over-blur.
+    // It does not: the kernel prefilter is lower or equal at every pitch.
+    //
+    // box -> kernel prefilter, 100-code sinusoid, codes:
+    //   2.5: 2 -> 0   3.0: 4 -> 0   5.0: 14 -> 4   6.0: 6 -> 3   11: 10 -> 9
+    let cases = [(2.5f32, 1.0f32), (3.0, 1.0), (5.0, 5.0), (6.0, 4.0), (11.0, 10.0)];
+    for (period, max_codes) in cases {
+        let src = probe_sinusoid(1200, 1200, period, 100.0);
+        let out = with_linear_resample(true, || image_viewer::downscale_image(&src, 150));
+        let amp = probe_amplitude(&out);
+        assert!(
+            amp <= max_codes,
+            "8x reduction, source period {period} px: {amp} codes survived, want <= {max_codes}"
+        );
+    }
+}
+
+#[test]
+fn the_prefilter_does_not_darken_a_near_nyquist_tone() {
+    // THE guard on the prefilter's working space. A weighted average is only
+    // exposure-preserving in the space it averages in: averaging *gamma-encoded*
+    // values of a 50% dither gives ~128 (its own sRGB mean), while the tone's
+    // true average reflectance is 50% linear, i.e. sRGB ~188.
+    //
+    //   50% near-Nyquist dither, mean R of the 309x432 result:
+    //     box in sRGB (today)      164.4
+    //     kernel in sRGB           130.0   <- the trap: looks like "no change"
+    //     kernel in linear light   186.2   <- and within 1.4 of the single-kernel
+    //                                                path's 187.6
+    //
+    // So a prefilter that averaged in the wrong space is not neutral, and the
+    // band below is where that shows. Lower bound only: the prefilter may not
+    // darken the tone, and this one brightens it toward the linear-light mean.
+    let src = probe_dither(PROBE_W, PROBE_H);
+    let out = probe_resize(&src);
+    let m = probe_mean(&out);
+    assert!(
+        (180.0..=195.0).contains(&m),
+        "50% dither came out at mean {m:.2}, want 180..195 (the linear-light \
+         average of its tones; the box prefilter gave 164.4 and an sRGB-space \
+         kernel gives 130.0)"
+    );
+}
+
+#[test]
+fn a_flat_field_survives_the_prefilter_unchanged() {
+    // The other half of the exposure guard, and the one that says nothing about
+    // *which* filter is used: every weighted average of a constant is that
+    // constant. Verified to pass with the box prefilter in place as well, so it
+    // is a regression guard and not a discriminator — the discriminating half is
+    // `the_prefilter_does_not_darken_a_near_nyquist_tone`.
+    for v in [0u8, 1, 64, 128, 200, 254, 255] {
+        let mut rgba = vec![0u8; (PROBE_W as usize) * (PROBE_H as usize) * 4];
+        for p in rgba.chunks_exact_mut(4) {
+            p.copy_from_slice(&[v, v, v, 255]);
+        }
+        let src = image_viewer::ImageData {
+            width: PROBE_W,
+            height: PROBE_H,
+            rgba,
+            load_time: std::time::Duration::ZERO,
+        };
+        let out = probe_resize(&src);
+        let m = probe_mean(&out);
+        assert!(
+            (m - v as f32).abs() <= 1.0,
+            "flat field {v} came out at mean {m:.2}"
+        );
+    }
+}
+
+#[test]
+fn the_prefilter_intermediate_is_at_most_twice_the_target() {
+    // This is the memory bound. The prefilter exists so the 12-bit linear
+    // conversion runs on a buffer of at most 2x the target rather than on the
+    // full-resolution source: on a 6.9 MP page that is 26.7 MB instead of
+    // 55 MB, and deleting the step doubles the conversion cost as well.
+    let cases = [
+        (890u32, 309u32, 618u32),   // the probe geometry: 2x the target
+        (2223, 772, 1544),          // the real 2223x3109 page at its 772 wide
+        (3109, 1080, 2160),         // ... and its height
+        (100, 1000, 100),           // no shrink: the dimension itself
+        (1, 1, 1),                  // 1 px
+        (7, 3, 6),                  // odd small
+        (4096, 2048, 4096),         // exactly 2x
+        (4097, 2048, 4096),         // just over
+        (u32::MAX, 4096, 8192),     // saturating_mul must not wrap
+        (u32::MAX, u32::MAX, u32::MAX),
+    ];
+    for (dim, target, want) in cases {
+        assert_eq!(
+            image_viewer::prefilter_dim(dim, target),
+            want,
+            "prefilter_dim({dim}, {target})"
+        );
+    }
+}
+
+#[test]
+fn linear_resize_keeps_its_two_step_shape() {
+    // The intermediate size above is a pure function and is pinned there, but
+    // nothing observable says `linear_resize` still *uses* it: delete the
+    // pre-reduction and every quality test in this file still passes (a single
+    // kernel pass scores the same or better on all of them) while the 12-bit
+    // buffer grows to the full-resolution source. So the wiring is pinned
+    // against the source text, which is the established pattern in this repo
+    // (`spreads.rs`, `keybindings.rs`) and the only one available here.
+    //
+    // It checks *position*, not just presence: `linear_resize`'s own
+    // brace-matched body, not the file, and not a comment elsewhere. Verified to
+    // fail both ways round — with `box_reduce_srgb` put back, and with the
+    // pre-reduction deleted outright.
+    let src = include_str!("../src/lib.rs");
+    let start = src.find("fn linear_resize(").expect("linear_resize exists");
+    let body = &src[start..];
+    // Brace-match the body rather than looking for the first `\n}`: a nested
+    // block at column 0 would end the slice early and the scan would then pass
+    // on a *truncated* function — which is the failure mode the `spreads.rs`
+    // position check was written for.
+    let mut depth = 0i32;
+    let end = body
+        .char_indices()
+        .find(|&(_, c)| {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            depth == 0 && c == '}'
+        })
+        .map(|(i, _)| i + 1)
+        .expect("linear_resize's braces balance");
+    let body = &body[..end];
+    assert!(
+        body.contains("prefilter_dim(data.width, new_w)")
+            && body.contains("prefilter_dim(data.height, new_h)"),
+        "linear_resize must size both axes with prefilter_dim"
+    );
+    assert!(
+        body.contains("kernel_reduce_linear("),
+        "linear_resize must pre-reduce before the linear conversion; without it \
+         the 12-bit buffer is the full-resolution source"
+    );
+    assert!(
+        !body.contains("box_reduce"),
+        "the sRGB box prefilter is gone; a box aliases more than the kernel it feeds"
+    );
+}
+
+#[test]
+fn every_downscale_filter_survives_the_widened_prefilter() {
+    // The prefilter runs the *selected* filter at a widened support (Lanczos3's
+    // radius is 3 source px, so 4.3 after the prefilter's own 1.44x), and its
+    // result indexes `to_srgb`. Overshoot past the 12-bit range must clamp: the
+    // same class of bug as the 4097 index that used to abort a worker.
+    //
+    // A crash guard, not a discriminator: it passes with the box prefilter too.
+    for f in [
+        image_viewer::DownscaleFilter::Hermite,
+        image_viewer::DownscaleFilter::Catrom,
+        image_viewer::DownscaleFilter::Lanczos3,
+    ] {
+        let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+        let was = image_viewer::linear_resample_enabled();
+        image_viewer::set_linear_resample(true);
+        image_viewer::set_downscale_filter(f);
+        let out = image_viewer::downscale_image(
+            &probe_dots(PROBE_W, PROBE_H, 3.0, 0, 255),
+            PROBE_TARGET,
+        );
+        image_viewer::set_downscale_filter(image_viewer::DownscaleFilter::Hermite);
+        image_viewer::set_linear_resample(was);
+        assert_eq!(
+            out.rgba.len(),
+            (out.width as usize) * (out.height as usize) * 4,
+            "{f:?}: buffer and dims disagree"
+        );
+        assert!(out.rgba.chunks_exact(4).all(|p| p[3] == 255), "{f:?}: alpha");
+    }
+}
+
 #[test]
 fn test_preview_load_survives_gamma_space_resize() {
     // End-to-end version of the same bug, through the real decode entry point

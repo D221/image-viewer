@@ -1019,14 +1019,62 @@ an edit.
   is reached via IFD0's *next-IFD pointer* (after IFD0's entry table), not the
   header's IFD0 offset — reading the wrong one looks like it works and silently
   finds nothing.
-- **`linear_resize` is the hot path for big non-JPEG sources**: sRGB box
-  pre-reduction to ≤2× the target → 12-bit linear conversion of *that* buffer →
-  two kernel passes. The conversion must never run over the full-resolution
-  source, a reciprocal **division inside the inner loop cost more than everything
-  else combined**, the vertical pass needs its running column accumulator or it
-  misses cache on every pixel, and **overshoot must clamp LUT indices to 4095**
-  (index 4097 was a worker panic). Toggling `linear_resample` does not re-decode
-  cached previews (the filter dropdown does — see `refilter`).
+- **`linear_resize` is the hot path for big non-JPEG sources**: **linear-light
+  kernel** pre-reduction to ≤2× the target (`prefilter_dim`) → 12-bit linear
+  conversion of *that* buffer → two kernel passes. The conversion must never run
+  over the full-resolution source, a reciprocal **division inside the inner loop
+  cost more than everything else combined**, and **overshoot must clamp LUT
+  indices to 4095** (index 4097 was a worker panic). Toggling `linear_resample`
+  does not re-decode cached previews (the filter dropdown does — see `refilter`).
+  - **The prefilter is a kernel, not a box, and it averages in *linear light*.**
+    Both halves were measured on a 2223×3109 page at the real 2.879× reduction
+    (the manga half-panel target of 1080), with a harness mirroring
+    `linear_resize` verbatim and byte-exact against `downscale_image`.
+    * A box's sinc sidelobes sit near −13 dB and do not roll off, so the **box was
+      aliasing more than the Hermite pass it fed**: a 100-code sinusoid left
+      **29/25/21/29 codes** at source periods 2.5/3/3.5/4 px, where a widened
+      kernel leaves **4/2/5/11**. The two tie above source period ~6 px, and at
+      every reduction from 1.3× to 16× the kernel is lower or equal (below 2× the
+      pre-reduction does not fire at all and the two paths are bit-identical).
+      The one cell where the box looked better — reduction 2.5, output period
+      exactly 2.00 — is a **one-point notch in the box**: 49 codes at source
+      period 4.9, **15** at 5.0, 50 at 5.1.
+    * A weighted average preserves exposure **only in the space it averages in**.
+      An sRGB-space kernel prefilter came out **5–7 codes darker per page** than
+      the box it replaced, and 130.0 on a 50% near-Nyquist dither where the
+      tone's true linear-light average is ~187. In linear light the same
+      prefilter lands within 1.4 codes of what a single kernel pass over the whole
+      source produces — measured on real pages, mean R **158.2 → 165.2** on
+      32.jpg, and a 50% dither **162 → 187.2**. *Pages get slightly lighter, and
+      that is the point*: the gamma-space box was under-reading dithered tone.
+    * **The intermediate size is the memory bound and it did not move.** Peak
+      bytes inside `linear_resize` are the same as the box's (u8 full-height
+      scratch, u8 pre-size scratch, u16 pre-size linear), and the final pass still
+      sees `dFactor` 2.0000 with Hermite's 4–5 taps. Deleting the pre-reduction
+      would double the conversion cost for a quality gain of **zero** — a single
+      kernel pass scores the same or better on every probe above — so
+      `prefilter_dim` is a public function with a table test, and
+      `linear_resize_keeps_its_two_step_shape` is a **source scan** (the
+      established pattern) because nothing observable from outside says how big
+      the intermediate is.
+    * It came out **2.4× faster** (debug, 32.jpg → 772×1080: 1096 → 464 ms), and
+      **not** because the kernel is cheaper than the box — per output pixel it is
+      3–4 f32 taps against 1.4 integer adds. The box's vertical pass summed a
+      sliding window down a column accumulator and so ran on **one thread**; the
+      kernel's is row-parallel. Converting each row into a per-worker `u16` row
+      buffer first, to cut the LUT lookups, was measured and is *slower*
+      (565–707 ms), so the LUT stays in the inner loop.
+  - **What this does not do.** It reduces the artefact; it cannot abolish it.
+    Content at the source Nyquist cannot survive a 2.879× downscale without
+    aliasing: at source period 5 (1.7 output px) 23 codes still get through, and
+    the artefact is a hard 1–2 px sparkle, not a low-frequency beat (a dot lattice
+    at output pitch 3–6 beats by **0.00** codes either way). Measured on real
+    pages, mean |Δ| between adjacent output pixels inside flat tone drops
+    17.996 → 13.533 on 32.jpg — better, not gone.
+- The old reciprocal-multiply box average (`box_spans` / `box_reciprocal` /
+  `ROUND`) and its running column accumulator are **gone**; the notes above about
+  integer division and cache misses in those loops no longer apply to this path.
+
 - Known waste, not worth fixing: `exif_orientation(path)` re-reads the file with
   `nom_exif::read_exif` although the bytes are already in memory. That is
   0.1–0.2 ms against a 10–17 ms `fs::read` — ~0.02% of a preview decode.

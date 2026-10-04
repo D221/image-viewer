@@ -508,10 +508,13 @@ backend is printed at startup.
 - **Large JPEGs get a DCT-scaled preview** (turbojpeg scales in the DCT
   domain), so opening a 40 MP photo doesn't mean decoding 40 MP twice. The
   full decode starts only after you have actually looked at it for 120 ms.
-- **Big images are resampled in two steps.** A cheap box pass reduces the source
-  to at most twice the display size, and only that reduced buffer is converted
-  to linear light and filtered — measured at **790 ms → 219 ms** for a 40 MP
-  source, and it aliases less than filtering straight from full resolution.
+- **Big images are resampled in two steps.** A first pass reduces the source to at
+  most twice the display size, and only that reduced buffer is converted to linear
+  light and filtered — measured at **790 ms → 219 ms** for a 40 MP source. That
+  first pass filters in linear light with the same kernel as the second, because a
+  plain average aliases *more* than the filter it feeds: at the 2.9× reduction of
+  a scanned page a box average left 21–29 codes of a near-Nyquist tone as 1–2 px
+  sparkle, where the kernel leaves 2–11.
 - **Neighbours are preloaded.** A fixed window of 3 images either side of the
   current one, with "next" prioritised slightly over "previous".
 - **Previews are sized to your display**, not a fixed cap, so the texture is

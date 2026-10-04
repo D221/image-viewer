@@ -32,16 +32,26 @@
 
 ## The resampler is the hot path for big non-JPEG sources
 
-`linear_resize`, in order: sRGB box pre-reduction to <=2x the target (integer
-running sums, rayon, precomputed reciprocals) -> 12-bit linear conversion of
-*that* buffer -> two kernel passes.
+`linear_resize`, in order: **linear-light kernel** pre-reduction to <=2x the target
+(`prefilter_dim`, rayon, `contributions` weights) -> 12-bit linear conversion of
+*that* buffer -> two kernel passes. The final pass therefore always sees
+`dFactor` 2.0.
 
-- The conversion must never run over the full-resolution source.
-- A reciprocal **division inside the inner loop cost more than everything else
-  combined**.
-- The vertical pass needs its running column accumulator or it misses cache on
-  every pixel.
+- The conversion must never run over the full-resolution source. The intermediate
+  size is the memory bound and it is pinned by a table test on `prefilter_dim` —
+  deleting the pre-reduction scores the *same or better* on every quality probe
+  (a single kernel pass over the whole source does), so only the memory and a
+  source scan stand between it and being merged away.
+- **A weighted average preserves exposure only in the space it averages in.** The
+  prefilter averages in linear light because an sRGB-space one came out 5-7 codes
+  darker per page and read a 50% near-Nyquist dither as 130 where the tone's true
+  average is ~187.
+- A **box** prefilter is not a neutral speed optimisation: its sidelobes sit near
+  -13 dB, and at the 2.9x reduction of a scanned page it left 21-29 codes of
+  near-Nyquist tone as 1-2 px sparkle where the kernel leaves 2-11.
 - **Overshoot must clamp LUT indices to 4095** — index 4097 was a worker panic.
+  The prefilter clamps too, and it runs the *selected* filter at a widened
+  support, so Lanczos3's overshoot reaches it first.
 
 `dynamic_to_image_data` still decodes at source size and resizes for PNG, HEIC,
 JXL and TIFF, so the transient full-size buffer is allocated for those. That is
