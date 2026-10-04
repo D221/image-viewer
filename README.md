@@ -301,11 +301,41 @@ should not quietly do that.
 | `C` | Toggle crop mode |
 | `Del` | Move to the Recycle Bin (never a hard delete) |
 | `E` `W` `R` | Explore folder, wallpaper, reload folder |
+| `M` | Toggle **manga mode** — show images as turns of one or two pages |
+| `D` | Toggle **right-to-left** pages (only while manga mode is on) |
+| `O` / `Shift+O` | One fewer / one more page opening alone at the front of the gallery |
+| `X` | Toggle the current page between single and double (takes a whole turn to itself) |
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
-| Mouse side buttons | Previous / next image |
+| Mouse side buttons | Same as `←` / `→` |
 | Drag & drop | Open a file, folder or archive |
+
+### Manga mode
+
+`M` shows images as **turns** — one page, or two meeting at a seam — laid out the
+way a book is: a scan that is itself two printed pages takes a whole turn to itself,
+and everything after it is re-paired. `D` swaps which side a turn opens on and which
+way the arrows go; **it is on by default**, because someone who has asked for a manga
+reader has asked for the one thing that makes it one. Both are in the settings panel
+too, under the same names.
+
+**Every navigation key moves as one unit.** The arrows, `Space`, `PgUp` / `PgDn` and
+both mouse side buttons are all resolved through one rule, so under right-to-left a
+rightward press is *backwards* and nothing can disagree with anything else. The wheel
+is the one exception and always moves forward: it has no side to preserve.
+
+`O` and `Shift+O` change how many pages open alone at the front — the cover, and
+usually one page of front matter. `X` overrides what the app thinks the current page
+is, which is the escape hatch for a scan whose proportions lie about it; press it
+again to undo. Both are stored per folder in
+`%LOCALAPPDATA%\image-viewer\spreads.json` — a file this app owns, holding nothing
+but pairing decisions. **Deleting it clears every override** and goes back to the
+detected shapes.
+
+In manga mode `Home` and `End` go to the first and last **turn** rather than the first
+and last file, which matters for a folder of documents. The grid (`G`) is unchanged —
+one cell per file — and opening a cell lands on the turn at that file's first page.
 
 **In the grid, the navigation keys drive a selection instead.** `←` `→` `↑` `↓`
 move by cell and by row, `PgUp` / `PgDn` move a viewport at a time, `Home` /
@@ -316,10 +346,19 @@ re-decodes, and the selection stops at the ends rather than wrapping.
 **Move and Copy have no keyboard shortcut**, deliberately. Both write to the
 filesystem, and a bare letter is one stray keystroke away from doing that. `C` used
 to be Copy and is now Crop, which touches nothing on disk until `Ctrl+S` — the
-single-key budget goes to actions that cannot lose data. `Del` keeps its key
-because it is the one people reach for while culling, and it goes to the Recycle
-Bin rather than deleting. If Move and Copy are wanted back on the keyboard, a
-modifier is the shape to add rather than a bare letter.
+single-key budget goes to actions that cannot lose data. `M` was Move and is now
+manga mode, which is the same kind of trade: a letter worth having for something that
+cannot lose a picture. `Del` keeps its key because it is the one people reach for
+while culling, and it goes to the Recycle Bin rather than deleting. If Move and Copy
+are wanted back on the keyboard, a modifier is the shape to add rather than a bare
+letter.
+
+**A UTF-8 BOM in `config.json` is ignored** rather than read as an empty file. Some
+editors and PowerShell's `Set-Content -Encoding utf8` write one, `serde_json` rejects
+it, and the alternative is that every setting silently reverts to its default with
+no error. The same applies to `spreads.json`, where it would be worse: the store is a
+read-modify-write, so a BOM that made it unreadable would turn the next `O` or `X`
+into a delete of every other folder's pairing decisions.
 
 ---
 
@@ -337,6 +376,8 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
 | Mouse wheel flips images | off | Wheel pages instead of zooming (`Ctrl`+wheel still zooms) |
 | Loop back at folder ends | on | Wrapping past the last image returns to the first. On by default so older configs keep their existing behaviour |
+| Manga mode | off | Show images as turns of one or two pages rather than one at a time. `M`. See the note below |
+| Right-to-left pages | **on** | A turn opens on the right, so `←` reads forwards. `D`. On by default because it is only read while manga mode is |
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
 
 The downscale filter and sort mode re-decode immediately; the linear-light

@@ -274,6 +274,40 @@ fn default_true() -> bool {
     true
 }
 
+/// Drop a leading UTF-8 **BOM** from text that is about to be parsed as JSON.
+///
+/// **Every JSON file this app reads can arrive with one, and without this every
+/// setting in it is silently lost.** `Set-Content -Encoding utf8` in Windows
+/// PowerShell writes `EF BB BF` before the first byte; several editors do the same
+/// under a "UTF-8 with signature" or "keep BOM" option, and a file round-tripped
+/// through one of them is byte-for-byte valid JSON apart from those three bytes.
+/// `serde_json` does not skip them - it reports "expected value at line 1 column 1",
+/// which is not a message anybody can act on - so both readers here take their
+/// documented failure path instead:
+///
+/// * `Config::load` returns the **defaults**, so every setting reverts with no
+///   warning: the folder is forgotten, every toggle is where it started, and the
+///   file on disk still looks fine.
+/// * `load_spread_overrides` returns an empty store, and - worse -
+///   `save_spread_overrides` is a **read-modify-write against a file it could not
+///   read**, so the next override press replaces every *other* gallery's entry with
+///   nothing. That is silent, unrecoverable and has no second copy anywhere.
+///
+/// So this is one function called from all three sites rather than a
+/// `trim_start_matches` at each: they are three places that already share a failure
+/// mode, and the reason they share it is invisible from any one of them.
+///
+/// **Only a leading BOM, and only exactly one.** `trim_start_matches` would eat any
+/// number of them and would be indifferent to where they are, which is not a
+/// difference worth having: the bytes are legal anywhere else in a JSON document
+/// (inside a string, as a character in a path) and are only a problem in front of the
+/// first token. U+FEFF as a character *code point* is not stripped either, because
+/// `fs::read_to_string` has already decoded `EF BB BF` into U+FEFF and this is the
+/// one place that byte sequence can appear.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 impl Config {
     /// Load configuration from a JSON file.
     pub fn load(path: &Path) -> Self {
@@ -299,7 +333,7 @@ impl Config {
             return default;
         };
 
-        match serde_json::from_str::<Self>(&data) {
+        match serde_json::from_str::<Self>(strip_bom(&data)) {
             Ok(config) => config,
             Err(err) => {
                 eprintln!("Failed to load config {}: {}", path.display(), err);
@@ -706,6 +740,71 @@ where
         })
         .find(|s| !s.starts_with('-') && !s.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+/// One navigation input, **named** rather than answered.
+///
+/// The point of the type is that there is nowhere else to put the question. A caller
+/// cannot say "is rightwards forwards?" - it can only say which input happened and
+/// ask [`nav_is_forward`], so every navigation key in the app is handed to the same
+/// function and a new key is a new line that has to name itself.
+///
+/// `Right`/`Left` are the arrow keys, and they are the only two variants that carry
+/// spatial meaning. `Next`/`Previous` are the inputs with a *sequence* but no side -
+/// `Space`, `PageDown`/`PageUp` and the mouse's forward/back buttons - and
+/// `WheelDown` is neither: see [`nav_is_forward`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NavInput {
+    /// The right arrow.
+    Right,
+    /// The left arrow.
+    Left,
+    /// Something that means "onward" without saying which way: `Space`,
+    /// `PageDown`, the mouse's forward button.
+    Next,
+    /// The same, backwards.
+    Previous,
+    /// A wheel scrolling down.
+    WheelDown,
+}
+
+/// Whether a navigation input means *forwards* in reading order.
+///
+/// **This function is the whole of the manga key mapping, and there is deliberately
+/// nowhere else for it to live.** OpenComic inverts the navigation keys for
+/// right-to-left manga and its `mangaInvert` set omits `Space`, so **Space silently
+/// becomes "previous page"** there: nothing errors, the arrows are right, and the
+/// space bar quietly goes the wrong way. Every input therefore names itself as a
+/// [`NavInput`] and comes here, so the set of inputs that can disagree is the set of
+/// variants of one enum.
+///
+/// # The trade-off, stated rather than discovered later
+///
+/// With `manga_rtl` on, `Right` is *backwards* in a book that opens to the left, so
+/// `→` means "next" in single-image mode and "backwards" in a manga spread. **That is
+/// the price of matching the screen**, and it is what Mihon, Komga and Kavita all
+/// ship: the reader's hand moves the way the page turns, rather than having to
+/// remember that this one app is reversed. A setting that made `→` mean "next" in
+/// both modes would be the alternative, and it is worse - it would make the arrows
+/// lie about which page is on screen.
+///
+/// # Why the wheel is the exception
+///
+/// `WheelDown` is **always** forwards, under both settings, because it is the one
+/// input with no spatial meaning to preserve. An arrow has a *side*, and a book that
+/// opens to the left has to move the hand with it; a wheel delta has only a sign, and
+/// a sign already means "onward" in both directions. Mihon excludes it for the same
+/// reason. Inverting it would mean scrolling *up* to go forwards in manga mode, which
+/// is not a reading convention anywhere.
+pub fn nav_is_forward(input: NavInput, rtl: bool) -> bool {
+    match input {
+        // Direction-agnostic in both modes, for the reason in the docs.
+        NavInput::WheelDown => true,
+        // Rightward on screen: forwards in a left-to-right book, backwards in a
+        // right-to-left one.
+        NavInput::Right | NavInput::Next => !rtl,
+        NavInput::Left | NavInput::Previous => rtl,
+    }
 }
 
 /// Scale factor that fits an image of `natural` size into an `area`, keeping
@@ -5830,7 +5929,7 @@ pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
     let Ok(text) = std::fs::read_to_string(store) else {
         return GallerySpreads::default();
     };
-    let all: SpreadStore = serde_json::from_str(&text).unwrap_or_default();
+    let all: SpreadStore = serde_json::from_str(strip_bom(&text)).unwrap_or_default();
     let mut g = all
         .get(root.to_string_lossy().as_ref())
         .cloned()
@@ -5976,7 +6075,12 @@ pub fn save_spread_overrides(
     }
     let mut all: SpreadStore = std::fs::read_to_string(store)
         .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
+        .as_deref()
+        // Stripped rather than parsed raw, and this is the load-bearing of the two
+        // sites: an unparseable store is *replaced*, so a BOM that made this parse
+        // fail would turn the next override press into a delete of every other
+        // gallery's entry. See `strip_bom`.
+        .and_then(|text| serde_json::from_str(strip_bom(text)).ok())
         .unwrap_or_default();
     all.insert(root.to_string_lossy().into_owned(), g.clone());
 

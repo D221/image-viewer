@@ -33,12 +33,12 @@ use std::time::{Duration, Instant};
 use image_viewer::perf;
 use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, forget_thumbnail, grid_cols,
-    is_archive_path, load_grid_thumbnail, load_image_full, load_page_preview_full,
-    load_spread_overrides, protected_preview_keys, save_spread_overrides,
-    set_downscale_filter, set_linear_resample, set_thumbnail_cache, scan_folder_sorted,
+    is_archive_path, last_anchor, load_grid_thumbnail, load_image_full, load_page_preview_full,
+    load_spread_overrides, nav_is_forward, protected_preview_keys, save_spread_overrides,
+    scan_folder_sorted, set_downscale_filter, set_linear_resample, set_thumbnail_cache,
     spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
-    DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, PageCtx, PagePos, Shape, SortMode,
-    Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
+    SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +47,91 @@ use image_viewer::{
 
 /// Wheel delta accumulated before a flip triggers in wheel-navigation mode.
 const THRESH_WHEEL: f32 = 60.0;
+
+/// The keys that navigate, each paired with what it **means**.
+///
+/// **The pairs are the direction rule's inputs, and this table is where a physical
+/// key becomes one.** `Right` and `Left` are the arrows and they are the only two
+/// entries with a side to preserve, so `manga_rtl` inverts exactly those. `Next` and
+/// `Previous` are the ones that say "onward" without saying which way.
+///
+/// They are one table, in one place, rather than a boolean per key read in the
+/// dispatch, because "which key means what" is a decision with a failure mode and no
+/// natural home if it is spread: an earlier version read each key separately and a
+/// key could be attached to the wrong meaning without anything noticing. Read as a
+/// table by `tests/keybindings.rs`, which asserts each row pairs the key with the
+/// input it is supposed to mean.
+const NAV_KEYS: &[(egui::Key, NavInput)] = &[
+    (egui::Key::ArrowRight, NavInput::Right),
+    (egui::Key::ArrowLeft, NavInput::Left),
+    (egui::Key::Space, NavInput::Next),
+    (egui::Key::PageDown, NavInput::Next),
+    (egui::Key::PageUp, NavInput::Previous),
+];
+
+/// Mouse side buttons, in the same shape as [`NAV_KEYS`].
+///
+/// Extra2 is the browser's "forward" and Extra1 its "back", so they are `Next` and
+/// `Previous` like every other forward-going input - not a pair of directions of
+/// their own, which is what they were before this table existed.
+const NAV_BUTTONS: &[(egui::PointerButton, NavInput)] = &[
+    (egui::PointerButton::Extra2, NavInput::Next),
+    (egui::PointerButton::Extra1, NavInput::Previous),
+];
+
+/// Resolve [`NAV_KEYS`] and [`NAV_BUTTONS`] into the direction they mean, if any of
+/// them fired.
+///
+/// **The single place a direction is produced in this binary**, and `Option<bool>`
+/// rather than two booleans for a reason that is easy to get wrong: with two flags,
+/// every caller has to decide which wins, and a caller that writes the decision
+/// itself is a second opinion about direction — which is the entire defect this
+/// feature's key mapping exists to prevent. Here there is one answer, and a caller
+/// that does not like it cannot invent another.
+///
+/// `Some(true)` is forwards and `Some(false)` is backwards. `None` is nothing was
+/// pressed, which is a different answer from "backwards" and used to be spelled the
+/// same way.
+///
+/// The two closures rather than reading the input here, because the same table has
+/// to be read two ways — `key_pressed` for a press and `key_down` for
+/// hold-to-browse — and passing the predicate is what stops those from being two
+/// implementations that drift apart.
+///
+/// **Forward wins when both fired.** A frame with an arrow-left and space held is
+/// two things at once, and "forwards" is what the old `next || ...` chain answered,
+/// so this is parity rather than a new rule.
+fn nav_direction(
+    key_active: impl Fn(egui::Key) -> bool,
+    button_active: impl Fn(egui::PointerButton) -> bool,
+    rtl: bool,
+) -> Option<bool> {
+    let mut forward = false;
+    let mut backward = false;
+    let mut note = |active: bool, meaning: NavInput| {
+        if !active {
+            return;
+        }
+        if nav_is_forward(meaning, rtl) {
+            forward = true;
+        } else {
+            backward = true;
+        }
+    };
+    for (key, meaning) in NAV_KEYS {
+        note(key_active(*key), *meaning);
+    }
+    for (button, meaning) in NAV_BUTTONS {
+        note(button_active(*button), *meaning);
+    }
+    if forward {
+        Some(true)
+    } else if backward {
+        Some(false)
+    } else {
+        None
+    }
+}
 
 /// How many images on each side of the current one get their preview preloaded.
 const PRELOAD_RADIUS: usize = 3;
@@ -1813,6 +1898,137 @@ impl MyApp {
         }
     }
 
+    /// `Home` / `End`: the first or last **turn** in manga mode, the first or last
+    /// *file* otherwise.
+    ///
+    /// Manga mode asks the library for the anchor rather than assigning a file
+    /// index, and the two ends are deliberately not spelled the same way:
+    ///
+    /// * **The first turn is `(0, 0)`, and that is arithmetic rather than a
+    ///   special case.** `anchor_of` starts its walk there and returns the position
+    ///   unchanged when it is asked about it, so the gallery's first page is its own
+    ///   anchor and always was. `snap_to_turn_anchor` in `goto` would put the cursor
+    ///   there even if this got it wrong, which is why `goto` is still called.
+    /// * **The last turn is a walk, not a subtraction.** `last_anchor` reads forward
+    ///   from the front, because which turn is last is a fact about the whole tiling
+    ///   and nothing asked *at* the last page can answer it: `lone` says "alone" there
+    ///   either way, and `prev_anchor` answers `None` at the front or on a second
+    ///   half. The controller's original "walk `prev_anchor` back from the final
+    ///   page" was found unimplementable for the same reason; `last_anchor` is the
+    ///   rule that works, and it is the one tested in `tests/spreads.rs`.
+    ///
+    /// An empty gallery does nothing at all, which is the old `!is_empty()` guard
+    /// moved in here so the two modes cannot disagree about it.
+    fn goto_edge(&mut self, end: bool, ctx: &Context) {
+        if self.gallery.is_empty() {
+            return;
+        }
+        if self.config.manga_mode {
+            let to = if end {
+                last_anchor(self.spreads.lead_lone, &self.page_ctx())
+            } else {
+                Some(PagePos { index: 0, page: 0 })
+            };
+            if self.goto_turn(to) {
+                self.goto(ctx);
+            }
+        } else {
+            self.gallery.index = if end { self.gallery.len() - 1 } else { 0 };
+            self.goto(ctx);
+        }
+    }
+
+    /// `M`: turn manga mode on or off.
+    ///
+    /// **Re-`goto`s, because the mode changes what a page is.** With it off a step
+    /// walks a page and with it on it walks a whole turn, and the cursor is only ever
+    /// on an anchor in one of those - so turning the mode on while the cursor sits on
+    /// the second half of what is now a pair would leave it in the middle of a turn,
+    /// which is the state every pairing rule is written not to be asked from.
+    /// `goto`'s own `snap_to_turn_anchor` is what actually fixes it; this calls it.
+    ///
+    /// View-only, which is what makes a bare letter safe here: one bool in
+    /// `config.json` and a repaint.
+    fn toggle_manga_mode(&mut self, ctx: &Context) {
+        self.config.manga_mode = !self.config.manga_mode;
+        self.config.save(&self.config_path);
+        self.goto(ctx);
+        ctx.request_repaint();
+    }
+
+    /// `D`: swap which side a turn opens on, and which way the arrows go.
+    ///
+    /// **No re-`goto`, deliberately, and the asymmetry with `M` is the point.** The
+    /// turn's *membership* does not change - the same pages are on screen in the same
+    /// pairs - only the order they are laid out in and the direction the keys move,
+    /// both of which are read fresh every frame by `central` and by the `nav` tuple.
+    /// Calling `goto` here would reset the full-res dwell timer and re-plan the
+    /// loader queue for a picture that did not change.
+    ///
+    /// Also view-only: one bool in `config.json`.
+    fn toggle_manga_rtl(&mut self, ctx: &Context) {
+        self.config.manga_rtl = !self.config.manga_rtl;
+        self.config.save(&self.config_path);
+        ctx.request_repaint();
+    }
+
+    /// `O` / `Shift+O`: step the leading-lone offset by `by`, clamped, and persist it.
+    ///
+    /// Writes only `spreads.json` under `%LOCALAPPDATA%` - **a file this app owns**,
+    /// under a key naming this gallery - which is what makes a bare letter safe: there
+    /// is nothing in it that is not a pairing decision, and a reader who dislikes the
+    /// result deletes the file or presses `O` back. Clamping is
+    /// `GallerySpreads::nudge_lead_lone`'s, so a `lead_lone` of 99 is not reachable
+    /// from the keyboard and the notice reports the value that was actually landed on
+    /// rather than the one that was asked for.
+    ///
+    /// **Re-`goto`s**, like `M`: the offset changes which pages open alone, so the
+    /// tiling under the cursor can change, and `goto` is what re-learns the shapes
+    /// and re-plans against them.
+    fn nudge_lead_lone(&mut self, by: i32, ctx: &Context) {
+        self.spreads.nudge_lead_lone(by);
+        self.save_spreads();
+        self.goto(ctx);
+        self.notice = Some(format!(
+            "{} pages open alone at the front",
+            self.spreads.lead_lone
+        ));
+    }
+
+    /// `X`: flip the cursor page between a page that takes a turn to itself and one
+    /// that shares.
+    ///
+    /// The shape it starts from is **what the page is judged to be now**, which is an
+    /// existing override if there is one and the aspect ratio otherwise -
+    /// `image_viewer::shape_of` already answers exactly that question, asking the
+    /// override first. So two presses flip and unflip, and `X` on a page the detector
+    /// is confidently wrong about still works, which is the entire reason a manual
+    /// override exists.
+    ///
+    /// Only the **cursor page**, never the turn: a wide scan in the middle of a pair
+    /// splits that turn and pushes everything after it along, so the user sees the
+    /// consequence of the override immediately rather than having to work out which
+    /// page they hit.
+    ///
+    /// Writes only `spreads.json`, the same file `O` writes, and re-`goto`s for
+    /// [`Self::nudge_lead_lone`]'s reason.
+    fn toggle_cursor_shape(&mut self, ctx: &Context) {
+        let Some(key) = self.cur.clone() else {
+            self.notice = Some("No image is open".into());
+            return;
+        };
+        let detected = image_viewer::shape_of(self.gallery.page_pos(), &self.page_ctx());
+        let landed = self.spreads.toggle(&key.path, key.page, detected);
+        self.save_spreads();
+        self.goto(ctx);
+        let page = key.page + 1;
+        self.notice = Some(if landed == Shape::Double {
+            format!("Page {page} now takes a whole turn to itself")
+        } else {
+            format!("Page {page} shares a turn with its neighbour")
+        });
+    }
+
     // ---- file list and filtering ------------------------------------------
 
     /// Rebuild `gallery.files` from `all_files` and the current filter. The
@@ -2048,19 +2264,28 @@ impl MyApp {
                         if Some(&key) == self.cur.as_ref() && self.waiting_load {
                             self.waiting_load = false;
                             if self.config.block_while_loading {
-                                let (held_fwd, held_prev) = ctx.input(|i| {
-                                    (
-                                        i.key_down(egui::Key::ArrowRight)
-                                            || i.key_down(egui::Key::PageDown)
-                                            || i.key_down(egui::Key::Space),
-                                        i.key_down(egui::Key::ArrowLeft)
-                                            || i.key_down(egui::Key::PageUp),
+                                // **The held keys go through the same
+                                // `nav_direction` as the press did.** This is the
+                                // second half of the navigation rule and the half
+                                // nobody writes: read the raw keys here and this site
+                                // decides the direction a second time, in a second
+                                // place, with no rule in sight — so under
+                                // `manga_rtl` a held arrow steps the opposite way to
+                                // the press that started the hold, and holding an
+                                // arrow in a manga library bounces between two turns
+                                // forever. `key_down` rather than `key_pressed`
+                                // because the key is being held, and no mouse button
+                                // because holding a side button is not a gesture this
+                                // app has.
+                                let held = ctx.input(|i| {
+                                    nav_direction(
+                                        |key| i.key_down(key),
+                                        |_| false,
+                                        self.config.manga_rtl,
                                     )
                                 });
-                                if held_fwd {
-                                    self.pending_advance = Some(true);
-                                } else if held_prev {
-                                    self.pending_advance = Some(false);
+                                if let Some(dir) = held {
+                                    self.pending_advance = Some(dir);
                                 }
                             }
                         }
@@ -3413,14 +3638,21 @@ impl MyApp {
         // instead of zooming. Ctrl+wheel always zooms.
         let wheel_nav_active = self.config.wheel_navigation && !ui.input(|i| i.modifiers.ctrl);
         if wheel_nav_active && scroll != 0.0 {
+            // **The wheel asks the rule too, and the rule says the same answer in
+            // both directions** — it is the one input with no side to preserve, so
+            // scrolling down is "onward" whether the book opens left or right.
+            // Spelling `true` here would be correct today and would be the one
+            // branch that could drift away from the setting without looking wrong:
+            // Mihon excludes the wheel for the same reason.
+            let down = nav_is_forward(NavInput::WheelDown, self.config.manga_rtl);
             // Scroll down (negative) = next image, scroll up = previous.
             self.wheel_acc += scroll;
             if self.wheel_acc <= -THRESH_WHEEL {
                 self.wheel_acc = 0.0;
-                self.step(&ctx, true);
+                self.step(&ctx, down);
             } else if self.wheel_acc >= THRESH_WHEEL {
                 self.wheel_acc = 0.0;
-                self.step(&ctx, false);
+                self.step(&ctx, !down);
             }
         }
 
@@ -4179,11 +4411,24 @@ impl MyApp {
     }
 
     /// Open the grid's highlighted image and leave the grid (Enter or click).
+    ///
+    /// **`goto_index`, not an assignment to `gallery.index`, and that is the whole
+    /// of what manga mode changed here.** The grid is one cell per file and the cell
+    /// names a *file*, so picking one has to mean "that file, at its first page" -
+    /// and `goto_index` is what says so, by resetting the page as well as the index.
+    /// Assigning `.index` leaves the page wherever the cursor happened to be, so
+    /// picking file 3 while sitting on page 2 of file 7 landed on page 2 of file 3,
+    /// which is a page of the picked file but not its *first* one. In manga mode that
+    /// is worse than a cosmetic slip: `goto`'s `snap_to_turn_anchor` then walks the
+    /// cursor to a turn anchor, and the reader arrives somewhere they did not pick.
+    ///
+    /// The grid is otherwise untouched, deliberately: one cell per file, page 1 only,
+    /// as it has always been.
     fn pick_grid_selection(&mut self, ctx: &Context) {
         if self.gallery.is_empty() {
             return;
         }
-        self.gallery.index = self.grid_sel.min(self.gallery.len() - 1);
+        self.gallery.goto_index(self.grid_sel.min(self.gallery.len() - 1));
         self.gallery_view = false;
         self.goto(ctx);
     }
@@ -4554,21 +4799,20 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
 
         // Consume a queued advance from "wait for load" mode — the image it
         // belongs to was painted during the previous frame.
+        //
+        // The *key* it re-reads is only a check that the reader is still pushing
+        // something; the direction is the one `pump` already resolved through
+        // `nav_is_forward`, so a queued advance cannot come back with the opposite
+        // sense to the press that queued it.
         if let Some(dir) = self.pending_advance.take() {
-            let (fwd, prev) = ctx.input(|i| {
-                (
-                    i.key_down(egui::Key::ArrowRight)
-                        || i.key_down(egui::Key::PageDown)
-                        || i.key_down(egui::Key::Space),
-                    i.key_down(egui::Key::ArrowLeft) || i.key_down(egui::Key::PageUp),
-                )
+            let still_held = ctx.input(|i| {
+                nav_direction(|key| i.key_down(key), |_| false, self.config.manga_rtl) == Some(dir)
             });
-            if dir && fwd {
-                self.step(ctx, true);
-            } else if !dir && prev {
-                self.step(ctx, false);
+            if still_held {
+                self.step(ctx, dir);
             }
         }
+        // ---- end of the hold-to-browse pair ----
         self.pump(ctx);
         self.sync_shown(ctx);
         self.maybe_rescan(ctx);
@@ -4933,22 +5177,67 @@ impl eframe::App for MyApp {
         let typing = ctx.egui_wants_keyboard_input();
         let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
         let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+        // ---- one direction rule, read once --------------------------------
+        //
+        // **Every input that can move the view is named in [`NAV_KEYS`] /
+        // [`NAV_BUTTONS`] and nowhere else, and every direction is asked of
+        // `nav_direction`, which asks `nav_is_forward`.** Nothing below may decide
+        // a direction on its own, and this shape is what makes that enforceable
+        // rather than a convention: `step` takes a `bool`, so `self.step(ctx, true)`
+        // would compile, read correctly and be the whole defect.
+        //
+        // The reason it has to be *one* table is a specific bug in a specific other
+        // reader. OpenComic inverts the navigation keys for right-to-left manga and
+        // its `mangaInvert` set omits `Space`, so **Space silently becomes
+        // "previous page"** there: nothing errors, the arrows are right, and the
+        // space bar quietly goes the wrong way. Five inputs, one enum, one
+        // function - a sixth input is a sixth row that has to say what it means,
+        // and it cannot be forgotten in a way nothing notices.
+        let rtl = self.config.manga_rtl;
+        let nav = ctx.input(|i| {
+            nav_direction(
+                |key| i.key_pressed(key),
+                |button| i.pointer.button_clicked(button),
+                rtl,
+            )
+        });
+        // Read once, and the *only* navigation read in the frame that is a press
+        // rather than a hold.
+        //
+        // `Option<bool>` because `MyApp::step` already takes a `bool` for its
+        // direction: forwards is `true`. So `nav` is passed straight through and
+        // there is no arithmetic on it anywhere in the dispatch — a
+        // `let (fwd, back) = nav` with `if fwd && !back` beside it would be a
+        // second place where a direction is decided.
+        let step_dir = nav;
+
+        // The **grid's** arrows, which are a different question and deliberately
+        // do not go through the rule: a highlight moving across a grid drawn left
+        // to right has a side, and the grid has one cell per file with no reading
+        // order at all. `Space` is in here because it has always moved the
+        // highlight, and a key that stops working because a manga setting is on
+        // would be the kind of regression nothing in the tree can see.
+        let (grid_right, grid_left) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::ArrowLeft),
+            )
+        });
+
         // Keyboard navigation + file triage
-        let (next, prev, first, last, toggle, grid, page_up, page_down, focus_search) =
-            ctx.input(|i| {
-                (
-                    i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::Space),
-                    i.key_pressed(egui::Key::ArrowLeft),
-                    i.key_pressed(egui::Key::Home),
-                    i.key_pressed(egui::Key::End),
-                    i.key_pressed(egui::Key::I),
-                    i.key_pressed(egui::Key::G),
-                    i.key_pressed(egui::Key::PageUp),
-                    i.key_pressed(egui::Key::PageDown),
-                    // `/` is the usual "search" chord and is not otherwise used.
-                    i.key_pressed(egui::Key::Slash) && !i.modifiers.ctrl && !i.modifiers.alt,
-                )
-            });
+        let (first, last, toggle, grid, page_up, page_down, focus_search) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Home),
+                i.key_pressed(egui::Key::End),
+                i.key_pressed(egui::Key::I),
+                i.key_pressed(egui::Key::G),
+                i.key_pressed(egui::Key::PageUp),
+                i.key_pressed(egui::Key::PageDown),
+                // `/` is the usual "search" chord and is not otherwise used.
+                i.key_pressed(egui::Key::Slash) && !i.modifiers.ctrl && !i.modifiers.alt,
+            )
+        });
 
         if f11 {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -5047,12 +5336,30 @@ impl eframe::App for MyApp {
             )
         });
         // Mouse side buttons: back = previous image, forward = next image.
-        let (mouse_back, mouse_fwd) = ctx.input(|i| {
+        //
+        // **Read up here, mapped in the `nav` tuple above** - which is why there
+        // is no separate `mouse_back` / `mouse_fwd` pair any more. Extra1/Extra2
+        // are two of the five inputs in that tuple precisely because they are
+        // `Previous`/`Next` rather than something with a direction of their own.
+        // The block that used to be here is gone, not moved: a second read of the
+        // same button is how a binding ends up with two opinions about what it
+        // means.
+        //
+        // The four manga controls. All bare, all view-only or app-owned files, and
+        // `tests/keybindings.rs` holds each of them to that in `BARE_LETTERS`.
+        let (manga_key, rtl_key, lead_down, lead_up, shape_key) = ctx.input(|i| {
             (
-                i.pointer
-                    .button_clicked(egui::PointerButton::Extra1),
-                i.pointer
-                    .button_clicked(egui::PointerButton::Extra2),
+                i.key_pressed(egui::Key::M) && !i.modifiers.any(),
+                i.key_pressed(egui::Key::D) && !i.modifiers.any(),
+                // `O` alone steps the leading-lone offset down and `Shift+O` up.
+                // Shift is not a modifier for this purpose, so the bare read is
+                // the one with nothing held at all - the same shape as `C`.
+                i.key_pressed(egui::Key::O) && !i.modifiers.any(),
+                i.key_pressed(egui::Key::O)
+                    && i.modifiers.shift
+                    && !i.modifiers.ctrl
+                    && !i.modifiers.alt,
+                i.key_pressed(egui::Key::X) && !i.modifiers.any(),
             )
         });
         // `typing` is true when the search box owns the keyboard. All of this is
@@ -5071,9 +5378,9 @@ impl eframe::App for MyApp {
                     *sel = (*sel + page).min(last_idx);
                 } else if page_up {
                     *sel = sel.saturating_sub(page);
-                } else if next || down {
+                } else if grid_right || down {
                     *sel = (*sel + if down { cols } else { 1 }).min(last_idx);
-                } else if prev || up {
+                } else if grid_left || up {
                     *sel = sel.saturating_sub(if up { cols } else { 1 });
                 } else if first {
                     *sel = 0;
@@ -5082,16 +5389,12 @@ impl eframe::App for MyApp {
                 } else if enter {
                     self.pick_grid_selection(ctx);
                 }
-            } else if next {
-                self.step(ctx, true);
-            } else if prev {
-                self.step(ctx, false);
-            } else if first && !self.gallery.is_empty() {
-                self.gallery.index = 0;
-                self.goto(ctx);
-            } else if last && !self.gallery.is_empty() {
-                self.gallery.index = self.gallery.len() - 1;
-                self.goto(ctx);
+            } else if let Some(dir) = step_dir {
+                self.step(ctx, dir);
+            } else if first {
+                self.goto_edge(false, ctx);
+            } else if last {
+                self.goto_edge(true, ctx);
             }
             if toggle {
                 self.suppress_resize_redecode = true;
@@ -5099,6 +5402,24 @@ impl eframe::App for MyApp {
             }
             if grid {
                 self.toggle_gallery();
+            }
+            // The manga controls, dispatched here so they stand down while the
+            // filter box has the keyboard. `M` and `D` first because they are the
+            // two a reader reaches for without thinking, and `X`/`O` last because
+            // they are the two that write a file.
+            if manga_key {
+                self.toggle_manga_mode(ctx);
+            }
+            if rtl_key {
+                self.toggle_manga_rtl(ctx);
+            }
+            if shape_key {
+                self.toggle_cursor_shape(ctx);
+            }
+            if lead_down {
+                self.nudge_lead_lone(-1, ctx);
+            } else if lead_up {
+                self.nudge_lead_lone(1, ctx);
             }
             if del {
                 self.delete_current(ctx);
@@ -5114,10 +5435,6 @@ impl eframe::App for MyApp {
                 self.toggle_crop_mode(ctx);
             } else if wall {
                 self.set_wallpaper();
-            } else if mouse_back {
-                self.step(ctx, false);
-            } else if mouse_fwd {
-                self.step(ctx, true);
             }
         }
 
@@ -5174,11 +5491,19 @@ impl eframe::App for MyApp {
                     // "Left"/"Right" rather than the arrow glyphs: the default
                     // egui font has no U+2190/U+2192, so the arrows rendered as
                     // blank boxes, and the name of the key is clearer anyway.
-                    if ui.button("Prev (Left)").clicked() {
-                        self.step(ctx, false);
+                    //
+                    // **Labelled by side, and routed through the rule, rather than
+                    // "Prev"/"Next" and a hardcoded direction.** These two are the
+                    // mouse's version of the arrow keys, so they have to move the
+                    // way the keys move - and under `manga_rtl` "Prev" next to a
+                    // button that goes the other way is a label that lies about
+                    // what the button does. "Left" is true in both modes.
+                    let rtl = self.config.manga_rtl;
+                    if ui.button("Left").clicked() {
+                        self.step(ctx, nav_is_forward(NavInput::Left, rtl));
                     }
-                    if ui.button("Next (Right)").clicked() {
-                        self.step(ctx, true);
+                    if ui.button("Right").clicked() {
+                        self.step(ctx, nav_is_forward(NavInput::Right, rtl));
                     }
                     if ui.button("Fit (F)").clicked() {
                         self.view.fit = true;
@@ -5510,6 +5835,55 @@ impl eframe::App for MyApp {
                     // so it has to be told.
                     self.gallery.loop_back = self.config.loop_back;
                     self.config.save(&self.config_path);
+                }
+                ui.add_space(6.0);
+                // ---- manga mode -------------------------------------------
+                //
+                // `M` and `D` reach these same two fields, so this panel and the
+                // keyboard cannot drift: both flip the bool and save.
+                //
+                // **`Manga mode` re-`goto`s and `Right-to-left` does not**, the same
+                // asymmetry the key handlers have and for the same reason - see
+                // `toggle_manga_mode` and `toggle_manga_rtl`. With the mode off the
+                // second box is a setting for nothing, so it says so rather than
+                // sitting there looking live.
+                if ui
+                    .checkbox(&mut self.config.manga_mode, "Manga mode (M)")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                    self.goto(ctx);
+                }
+                if ui
+                    .checkbox(&mut self.config.manga_rtl, "Right-to-left pages (D)")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                    ctx.request_repaint();
+                }
+                if !self.config.manga_mode {
+                    ui.small("Both are for manga mode, which is off.");
+                } else {
+                    ui.small("A turn opens on the right, so Left reads forwards. \
+                              Right-to-left off makes it match Left-to-right.");
+                    // The disclosure `AGENTS.md` requires beside any cache: a file
+                    // that silently re-pairs a library must not be enabled quietly.
+                    // Deleting it costs nothing but the decisions in it.
+                    match spreads_root() {
+                        Some(store) => {
+                            ui.small(format!(
+                                "Pairing overrides live in {}. Delete that file to clear \
+                                 every override and go back to the detected shapes.",
+                                store.display()
+                            ));
+                        }
+                        None => {
+                            ui.small(
+                                "No local app-data folder, so pairing overrides are kept in \
+                                 memory only and are forgotten at exit.",
+                            );
+                        }
+                    }
                 }
                 // Sits with the crop button's own row rather than under Graphics
                 // because it is a property of the *gesture*, not of the app: it
