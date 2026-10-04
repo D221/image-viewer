@@ -287,7 +287,7 @@ should not quietly do that.
 
 | Key | Action |
 |---|---|
-| `←` `→` | Previous / next image, or previous / next **page** of a document (also `PgUp` / `PgDn` / `Space`) |
+| `←` `→` | Previous / next image, or previous / next **page** of a document (also `PgUp` / `PgDn` / `Space`) — in **manga mode**, previous / next **turn**, and right-to-left flips the arrows |
 | `↑` `↓` | In the grid: move the selection by a row |
 | `Enter` | In the grid: open the selected image |
 | `Home` / `End` | First / last image (in the grid: first / last cell) |
@@ -320,6 +320,12 @@ way the arrows go; **it is on by default**, because someone who has asked for a 
 reader has asked for the one thing that makes it one. Both are in the settings panel
 too, under the same names.
 
+The **seam is the middle of the picture** and there is **no gutter** between the two
+pages, so facing pages touch and a drawing that crosses the fold is unbroken. A lone
+page is not centred either — it hangs off the seam on its own side, at no more than
+half the window's width, which is what a book's cover does, and which is also what
+distinguishes a lone page from a page whose partner has not decoded yet.
+
 **Every navigation key moves as one unit.** The arrows, `Space`, `PgUp` / `PgDn` and
 both mouse side buttons are all resolved through one rule, so under right-to-left a
 rightward press is *backwards* and nothing can disagree with anything else. The wheel
@@ -336,6 +342,28 @@ detected shapes.
 In manga mode `Home` and `End` go to the first and last **turn** rather than the first
 and last file, which matters for a folder of documents. The grid (`G`) is unchanged —
 one cell per file — and opening a cell lands on the turn at that file's first page.
+
+Both pages of a turn share **one scale**, so zooming and panning apply to the turn and
+the halves cannot be zoomed apart. A page you have turned keeps its own rotation
+inside the turn, and full-resolution tiles are cut for each page separately, so a
+zoomed spread is sharp on both sides.
+
+#### Three things this cannot do, so you do not have to find out
+
+- **A single landscape page and a scan of two printed pages are geometrically
+  identical.** Both are about 1.414 wide, so no aspect-ratio detector can tell them
+  apart — every reader in this field has the same problem. What bounds it here is the
+  tolerance check: a landscape page will not pair with a portrait one, so it takes a
+  turn of its own instead of being squashed into a half. `X` ends it: press it on the
+  page and it shares.
+- **A folder of 3:2 photographs in manga mode is one photo per turn.** 3:2 is 1.5,
+  above the 1.2 threshold, so every photograph is read as a two-page scan. Manga mode
+  is for pages; leave it off for photographs.
+- **The first visit to a cold book can shift the pairing once**, as each page's
+  dimensions arrive, and it corrects itself on the second visit. This cannot be
+  avoided: deciding whether a page pairs means knowing how wide it is, and that answer
+  comes from reading the file. A spread that settles once, at the front of a book
+  nobody has read yet, is the cold-start cost of the feature rather than a defect.
 
 **In the grid, the navigation keys drive a selection instead.** `←` `→` `↑` `↓`
 move by cell and by row, `PgUp` / `PgDn` move a viewport at a time, `Home` /

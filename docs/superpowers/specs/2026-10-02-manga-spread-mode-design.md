@@ -136,30 +136,47 @@ pairable(j, k)  =  shape(j) != Double
                     || |ratio(j) - ratio(k)| <= PAIR_ASPECT_TOLERANCE)
 
 /// Does the turn anchored at `s` hold only that page?
-/// VALID ONLY AT AN ANCHOR - which the cursor always is.
-/// `s < lead_lone` is a flat-page comparison, via `PageCtx::flat`.
-lone(s)         =  flat(s) < lead_lone                // front matter
+/// VALID ONLY AT AN ANCHOR - which the cursor always is, because `goto` snaps it.
+/// "front matter" is `is_lead(s)`, NOT `flat(s) < lead_lone` - see below.
+lone(s)         =  is_lead(s)                         // front matter
                 || shape(s) == Double                // a fold-out
-                || !pairable(s, step(s, +1))         // nothing to pair with
+                || !pairable(s, step_no_wrap(s, +1)) // nothing to pair with
 
 turn_len(s)     = 1 if lone(s) else 2
-next_anchor(a)  = a + turn_len(a)
+next_anchor(a)  = step(a, turn_len(a))               // the ONLY wrapping step
+anchor_of(p)    = walk forward from page 0 to the turn holding `p`
 
-/// The anchor before the one anchored at `a`. `None` at the start.
+/// The anchor before the one anchored at `a`. **TWO meanings of `None`:**
+/// there is no turn before the first, AND `a` is not an anchor at all.
 prev_anchor(a):
-    b = step(a, -1)
-    if b is None              { return None }          // start of the gallery
-    if flat(b) < lead_lone
-       || shape(b) == Double
-       || !pairable(step(b,-1), b)   { return Some(b) } // b took a whole turn alone
-    return Some(step(b, -1))                          // b was the second of {b-1, b}
+    anchor = page 0
+    loop:
+        next = step_no_wrap(anchor, turn_len(anchor))
+        if next is None  { return None }              // ran off the front
+        if next == a     { return Some(anchor) }
+        anchor = next
 ```
 
 `lead_lone` defaults to **1** (the cover). `O` adjusts it; see §6.
 
-Forward is one addition. Backward is **two local `pairable` calls** — `b` either took a
-whole turn alone, or it was the second half of `{b-1, b}`, and those are distinguished by
-asking whether `b` paired with `b-1`. Both tests are reads, not scans.
+**`is_lead(s)`, not `flat(s) < lead_lone`.** Two reasons, both measured. `Gallery::flat`
+sums the page counts of every file before `s` with a `PathBuf`-keyed lookup each, so the
+walk cost **117-385 ms** on a folder of 2000 loose images (release, cursor at the far end)
+— and `flat` is `None` whenever a *preceding* file's count is unlearned, so the guarded
+spelling that replaced it answered "not front matter" for a front page behind an unlearned
+file. `step_no_wrap(s, -(n as isize)).is_none()` asks the position arithmetic: O(1),
+always answerable, and the same statement.
+
+**Forward is one addition; backward is a walk from page 0, and it has to be.**
+`prev_anchor` cannot be a local test: on `[Single, Single, Single, Double]` with
+`lead_lone = 0`, forward gives `{0,1} | {2} | {3}` — so page 2 *is* an anchor, it went alone
+because nothing was ahead of it — yet `pairable(1, 2)` is true, so "could 2 pair with the
+page behind it" cannot tell that from "2 is the second half of `{1,2}`". Whether `b` is an
+anchor depends on `b-1`'s turn length, which depends on `b-2`'s, so it only resolves at the
+front. **Three local formulations were tried and all three are wrong** (enumerated in
+`prev_anchor`'s doc comment); the walk is in-memory arithmetic over already-cached
+dimensions. The earlier claim in this document that backward is "two local reads" is
+**withdrawn**.
 
 ### Worked trace
 
@@ -169,7 +186,7 @@ Forward from anchor 0:
 
 ```
 anchor  lone?                          why                        turn
-  0     true                           flat(0) < lead_lone       {0}
+  0     true                           is_lead(0)                 {0}
   1     false                          pairable(1,2)              {1,2}
   3     false                          pairable(3,4)              {3,4}
   4     --                             not an anchor, never asked
@@ -177,9 +194,9 @@ anchor  lone?                          why                        turn
   6     false                          pairable(6,7)              {6,7}
 ```
 
-Backward from anchor 6: `b = 5`, `shape(5) == Double` ⇒ `prev_anchor(6) = 5` ✓
-Backward from anchor 5: `b = 4`, `shape(4)` is not Double and
-`pairable(3,4)` holds (both ~0.70) ⇒ 4 was the second of `{3,4}` ⇒ `prev_anchor(5) = 3` ✓
+Backward is the same tiling read from the other end: `prev_anchor(6) = 5` ✓,
+`prev_anchor(5) = 3` ✓, `prev_anchor(0) = None` (first turn) ✓. All three come out of the
+walk, not out of a local test on the page behind the cursor.
 
 Result: `{0} {1,2} {3,4} {5} {6,7}` — 4 spreads over 6 pages, which is Komga's own
 assertion for this shape (`book-spreads.spec.ts`: 6 pages → 4 spreads, reindexed to
@@ -187,8 +204,8 @@ assertion for this shape (`book-spreads.spec.ts`: 6 pages → 4 spreads, reindex
 failure case of a scan that dropped its blank front-matter page.
 
 Note the guard at anchor 4 in the trace above: **`lone` is never evaluated there.** That is
-the whole point of the invariant, and the exhaustive round-trip test in §10 is what proves
-it stays true.
+the whole point of the invariant, and the round-trip property in §10 is what proves it
+stays true — over **256 random** galleries, not over every shape pattern.
 
 ### Why this needs no page map
 
@@ -197,7 +214,12 @@ unknown-length chapter. Aidoku maintains an `isolatedPages` set *and* a
 `shiftIsolation(after:by:)` to repair its indices when it physically inserts split pages.
 Kavita precomputes the entire pairing table server-side and must invalidate the whole thing
 when a file changes. We have none of that, because **every query is relative to a cursor
-that is always an anchor**, and both directions are a bounded number of local reads.
+that is always an anchor**, and no state is carried between queries. **Forward is O(1);
+backward is O(distance from the front)** — this document originally claimed both were a
+bounded number of local reads, and that claim was withdrawn during implementation once the
+local formulation above was found to be wrong. The walk is in-memory arithmetic over cached
+dimensions, and the pathological case is a `prev` immediately after jumping into a cold
+chapter.
 
 This is also why no whole-book precomputation appears anywhere in the design: a precomputed
 table would have to be rebuilt whenever a dimension is learned, a file is re-exported, or
@@ -243,14 +265,22 @@ Three sources, cheapest first. **No folder scan reads anything** — same rule a
    optimistic is deliberate: refusing to pair on missing data would strand a turn, which is
    worse than a pair that turns out to be wrong.
 
-Cached in a `HashMap<PathBuf, Vec<(u32, u32)>>` beside `page_counts`, learned by
+Cached in a `HashMap<ImgKey, (u32, u32)>` beside `page_counts`, learned by
 `Gallery::learn_shapes` on arrival and dropped by `invalidate_path` exactly as
-`forget_page_count` drops a page count.
+`forget_page_count` drops a page count. **Keyed by `ImgKey { path, page }`, not by path** —
+a document with a landscape fold-out among portrait pages has one shape per page, and one
+entry for the file would judge page 3 by whatever page 0 happened to be. `learn_shapes` also
+reads **the next page, in the same document only**, because `lone` decides a turn by asking
+about `anchor + 1`: learning only the page under the cursor means arriving at page 5 changes
+page 5's shape, which changes `lone`, which changes the turn the reader is already looking
+at.
 
-**Stability.** A learned shape never changes, so the pairing cannot oscillate within a
-session. The first visit to a cold book may shift once as dims arrive; it self-corrects on
-the second visit. This is Mihon #3812's *"when cache deleted the dual page works"* avoided
-by caching the dimensions rather than the verdict.
+**Stability.** A learned shape never changes for an unchanged file, so the pairing cannot
+oscillinate within a session — and `note_shapes` (the decode-reporting route) is **fill-only**,
+so an approximation that arrives second cannot displace a header measurement. The first visit
+to a cold book may shift once as dims arrive; it self-corrects on the second visit. This is
+Mihon #3812's *"when cache deleted the dual page works"* avoided by caching the dimensions
+rather than the verdict.
 
 ---
 
@@ -264,7 +294,7 @@ be on a network share.
 {
   "<gallery root>": {
     "lead_lone": 1,
-    "pages": { "<relative path>": { "<page>": "single" } }
+    "pages": { "<bare file name>": { "<page number>": "single" } }
   }
 }
 ```
@@ -272,6 +302,19 @@ be on a network share.
 - **Keyed by the gallery root**, which for an archive is the **original** path, never the
   `%TEMP%` extraction path. Persisting a temp path is the mistake `AGENTS.md` records for
   `config.folder`, and it would orphan every override whenever the archive changes.
+- **Per-page overrides are keyed by bare file name and page number**, not by path — the same
+  archive reason — and the page number is a nested level because `serde_json` cannot write a
+  `(String, u32)` map key and nested objects are also what a person can edit. An unparseable
+  page key is dropped rather than fatal, so one typo does not cost every override in the file.
+- **The store is a read-modify-write, and that is the whole of its risk profile.** One file
+  holds every gallery, so writing one gallery's entry over the top would delete every other
+  gallery's decisions — and an unparseable store is replaced, so one bad byte becomes that on
+  the *next* press. Three consequences followed from it and are load-bearing: a UTF-8 BOM is
+  stripped on both the read and the write (in `Config::load` too, where the same BOM silently
+  reverted every setting); the temporary is `spreads.json.tmp.<pid>` rather than a fixed name,
+  because two instances writing the same file milliseconds apart would interleave; and an
+  over-cap store is honoured as **empty** by a load but left **untouched** by a save, because
+  the save's read is the first half of the write.
 - `lead_lone` is the `O` key's persisted value. `0` means "no lone cover", which is the fix
   for a scan that dropped its blank front-matter page — the single most-reported failure in
   every mature reader (Komga #123, #2132 and PR #1236; OpenComic #456; Paperback #251).
@@ -304,7 +347,39 @@ be on a network share.
   reads as a bug on first sight, so it is stated here and asserted in a test.
 - The **cursor page owns everything view-shaped**: `footprint`, the crop frame, `dim_bands`,
   `crop_from_screen`/`crop_screen_rect`. These currently derive from the single `rect`; in a
-  spread they derive from the cursor page's rect only.
+  spread they derive from the cursor page's rect only. None of them needed changing, which is
+  the evidence that they were already about the cursor rather than about the picture.
+- **Layout comes from dimensions, paint comes from textures.** `turn_pages` reads each page's
+  *cached* dimensions and falls back to the cursor page's own for a partner nothing has
+  measured. If the layout waited on the partner's texture instead, the spread would reflow
+  when that texture landed — under the reader, mid-read — which is worse than a wrong slot.
+- **Two rectangles per page, and conflating them paints the transform twice.** The *slot* is
+  where the page goes (its transformed footprint, which is what `spread_rects` placed); the
+  *paint rect* is what goes into `paint_tex`, and it stays in unrotated image space at the
+  page's stored dimensions, centred on the slot. Handing `paint_tex` the slot paints a
+  `Rot90` page's transform a second time, and the picture lands on the swapped rectangle.
+  Each page gets its **own** `Xform`, looked up by its own path.
+
+### The seam is not the content's centre
+
+**The seam sits on the panel's centre and the content's centre does not**, which is the one
+assumption this feature broke twice, both times silently and both times reported by a user
+running the app:
+
+1. **The zoom anchor.** `anchor - panel.center()` is correct only when the content is centred
+   on the panel. A turn's content is displaced on **both** axes — horizontally by half the
+   width difference (zero for two equal pages, which is why it hid), vertically because the
+   turn is top-aligned, so its centre is the panel top plus half the *tallest* page. The
+   anchor is measured with `spread_centre` **asked at two scales**, because the content's
+   centre is a function of the scale and bracketing the same content point between the two
+   is what keeps it under the cursor.
+2. **The pan clamp.** The symmetric `±(content·scale − panel)/2` bounds hold a content
+   *centred on the panel's centre*. Panning moves content the other way, so the range is the
+   symmetric one **translated by minus the displacement** — not narrowed, moved. Measured on
+   the running app over 41 zoom steps of a 2000-wide and a 2800-wide page, the old expression
+   truncated **36** of them, by up to **67 points**. The new bound is read off the same
+   rectangles `spread_rects` returns, so the clamp and the picture are one geometry rather
+   than two that agree today.
 
 Gutter is zero and not a setting. Mihon and Aidoku have none; OpenComic derives its gutter
 from the page margin. YAGNI until someone asks.
@@ -318,10 +393,14 @@ only primitives that move it.** The pairing is arithmetic on top. Consequence:
 `tests/multiframe.rs:697-918` keeps testing what it tests, unchanged, and `Gallery`'s
 documented *"a cursor, not a list"* shape is untouched.
 
-- **Forward:** `anchor = next_anchor(anchor)` — one addition.
-- **Backward:** `anchor = prev_anchor(anchor)` — two local reads.
+- **Forward:** `next_turn(a)` = `next_anchor(anchor_of(a))` — one snap walk plus one addition.
+- **Backward:** `prev_turn(a)` — `prev_anchor`, and `anchor_of` **only when it answers
+  `None`**, because that `None` is ambiguous (§4). `last_anchor` for the `loop_back` wrap.
 - The turn painted is always `[anchor]` or `[anchor, anchor+1]`, decided by `turn_len`.
-- `Gallery` gains exactly two things: `goto_index_page(usize, u32)` and the shape cache.
+- `Gallery` gains exactly two things: `goto_page(PagePos)` and the shape cache.
+  (`goto_page` takes a whole `(index, page)` position rather than two arguments, because
+  every caller gets one out of a walk and a two-argument form invites a caller to
+  assemble a position from a file index and a page number separately.)
 
 ### `manga_rtl` (default **on**)
 
@@ -367,7 +446,7 @@ exactly the class of action `tests/keybindings.rs` exists to prevent.
 | | In manga mode |
 |---|---|
 | `Home` | the turn anchored at the gallery's first page |
-| `End` | the last turn, found by walking back from the final page |
+| `End` | the **last** turn, found by `last_anchor` — a forward walk from page 0, *not* by walking back from the final page. That rule is unimplementable: `prev_anchor` answers `None` at a final page that is a second half, and the turn *before* the last one at a final page that opens the last turn, and neither is the last turn |
 | `Del` | the cursor page only; the partner survives and becomes lone |
 | Grid (`G`) | **unchanged** — one cell per file, page 1 only, as it is today. Picking a cell enters manga mode on the turn anchored at that file's first page. |
 | EXIF panel | the cursor page's metadata |
@@ -402,18 +481,32 @@ which writes to the OS). Neither can touch a user's image.
 - **Config:** `manga_mode: bool` (`#[serde(default)]`) and `manga_rtl: bool`
   (`#[serde(default = "default_true")]`). Both get the Settings-panel checkbox pattern at
   `src/main.rs:4272-4518`. No `deny_unknown_fields`, ever.
-- **`Gallery` additions:** `goto_index_page`, `learn_shapes`, `forget_shapes`.
+- **`Gallery` additions:** `goto_page`, `learn_shapes`, `forget_shapes`.
 
 ### Known limitations
 
-1. The partner page renders at **preview resolution** when you zoom past 1:1. At
-   fit-to-window a 4096 px preview is already 1:1 on a 4K screen, so this only appears on a
-   deliberate zoom. Full-res per turn is blocked on the ~256 MB `MAX_TILES` ceiling.
-2. The first visit to a cold book can shift the pairing once as dims arrive.
+1. **WITHDRAWN — no longer true.** This document originally listed "the partner page renders
+   at preview resolution when you zoom past 1:1", and justified it as blocked on the ~256 MB
+   `MAX_TILES` ceiling. That ceiling was never the constraint: the tile loop was filtered to
+   the *cursor's* full buffer, while `sync_shown` adopts by `Arc::clone` rather than moving,
+   so the partner's full-resolution buffer was **already in memory** at
+   `previews[partner].full` and the expensive decode had already happened. Both halves are
+   now cut from their own buffers, and a `Kind::Full` job is planned for a partner that has
+   none (`Plan::partner_needs_full`) — which is the common case, not the corner one, because
+   a source over `FAST_FULL_MAX_PIXELS` is decoded DCT-scaled and carries no full buffer, and
+   manga scans are frequently large JPEGs. `MAX_TILES` stays one global bound counted across
+   both pages, because cuts are on demand.
+2. The first visit to a cold book can shift the pairing once as dims arrive, and self-corrects
+   on the second visit.
 3. A single landscape page and a double-page scan are geometrically identical — a limit of
-   the input, contained by the tolerance check and ended by the override.
+   the input, contained by the tolerance check and ended by the `X` override.
 4. No content-based detection, deliberately (§1).
 5. An animated page in a spread animates while its partner stays still. Weird, harmless.
+6. A folder of 3:2 photographs in manga mode is **one photograph per turn** — 1.5 is above
+   `SPREAD_ASPECT`, so every photograph is judged a two-page scan. Inherent to a threshold
+   detector, and the reason `SPREAD_ASPECT` is 1.2 rather than 1.0: a real page is ~0.707 and
+   a real spread ~1.414, so 1.0 sits on the midpoint and calls a square-ish single page a
+   spread. 3:2 is genuinely past that line.
 
 ---
 
@@ -425,11 +518,14 @@ removed** — a test that passes on the broken code is decoration.
 **The pairing**
 - The §4 trace, asserted turn by turn, forward and backward. Page 4's absence from the
   `lone` column is itself an assertion: **`lone` must never be evaluated at a non-anchor.**
-- **Exhaustive**: for every length and every shape pattern, walking forward N turns visits
-  every anchor exactly once, no two turns overlap, and every page is in exactly one turn;
-  forward-then-back-N returns to the start. `tests/property.rs` already has proptest. The
-  round-trip and the no-overlap check are what catch a wrong `prev_anchor` — the naive
-  predicate in §4's trap passes a forward-only test and fails these.
+- **Random, not exhaustive**: over 256 generated galleries (1..=12 pages, leading-lone
+  0..=2, both `loop_back` settings, every page independently Single or Double), walking
+  forward N turns visits every anchor exactly once, no two turns overlap, and every page is
+  in exactly one turn; forward-then-back-N returns to the start. `tests/property.rs` already
+  has proptest. The round-trip and the no-overlap check are what catch a wrong `prev_anchor` —
+  the naive predicate in §4's trap passes a forward-only test and fails these. **256 draws do
+  not cover 2^12 shape patterns**, so the cases that matter are additionally spelled out in
+  named tests rather than left to the draw.
 - `lead_lone` 0, 1 and 2 → `{0,1}{2,3}…`, `{0}{1,2}…`, `{0}{1}{2,3}…`.
 - `loop_back` off: `next_anchor`/`prev_anchor` at the ends do not move and do not wrap.
 - A spread straddling two files, and one straddling two pages of a multi-page TIFF.
@@ -469,7 +565,7 @@ removed** — a test that passes on the broken code is decoration.
 | Concern | Location |
 |---|---|
 | `Shape`, `PagePos`, `PageCtx`, `pairable`, `lone`, `turn_len`, `next_anchor`, `prev_anchor`, `page_dims` | `src/lib.rs` (new) |
-| `Gallery`: `goto_index_page`, `learn_shapes`, `forget_shapes` | `src/lib.rs:5868+` |
+| `Gallery`: `goto_page`, `learn_shapes`, `forget_shapes` | `src/lib.rs` |
 | `Plan.partner` | `src/lib.rs:1099-1119` |
 | `Config.manga_mode`, `Config.manga_rtl` | `src/lib.rs:167-239` |
 | Overrides: load, save, `root_path` | `src/lib.rs` (new, beside the thumb cache) |

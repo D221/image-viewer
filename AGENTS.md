@@ -11,11 +11,12 @@ that are already in memory. One crate, no workspace, no CI.
   first failing target, and `--lib` (the in-crate `perf` tests) is a target no
   per-target command below ever runs.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
-- 22 test targets: `bench`, `bench_browse`, `bench_resize`, `bench_rotate_save`,
-  `bench_startup`, `bench_variants`, `color_profiles`, `embedded_thumbs`,
-  `filter_and_paging`, `flip_through`, `formats`, `icon`, `integration`,
-  `keybindings`, `multiframe`, `pathological`, `property`, `renderer`,
-  `rotate_save`, `standard`, `thumb_cache`, `unit`.
+- 26 targets, 23 of them the test files `bench`, `bench_browse`, `bench_resize`,
+  `bench_rotate_save`, `bench_startup`, `bench_variants`, `color_profiles`,
+  `embedded_thumbs`, `filter_and_paging`, `flip_through`, `formats`, `icon`,
+  `integration`, `keybindings`, `multiframe`, `pathological`, `property`,
+  `renderer`, `rotate_save`, `spreads`, `standard`, `thumb_cache`, `unit` — the
+  other three are `--lib`, the binary's own target and doc-tests.
 - **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
   use `criterion_main!` but are ordinary `{test}` targets with the default
   harness (there is no `[[bench]] harness = false` in `Cargo.toml`), so
@@ -338,6 +339,153 @@ that are already in memory. One crate, no workspace, no CI.
   `new_directory` makes a directory explicitly *not* chained, so a fixture built
   that way is single-page however many times the loop runs. `image` 0.25 also
   writes only single-page TIFFs.
+
+## Spreads and reading direction
+
+Manga mode shows a folder as **turns** of one page or two, opening
+right-to-left by default. The shape is the same everywhere: the **pairing rules**
+(`lone`, `pairable`, `shape_of`, `next_anchor`, `prev_anchor`, `turn_partner`,
+`anchor_of`, `next_turn`, `prev_turn`) and the **layout** (`spread_fit`,
+`spread_rects`, `spread_centre`, `spread_pan_bounds`) are pure functions in
+`lib.rs`, and only the mode gate, the page tuple and the two rects live in
+`main.rs`. Everything below is a consequence someone learned, and most of them
+are wrong in a way that *looks* right.
+
+- **A turn is anchored, and `lone` is only true of an anchor.** `lone(anchor)`
+  asks "can the page *after* this one pair with it", which cannot distinguish
+  "first half of a pair" from "alone", because the answer depends on what
+  happened *behind* the anchor. At an anchor nothing paired from behind, so the
+  local test is complete; anywhere else it is wrong, and **the failure is
+  invisible going forward**: page 4 of a run where page 5 is a landscape insert
+  "cannot pair with" 5, therefore "is alone" — yet it paired with page 3. Ask
+  whether the page ahead pairs *only after* establishing that the page is an
+  anchor, and never fold the anchor question into the pairing question. That is
+  what `anchor_of` is for, and the cursor is on an anchor by construction because
+  `MyApp::goto` calls `snap_to_turn_anchor` — the single funnel every way into
+  the app passes through, rather than three call sites that could disagree.
+- **`prev_anchor`'s `None` means two things**: there is no turn before the first
+  one, **and** the position asked about is not an anchor at all. It walks the
+  tiling forward from page 0 comparing successors, so a second half is never the
+  successor it is looking for and the walk runs off the end — the same `None`.
+  Reading it as only "at the front" is how a Left press jumped to the last
+  spread of the volume from a resumed position, a grid pick or a `Del`, with
+  `loop_back` both on and off. `prev_turn` asks `anchor_of` to tell the two
+  apart; any new caller must too.
+- **Backward is O(distance from the front), and that is not an oversight.**
+  Forward is one addition (`next_anchor = a + turn_len(a)`). Backward cannot be
+  local: whether `b` is an anchor depends on `b-1`'s turn length, which depends on
+  `b-2`'s, and it only resolves by walking back to page 0. Three local rules were
+  tried and all three are wrong on `[Single, Single, Single, Double]` (they are
+  enumerated in `prev_anchor`'s docs). The walk is in-memory arithmetic over
+  cached dimensions — microseconds — against a decode measured in hundreds of
+  milliseconds. **Do not "optimise" it into a two-candidate test**, and do not
+  write in a doc that both directions are a bounded number of reads.
+- **`prev_anchor` asks `step_no_wrap`, and `next_anchor` is the only caller of
+  the wrapping `step`.** A turn must not straddle the wrap: with looping on, the
+  last turn truncates to one page so the tiling is identical to the same gallery
+  with looping off, and the partition property (every page in exactly one turn)
+  holds for both. A wrapping step here tiles `{0} {1,2} {3,0}` and turning forward
+  off the last spread shows page 4 beside page 1.
+- **`shown` is the cursor's page, not the turn.** Every view-shaped path reads
+  it — `footprint`, the crop frame, `dim_bands`, the tile source-pixel mapping,
+  EXIF, `Ctrl+S`, `Ctrl+C` — and none of them needed to change for this feature,
+  which is the evidence that they were already correct. `shown_partner` is a
+  *second* key, adopted in the same act as `shown` in `sync_shown` (so the turn
+  cannot show one page from this turn beside a stale page from the last), and
+  `turn_pages` is **cursor first** because `spread_rects` returns rects in input
+  order. Repointing any of those paths at the turn is the change that would break
+  them: the cursor page is the one the reader asked for, and it is the only one
+  `Del`, save and copy are statements about.
+- **The turn's second half gets its own xform and its own `orig`, and the slot is
+  its *transformed* footprint.** `edits` is keyed by path precisely so turning
+  one page does not turn the next, so reading the partner's transform off the
+  cursor is two pictures under one transform. And a slot sized from *stored*
+  dims with a turned page painted into it spills `|w - h| * scale / 2` over the
+  seam — measured at ~234 points on a 1000x1500 page. Hand `xformed_footprint`
+  to `spread_rects`; the paint rect stays in unrotated image space, because
+  passing the *slot* to `paint_tex` paints the transform twice.
+- **Layout comes from dimensions; paint comes from textures.** `turn_pages` looks
+  dimensions up in the shape cache, and a partner nothing has measured yet falls
+  back to the cursor page's own dims. If layout waited on the partner's *texture*
+  instead, the spread would reflow when that texture landed, under the reader,
+  mid-read. A wrong placeholder is only a sliver at the seam; a reflow is a
+  picture that moves by itself. `MAX_TILES` stays one global bound, counted
+  across both pages, because cuts are on demand.
+- **The content of a spread is not centred on the panel's centre; the *seam*
+  is.** Pages extend outward from the seam and the turn is top-aligned, so the
+  content's centre is displaced on both axes — horizontally by half the width
+  difference, vertically by half the tallest page. Both are zero for two equal
+  pages and for a single image, **which is why a bug here hides.** The zoom
+  anchor (`spread_centre`, asked at two scales, or the point under the cursor
+  moves) and the pan clamp (`spread_pan_bounds`, the content's own edges against
+  the panel's, per axis and not symmetric) both measure from the content. The old
+  symmetric clamp truncated **36 of 41** zoom steps that still had room to pan,
+  by up to 67 points. **One shared scale, one zoom level, one pan** — the two
+  halves cannot zoom independently, and that is the price of sharing `view`.
+- **The wheel deliberately does not follow the arrows, and every navigation key
+  goes through one rule.** `nav_is_forward` in `lib.rs` is the only thing in the
+  codebase that knows which way forwards is; `NAV_KEYS` pairs each physical key
+  with what it *means* and `nav_direction` resolves them into `Option<bool>`.
+  OpenComic ships a live bug from omitting `Space` from its inversion set, so
+  Space silently becomes "previous page" in manga mode: nothing errors and the
+  arrows are right. With two booleans instead of `Option<bool>`, every caller
+  decides which wins and a caller that writes that decision is a second opinion
+  about direction — the entire defect. The wheel is the one exception, always
+  forwards, because it is the one input with no side to preserve; asking the
+  rule rather than spelling `true` is what keeps it from drifting.
+- **`SPREAD_ASPECT` is 1.2 and every reader in the field uses 1.0.** A real page
+  is about 0.707 and a real spread about 1.414, so a threshold of 1.0 sits on the
+  midpoint and calls a square-ish single page a spread. Above the threshold, not
+  at or below it. **And the dimensions must be the ones the page *displays* at:**
+  a phone scan stored 1600x900 with EXIF orientation 6 has a stored ratio of
+  1.78, above the threshold, so judging by stored size makes *every* page in the
+  volume a spread and nothing ever pairs — silent, and it lands on the largest
+  category of real manga library there is.
+- **`lone` decides a turn by asking about `anchor + 1`, so the next page's
+  dimensions are load-bearing.** Learning only the page under the cursor gets it
+  wrong in the worst way: arriving at page 5 changes page 5's shape, which
+  changes `lone`, which changes the turn the reader is already looking at. A
+  spread that re-flows mid-read is worse than one that was wrong from the start,
+  because the reader watched it change. `learn_shapes` therefore reads the next
+  page too, bounded to *the same document* — one page, and only for a file known
+  to have more than one. A partner's *decode* landing is also a re-plan trigger
+  (`arrival_reschedules`), because `pairable` treats unknown dims optimistically
+  and a wide page that was planned as a partner collapses the turn to one page.
+- **The pairing tests are random, not exhaustive.** `tests/spreads.rs` runs 256
+  proptest cases over galleries of 1..=12 pages in one document, a leading-lone
+  offset in 0..=2 and both `loop_back` settings; 2^12 shape patterns across twelve
+  lengths is orders of magnitude more than 256 draws, and a handful of named
+  tests carry the cases that matter. Say "random over N cases" and never
+  "exhaustive" — three doc comments and this feature's own spec said
+  "exhaustive" for a property test that is not, and each correction was a fix
+  round of its own.
+- **Overrides live in `%LOCALAPPDATA%\image-viewer\spreads.json`, keyed by the
+  original archive path.** Never the extraction directory: its name is a hash of
+  the archive's path, mtime and length, so it changes on every re-extract and an
+  override keyed by it would work until the `.cbz` was touched and then lose
+  every one. The store is a **read-modify-write**, so a parse failure is not a
+  lost session, it is a deleted file: an unparseable store is replaced with one
+  gallery's entry. A **UTF-8 BOM** therefore had to be stripped in three places
+  — `Config::load`, `load_spread_overrides` and `save_spread_overrides` — and in
+  the save path it was the difference between "settings reverted" and "every
+  other gallery's decisions deleted". An over-cap store is honoured as empty by a
+  load and left *untouched* by a save, because the two resources differ and the
+  save's read is the first half of the write.
+- **What is *not* claimed**: `main.rs` is unreachable from every test, so the
+  paint and navigation wiring is covered by **source scans and one-off geometry
+  dumps**, not by the suite. Every pairing rule and all four layout functions
+  are pinned behaviourally in `tests/spreads.rs`, and the scans cover the
+  navigation wiring (`step`, `turn_forward`, `turn_backward`, `goto_turn`,
+  `goto`'s snap), the zoom anchor's two-scale call, the tile loop over both
+  pages, a non-cursor `Kind::Full` being kept, and `invalidate_path`'s clearing.
+  What they cannot tell is whether any of it *works* — a scan catches a call
+  being reverted, not a rect being wrong. The sub-pixel slide that closes the
+  seam, the per-page tile rects and the displaced-centre numbers were checked by
+  instrumenting the running app and dumping its own geometry, and that evidence
+  is not a test. **Nobody has looked at a spread.** Screen capture cannot see
+  this app's swapchain on this box — three routes, all blank, including for the
+  untouched single-image path — so an eyeball is still owed and is recorded in
+  `TODO.md`.
 
 ## Transforms, crop and saving
 
@@ -827,14 +975,16 @@ an edit.
   two attempts at one were pure warm-up artefacts). Load the
   `verifying-a-change` skill before writing a test for something that can be wrong
   in several ways at once.
-- Three suites assert against **source text**, deliberately, and say why in their
+- Four suites assert against **source text**, deliberately, and say why in their
   module docs: `keybindings.rs` (a shortcut that does not exist is otherwise
   unobservable), `renderer.rs` (the probe's early exit is in a binary),
-  `unit.rs` (the glyph scan). They check the *premise* against a real context or
-  queue, not a comment — and none of them verifies that a bound key actually
-  works, because that needs a synthetic keystroke.
+  `spreads.rs` (manga mode's `invalidate_path` wiring, and that a partner's
+  arrival re-plans), `unit.rs` (the glyph scan). They check the *premise* against
+  a real context or queue, not a comment — and none of them verifies that a bound
+  key actually works, because that needs a synthetic keystroke.
 - `main.rs` is unreachable from any test. Every rule that has bitten us has been
   moved into `lib.rs` for that reason: the job planner, the resize policy, the
   transform algebra, `dim_bands`, the page cursor, the preview-cache eviction
-  policy, `startup_index`, `path_arg`. If you are about to write a decision in
-  the binary, check whether it can be a pure function first.
+  policy, `startup_index`, `path_arg`, the whole spread-pairing core and its
+  geometry. If you are about to write a decision in the binary, check whether it
+  can be a pure function first.

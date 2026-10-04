@@ -272,6 +272,39 @@ entropy decoder (there isn't one) or a thumbnail the file already carries
 
 ---
 
+## 6. Manga mode: verified by arithmetic, and nobody has looked at a spread
+
+Shipped. The pairing rules and the layout geometry are pure functions in
+`lib.rs` and are pinned behaviourally in `tests/spreads.rs`; the traps are in
+`AGENTS.md` under **Spreads and reading direction**; the user-facing description
+and the three limits a user cannot work around are in `README.md`.
+
+**What is unverified is the part a test cannot reach.** `main.rs` is unreachable
+from every integration test, so the paint and navigation wiring is covered by
+source scans and by one-off geometry dumps from a temporary instrumentation.
+The displaced-centre numbers, the zoom anchor's two-scale form (matched to the
+running app's own per-frame offsets to ~0.002 pt over six zoom steps) and the
+pan-clamp counts all come from those dumps. **That evidence is not a test and
+does not survive in the tree.**
+
+**Screen capture cannot see this app's swapchain on this box** — three routes,
+all blank, including for the untouched single-image path and for a solid-red
+fixture. So this is not "the screenshot was hard to get": on this machine it is
+currently impossible, and the substitution (dump the numbers, match the app's own
+values) is weaker than a look, because every number it checked was chosen by the
+same person who wrote the code.
+
+**To close it:** one pass on a console session. Open a book, turn through it, and
+check the four things the geometry cannot tell you — that the seam is where the
+reader expects it under both `D` settings; that a lone page sits where a cover
+should and not centred; that the two halves are sharp together at a deliberate
+zoom; and that a turned page inside a turn stays inside its own half. A
+photograph folder with `M` on is the other half of it (one photo per turn, as
+`README.md` says). Until then the feature is **arithmetically correct and
+unseen**, and that is the honest state of it.
+
+---
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several
