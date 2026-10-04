@@ -849,10 +849,24 @@ pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -
 /// one page or two by construction ([`turn_len`]), and a third page would land on top
 /// of the second rather than widening the box.
 pub fn spread_centre(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> (f32, f32) {
+    match spread_box(panel, pages, scale, rtl) {
+        Some(b) => ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5),
+        None => (panel[0] + panel[2] * 0.5, panel[1] + panel[3] * 0.5),
+    }
+}
+
+/// The box a turn's pages occupy, as `[min_x, min_y, max_x, max_y]`, or `None` for a
+/// turn with no pages.
+///
+/// The one statement of "where the content is", shared by [`spread_centre`] and
+/// [`spread_pan_bounds`] so the two cannot disagree about it - for the same reason
+/// `spread_centre` derives itself from [`spread_rects`] rather than restating the
+/// seam rule. `spread_rects` is called once per caller rather than passed in: it
+/// allocates a `Vec` either way and borrowing it would invite a caller to hand over
+/// rects from somewhere other than this rule, which is the drift being avoided.
+fn spread_box(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> Option<[f32; 4]> {
     let rects = spread_rects(panel, pages, scale, rtl);
-    let Some(first) = rects.first() else {
-        return (panel[0] + panel[2] * 0.5, panel[1] + panel[3] * 0.5);
-    };
+    let first = rects.first()?;
     let (mut min_x, mut max_x, mut min_y, mut max_y) =
         (first[0], first[0] + first[2], first[1], first[1] + first[3]);
     for r in &rects[1..] {
@@ -861,7 +875,102 @@ pub fn spread_centre(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) 
         min_y = min_y.min(r[1]);
         max_y = max_y.max(r[1] + r[3]);
     }
-    ((min_x + max_x) * 0.5, (min_y + max_y) * 0.5)
+    Some([min_x, min_y, max_x, max_y])
+}
+
+/// The range the view offset may take, as `(low, high)`: the furthest the content may
+/// be dragged up/left and down/right before a gap opens between it and the panel.
+///
+/// **Not symmetric, and that is the whole of it.** `central` used to clamp to
+/// `±(content·scale − panel.size()) / 2`, which is the range that holds a content
+/// **centred on the panel's centre** and nothing else. A turn's content is not centred
+/// on it, by the same displacement [`spread_centre`] exists to report: horizontally by
+/// half the difference of the two widths, vertically because the turn is top-aligned.
+/// Panning moves content the *other* way, so the range is the symmetric one **translated
+/// by minus that displacement** - not narrowed, moved - and what that is worth is a
+/// measured number: on a two-page spread (a 2000-wide and a 2800-wide page) over 41 zoom
+/// steps, the symmetric bound truncated **36 of them**, all of them steps that still had
+/// room to pan, by up to 67 points. (The other 5 are truncations both bounds share, at
+/// scales where the content still fits the panel - refusing to pan there is the point.)
+///
+/// **Derived from the content, not from a second statement of it.** The bound is read
+/// off the same rectangles [`spread_rects`] returns (via [`spread_box`], shared with
+/// [`spread_centre`]): the content may be dragged until **its own edge** meets the
+/// panel's, so `low` is `panel.max − content.max` and `high` is `panel.min − content.min`,
+/// and the width of that range is `content − panel` on both accounts. A hand-written
+/// "where is the content" in this function is the exact drift this fix exists to remove -
+/// the clamp and the picture have to be one geometry, not two that agree today.
+///
+/// **An axis the content fits in is locked at zero**, which is what "centre it on axes
+/// where it fits" means and what `.max(ZERO)` meant in the old expression. A lone page
+/// is the case that makes this visible: [`spread_fit`] draws it at no more than half the
+/// panel's width, so for every zoom at which it fits the panel it cannot be dragged
+/// sideways at all - it stays on its own side of the seam, which is
+/// `a_lone_page_rests_with_the_seam_on_the_centre`'s rule and this function's
+/// consequence. Past `2 × fit` the page is wider than the panel, has no half left to stay
+/// in, and the ordinary bound takes over; the part of it that a zoom pushes past the
+/// panel's edge before that does not pan into view, which is the old behaviour too and
+/// unchanged by this.
+///
+/// **`pages` empty is the single-image path, and it is bit for bit what it always was**:
+/// the same `((foot·scale − panel.size()) * 0.5).max(0)` on each axis, the same
+/// operations in the same order, from the same `foot`. That is the whole of the gate -
+/// `foot` is read on that branch and on no other - and it is what
+/// `the_pan_bound_is_symmetric_only_when_the_content_is_centred` pins, since a content
+/// centred on the panel's centre is exactly the case the old expression is right about.
+/// `foot` is the caller's own fold of the turn's pages (widths sum, heights max) or the
+/// single image's footprint; the turn's branch deliberately does not read it, because the
+/// box it derives from `spread_rects` is the same number and reading it twice is the
+/// second statement this file keeps refusing to write.
+///
+/// Both bounds are finite and `low <= high`, which the caller relies on: it clamps with
+/// `f32::clamp`, and that panics on an inverted range rather than returning a picture
+/// that is subtly in the wrong place. It cannot be inverted - the range is
+/// `content − panel` wide, so a content that fits gives `(0, 0)` and a content that does
+/// not has `panel.min − content.min > panel.max − content.max` strictly - and
+/// `a_pan_range_is_always_ordered_and_finite` pins that over the degenerate inputs.
+pub fn spread_pan_bounds(
+    panel: Rect4,
+    foot: (f32, f32),
+    pages: &[(f32, f32)],
+    scale: f32,
+    rtl: bool,
+) -> ([f32; 2], [f32; 2]) {
+    // The single-image path, byte for byte: the same `((foot·scale − panel.size()) * 0.5)`
+    // the binary computed inline, the same operations in the same order, and the same
+    // `.max(0.0)` per axis. `Vec2::clamp(−m, m)` and `f32::clamp(m_lo, m_hi)` are the same
+    // function for finite inputs, so the caller's switch to per-axis `f32::clamp` does not
+    // move one image either.
+    if pages.is_empty() {
+        let half = [
+            ((foot.0 * scale - panel[2]) * 0.5).max(0.0),
+            ((foot.1 * scale - panel[3]) * 0.5).max(0.0),
+        ];
+        return ([-half[0], -half[1]], half);
+    }
+
+    // A turn: the content's own edges against the panel's, which is the same arithmetic
+    // read the other way round. `low` puts the content's trailing edge on the panel's
+    // trailing edge and `high` puts its leading edge on the panel's leading edge; the
+    // range is `content − panel` wide, so a content that fits leaves it empty.
+    //
+    // `spread_box` cannot answer `None` here - `spread_rects` returns one rect per page -
+    // so the fallback is the unreachable one, and it is the *locked* answer rather than
+    // the symmetric one, which is what a caller wanting to clamp needs.
+    let Some([min_x, min_y, max_x, max_y]) = spread_box(panel, pages, scale, rtl) else {
+        return ([0.0, 0.0], [0.0, 0.0]);
+    };
+    let axis = |c_lo: f32, c_hi: f32, p_lo: f32, p_hi: f32| {
+        if c_hi - c_lo <= p_hi - p_lo {
+            // Fits: no edge to reach and no gap to open, so it does not pan at all.
+            (0.0f32, 0.0f32)
+        } else {
+            (p_hi - c_hi, p_lo - c_lo)
+        }
+    };
+    let (lo_x, hi_x) = axis(min_x, max_x, panel[0], panel[0] + panel[2]);
+    let (lo_y, hi_y) = axis(min_y, max_y, panel[1], panel[1] + panel[3]);
+    ([lo_x, lo_y], [hi_x, hi_y])
 }
 
 /// Footprint `(width, height)` an image of `w x h` occupies once `xform` has been

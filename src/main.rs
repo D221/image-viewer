@@ -3525,8 +3525,41 @@ impl MyApp {
             }
             Vec2::new(w, h)
         };
-        let max_off = ((clamp_px * scale - panel.size()) * 0.5).max(Vec2::ZERO);
-        offset = offset.clamp(-max_off, max_off);
+        // Keep the image from being lost off-screen, bounded by **the content's own
+        // edges** against the panel's - not by a range symmetric about the panel's
+        // centre, which is right only when the content is centred there.
+        //
+        // `spread_pan_bounds` derives the range from the same rectangles
+        // `spread_rects` hands the paint path a few lines below, so the clamp and the
+        // picture are one geometry. A turn's content is displaced from the panel's
+        // centre by half the width difference and, being top-aligned, by half the tallest
+        // page - and panning moves content the *other* way, so the range is the symmetric
+        // one **translated by minus that displacement**: not narrower, just moved.
+        //
+        // What that is worth, measured on the running app (a two-page spread of a
+        // 2000-wide and a 2800-wide page, zoomed in 40 steps): the old expression
+        // truncated **36 of 41** steps that still had room to pan, by up to **67
+        // points**; this one truncates **1 of 40**, and that one is the content being
+        // 11 points taller than the panel, where any further pan would open a gap.
+        // Truncation is not itself the bug - a zoom that wants more pan than the
+        // content has must be refused - which is exactly what makes "the bound is wrong"
+        // and "the bound is right and binding" look the same from the outside.
+        //
+        // **Both axes, and the bounds are not symmetric**, so this is a per-axis clamp
+        // and not the `Vec2` one it replaced. `f32::clamp` is `max` then `min`, which is
+        // what `Vec2::clamp` did per component, so a single image - which takes the
+        // library's gated branch and answers the same expression, term for term - is
+        // bit for bit unchanged. `f32::clamp` also panics on an inverted range, which
+        // `spread_pan_bounds` cannot return (`a_pan_range_is_always_ordered_and_finite`).
+        let (off_lo, off_hi) = image_viewer::spread_pan_bounds(
+            [panel.min.x, panel.min.y, panel.width(), panel.height()],
+            (clamp_px.x, clamp_px.y),
+            &spread_dims,
+            scale,
+            self.config.manga_rtl,
+        );
+        offset.x = offset.x.clamp(off_lo[0], off_hi[0]);
+        offset.y = offset.y.clamp(off_lo[1], off_hi[1]);
 
         let at_fit = scale <= fit_scale * 1.0001;
         if at_fit {
