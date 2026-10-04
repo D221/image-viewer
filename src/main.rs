@@ -3649,37 +3649,67 @@ impl MyApp {
             (panel.width() * ppp).round() as u32,
             (panel.height() * ppp).round() as u32,
         );
-        // **The half panel in manga mode**, and both halves of the change hang off
-        // the same number. `preview_target` takes the *long* side, so halving the
-        // width is what makes `display_dim`, `schedule`'s `target_dim` and the
-        // resize refine ask for half-width textures — and a page in a **two-page**
-        // spread can never need more than half the panel's width, so decoding for the
-        // whole panel would make every turn cost twice what it needs to. It is the width
-        // that is halved and not the height because the seam runs vertically: the
-        // panel's full height is what one page is fitted into.
+        // **The half panel in manga mode**, and both halves of the change hang off the
+        // same number. `preview_target` takes the *long* side, so halving the width is
+        // what makes `display_dim`, `schedule`'s `target_dim` and the resize refine ask
+        // for half-width textures — and a page in a **two-page** turn can never need
+        // more than half the panel's width, so decoding for the whole panel would make
+        // every turn cost twice what it needs to. It is the width that is halved and
+        // not the height because the seam runs vertically: the panel's full height is
+        // what one page is fitted into. `decode_panel_px` is that rule, moved into the
+        // library so it can be tested, and with one exception:
         //
-        // **A lone spread is the case this over-reserves for, and it is not corrected
-        // here** — `lone_spread_fills_turn` below fits that page against the *whole*
-        // panel. The correction is not free: this number is read before `pages` exists
-        // (`turn_pages` needs `shown` and its `orig`), so it would have to guess the
-        // turn's length, and the guess is only sound because a `Double` never pairs —
-        // `lone` returns true on it, so `turn_len` is 1 and `spread_dims.len()` is
-        // provably 1. What it costs today is a *soft* lone spread, not a misplaced
-        // one, and only where the long side binds: at `ppp` 1 a 2700x1920 page on a
-        // 1920x1080 panel is previewed at 1620x1152 and drawn at 1518.75 points, so it
-        // is very slightly downscaled and nothing is visible. At `ppp` 2 the panel wants
-        // 3840 physical px across and the preview is asked for 2880 — about 0.75 of
-        // what it should be, which reads as soft until the full-res tiles arrive.
-        // Recorded rather than fixed, so the next reader of `lone_spread_fills_turn`
-        // knows the layout and the decode target were moved separately and why.
+        // **A lone spread is laid out as the single-image layout, so it is decoded as
+        // one too** — that is the whole of the exception, and it takes the *same*
+        // flag the four layout calls below are handed. Halving unconditionally here
+        // while `spread_fit` fitted that page against the panel's whole width was the
+        // reported defect: a picture drawn 1518.75 points wide out of a texture asked
+        // for half that. **Measured on a 2700x1920 page on a 1920x1080 panel**, the
+        // request went 1080 → 1920 at `ppp` 1 and 2160 → 3840 at `ppp` 2, either way
+        // from 0.711 of the drawn long side to 1.264 of it; and because
+        // `decode_jpeg_scaled` picks the smallest of 1/8, 1/4, 1/2, 1 that covers the
+        // request, the texture at `ppp` 1 went 1350x960 → 2700x1920, so the picture
+        // was painted from a texture 0.889 of the width it was drawn at.
+        //
+        // **Which rung a source lands on is the source's, not the rule's**, and that
+        // is why the fix is stated about the request: at `ppp` 2 both requests are past
+        // this page's long side, both land on 1/1, and this fixture's texture is the
+        // same 2700 wide either way. A larger page leaves 1/2 at `ppp` 2 as well, and a
+        // page under 2160 never leaves it at all. The invariant is the one
+        // `the_decode_target_covers_the_picture_the_layout_draws` pins: **the request
+        // is never smaller than the picture it will be drawn as.**
+        //
+        // **One decision, asked once, read twice.** `lone_spread_fills_turn` is a
+        // query over the position and the pairing, not over the paint: `turn_len` is
+        // what `turn_partner` is built from and `shape_of` is the shape the fit is
+        // judged by, so it can be answered at the top of the frame — before `pages`
+        // and `spread_dims` exist — and is the same answer the layout reaches later.
+        // That is why the two cannot disagree, and it is why the count is not
+        // `spread_dims.len()` or `shown_partner.is_none()` any more: both are readings
+        // of a rule, and a reading is free to be stale where the rule is not.
+        //
+        // Two honest costs, both bounded and both correct. **Toggling the mode is now a
+        // no-op for a lone spread** — on is the full panel and off is the full panel,
+        // because the layout is the single-image layout either way, so it costs no
+        // refine at all where the half-panel answer used to charge one for a picture
+        // that did not change. And **arriving at a spread nobody has measured** is a
+        // target change once, when `learn_shapes` reads its header from `goto` and the
+        // flag becomes true: `needs_refine` fires once, the decoded preview is
+        // replaced once, and the target is then stable because a shape only ever
+        // resolves from unknown to measured.
         //
         // `self.config.manga_mode` is read here, on the frame, rather than snapshotted
         // at construction, so toggling it takes effect without a restart.
-        let panel_px = if self.config.manga_mode {
-            (panel_px.0 / 2, panel_px.1)
-        } else {
-            panel_px
-        };
+        let lone_spread_fills_turn = image_viewer::lone_spread_fills_turn(
+            self.shown_pos(),
+            self.spreads.lead_lone,
+            &self.page_ctx(),
+        );
+        let panel_px = image_viewer::decode_panel_px(
+            panel_px,
+            self.config.manga_mode,
+            lone_spread_fills_turn,
+        );
         // Resize. The texture is re-fitted to the new area by the drawing code
         // below, which happens on this very frame and costs nothing — so the
         // picture is never blanked and never soft *as a choice*. The only thing
@@ -3830,23 +3860,14 @@ impl MyApp {
         // whole spread** — so it is fitted against the panel's whole width and centred
         // on the seam, rather than confined to a half with an empty one beside it.
         //
-        // **The discriminator is `Shape`, and the caller asks**, because the geometry
-        // answers wrongly in both directions (`turn_is_a_lone_spread`'s doc has both): a
-        // near-square page is wider than tall and is a `Single`, and `X` can make a
-        // portrait page a `Double` — and "treat this as a spread" has to mean the
-        // whole turn. Asked of `shown` rather than of the cursor, for the reason
-        // `turn_pages` gives: the layout describes the picture on screen, and during
-        // the lag between a navigation and its decode landing those are two pages.
-        //
-        // **`spread_dims.len()` is the count**, not `shown_partner.is_none()`: one rule
-        // reading one list, so the fit and the rects cannot disagree about whether this
-        // is a lone spread.
-        let lone_spread_fills_turn = self.shown_pos().is_some_and(|pos| {
-            image_viewer::turn_is_a_lone_spread(
-                spread_dims.len(),
-                image_viewer::shape_of(pos, &self.page_ctx()),
-            )
-        });
+        // **The flag was decided at the top of this frame**, by
+        // `image_viewer::lone_spread_fills_turn`, and this is only reading it — the
+        // same value `decode_panel_px` was handed, which is what keeps the picture from
+        // being drawn at one size out of a texture asked for another. The *why* it is
+        // a position query rather than a reading of `spread_dims` is at that call:
+        // `turn_len` is what `turn_partner` is built from and `shape_of` is the shape
+        // the fit is judged by, so it is answerable before `pages` exists and cannot be
+        // a frame out of date with the paint the way a latched count can.
 
         // One shared scale for the whole turn, and the cursor page's own fit when
         // the mode is off. `spread_fit` clamps to the same `(1e-4, 8.0)` the

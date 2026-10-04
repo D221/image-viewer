@@ -517,12 +517,52 @@ are wrong in a way that *looks* right.
     offset is silently truncated. Both re-check `pages.len() == 1` rather than
     trusting the flag, because honouring it on a turn of two would stack both
     pages on the centre.
-  * The flag is computed from **`spread_dims.len()`**, not
-    `shown_partner.is_none()`: one rule reading the list `spread_rects` is about
-    to be handed. `main.rs` is untestable, so the four call sites are pinned by a
-    source scan (`central_decides_and_threads_the_lone_spread_flag`), not by the
-    library tests — the library is correct and the app still wrong if the flag is
-    not passed.
+  * **And it is also what the turn is *decoded* for — five consumers, one answer.**
+    `decode_panel_px(panel_px, manga_mode, lone_spread_fills_turn)` halves the
+    panel's width for every turn except a lone spread, and it is the same `bool`
+    the four layout calls are handed, read from one binding. A lone spread is
+    drawn as the single-image layout, so decoding it for half the panel hands
+    `spread_fit` a page wider than the texture it is about to be drawn from. The
+    invariant is **the request is never smaller than the picture it will be drawn
+    as**: on a 2700x1920 page drawn 1518.75x1080 on a 1920x1080 panel, the request
+    went 1080 → 1920 at `ppp` 1 and 2160 → 3840 at `ppp` 2, either way from **0.711
+    of the drawn long side to 1.264** — and because `decode_jpeg_scaled` picks the
+    smallest of 1/8, 1/4, 1/2, 1 that still covers the request, the texture at
+    `ppp` 1 went **1350x960 → 2700x1920**, a texture 0.889 of the width it was
+    painted across. The number is one function because `panel_px` feeds everything
+    downstream: `preview_target`, `display_dim`, `schedule`'s `target_dim` and the
+    resize machine.
+  * **Which rung a source lands on is the source's, not the rule's.** At `ppp` 2
+    both requests are past a 2700-long-side page's own size, both land on 1/1, and
+    that fixture's texture is the same 2700 wide either way — so the *texture* at
+    `ppp` 2 did not change for it while the *request* was wrong at both ratios. A
+    6000-long-side page leaves 1/2 at `ppp` 2 as well; a 1600-wide page never leaves
+    it. Pin the request, not the rung: the rung is a property of the file.
+    `a_lone_spread_is_decoded_at_the_size_it_is_drawn_at` pins both, and says which
+    is which.
+  * **The flag is asked once, at the top of the frame, from the position** —
+    `lone_spread_fills_turn(Some(pos), lead_lone, ctx)` in `lib.rs`, which is
+    `turn_is_a_lone_spread(turn_len(pos, ..), shape_of(pos, ..))`. Not
+    `spread_dims.len()` and not `shown_partner.is_none()`: those are *readings* of
+    the rule, and a reading is a frame behind the rule, which is how a value
+    latched at one event and read at another keeps producing correct-looking
+    screens. It is answerable before `pages` exists because it asks the **pairing**
+    rather than the paint: `turn_len` and `shape_of` are the rule's own inputs, so
+    the query cannot be a frame behind the rule the way a reading of the laid-out
+    pages can. `main.rs` is untestable, so the wiring is pinned by a source
+    scan (`central_decides_and_threads_the_lone_spread_flag`) — including that
+    `central` binds the flag **exactly once** and decides `panel_px` before
+    `preview_target` reads it — not by the library tests: the library is correct
+    and the app still wrong if the flag is not passed, and verified, every
+    behavioural test in the suite stayed green with the app's wiring reverted.
+  * **Two consequences of getting it right, both worth knowing.** Toggling `M` on a
+    lone spread is now *inert* — both modes decode the full panel and lay out the
+    same single-image rectangle — so it costs no refine, where the half-panel
+    answer charged one each way for a picture that did not change. And arriving at
+    a spread nobody has measured is a target change **once**, when `goto`'s
+    `learn_shapes` reads its header and the flag becomes true: one `needs_refine`,
+    one replaced preview, then stable, because a shape only ever resolves from
+    unknown to measured.
 - **The content of a spread is not centred on the panel's centre; the *seam*
   is.** Pages extend outward from the seam and the turn is top-aligned, so the
   content's centre is displaced on both axes — horizontally by half the width

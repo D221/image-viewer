@@ -886,6 +886,34 @@ pub fn turn_is_a_lone_spread(page_count: usize, shape: Shape) -> bool {
     page_count == 1 && shape == Shape::Double
 }
 
+/// The one answer the app needs about the turn under the cursor, from the position
+/// alone: **is that turn a lone spread**, so the whole turn is one picture?
+///
+/// It exists because the app needs this *twice*, in two places that cannot be allowed
+/// to disagree — to decide what to **decode** for ([`decode_panel_px`]) and to decide
+/// how to **lay out** ([`spread_fit`] and the three functions that follow it). Asking
+/// it once is the fix for a picture that was drawn at one size and decoded at another,
+/// and the caller cannot get it wrong by accident: the page count comes from
+/// [`turn_len`] and the shape from [`shape_of`], so neither `spread_dims.len()` nor
+/// `shown_partner.is_none()` is available to be substituted for the rule.
+///
+/// **Both halves are the same rule as the layout's.** `turn_len` is what
+/// `turn_partner` is built from, so the count and the partner cannot diverge; `shape_of`
+/// is the shape the fit is judged by. That equivalence is why this can be asked at the
+/// top of a frame, before the pages exist, and be the same answer the layout reaches
+/// later: nothing here reads the *paint*, so nothing here can be a frame out of date
+/// with it.
+///
+/// `None` for no position at all — nothing on screen yet — answers **false**, which
+/// halves the panel exactly as the unfixed code did. A turn cannot be a lone spread
+/// before its first frame exists, so this is the conservative answer and not a
+/// special case.
+pub fn lone_spread_fills_turn(pos: Option<PagePos>, lead_lone: u32, ctx: &dyn PageCtx) -> bool {
+    pos.is_some_and(|pos| {
+        turn_is_a_lone_spread(turn_len(pos, lead_lone, ctx), shape_of(pos, ctx))
+    })
+}
+
 /// The scale a whole turn is drawn at: the more constrained fit of every page
 /// present into *its half* of the panel, so every page fits at one shared factor.
 ///
@@ -1888,6 +1916,44 @@ pub fn wants_exif(panel_visible: bool, exif_pending: bool) -> bool {
 /// expiring and a resize - and it stays one. This adds the second.
 pub fn arrival_reschedules(key: &ImgKey, cur: Option<&ImgKey>, partner: Option<&ImgKey>) -> bool {
     Some(key) == cur || Some(key) == partner
+}
+
+/// The display area a turn's page is **decoded** for: `panel_px` with its width
+/// halved, unless the turn is a lone spread.
+///
+/// `preview_target` takes the *long* side, so this one number is what every
+/// consumer of the display area gets: the preview texture itself, `display_dim`,
+/// `schedule`'s `target_dim` and the resize machine's refine test. Halving the width
+/// and not the height is the seam rule — the panel's full height is what one page is
+/// fitted into — and a page in a **two-page** turn can never need more than half the
+/// panel's width, so decoding for the whole panel would make every turn cost twice
+/// what it needs to.
+///
+/// **`lone_spread_fills_turn` is the same answer the layout is handed**, and that is
+/// the whole point of taking it as a parameter rather than measuring a page here. A
+/// lone spread is laid out as the single-image layout — fitted against the panel's
+/// whole width, centred on the seam — so decoding it for half the panel hands
+/// [`spread_fit`] a page wider than the texture it is about to be drawn from: the
+/// request is then **0.71 of the drawn long side**, which is a picture with nothing
+/// anywhere reporting a shortfall. Whether that reads as visibly soft depends on
+/// which rung [`decode_jpeg_scaled`] lands on for that particular source, so the rule
+/// belongs here and the symptom does not: **the request is never smaller than the
+/// picture it will be drawn as.** One caller computing one flag for both this and
+/// [`spread_fit`] is the only arrangement where the two cannot drift.
+///
+/// A lone **portrait** page still halves, and that is the case a fix like this widens
+/// by accident: a cover is one page wide, it keeps its half, and it is the half the
+/// rule is written for.
+pub fn decode_panel_px(
+    panel_px: (u32, u32),
+    manga_mode: bool,
+    lone_spread_fills_turn: bool,
+) -> (u32, u32) {
+    if manga_mode && !lone_spread_fills_turn {
+        (panel_px.0 / 2, panel_px.1)
+    } else {
+        panel_px
+    }
 }
 
 /// Long side of the preview texture for a display area, in physical pixels.

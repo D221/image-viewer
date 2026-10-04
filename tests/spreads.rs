@@ -20,12 +20,13 @@
 //! test. What the source scan adds is only the call, which nothing else can see.
 
 use image_viewer::{
-    anchor_of, exif_orientation, last_anchor, load_spread_overrides, lone, next_anchor, next_turn,
-    page_dims, pairable, prev_anchor, prev_turn, save_spread_overrides, shape_of, spread_centre,
+    anchor_of, decode_panel_px, exif_orientation, last_anchor, load_image, load_spread_overrides,
+    lone, lone_spread_fills_turn, needs_refine, next_anchor, next_turn, page_dims, pairable,
+    prev_anchor, prev_turn, preview_target, save_spread_overrides, shape_of, spread_centre,
     spread_fit, spread_pan_bounds, spread_rects, spread_root_key, spreads_root, spreads_tmp,
     thumb_cache_root, turn_is_a_lone_spread, turn_len, turn_partner, Gallery, GallerySpreads,
-    ImgKey, PageCtx, PagePos, Rect4, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES,
-    SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
+    ImgKey, PageCtx, PagePos, Rect4, ResizeAction, ResizeTracker, Shape, LEAD_LONE_DEFAULT,
+    LEAD_LONE_MAX, PROBE_PREFIX_BYTES, RESIZE_PX_FLOOR, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -6531,46 +6532,519 @@ fn copy_refuses_a_page_of_a_multi_page_document() {
     );
 }
 
-/// `central` asks the library whether this is a lone spread, and passes the answer to
-/// **every** layout call — the fit, the rects, the zoom anchor and the pan bound.
+// ---------------------------------------------------------------------------
+// What a turn is *decoded* for
+// ---------------------------------------------------------------------------
+
+/// The panel the decode tests below use, in **points**: 1920x1080, which is the panel
+/// the reported defect was measured on and a size every reader has.
+const DECODE_PANEL: (f32, f32) = (1920.0, 1080.0);
+
+/// [`DECODE_PANEL`] in physical pixels at a pixel ratio. Both `decode_panel_px` and
+/// `preview_target` speak that unit and `panel_px` in `central` is built from it, so
+/// this is the only place the two scales meet.
+fn panel_px_at(ppp: u32) -> (u32, u32) {
+    (DECODE_PANEL.0 as u32 * ppp, DECODE_PANEL.1 as u32 * ppp)
+}
+
+/// A lone **spread** is decoded for the whole panel: 1920 at `ppp` 1, 3840 at `ppp` 2.
 ///
-/// **This is a source scan, and it is the only thing covering the wiring.** The five
-/// behavioural tests above drive `spread_fit` / `spread_rects` / `shape_of` directly, so
-/// every one of them stays green if `MyApp::central` never computes the flag at all:
-/// the library would be correct and the app would still draw the reported bug, because
-/// the call sites default to `false`. `central` lives in the binary, which no integration
-/// test can reach, so the call is asserted against the source for the same reason
-/// `tests/renderer.rs`, `tests/keybindings.rs` and the scans above do.
+/// This is the fix. The layout was moved a commit ago and the decode target was not,
+/// so a page drawn across the panel's whole width was asked for a texture from half
+/// of it — and the picture was soft in proportion to how much of the panel it used.
+/// At `ppp` 1 that is a slightly downscaled 1518.75 points out of a 1920 texture and
+/// nothing is visible; at `ppp` 2 it is 2160 against a 3037.5-point draw, which is
+/// 0.71, and that is a visibly soft picture with no counter anywhere.
 ///
-/// **Four sites, not one, and the reason is that they are four separate claims.** A
-/// lone spread drawn full-panel but zoomed about the *half*-width centre drifts a point
-/// on every wheel notch; drawn full-panel but clamped by a pan bound derived from a
-/// half-width content box cannot be panned at all, and the zoom's wanted offset is
-/// silently truncated instead. Each of those is a plausible picture with no error, which
-/// is the shape of defect this feature keeps producing, so passing the flag to three of
-/// the four sites is a state this test has to be able to see.
+/// **The fixture is a spread by its *shape*, not by being alone.** It is the third
+/// page of a document of singles with the default `lead_lone`, so it has a page
+/// behind it (`step_no_wrap(pos, -1)` is `Some`) and is not front matter: the arm of
+/// `lone` that makes this turn hold one page is the spread's, which is the only thing
+/// that can make it true. A test with a lone page at the front of a gallery would pass
+/// with front matter doing all the work.
+#[test]
+fn a_lone_spread_is_decoded_for_the_whole_panel() {
+    let g = TestGallery::one_doc(vec![Single, Single, Double]);
+    let pos = g.page_at(2).expect("the gallery has three pages");
+    assert_eq!(
+        g.step_no_wrap(pos, -1),
+        Some(g.page_at(1).unwrap()),
+        "the fixture must have a page behind it, or this test is about front matter"
+    );
+    assert_eq!(turn_len(pos, LEAD_LONE_DEFAULT, &g), 1, "a spread never pairs");
+    assert_eq!(shape_of(pos, &g), Double, "and it is the shape, not the geometry");
+    assert!(
+        lone_spread_fills_turn(Some(pos), LEAD_LONE_DEFAULT, &g),
+        "so the query the app makes at the top of the frame answers true"
+    );
+
+    // **The numbers, at both pixel ratios.** Not "not halved": 3840 is the whole claim,
+    // and a clamp or an off-by-one elsewhere would satisfy a direction check.
+    assert_eq!(
+        decode_panel_px(panel_px_at(1), true, true),
+        (1920, 1080),
+        "ppp 1: the whole panel, for a page laid out across the whole panel"
+    );
+    assert_eq!(preview_target(decode_panel_px(panel_px_at(1), true, true)), 1920);
+    assert_eq!(
+        decode_panel_px(panel_px_at(2), true, true),
+        (3840, 2160),
+        "ppp 2: and the whole panel again, in physical pixels"
+    );
+    assert_eq!(preview_target(decode_panel_px(panel_px_at(2), true, true)), 3840);
+
+    // The height was never the axis in question — the seam runs vertically, so one
+    // page is fitted into the panel's full height in both cases.
+    assert_eq!(
+        decode_panel_px(panel_px_at(2), true, true).1,
+        panel_px_at(2).1,
+        "only the width is halved, and this page is not halved at all"
+    );
+
+    // The mode being off is the *same* panel, and that is the point: a lone spread is
+    // laid out as the single-image layout, so on and off draw and decode the same
+    // picture. See `toggling_the_mode_on_a_lone_spread_changes_nothing_to_decode`.
+    assert_eq!(decode_panel_px(panel_px_at(1), false, true), (1920, 1080));
+
+    // The number this fix removes, named so a reader can see what regressed: at `ppp` 1
+    // the half-panel answer decoded for 1080 and at `ppp` 2 for 2160.
+    assert_eq!(preview_target((960, 1080)), 1080);
+    assert_eq!(preview_target((1920, 2160)), 2160);
+}
+
+/// A lone **portrait** page is decoded for the half, because that is the layout it is
+/// drawn with: a book's cover is one page wide, it hangs off the seam, and a texture
+/// for the whole panel would make every cover in a volume cost twice what it needs.
 ///
-/// The negative assertion matters as much as the four positives: `central` comparing the
-/// page's **dimensions** instead of asking `shape_of` still compiles and is still right
-/// for every single-page image in every fixture, while breaking the two cases
-/// `turn_is_a_lone_spread`'s doc names - a forced portrait page keeps its half (so `X`
-/// does nothing visible) and a near-square page takes the whole window.
+/// This is the regression guard for the fix, and the temptation it creates is the one
+/// that matters: widen the rule to "a lone page is decoded for the panel" and every
+/// cover in the library is decoded at full width and drawn at half.
+#[test]
+fn a_lone_portrait_page_is_decoded_for_the_half() {
+    let g = TestGallery::one_doc(vec![Single, Single, Single]);
+    // The last page: a turn of one because nothing pairs with it, not because it is
+    // front matter (the default `lead_lone` already made page 0 a lone turn).
+    let pos = g.page_at(2).expect("three pages");
+    assert_eq!(turn_len(pos, LEAD_LONE_DEFAULT, &g), 1);
+    assert_eq!(shape_of(pos, &g), Single);
+    assert!(
+        !lone_spread_fills_turn(Some(pos), LEAD_LONE_DEFAULT, &g),
+        "a portrait page is a lone turn and not a lone spread"
+    );
+
+    assert_eq!(
+        decode_panel_px(panel_px_at(1), true, false),
+        (960, 1080),
+        "half the width, all of the height"
+    );
+    assert_eq!(preview_target(decode_panel_px(panel_px_at(1), true, false)), 1080);
+    assert_eq!(decode_panel_px(panel_px_at(2), true, false), (1920, 2160));
+    assert_eq!(preview_target(decode_panel_px(panel_px_at(2), true, false)), 2160);
+}
+
+/// A two-page turn is decoded for the half: each page is one page wide, and a texture
+/// for the whole panel would double the cost of every turn in the book to sharpen
+/// nothing.
+#[test]
+fn a_two_page_turn_is_decoded_for_the_half() {
+    let g = TestGallery::one_doc(vec![Single, Single, Single, Single]);
+    let pos = g.page_at(1).expect("four pages");
+    assert_eq!(turn_len(pos, LEAD_LONE_DEFAULT, &g), 2, "a pair is a turn of two");
+    assert_eq!(shape_of(pos, &g), Single);
+    assert!(
+        !lone_spread_fills_turn(Some(pos), LEAD_LONE_DEFAULT, &g),
+        "two pages cannot be one picture however wide either of them is"
+    );
+
+    assert_eq!(decode_panel_px(panel_px_at(1), true, false), (960, 1080));
+    assert_eq!(decode_panel_px(panel_px_at(2), true, false), (1920, 2160));
+
+    // The mode off is the whole panel whatever the turn is, so a photo folder's
+    // previews do not shrink when the mode is toggled back off.
+    assert_eq!(decode_panel_px(panel_px_at(1), false, false), (1920, 1080));
+}
+
+/// The decode target and the layout the page is actually drawn at are the **same
+/// width**, which is the whole claim; the two agreeing is what makes the flag one
+/// decision rather than two.
+///
+/// The test derives the drawn rectangle from [`spread_fit`] — the function the app
+/// hands the same flag to — and requires the decode's long side to cover it, at both
+/// pixel ratios. Two weaker assertions were available and both are worthless: "the
+/// decode is at least half the panel" is satisfied by the bug, and "the decode does not
+/// exceed the panel" is satisfied by a texture ten times too large.
+///
+/// **And the numbers that fail.** For the lone spread the draw is 1518.75 x 1080
+/// points (the height binds: `min(1920/2700, 1080/1920) = 0.5625`), so 1920 of 1920 is
+/// **1.26** of it and the half-panel answer's 1080 is **0.71**. At `ppp` 2 that is
+/// 3840 of 3037.5 against 2160 of 3037.5. The portrait page and the pair both land
+/// exactly on 1080, because one page fitted into a half panel is bound by the panel's
+/// height — which is why the half-panel rule is not merely conservative on those two
+/// and is *wrong* only on the third.
+#[test]
+fn the_decode_target_covers_the_picture_the_layout_draws() {
+    // A real double-page scan: 2700x1920 is the 1.414 a two-page scan comes out of a
+    // phone, and it is wider than `SPREAD_ASPECT` so `shape_of` calls it a `Double`.
+    let scan = WIDE_SCAN;
+    // A real single page, portrait, at the same scale family.
+    let page = (1350.0, 1920.0);
+
+    for ppp in [1u32, 2] {
+        for (what, pages, flag) in [
+            ("a lone spread", vec![scan], true),
+            ("a lone portrait page", vec![page], false),
+            ("a two-page turn", vec![page, page], false),
+        ] {
+            let scale = spread_fit(DECODE_PANEL, &pages, flag);
+            let drawn = pages
+                .iter()
+                .map(|&(w, h)| (w * scale).max(h * scale) * ppp as f32)
+                .fold(0.0f32, f32::max);
+            let target = preview_target(decode_panel_px(panel_px_at(ppp), true, flag)) as f32;
+            assert!(
+                target >= drawn,
+                "ppp {ppp}, {what}: drawn at {drawn} points and decoded for {target}, so the \
+                 texture is short of the picture by {} - which is the reported defect, still \
+                 present",
+                drawn - target
+            );
+        }
+    }
+
+    // The two numbers, spelled out, because "the assertion above passed" is not the
+    // evidence for *how much* was wrong. Rounded to three decimals because the claim is
+    // about how much of the picture the texture covers, and an f32 ratio written out to
+    // seventeen places would pin the rounding rather than the ratio.
+    let scale = spread_fit(DECODE_PANEL, &[scan], true);
+    assert_eq!(scale, 0.5625, "2700x1920 on a 1920x1080 panel");
+    let drawn = (scan.0 * scale).max(scan.1 * scale);
+    assert_eq!(drawn, 1518.75, "1518.75 x 1080, the number AGENTS.md records");
+    assert_eq!(coverage(1920, drawn), 1.264, "ppp 1: 1920 of 1518.75");
+    assert_eq!(
+        coverage(1080, drawn),
+        0.711,
+        "ppp 1, before the fix: 1080 of 1518.75 - close enough to hide, which is why this \
+         shipped"
+    );
+    assert_eq!(coverage(3840, drawn * 2.0), 1.264, "ppp 2: 3840 of 3037.5");
+    assert_eq!(
+        coverage(2160, drawn * 2.0),
+        0.711,
+        "ppp 2, before the fix: 2160 of 3037.5 - visibly soft"
+    );
+}
+
+/// How much of a drawn picture a decode target covers, to three decimals.
+///
+/// Below 1.0 is the defect in one number: a request smaller than the rectangle the
+/// picture is drawn into.
+fn coverage(target: u32, drawn: f32) -> f64 {
+    ((target as f64 / drawn as f64) * 1000.0).round() / 1000.0
+}
+
+/// End to end: the **texture** a lone spread comes back at, before and after — not
+/// the request, which is what the tests above pin.
+///
+/// They are not the same number, and only one of them is a picture.
+/// `decode_jpeg_scaled` picks the smallest of 1/8, 1/4, 1/2 and 1 whose long side
+/// still covers the request, so a request below the drawn size can land on a *lower
+/// rung* and return a texture narrower than the rectangle it is drawn into. The
+/// fixture is 2700x1920 — the double-page scan in every geometry test above, and a
+/// size whose rungs straddle the two requests: half of it is 1350, which covers the
+/// old 1080 and not the new 1920. So the old answer is a **1350-wide texture painted
+/// over 1518.75 pixels** and the new one is 2700 wide for the same 1518.75.
+///
+/// **What this test does *not* claim, and the reason the fixture's size is load-bearing
+/// here.** At `ppp` 2 both requests are past this source's long side, so both land on
+/// 1/1 and the texture is the same 2700 either way: for *this* page the defect is
+/// obvious at `ppp` 1 and invisible at `ppp` 2, while the *request* was wrong at both.
+/// Which rung a source lands on is a property of that source's dimensions — a 1600-wide
+/// page never leaves 1/2 and a 6000-wide one leaves it either way — so the rule the fix
+/// restores is about the request (never smaller than the draw), and pinning a rung here
+/// would pin the fixture rather than the rule.
+///
+/// Decoding for real is what makes this worth a 5 MP fixture: the pure tests above would
+/// all stay green if `decode_jpeg_scaled` chose the *largest* reduction that covers the
+/// request, which is a plausible edit and the opposite of right.
+#[test]
+fn a_lone_spread_is_decoded_at_the_size_it_is_drawn_at() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("spread.jpg");
+    write_jpeg(&path, WIDE_SCAN.0 as u32, WIDE_SCAN.1 as u32);
+
+    // The drawn rect, from the layout that is handed the same flag.
+    let scale = spread_fit(DECODE_PANEL, &[WIDE_SCAN], true);
+    let drawn = WIDE_SCAN.0 * scale;
+    assert_eq!(drawn, 1518.75, "the same 1518.75 the layout tests pin");
+
+    for (ppp, half, whole) in [
+        (1u32, (960u32, 1080u32), decode_panel_px(panel_px_at(1), true, true)),
+        (2, (1920, 2160), decode_panel_px(panel_px_at(2), true, true)),
+    ] {
+        let want = drawn * ppp as f32;
+        let old = load_image(&path, preview_target(half)).expect("the old target decodes");
+        let new = load_image(&path, preview_target(whole)).expect("the new target decodes");
+        assert!(
+            (old.width as f32) < want,
+            "ppp {ppp}: the half-panel request decoded {}x{} and the page is drawn {want} \
+             pixels wide, so the texture is upscaled to paint it",
+            old.width,
+            old.height
+        );
+        assert!(
+            (new.width as f32) >= want || new.width == WIDE_SCAN.0 as u32,
+            "ppp {ppp}: the whole-panel request decoded {}x{}, still short of the {want} pixels \
+             the page is drawn across",
+            new.width,
+            new.height
+        );
+        if ppp == 1 {
+            // The rungs, pinned: this is the mechanism, in two pairs of numbers.
+            assert_eq!(
+                (old.width, old.height),
+                (1350, 960),
+                "1080 is asked for, half of 2700 is 1350 which covers it, a quarter does not, so \
+                 1/2 is the rung"
+            );
+            assert_eq!(
+                (new.width, new.height),
+                (2700, 1920),
+                "1920 is asked for, 1/2 does not cover it, so 1/1 does - and 1/1 is all the \
+                 source has"
+            );
+            assert_eq!(
+                coverage(old.width, want),
+                0.889,
+                "and the old texture is 0.889 of what is painted across it: soft, at one pixel \
+                 ratio"
+            );
+            assert_eq!(
+                coverage(new.width, want),
+                1.778,
+                "and the new one is comfortably past it, which is what 'the source has no more \
+                 to give' looks like"
+            );
+        } else {
+            assert_eq!(
+                (old.width, old.height),
+                (2700, 1920),
+                "ppp 2: both requests are past this source's long side, so both land on 1/1 and \
+                 the texture is identical. The request was still wrong, and a page twice this \
+                 size would show it."
+            );
+            assert_eq!((new.width, new.height), (2700, 1920));
+            assert_eq!(
+                coverage(old.width, want),
+                0.889,
+                "which is why this page was not soft at ppp 2 - and the reason the report was \
+                 written about HiDPI is the *request*, which is 0.711 of the draw at both ratios"
+            );
+        }
+    }
+}
+
+/// A plain baseline JPEG of `w` x `h`, for the one test here that decodes rather than
+/// arithmetic.
+fn write_jpeg(path: &std::path::Path, w: u32, h: u32) {
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(w, h, image::Luma([128])))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+        .unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// The resize machine sees a lone spread's target change **once**, refine **once**, and
+/// then nothing at all — including when the target does not change, which is the case
+/// the mode toggle now is.
+///
+/// Both halves are the real risk. The old half-panel answer made `M` on a lone spread
+/// change the target in both directions (1920 to 1080 and back) and charge a refine
+/// each way for a picture that did not change; the new answer makes the toggle
+/// **inert**, because on and off decode the same panel and lay out the same
+/// single-image rectangle. Neither is a storm — the tracker is sticky — but "no storm"
+/// was never the question. The question is whether a genuine change costs exactly one
+/// decode, and a flicker of the flag (a shape measured a frame later, a partner that
+/// lands) would either alternate the target and never settle, or settle twice.
+///
+/// The counts are over a **run of frames**, not one call, because that is the only
+/// shape in which "one" means anything: a per-call assertion cannot tell a settled
+/// refine from a storm of them.
+#[test]
+fn a_lone_spread_costs_one_refine_when_its_target_really_changes() {
+    let source_long = WIDE_SCAN.0 as u32;
+    let ppp = 2u32;
+    let target_of = |lone_spread: bool| {
+        preview_target(decode_panel_px(panel_px_at(ppp), true, lone_spread))
+    };
+
+    let half = target_of(false);
+    let whole = target_of(true);
+    assert_eq!((half, whole), (2160, 3840), "ppp 2 on a 1920x1080 panel");
+
+    // A turn whose shape has just been measured: the preview on screen was decoded for
+    // the half-panel answer, and the flag is now true.
+    let mut tracker = ResizeTracker::new();
+    let mut actions = Vec::new();
+    for _ in 0..12 {
+        let target = whole;
+        actions.push(tracker.frame(
+            target,
+            needs_refine(half, source_long, half, target, RESIZE_PX_FLOOR),
+        ));
+    }
+    assert_eq!(
+        actions.iter().filter(|a| **a == ResizeAction::Refine).count(),
+        1,
+        "twelve frames of one real change are one refine, not one per frame and not a \
+         storm of them: {actions:?}"
+    );
+    assert_eq!(
+        actions.first(),
+        Some(&ResizeAction::Wait),
+        "and the first frame only waits: the machine settles on the frame after a size \
+         changes, which is the rule that makes a window drag cost one decode"
+    );
+    // The decode lands, and a settled target costs nothing afterwards.
+    tracker.landed();
+    assert_eq!(
+        tracker.frame(whole, needs_refine(whole, source_long, whole, whole, RESIZE_PX_FLOOR)),
+        ResizeAction::Idle,
+        "once the sharper texture is in place the target is met exactly, so there is \
+         nothing left to ask for"
+    );
+
+    // **The toggle itself, with the fix in place.** Both modes decode the whole panel
+    // for a lone spread, so the target does not move and there is no refine to charge.
+    assert_eq!(
+        preview_target(decode_panel_px(panel_px_at(ppp), false, true)),
+        whole,
+        "mode off on a lone spread is the same panel as mode on - it is drawn as a single \
+         image either way"
+    );
+    let mut tracker = ResizeTracker::new();
+    let mut actions = Vec::new();
+    for target in [whole, whole] {
+        actions.push(tracker.frame(target, needs_refine(whole, source_long, whole, target, RESIZE_PX_FLOOR)));
+    }
+    assert_eq!(
+        actions,
+        vec![ResizeAction::Idle, ResizeAction::Idle],
+        "toggling `M` on a lone spread changes the decode target not at all, so it must not \
+         cost a decode for a picture that did not change"
+    );
+
+    // The control: on a page that is *not* a lone spread the mode does change the
+    // target, so the "no refine" above is not the tracker being deaf. Off to on is a
+    // shrink, which `needs_refine` refuses; on to off is a growth, which it accepts
+    // once.
+    let mut tracker = ResizeTracker::new();
+    let mut actions = Vec::new();
+    for target in [half, half, whole, whole, whole] {
+        actions.push(tracker.frame(
+            target,
+            needs_refine(half, source_long, half, target, RESIZE_PX_FLOOR),
+        ));
+    }
+    tracker.landed();
+    assert_eq!(
+        actions.iter().filter(|a| **a == ResizeAction::Refine).count(),
+        1,
+        "a portrait page or a pair does pay one refine when the mode goes back off, so the \
+         lone-spread case above is a property of the flag and not of the machine: {actions:?}"
+    );
+
+    // And a flicker would be visible as a storm of waits with no refine at all, which
+    // is what makes "twelve frames of one real change" the assertion worth having.
+    let mut tracker = ResizeTracker::new();
+    let flicker: Vec<ResizeAction> = (0..12)
+        .map(|i| {
+            let target = if i % 2 == 0 { half } else { whole };
+            tracker.frame(
+                target,
+                needs_refine(half, source_long, half, target, RESIZE_PX_FLOOR),
+            )
+        })
+        .collect();
+    assert_eq!(
+        flicker.iter().filter(|a| **a == ResizeAction::Refine).count(),
+        0,
+        "a flag that changed every frame would leave the machine waiting forever and never \
+         decoding at all - which is how a flickering flag presents, not as a storm: {flicker:?}"
+    );
+}
+
+/// The four layout calls and the decode target are handed **one** answer, and
+/// `central` reaches it through the library twice rather than through two readings of
+/// the rule.
+///
+/// **This is a source scan, and it is the only thing covering the wiring.** The
+/// behavioural tests above drive `lone_spread_fills_turn` and `decode_panel_px`
+/// directly, so every one of them stays green if `MyApp::central` never asks: the
+/// library would be correct and the app would still draw the reported defect, because
+/// the call sites would default to "halve". `central` is in the binary, which no
+/// integration test can reach, so the call is asserted against the source for the same
+/// reason `tests/renderer.rs`, `tests/keybindings.rs` and the other scans here do. What
+/// a scan cannot tell is whether any of it *works*.
+///
+/// **The negative assertions are the load-bearing half.** An earlier version of this
+/// wiring asked `turn_is_a_lone_spread(spread_dims.len(), shape_of(pos, ..))` where the
+/// pages were already laid out, which is right; moving the question earlier is only
+/// safe if there is exactly one place it is asked. A `central` that computed it twice
+/// — once for the decode and once for the fit — would satisfy every positive assertion
+/// in this test and could disagree with itself on the frame a shape is learned.
 #[test]
 fn central_decides_and_threads_the_lone_spread_flag() {
     let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
     let central = fn_body(&src, "fn central(");
 
     assert!(
-        central.contains("image_viewer::turn_is_a_lone_spread("),
-        "`central` no longer asks the library whether this is a lone spread, so the flag is\n\
-         always false and every lone spread is fitted into a half and hung off the seam -\n\
+        central.contains("image_viewer::lone_spread_fills_turn("),
+        "`central` no longer asks the library whether the turn is a lone spread, so the flag is\n\
+         always false and every lone spread is fitted into a half and decoded for half a panel -\n\
          which is the reported defect, unchanged.\nBody was:\n{central}"
     );
     assert!(
-        central.contains("image_viewer::shape_of("),
-        "and it must ask `shape_of` rather than compare dimensions itself: a near-square page\n\
-         is wider than tall, and a page `X` forced to `Double` is taller than wide, so a\n\
-         `w > h` test gets both wrong.\nBody was:\n{central}"
+        !central.contains("image_viewer::turn_is_a_lone_spread("),
+        "`central` asks the lone-spread question a second time, from `spread_dims.len()`. Two\n\
+         sites answering one rule is free to disagree - and the second one would be a reading of\n\
+         the paint, so it can be a frame out of date with the first. The query at the top of the\n\
+         frame is the one that is asked once.\nBody was:\n{central}"
+    );
+    assert_eq!(
+        central.matches("let lone_spread_fills_turn =").count(),
+        1,
+        "`central` must bind `lone_spread_fills_turn` exactly once and read it everywhere, so the\n\
+         decode target and the four layout calls cannot come from two different answers.\n\
+         Body was:\n{central}"
+    );
+
+    // **The decode target, and it must be the same flag.** A call that passed a literal
+    // `false`, or recomputed the shape, would leave the picture decoded for a half panel
+    // while it is drawn across the whole one - which is the defect, and it is the *only*
+    // thing in this fix.
+    let at = central
+        .find("decode_panel_px(")
+        .expect("`central` no longer halves the panel through the library");
+    let args = call_args(central, at);
+    assert!(
+        args.contains("lone_spread_fills_turn") && args.contains("self.config.manga_mode"),
+        "`decode_panel_px` must be handed the one flag and the mode, so the decode target is the\n\
+         layout's own answer rather than a second opinion about it.\nArguments were:\n{args}"
+    );
+    // ...and it must come **before** the first thing that consumes `panel_px`, which
+    // is what "asked early" means: `preview_target` is the resize machine's target and
+    // `display_dim` is what `schedule` reads, so a `panel_px` that is still being
+    // halved below those two lines is the old bug with extra steps. Comparing against
+    // the layout calls would be checking nothing — `central` fits after the picture is
+    // known, so an ask placed anywhere above `spread_fit` would satisfy it.
+    let preview_target_at = central
+        .find("preview_target(")
+        .expect("`central` no longer asks for the preview target");
+    assert!(
+        at < preview_target_at,
+        "the decode target is decided after `preview_target` and `display_dim` have already \
+         read `panel_px`, so the resize machine and the loader queue are planning against a \
+         half-panel answer whatever the layout then does with it"
     );
 
     // Every layout call, in both spellings, with the flag as an argument. `spread_fit`
@@ -6596,20 +7070,6 @@ fn central_decides_and_threads_the_lone_spread_flag() {
              Arguments were:\n{args}"
         );
     }
-
-    // And it is computed from the **page count** rather than from the partner being absent,
-    // so the fit and the rects cannot disagree about what the turn is. `spread_dims` is
-    // the list `spread_rects` is about to be handed, which is what makes that true.
-    let at = central
-        .find("turn_is_a_lone_spread(")
-        .expect("the decision is there; the assertion above says so");
-    assert!(
-        call_args(central, at).contains("spread_dims.len()"),
-        "the lone-spread decision must be made from the number of pages actually being laid\n\
-         out, not from `shown_partner.is_none()`: those are two statements of the same thing\n\
-         and they would be free to disagree.\nArguments were:\n{}",
-        call_args(central, at)
-    );
 }
 
 /// The text between a call's `(` and its matching `)`, starting from the call's own name.
