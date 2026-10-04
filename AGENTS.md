@@ -282,6 +282,21 @@ that are already in memory. One crate, no workspace, no CI.
   If you raise `PRELOAD_RADIUS`, re-check all of this. A worker panic here is
   usually OOM; its payload is logged (`C_DECODE_PANICS`) — don't reduce it back
   to a bare "decoder panicked", that hid the cause.
+  - **`MAX_TILES` is one global bound and it is enforced** — the eviction pass sums
+    every page's map (the cursor's on `self.full`, each other page's on its own
+    preview) and drops the least-recently-drawn tiles across all of them. Verified,
+    not assumed; `tests/spreads.rs` pins the geometry, not this count.
+  - **But `Preview.full` now has a *second producer*.** It used to be written only
+    by the single-pass decode, so `PREVIEW_CACHE_CAP × MAX_FULL_PIXELS` was reachable
+    only by decoding 16 large sources in one folder. A `Kind::Full` result for a
+    turn's **second half** is now also kept on that page's preview (`Msg::Full`'s
+    else-arm), and the plan asks for one whenever `Plan::partner_needs_full`. So the
+    same ceiling is now reachable **by flipping through turns in a manga volume**
+    rather than only by browsing a folder of huge files — 16 cached previews, each
+    holding a full-resolution buffer for a source over `FAST_FULL_MAX_PIXELS`, which
+    is the shape of library this feature targets. Nothing is unbounded and no new cap
+    was added, because the counts that bound it (`PREVIEW_CACHE_CAP`, `MAX_TILES`)
+    did not change; what changed is *which workload fills them*.
 - **The filter is the whole viewer.** `MyApp.all_files` is unfiltered;
   `gallery.files` is it through `Gallery::set_filtered`. Every site that rebuilds
   the list goes through `set_files` / `adopt_gallery` so the filter cannot be
@@ -363,6 +378,21 @@ are wrong in a way that *looks* right.
   what `anchor_of` is for, and the cursor is on an anchor by construction because
   `MyApp::goto` calls `snap_to_turn_anchor` — the single funnel every way into
   the app passes through, rather than three call sites that could disagree.
+- **`FullImage` is keyed by `(file, page)`, not by path — and it was not, and every
+  site that read it was a silent wrong picture.** `decode_page` returns
+  `full: None` for every page past the first of a TIFF, so a path-keyed buffer is
+  frozen at whichever page happened to be current. Three consequences, all with no
+  error and no counter:
+  * `needs_full`'s first line answered "already done" from the cursor page's buffer
+    for a partner that is `(index, page+1)` of the *same file* — which is **every
+    turn inside a manga volume** at the default `lead_lone` — so `plan_jobs` was
+    handed `partner_needs_full == false`, no `Kind::Full` job was ever planned, and
+    the second half of a zoomed spread stayed soft for the session. Its own doc
+    states the invariant its first line violated.
+  * the tile loop handed page 0's pixels to `make_tile` with page N's `uv`.
+  * `Ctrl+C` filtered the buffer by path and pasted page 1.
+  `FullImage::is(&ImgKey)` is the one spelling, and it is a `page` comparison rather
+  than a built key so it allocates nothing on a per-frame path.
 - **`prev_anchor`'s `None` means two things**: there is no turn before the first
   one, **and** the position asked about is not an anchor at all. It walks the
   tiling forward from page 0 comparing successors, so a second half is never the
@@ -371,15 +401,36 @@ are wrong in a way that *looks* right.
   spread of the volume from a resumed position, a grid pick or a `Del`, with
   `loop_back` both on and off. `prev_turn` asks `anchor_of` to tell the two
   apart; any new caller must too.
-- **Backward is O(distance from the front), and that is not an oversight.**
-  Forward is one addition (`next_anchor = a + turn_len(a)`). Backward cannot be
-  local: whether `b` is an anchor depends on `b-1`'s turn length, which depends on
-  `b-2`'s, and it only resolves by walking back to page 0. Three local rules were
-  tried and all three are wrong on `[Single, Single, Single, Double]` (they are
-  enumerated in `prev_anchor`'s docs). The walk is in-memory arithmetic over
-  cached dimensions — microseconds — against a decode measured in hundreds of
-  milliseconds. **Do not "optimise" it into a two-candidate test**, and do not
-  write in a doc that both directions are a bounded number of reads.
+- **Both directions are O(distance from the front), and that is not an oversight.**
+  `next_anchor = a + turn_len(a)` is one addition *when asked of an anchor* — but
+  **the navigation the app performs is `next_turn`, which snaps first**, and the snap
+  is `anchor_of`, which walks forward from `(0,0)`. So a forward press pays the same
+  walk a backward one does, plus one addition. Three places asserted otherwise and
+  all three are corrected: `anchor_of`'s doc, the design spec, and RULING 4 (which
+  had the direction backwards as well as the bound). Measured as a *count*, since a
+  timing assertion here would be an artefact
+  (`a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor`): 10 `dims` reads
+  per turn for `anchor_of`, 5 for `prev_anchor`, exactly linear in the turns behind
+  the cursor — ~2000 reads at the back of a 2000-file gallery. Microseconds against a
+  decode measured in hundreds of milliseconds, so **not a hang**; but not O(1) either,
+  and it is the claim that says no pairing table is needed. The deferred fix (a
+  per-gallery anchor list) and its cost are in `TODO.md`. Backward cannot be made
+  local at all: whether `b` is an anchor depends on `b-1`'s turn length, which
+  depends on `b-2`'s, and it only resolves by walking back to page 0. Three local rules
+  were tried and all three are wrong on `[Single, Single, Single, Double]` (they are
+  enumerated in `prev_anchor`'s docs). **Do not "optimise" either walk into a
+  two-candidate test**, and do not write in a doc that a direction is a bounded
+  number of reads.
+- **A document is stepped *over* unless its page count is learned before the step,
+  and `goto` learns it for the turn's *other half*.** `pages_in` answers 1 for a file
+  nobody has asked about, `pairable` treats an unmeasured page as pairing
+  optimistically, and `step` applies `turn_len` one page at a time — so in
+  `[a, b, vol.tiff(200pp), c]` the step from `b` claims the document's first page as
+  its own second half and lands on `c`, and the tiling then says "one page" for the
+  rest of the session. **199 pages unreachable by pressing `→`**, which is the content
+  this feature exists for; the non-manga path is immune because `Gallery::next` steps
+  one page and lands on it. `goto`'s `learn_partner_pages` reads the other half's file
+  — one cache-first four-byte read, once per file for the session.
 - **`prev_anchor` asks `step_no_wrap`, and `next_anchor` is the only caller of
   the wrapping `step`.** A turn must not straddle the wrap: with looping on, the
   last turn truncates to one page so the tiling is identical to the same gallery
@@ -390,12 +441,41 @@ are wrong in a way that *looks* right.
   it — `footprint`, the crop frame, `dim_bands`, the tile source-pixel mapping,
   EXIF, `Ctrl+S`, `Ctrl+C` — and none of them needed to change for this feature,
   which is the evidence that they were already correct. `shown_partner` is a
-  *second* key, adopted in the same act as `shown` in `sync_shown` (so the turn
-  cannot show one page from this turn beside a stale page from the last), and
-  `turn_pages` is **cursor first** because `spread_rects` returns rects in input
-  order. Repointing any of those paths at the turn is the change that would break
-  them: the cursor page is the one the reader asked for, and it is the only one
-  `Del`, save and copy are statements about.
+  *second* key, and `turn_pages` is **cursor first** because `spread_rects` returns
+  rects in input order. Repointing any of those paths at the turn is the change
+  that would break them: the cursor page is the one the reader asked for, and it
+  is the only one `Del`, save and copy are statements about.
+- **`shown_partner` is DERIVED every frame, never latched, and that is the whole
+  lesson of this feature's final review.** It was adopted in the same act as
+  `shown`, inside `sync_shown`'s `if previews.contains_key(&cur) && shown != cur`
+  gate — and that gate is **false on every frame the cursor stands still**, while
+  `M`, `O` and `X` all re-`goto` **without moving the cursor**. So `→ → → M` in a
+  folder of single pages halves the panel and lays out *one* page: a half-width
+  picture beside an empty half, no error and no counter, until the next `→`
+  produces a correct spread. Now `sync_shown_partner()` runs every frame, from
+  `shown`'s own position via `Gallery::pos_of`. Two consequences:
+  * **The call's position is the property, not its presence** — it sits *after*
+    the adopt gate. `tests/spreads.rs::the_turns_second_half_is_derived_not_latched`
+    brace-matches the gate and fails if the call is inside it. Verified by moving
+    it back: the test fails. A `contains` scan would have passed on the bug.
+  * **The workaround it needed is deleted.** `invalidate_path` used to clear and
+    re-ask `shown_partner`, because after a partner's re-export the gate was false
+    from there to the end of the session. With derivation, the next frame asks the
+    pairing again — which also covers the re-export that made the partner *stop*
+    pairing, a case the re-arm could not.
+  * **I2 was the same defect from the other side**: a partner whose decode reveals
+    it is a two-page scan collapses the *plan* (`arrival_reschedules`), and a latch
+    left three printed pages squashed into one viewport until the reader navigated.
+    Re-deriving every frame closes that as a class rather than at one site.
+  * **The re-derivation does not snap to an anchor**, deliberately: `anchor_of` is
+    an O(distance from the front) walk and this is per-frame. It does not need to,
+    because `lone`'s three arms can only go from false to true as a dimension
+    resolves, so **an anchor can only gain turns around it, never lose its own** —
+    `tests/spreads.rs::an_anchor_stays_an_anchor_as_the_pairing_learns`.
+  * **The review question to ask of anything here: "what is the lifetime of this
+    value, and who re-derives it?"** C1, C2, I2 were all a value latched at one
+    event and read at another, and each had a passing test or scan asserting the
+    call existed.
 - **The turn's second half gets its own xform and its own `orig`, and the slot is
   its *transformed* footprint.** `edits` is keyed by path precisely so turning
   one page does not turn the next, so reading the partner's transform off the
@@ -486,6 +566,19 @@ are wrong in a way that *looks* right.
   this app's swapchain on this box — three routes, all blank, including for the
   untouched single-image path — so an eyeball is still owed and is recorded in
   `TODO.md`.
+- **The eyeball checklist had to be extended, because the two critical findings
+  were both invisible to it.** Every check on it was *visual* — seam position, a
+  cover where a cover belongs, sharpness, rotation — and both criticals produced a
+  screen that is perfectly laid out and shows the **wrong picture**: `M` on a
+  stationary cursor laid out one page where a spread belongs (and a lone page at
+  half width beside an empty half is *exactly* what the seam rule prescribes, so the
+  existing checks pass on it), and page 0's tiles were cut for page N's rectangle. A
+  latch produces a stable, plausible screen, which is precisely what a screenshot
+  judges well. The three added checks are "a spread **appeared**", "the tiles are
+  *that page's*", and "`Ctrl+C` on page 2 pastes page 2" — named after the failure
+  each would have caught, and the last one is outside the window entirely.
+  `tests/probe_chords.ps1` cannot see it either: it uses a real `.jpg`, which has one
+  page.
 
 ## Transforms, crop and saving
 
@@ -978,10 +1071,20 @@ an edit.
 - Four suites assert against **source text**, deliberately, and say why in their
   module docs: `keybindings.rs` (a shortcut that does not exist is otherwise
   unobservable), `renderer.rs` (the probe's early exit is in a binary),
-  `spreads.rs` (manga mode's `invalidate_path` wiring, and that a partner's
-  arrival re-plans), `unit.rs` (the glyph scan). They check the *premise* against
-  a real context or queue, not a comment — and none of them verifies that a bound
-  key actually works, because that needs a synthetic keystroke.
+  `spreads.rs` (manga mode's `invalidate_path` wiring, that a partner's
+  arrival re-plans, and the five fix-wave scans), `unit.rs` (the glyph scan). They
+  check the *premise* against a real context or queue, not a comment — and none of
+  them verifies that a bound key actually works, because that needs a synthetic
+  keystroke.
+- **A source scan that checks a call's *presence* has already failed here, and the
+  fix wave added the check that works.** The `shown_partner` latch had its
+  assignment present, in the right function, doing the right call; what was wrong
+  was *which block* it was in. So
+  `the_turns_second_half_is_derived_not_latched` brace-matches the adopt gate with
+  a `block_after` helper and asserts the derivation is **not** inside it, plus a
+  byte-offset check that the call really is after the block — and it was verified
+  by moving the call back inside, where it fails. **When the defect is a value
+  computed at the wrong time, presence is not the property; position is.**
 - `main.rs` is unreachable from any test. Every rule that has bitten us has been
   moved into `lib.rs` for that reason: the job planner, the resize policy, the
   transform algebra, `dim_bands`, the page cursor, the preview-cache eviction

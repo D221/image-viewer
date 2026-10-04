@@ -1263,6 +1263,17 @@ struct TilePage {
 
 struct FullImage {
     path: PathBuf,
+    /// Which **page** of `path` these pixels are. Not decoration:
+    /// `decode_page` returns `full: None` for every page past the first of a
+    /// multi-page TIFF, so a document's `self.full` is whichever page's decode
+    /// landed — and a struct without this field hands page 1's pixels to page 3's
+    /// rect. Keyed by `PathBuf` only, the three sites that read it were each a
+    /// silent wrong-picture bug: the tile loop cutting page 0 with page N's `uv`,
+    /// `Ctrl+C` pasting page 1 of a document past page 1, and `needs_full`
+    /// answering "already done" for a partner that is another page of the same
+    /// document — which is *every turn inside a manga volume*, and left the second
+    /// half of a zoomed spread permanently soft. See [`FullImage::is`].
+    page: u32,
     data: Arc<ImageData>,
     tiles: HashMap<(u32, u32), Tile>,
     load_ms: u64,
@@ -1271,6 +1282,21 @@ struct FullImage {
     /// an oriented buffer without reaching back into the preview cache — and
     /// because the value that describes a buffer is a property of the buffer.
     exif_tag: u16,
+}
+
+impl FullImage {
+    /// Whether these are the pixels of `key` — **file and page**, the whole
+    /// [`ImgKey`].
+    ///
+    /// Every site that asks "is this full buffer the one for this image" goes
+    /// through here rather than spelling `f.path == key.path`, because that
+    /// spelling is the bug: it is `true` for every page of a document, and the
+    /// answer "yes, this is that page's full decode" is then given by a buffer
+    /// holding a different page's pixels. A `page`-field comparison rather than a
+    /// built `ImgKey` so the check allocates nothing on a path that runs per frame.
+    fn is(&self, key: &ImgKey) -> bool {
+        self.path == key.path && self.page == key.page
+    }
 }
 
 /// `scale` / `offset` only matter while `fit` is false.
@@ -1703,6 +1729,28 @@ impl MyApp {
         if let Some(p) = self.gallery.current().map(|p| p.to_path_buf()) {
             self.gallery.learn_pages(&p);
         }
+        // ...and how many pages the **turn's other half** has, when that half names a
+        // different file.
+        //
+        // **Without this a whole document is stepped over, and the content manga mode
+        // is for is exactly what it is stepped over.** `pages_in` answers 1 for a file
+        // nobody has asked about, `step` applies `turn_len` one page at a time, and so
+        // a step of two pages from a portrait page in front of an unlearned
+        // multi-page document lands *past* it: in a gallery
+        // `[a, b, vol.tiff(200pp), c]` the step from `b` pairs optimistically (the
+        // document's page 1 has no measured dimensions, and `pairable` treats unknown
+        // as "pairs"), consumes the document's first page as its own second half, and
+        // lands on `c` — and because the count is still unlearned, the tiling keeps
+        // saying "one page" and every further step treats 199 printed pages as one
+        // file. Pressing `→` never reaches them. The non-manga path is immune because
+        // `Gallery::next` steps one page and lands on it.
+        //
+        // **Same trade `learn_shapes`' read-ahead makes, and the same answer**: one
+        // four-byte read, `learn_pages` is cache-first so it is paid once per *file*
+        // for the session, and per navigation the cost is one `HashMap` lookup on a
+        // path that is going to be walked anyway. Manga mode only, so a photo folder —
+        // where there is no second half and every file is one page — is untouched.
+        self.learn_partner_pages();
         // How large this page *displays* at, and the next one's, which is what the
         // manga pairing judges a page by: a turn is decided by asking about the page
         // after it, so learning only this one would let a spread re-flow under the
@@ -1772,10 +1820,124 @@ impl MyApp {
     /// `None` also when the turn holds one page or the gallery is empty — see the
     /// library function for why those need no separate case here.
     fn turn_partner(&self) -> Option<ImgKey> {
+        self.turn_partner_at(self.gallery.page_pos())
+    }
+
+    /// [`Self::turn_partner`] for **any** position, not just the cursor's.
+    ///
+    /// The position is a parameter because "the turn the reader is looking at" and
+    /// "the turn the cursor is on" are two different questions during the lag
+    /// between them — `shown` lags `cur` for the length of a decode — and answering
+    /// the second while painting the first is how a spread ends up showing a page
+    /// from this turn beside one from the last. `shown_partner` is derived through
+    /// this; the plan is not, because the plan is about what is *wanted*.
+    ///
+    /// **A position that is not an anchor is not snapped here, and that is
+    /// deliberate.** Snapping is [`image_viewer::anchor_of`], an O(distance from the
+    /// front) walk, and this runs every frame. It does not need to: the only position
+    /// it is asked about is `shown`'s, which was adopted from a `cur` that `goto`'s
+    /// `snap_to_turn_anchor` had already put on an anchor, and every way the pairing
+    /// can change afterwards makes turns **shorter or leaves them alone** —
+    /// `lone(anchor)`'s three arms are `is_lead`, `shape_of(anchor) == Double` and
+    /// `!pairable(anchor, next)`, and a dimension only ever resolves from unknown
+    /// (`Shape::Single`) to `Single` or `Double`, so `lone` can only go true and a
+    /// turn can only shrink. A turn that shrinks frees its second half, so a position
+    /// that was an anchor cannot stop being one, and cannot become the second half of
+    /// a turn behind it either (that would need some *earlier* anchor to stop being
+    /// lone). The four things that re-pair by choice — `M`, `O`, `X` and loading a
+    /// spread store — all re-`goto`, which re-snaps.
+    fn turn_partner_at(&self, pos: PagePos) -> Option<ImgKey> {
         if !self.config.manga_mode {
             return None;
         }
-        image_viewer::turn_partner(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx())
+        image_viewer::turn_partner(pos, self.spreads.lead_lone, &self.page_ctx())
+    }
+
+    /// Where "what is on screen" sits in the flat page sequence, as a position.
+    ///
+    /// **`shown` is a key and the pairing is asked in positions**, and this is the
+    /// bridge. It exists because `ImgKey` does not know its file index and the
+    /// gallery is a `Vec`, so turning one back into the other is a scan — see
+    /// [`Gallery::pos_of`], which this defers to.
+    ///
+    /// **The fast path is the whole of the cost.** `shown` almost always *is* `cur`,
+    /// and `cur` was built from [`Gallery::page_pos`], so the position is already in
+    /// hand and the scan never runs. The scan is for the lag — the frames between a
+    /// navigation and its decode landing — which are the frames where a full-res
+    /// decode is in flight and frames are hundreds of milliseconds apart, so the few
+    /// hundred path comparisons are not what the frame is spending its time on.
+    ///
+    /// `None` when nothing is on screen, and when the file is no longer in the
+    /// gallery at all (removed from under the picture, or the folder was filtered
+    /// or reloaded). Both mean "no turn", which is the honest answer: `turn_partner`
+    /// of an unknown position cannot be a turn of anything.
+    fn shown_pos(&self) -> Option<PagePos> {
+        let shown = self.shown.as_ref()?;
+        if self.cur.as_ref() == Some(shown) {
+            return Some(self.gallery.page_pos());
+        }
+        self.gallery.pos_of(shown)
+    }
+
+    /// Re-derive `shown_partner` from where `shown` is. **Never a latch, and the
+    /// ordering in [`Self::sync_shown`] is the property** — the call sits after the
+    /// adopt gate, not inside it.
+    ///
+    /// It was a latch, and the gate is why: the only assignment sat inside
+    /// `if previews.contains_key(&cur) && shown != cur`, which is false every frame
+    /// the cursor is standing still — so `M` (which re-`goto`s without moving the
+    /// cursor), `O` at `(0, 0)` and `X` all changed what a page is and the screen
+    /// kept the old answer. The repro is four keystrokes: `→ → → M` in a folder of
+    /// single pages leaves `pages` with **one** entry, so `spread_fit` fits a page
+    /// into the now-half-width panel and the reader gets a half-width picture beside
+    /// an empty half, until the next `→` produces a correct spread and the bug reads
+    /// as "mostly working".
+    ///
+    /// The other reason it has to be unconditional is the same defect seen from the
+    /// other side: a partner whose decode reveals it is a two-page scan collapses the
+    /// *plan* (`arrival_reschedules` re-runs `schedule`), and nothing re-derived the
+    /// pair, so three printed pages stayed squashed into one viewport until the reader
+    /// navigated. Deriving every frame closes that as a class rather than one site.
+    fn sync_shown_partner(&mut self) {
+        let want = self.shown_pos().and_then(|pos| self.turn_partner_at(pos));
+        self.shown_partner = want;
+    }
+
+    /// Learn the page count of the file the turn's second half names, when that half
+    /// is a **different file** from the one the cursor is on.
+    ///
+    /// Called from [`Self::goto`] and nothing else. The gap it closes is a whole
+    /// multi-page document being stepped over: `pages_in` answers 1 for a file nobody
+    /// has asked about, `pairable` treats an unmeasured page as pairing optimistically,
+    /// so a turn anchored just before a 200-page document claims its first page as the
+    /// turn's second half, the step lands on the *file after* it, and the tiling then
+    /// says "one page" for the rest of the session — so `→` never reaches pages 2..200.
+    /// `goto`'s own comment has the traced version.
+    ///
+    /// **`None` — and so no read — for a lone turn, and for a partner inside the same
+    /// document**, whose count `learn_pages` has already answered because it is the
+    /// cursor's own file. So the added work per navigation is one `HashMap` lookup for
+    /// a cached count and a four-byte read the first time a file is visited.
+    ///
+    /// Manga mode only, and it takes the partner from [`Self::turn_partner`] rather
+    /// than "the next page": a turn that holds one page has no second half to learn
+    /// anything about, and asking about a page the turn does not contain would learn a
+    /// count nothing is asking about.
+    fn learn_partner_pages(&mut self) {
+        let Some(partner) = self.turn_partner() else {
+            return;
+        };
+        // The cursor's own **file**, from the gallery and not from `self.cur`: `goto`
+        // calls this before `cur` is rebuilt, so `cur` is still the position the
+        // navigation is leaving and the "is it the same file" test below would
+        // compare the wrong two.
+        let Some(here) = self.gallery.current().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        if partner.path == here {
+            return;
+        }
+        self.gallery.learn_pages(&partner.path);
     }
 
     fn step(&mut self, ctx: &Context, forward: bool) {
@@ -2081,9 +2243,16 @@ impl MyApp {
     ///
     /// Takes the *key*, not the path, because "is the full decode done" is a
     /// question about a page: page 3 of a document has its own full decode and its
-    /// own failure, and asking about the file would answer for page 1.
+    /// own failure, and asking about the file would answer for page 1. **The first
+    /// line was the one that broke that**: it compared paths, so on a turn inside a
+    /// document — every turn in a manga volume at the default `lead_lone`, where the
+    /// partner is `(index, page + 1)` of the *same file* — it answered "done" from
+    /// the cursor page's buffer, `plan_jobs` was handed `partner_needs_full == false`,
+    /// no `Kind::Full` job was ever planned for the partner, and the second half of a
+    /// zoomed spread stayed at preview resolution for the session while the expensive
+    /// decode sat in the queue never being asked for.
     fn needs_full(&self, key: &ImgKey) -> bool {
-        if self.full.as_ref().is_some_and(|f| f.path == key.path) {
+        if self.full.as_ref().is_some_and(|f| f.is(key)) {
             return false;
         }
         if self.failed.contains(&(key.clone(), Kind::Full)) {
@@ -2349,7 +2518,8 @@ impl MyApp {
                             let exif_tag =
                                 self.previews.get(&key).map_or(0, |pv| pv.exif_tag);
                             self.full = Some(FullImage {
-                                path: key.path,
+                                path: key.path.clone(),
+                                page: key.page,
                                 data,
                                 tiles: HashMap::new(),
                                 load_ms,
@@ -2447,12 +2617,26 @@ impl MyApp {
 
     /// Switch what's on screen as soon as the requested image's preview exists.
     ///
-    /// **The partner is adopted in the same act as the cursor**, and that is the
-    /// whole of what it takes: `shown` lags `cur` while the wanted preview
-    /// decodes, so the spread's other half must lag with it rather than arrive on
-    /// its own schedule. Adopting them separately is how a spread ends up showing
-    /// one page from this turn beside a stale page from the last, and the lag
-    /// makes that the common case rather than a race.
+    /// **Two things happen here, and the second is not inside the first.** `shown` is
+    /// adopted when the wanted preview lands — it lags `cur` while that decodes, and
+    /// this is the only place it catches up. `shown_partner` is then **re-derived every
+    /// frame**, from where `shown` is, by [`Self::sync_shown_partner`].
+    ///
+    /// **The separation is the fix, and it is load-bearing in both directions.**
+    ///
+    /// *Deriving it after the gate* is what stops it being a latch. It used to be
+    /// assigned inside `if previews.contains_key(&cur) && shown != cur`, which is false
+    /// on every frame the cursor is standing still — and `M`, `O` and `X` all re-`goto`
+    /// **without moving the cursor**. So all three changed what a page is and the screen
+    /// kept the old answer: `→ → → M` in a folder of single pages halves the panel and
+    /// lays out **one** page, so the reader gets a half-width picture beside an empty
+    /// half, and only the next `→` produces a correct spread. `invalidate_path` had
+    /// already found this same gate and worked around it for the one case it knew
+    /// about; the workaround is gone now, because there is no latch to work around.
+    ///
+    /// *Deriving it from `shown`'s position rather than the cursor's* is what stops the
+    /// two halves disagreeing. During the lag `shown` and `cur` are different images,
+    /// and `turn_partner` read the cursor's turn while this frame painted `shown`'s.
     fn sync_shown(&mut self, ctx: &Context) {
         let Some(cur) = self.cur.clone() else {
             self.shown = None;
@@ -2469,22 +2653,26 @@ impl MyApp {
         // comparison cannot, because the two have the same path.
         if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
             self.shown = Some(cur.clone());
-            // Read here rather than in the paint loop, because `turn_partner`
-            // asks about the **cursor's** turn while this frame paints `shown`'s.
-            // Manga mode off answers `None` from the gate in that function, so
-            // this is not a branch on the setting and needs no comment of its own.
-            self.shown_partner = self.turn_partner();
             self.view.fit = true;
         }
+        // **Outside the gate on purpose, and this is the assertion that keeps it
+        // outside** (`tests/spreads.rs`,
+        // `the_turns_second_half_is_derived_not_latched`). One frame, unconditionally:
+        // the mode toggle, the leading-lone nudge, `X`, a learned shape that collapses
+        // the turn, a learned page count that moves its far edge, a re-export that
+        // changes the pairing — every one of them is a change to what the turn *is*,
+        // and re-deriving is what makes them take effect without a navigation.
+        self.sync_shown_partner();
         // Adopt the full image that came with the preview's decode pass
         // (single-pass files), whether it just arrived or was preloaded
         // while the user was on a neighbouring image.
         if let Some(pv) = self.previews.get(&cur) {
             if let Some(data) = &pv.full {
-                if self.full.as_ref().map_or(true, |f| f.path != cur.path) {
+                if self.full.as_ref().map_or(true, |f| !f.is(&cur)) {
                     let load_ms = data.load_time.as_millis() as u64;
                     self.full = Some(FullImage {
                         path: cur.path.clone(),
+                        page: cur.page,
                         data: Arc::clone(data),
                         tiles: HashMap::new(),
                         load_ms,
@@ -2514,8 +2702,13 @@ impl MyApp {
                 }
             }
         }
+        // `self.full` holds one page, and the picture on screen is `shown`. Dropping it
+        // whenever those two name different pages is what keeps a document's tile
+        // buffer from being page 0's while page 3 is on screen — `decode_page`
+        // returns no full buffer for a page past the first, so without the page in
+        // the comparison the two are the same file and the drop never fired.
         if let Some(s) = &self.shown {
-            if self.full.as_ref().is_some_and(|f| f.path != s.path) {
+            if self.full.as_ref().is_some_and(|f| !f.is(s)) {
                 self.full = None;
             }
         }
@@ -2807,42 +3000,32 @@ impl MyApp {
             // outcome that looks like a bug.
             self.shown = None;
         }
-        // The partner goes too, **and on its own condition** — this function is
-        // told one path, and in a turn that path is either half. `shown` surviving
-        // says nothing about the partner's pixels: `previews.retain` above has
-        // already dropped them, so leaving `shown_partner` pointing at the file
-        // would have `central` lay out a two-page turn and paint a hole in one
-        // half, for as long as the reader stayed put.
+        // **The partner needs no arm and no re-arm here, and did once.**
         //
-        // Clearing it reflows the turn to one page, which is the reflow-under-the-
-        // reader case `learn_shapes` calls worse than being wrong from the start.
-        // It is accepted because the alternative is not "wrong from the start", it
-        // is a blank half — and because `shown` is not cleared either, so the
-        // cursor page's pixels stay exactly as solid as they were.
+        // This used to carry a twenty-line comment and an `if` that cleared the turn's
+        // second half when the changed path was the *partner's*, then re-asked it in
+        // the same breath. Both halves are gone, and the reason is worth keeping: the
+        // re-arm existed because that field was **latched**, assigned only inside
+        // `sync_shown`'s `if previews.contains_key(&cur) && shown != cur` gate — which
+        // is false on every frame the cursor stands still, so when the partner was the
+        // file that changed, `shown` survived, equalled `cur`, and nothing was assigned
+        // again for the rest of the session. The spread collapsed to one page and stayed
+        // collapsed after the partner's fresh decode had landed and was perfectly
+        // paintable.
         //
-        // **And then it is re-asked, in the same breath, because the reflow is
-        // only acceptable if it is temporary.** The re-arm is *not* left to
-        // `sync_shown`: that arm is gated on `shown != cur`, and when the
-        // **partner** is the file that changed `shown` survives and still equals
-        // `cur`, so the gate is false from here to the end of the session and
-        // `shown_partner` is never assigned again. `turn_partner` has exactly one
-        // caller, so there is no other path back: the spread would collapse to one
-        // page and stay collapsed after the partner's fresh decode landed and was
-        // perfectly paintable, with no error and no perf counter. That is reachable
-        // from the ordinary watcher — re-save the page beside the cursor — and it
-        // is the "spread silently becomes a lone page for the session" failure this
-        // function's other half exists to prevent.
+        // The latch is gone: `sync_shown_partner` re-derives the answer from `shown`'s
+        // own position **every frame**, and this function has already run
+        // `forget_shapes` / `forget_page_count` / `spreads.forget_file`, so the very
+        // next `frame_prelude` asks the pairing the question again and gets whatever the
+        // re-exported file actually is. That is strictly better than the re-arm: it also
+        // covers the case where the re-export made the partner *stop* pairing (the turn
+        // correctly collapses to one page) rather than only the case where it changed
+        // the pixels.
         //
-        // The `shown.is_some()` guard is what keeps this from *inventing* a
-        // partner for a turn that is not on screen: with nothing adopted, the next
-        // `sync_shown` will do the adopting and set the partner with it.
-        if self.shown_partner.as_ref().is_some_and(|k| k.path == p) {
-            self.shown_partner = if self.shown.is_some() {
-                self.turn_partner()
-            } else {
-                None
-            };
-        }
+        // What still holds is the *order*: `previews.retain` above drops the partner's
+        // pixels, so the turn must not keep a half whose texture is gone, and the
+        // derivation reads the same dropped `previews` the paint does. One frame of
+        // disagreement is not possible — both happen inside the same `sync_shown` call.
         if self.cur.as_ref().is_some_and(|c| c.path == p) {
             self.error = None;
             self.waiting_load = false;
@@ -3132,12 +3315,38 @@ impl MyApp {
             return;
         };
         let p = cur.path.clone();
+        // **A page of a multi-page document is refused, and the refusal is the
+        // feature.** `Ctrl+S` refuses it because the lossless path rewrites the whole
+        // file and the fallback starts at page 1, so a save would write page 1's pixels
+        // under the document's name. That reason is about *saving*; the clipboard has no
+        // such write, and the fast path below now compares the page as well as the file,
+        // so it hands over the right pixels. What is still not a thing this app can do
+        // is put **a page's** pixels on the clipboard and call it "the image as it is
+        // framed": the crop and the turn live in `ImageEdits`, which is keyed by *path*
+        // because they are an edit to the document — so a frame drawn on page 1 would be
+        // applied to page 3's picture, and the result is a valid picture of the wrong
+        // part of the scan, which is the one outcome with no error anywhere. Refusing
+        // until the save/clipboard path carries a page is the honest answer, and it is
+        // the same answer `Ctrl+S` already gives on the same keypress family.
+        if cur.page > 0 {
+            self.error = Some(format!(
+                "Cannot copy a single page of a multi-page document ({}/{}). \
+                 The clipboard copies a whole file, and the crop and turn are the \
+                 document's.",
+                cur.page + 1,
+                self.gallery.pages_in_current()
+            ));
+            return;
+        }
         let edit = self.edits.get(&p);
         let (xform, crop) = (edit.xform, edit.crop);
         let edited = !edit.is_identity();
 
         // Fast path: full-res pixels already in memory, EXIF orientation applied.
-        if let Some(f) = self.full.as_ref().filter(|f| f.path == p) {
+        // **The key, not the path** — see `FullImage::is`. With the page missing this
+        // filter was true for every page of a document, so `Ctrl+C` on page 2 pasted
+        // page 1's pixels with no error and no counter.
+        if let Some(f) = self.full.as_ref().filter(|f| f.is(&cur)) {
             match image_viewer::region_for_save(&f.data, f.exif_tag, xform, crop) {
                 Some(out) => match set_clipboard_rgba(out.width, out.height, out.rgba) {
                     Ok(()) => self.notice = Some(copied_notice(out.width, out.height, &edit)),
@@ -3308,6 +3517,13 @@ impl MyApp {
             return vec![(shown.clone(), cursor_dims, cursor_xform)];
         };
         let pos = self.gallery.page_pos();
+        // **`shown`'s position, not the cursor's.** During the lag between a navigation
+        // and its decode landing these are different images on different turns, and
+        // stepping from the cursor to look for the partner walked the wrong turn — the
+        // `filter` below then failed and the layout fell back to the cursor page's
+        // dimensions. With the pair derived from `shown` (`sync_shown_partner`) this
+        // lookup is the one it was written to be.
+        let pos = self.shown_pos().unwrap_or(pos);
         // `step_no_wrap` rather than the wrapping step, because a turn must not
         // straddle the wrap — the same rule `PageCtx::step_no_wrap` is built on and
         // the same one `turn_partner` steps over. The `key` comparison is what
@@ -4073,7 +4289,12 @@ impl MyApp {
         // re-cut on every navigation.
         let cursor_page = || {
             self.full.as_ref().and_then(|f| {
-                (f.path == shown.path).then(|| TilePage {
+                // **The key, not the path.** This closure hands `f.data` — one page's
+                // pixels — to `make_tile`, and the rect and density beside it are
+                // `shown`'s. With the page missing, page 0's buffer satisfied the check
+                // on every page of a document and the loop cut **page 0's tiles** with
+                // page N's `uv`: page 0 drawn over page N, no error and no counter.
+                (f.is(&shown)).then(|| TilePage {
                     data: Arc::clone(&f.data),
                     // texture px per source px
                     preview_density: tex_w / img_px.x,
@@ -4136,7 +4357,7 @@ impl MyApp {
                 continue;
             }
             if i == 0 {
-                if let Some(f) = self.full.as_mut().filter(|f| f.path == shown.path) {
+                if let Some(f) = self.full.as_mut().filter(|f| f.is(&shown)) {
                     maps.push((std::mem::take(&mut f.tiles), TileMapOwner::Full));
                 }
             } else if let Some(pv) = self.previews.get_mut(&pages[i].0) {

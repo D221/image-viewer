@@ -305,7 +305,7 @@ should not quietly do that.
 | `D` | Toggle **right-to-left** pages (only while manga mode is on) |
 | `O` / `Shift+O` | One fewer / one more page opening alone at the front of the gallery |
 | `X` | Toggle the current page between single and double (takes a whole turn to itself) |
-| `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears |
+| `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` |
@@ -323,8 +323,15 @@ too, under the same names.
 The **seam is the middle of the picture** and there is **no gutter** between the two
 pages, so facing pages touch and a drawing that crosses the fold is unbroken. A lone
 page is not centred either — it hangs off the seam on its own side, at no more than
-half the window's width, which is what a book's cover does, and which is also what
-distinguishes a lone page from a page whose partner has not decoded yet.
+half the window's width, which is what a book's cover does.
+
+A lone page and a page **whose partner has not arrived yet look the same**: one or two
+slots are laid out, and the far half is empty either way. That is deliberate — a
+half-width page in an empty half is the cover, and centring it instead would stop it
+sharing the seam every other turn's pages meet on — but it means a blank half is not
+by itself a sign of a problem. Wait a moment: the partner is in the decode queue and
+will appear on its own. If it does not, the pairing is what changed, and the notice
+line will say so.
 
 **Every navigation key moves as one unit.** The arrows, `Space`, `PgUp` / `PgDn` and
 both mouse side buttons are all resolved through one rule, so under right-to-left a

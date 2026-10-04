@@ -933,11 +933,24 @@ pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -
 ///
 /// The bounding box of the rects [`spread_rects`] actually returned. A second
 /// statement of the seam rule would be a second rule: `rtl` decides which page is
-/// which side, the sub-pixel seam slide in the paint path does not move any rect's
-/// centre away from what this returns, and a "centre" computed from the seam and the
+/// which side, and a "centre" computed from the seam and the
 /// widths by hand agrees with the picture only until one of those changes. So the
-/// cost is one two-element `Vec` per zoom frame - nothing beside a decode - and the
-/// two cannot drift apart.
+/// cost is one two-element `Vec` per zoom frame - nothing beside a decode - and
+/// the two cannot drift apart.
+///
+/// **The paint path's sub-pixel seam slide does move this centre, by up to half a
+/// physical pixel, and it is harmless.** The slide is a rigid translation of the
+/// *partner's* rect by a sub-pixel amount `d` - the two pages share one edge, so
+/// snapping the cursor page's `x` independently would leave a hairline gap of `d` at
+/// the seam - so the content's box moves by `d` on one side and the centre with it by
+/// `d / 2`. An earlier version of this doc claimed the slide "does not move any rect's
+/// centre away from what this returns", and that was false in the exact direction the
+/// number is used: this is the anchor a zoom measures from, so the error is a point on
+/// the point under the cursor. It is a fraction of a device pixel, it is one-sided (the
+/// cursor page does not move, so the slide can only *close* a gap, never open one), and
+/// it is not worth a second rule. **Stated here rather than fixed**, so the next reader
+/// does not derive a seam rule from this box and then find the hairlines it cannot
+/// close.
 ///
 /// **A turn with no pages answers the panel centre**, exactly what `central` computed
 /// for itself before a turn existed, and bit for bit: `panel[0] + panel[2] * 0.5` is
@@ -1728,10 +1741,19 @@ pub fn wants_exif(panel_visible: bool, exif_pending: bool) -> bool {
 /// **measurement**, and a measurement can change the pairing. That is the whole
 /// reason this asks about the partner and not about the cursor alone.
 ///
-/// [`lone`] reads `flat`, [`shape_of`] and `pairable`, and `pairable` reads the
-/// dimensions of exactly two pages - the anchor and its successor. So **only
-/// those two pages can change the turn**, and no other neighbour can, however
+/// [`lone`] reads [`PageCtx::step_no_wrap`] (through `is_lead`, its front-matter
+/// arm) and [`PageCtx::dims`] (through `shape_of` and `pairable`), and `pairable`
+/// reads the dimensions of exactly two pages - the anchor and its successor. So
+/// **only those two pages can change the turn**, and no other neighbour can, however
 /// many of them land.
+///
+/// (An earlier version of this line said `lone` reads `flat`. It did, and it does not
+/// any more: the front-matter arm is now `is_lead`, which asks
+/// `step_no_wrap(pos, -lead_lone)` precisely because `flat` is O(files) and refused to
+/// answer for a file whose count had not been learned. **The conclusion this function
+/// draws is unchanged** - the two pages named are the same two - but a premise that
+/// names a function no longer on the path is how a future editor ends up optimising
+/// the wrong thing.)
 ///
 /// The partner's arrival is therefore a re-plan trigger, and the case it exists
 /// for is this: [`pairable`] treats unknown dimensions optimistically (nothing to
@@ -2353,6 +2375,21 @@ pub fn dim_bands(outer: [f32; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
 /// Pure, so the policy is testable. It lives here rather than in the app because
 /// the app is a binary and this is the sort of thing that is only ever noticed by
 /// its memory growing.
+///
+/// **A manga turn's second half is in this set only when `shown` names it, and that
+/// is a gap, not an oversight** — an earlier design note claimed "the partner is
+/// index ±1, well inside `PRELOAD_RADIUS = 3`, so this needs no change", and that is
+/// **false for a turn inside a document**: the partner there is `(index, page + 1)`,
+/// and the window above inserts `ImgKey::first` of each neighbour, i.e. `(index±k,
+/// 0)`. So an in-document partner is not protected by position.
+///
+/// It is protected in practice, by the thing that cannot be evicted anyway:
+/// `central` stamps the turn's second page's `used` every frame it is on screen, so
+/// it is never the LRU victim while the reader is looking at it, and a turn of two
+/// files is `ImgKey::first` of a neighbour and *is* in the set. **Recorded as a
+/// premise to distrust rather than a guarantee**: nothing here is what makes it safe,
+/// and if the eviction policy is ever changed to prefer something other than `used`,
+/// this set is where the in-document partner has to be added.
 pub fn protected_preview_keys(
     files: &[PathBuf],
     index: usize,
@@ -7474,9 +7511,14 @@ pub fn turn_partner(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Optio
 
 /// The anchor after `a`, or `None` past the end with looping off.
 ///
-/// Forward is one addition, and that is the whole reason this design needs no
-/// pairing table: the next anchor is this turn's length away, and a turn's
+/// Forward is one addition **from an anchor**, and that is the reason this design
+/// needs no pairing table: the next anchor is this turn's length away, and a turn's
 /// length is a local test.
+///
+/// **What it costs the app, which is not this.** `MyApp::turn_forward` calls
+/// [`next_turn`], not this, and that snaps to the anchor first — so the navigation a
+/// press performs is one `anchor_of` walk plus this one addition. See `anchor_of`'s
+/// doc for the corrected cost and `TODO.md` for the deferred table.
 ///
 /// **The only caller of the wrapping [`PageCtx::step`].** The wrap belongs here
 /// and nowhere else: [`lone`] asks for a partner with `step_no_wrap`, so a turn
@@ -7622,9 +7664,24 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
 /// the walk produced or a cursor, and [`Gallery::goto_page`] refuses an index past the
 /// end of the list, so nothing can observe the difference.
 ///
-/// **O(distance from `pos`), like every other walk here, and no worse:** it reads the
-/// same cached dimensions the rest of the section does, and it stops at the turn `pos`
-/// is on rather than reading to the end of the volume.
+/// **O(distance from the *front*), not from `pos` — and the distinction is load
+/// bearing, so it is worth stating plainly.** The walk starts at `(0, 0)`, so this
+/// costs one iteration per *turn before the answer*, not one per page between the
+/// front and `pos`. It therefore reads the same cached dimensions the rest of the
+/// section does and nothing else: no I/O, no decode, and **it stops at the turn `pos`
+/// is on rather than reading to the end of the volume**.
+///
+/// **An earlier version of this doc said "O(distance from `pos`), like every other
+/// walk here", and it was wrong.** So was "forward is O(1)", which
+/// [`next_anchor`]'s own doc repeats and which is the claim that lets a reader
+/// believe no pairing table is needed: it is true of `next_anchor` *from an anchor*,
+/// and the navigation the app actually performs is [`next_turn`], which **calls this
+/// function first**. At the far end of a 2000-file folder a forward step is therefore
+/// ~1000 iterations of `turn_len`, not one addition — still microseconds of in-memory
+/// arithmetic against a decode measured in hundreds of milliseconds, and still not a
+/// hang, but it is not the bound it was documented as. The deferred fix (a per-gallery
+/// anchor list) and the corrected cost are recorded in `TODO.md`; do not "optimise"
+/// this into a local test, for [`prev_anchor`]'s reasons.
 pub fn anchor_of(pos: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> PagePos {
     let mut anchor = PagePos { index: 0, page: 0 };
     for _ in 0..PREV_SCAN_LIMIT {
@@ -7893,6 +7950,36 @@ impl Gallery {
     /// and a per-file one answer the same single-page query identically.
     pub fn known_shapes(&self) -> usize {
         self.shapes.len()
+    }
+
+    /// The position `key` names, as the inverse of [`PageCtx::key`].
+    ///
+    /// **Needed because "what is on screen" is a key and "which turn is it on" is a
+    /// position**, and the pairing is asked entirely in positions. A turn's second
+    /// half is derived from an anchor, so deriving it for the picture the app is
+    /// painting means turning that key back into a position on every frame.
+    ///
+    /// **A linear scan, and that is the trade.** `set_filtered` already searches
+    /// `files` this way for the same reason — a key does not know its index — so this
+    /// is not a new shape, only a new caller. It is a `PathBuf` comparison per file,
+    /// pointer-equal for the common case where the app asks about the cursor's own
+    /// file; [`Self::page_pos`] answers that without the scan at all, which is why the
+    /// app checks that first.
+    ///
+    /// **Only the path is matched, and the page is trusted**, for [`Self::goto_page`]'s
+    /// reason: every caller in this crate hands over a key that some `key(pos)` built,
+    /// and inventing a second page-range rule here is a place for the two to disagree.
+    /// A key naming a page past the end of its file therefore answers a position
+    /// rather than `None`.
+    ///
+    /// `None` when the path is not in `files` at all — a file removed while it was
+    /// still on screen, or one from a gallery that has since been rebuilt.
+    pub fn pos_of(&self, key: &ImgKey) -> Option<PagePos> {
+        let index = self.files.iter().position(|f| f == &key.path)?;
+        Some(PagePos {
+            index,
+            page: key.page,
+        })
     }
 
     /// Whether advancing past either end wraps around. Separate from the field so

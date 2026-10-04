@@ -306,6 +306,28 @@ fn no_unexpected_bare_letter_shortcuts() {
     //  * `M` re-`goto`s, because turning the mode on with the cursor on the second
     //    half of what is now a pair leaves it mid-turn, which is the state every
     //    pairing rule is written not to be asked from.
+    //
+    //    **What the re-`goto` is for has changed, and the assertion below has to stop
+    //    claiming otherwise.** It used to say "without the goto the turn it changed is
+    //    not recomputed and the reader sees nothing happen", and that was the load-bearing
+    //    claim for the whole fix wave this test sits next to — it named the re-`goto` as
+    //    the thing that refreshes the pairing. It is not. `shown_partner` is now derived
+    //    every frame from `shown`'s own position (`sync_shown_partner` in `src/main.rs`),
+    //    so the painting updates without a `goto` at all; the `goto` is still required
+    //    for three other reasons and is still load-bearing for each:
+    //
+    //      * **the cursor snap** (`snap_to_turn_anchor`), which is the only thing that
+    //        puts a cursor the app assigned by *file index* back on an anchor;
+    //      * **the shape and page re-learn**, so the new pairing is measured rather
+    //        than planned against what was known before; and
+    //      * **the loader re-plan** (`schedule`), which is what asks for the partner's
+    //        decode — the picture being laid out is not the picture being fetched, and
+    //        without a `schedule` a newly-chosen partner has no job and stays blank.
+    //
+    //    The old wording survived a fix it had become false about, which is the failure
+    //    mode this suite is built to catch everywhere else; `tests/spreads.rs`'s
+    //    `the_turns_second_half_is_derived_not_latched` is the scan that now owns the
+    //    derivation, and it fails when the call is moved back inside the adopt gate.
     //  * `D` must **not** re-`goto`: the turn's membership has not changed, and a
     //    `goto` would reset the full-res dwell timer and re-plan the loader queue for
     //    a picture that did not change. Asserted as an absence, which is the harder
@@ -341,8 +363,13 @@ fn no_unexpected_bare_letter_shortcuts() {
         assert!(
             body.contains("self.save_spreads()") && body.contains("self.goto(ctx)"),
             "`{what}` ({sig}) does not both save the overrides and re-goto. Without the \
-             save the decision is forgotten at exit; without the goto the turn it changed \
-             is not recomputed and the reader sees nothing happen.\nBody was:\n{body}"
+             save the decision is forgotten at exit; without the goto the cursor is not \
+             re-snapped onto a turn anchor, the new pairing is not re-measured, and the \
+             loader is not re-planned - so a newly-chosen partner has no job and its half \
+             of the turn stays blank. Note this is NOT what repaints the spread: the \
+             second half is derived every frame from where `shown` is \
+             (`sync_shown_partner`), which `tests/spreads.rs` pins by position.\n\
+             Body was:\n{body}"
         );
     }
 

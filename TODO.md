@@ -287,6 +287,14 @@ running app's own per-frame offsets to ~0.002 pt over six zoom steps) and the
 pan-clamp counts all come from those dumps. **That evidence is not a test and
 does not survive in the tree.**
 
+**Six of the guards added for this feature were no-ops** — the call existed, in the
+right function, and moving or deleting it changed nothing observable, because the
+thing it guarded was itself unreachable. So the scans below are not decorative, but
+the *number* of scans is not the measure of coverage either; the fix wave that
+produced the three critical findings below added **five more scans, of which the
+decisive one checks a call's position inside the file rather than its presence**,
+because the bug was a call that was present and in the wrong block.
+
 **Screen capture cannot see this app's swapchain on this box** — three routes,
 all blank, including for the untouched single-image path and for a solid-red
 fixture. So this is not "the screenshot was hard to get": on this machine it is
@@ -302,6 +310,69 @@ zoom; and that a turned page inside a turn stays inside its own half. A
 photograph folder with `M` on is the other half of it (one photo per turn, as
 `README.md` says). Until then the feature is **arithmetically correct and
 unseen**, and that is the honest state of it.
+
+### The checklist as it stood would have missed both critical bugs
+
+The four checks above are all *visual*: seam, cover, sharpness, rotation. **A picture
+can be laid out perfectly and still be the wrong picture**, which is what the final
+review's two critical findings were, and neither of them changes where anything is on
+screen. So three more, and each is named after the failure it would have caught:
+
+- **Press `M` on a stationary cursor and confirm a spread appears.** With the cursor
+  not moving, `shown_partner` was latched at the last adopted preview, so `M` flipped
+  the setting, halved the panel and laid out **one** page: a half-width picture beside
+  an empty half, with no error and no counter, until the next `→` produced a correct
+  spread. The visual checks pass on that screen — a lone cover *is* what a lone cover
+  looks like, and a lone page sitting at half width beside nothing is exactly what the
+  seam rule prescribes. **The tell is that nothing appears where a spread should be**,
+  so the check has to be "a spread appeared", not "the page looks right". `O` and `X`
+  have the same latch and the same check.
+- **Open a multi-page document, page forward, zoom, and confirm the tiles are *that
+  page's*.** `self.full` was keyed by path, and `decode_page` returns no full buffer
+  for a page past the first — so page 0's pixels were cut with page N's `uv` and drawn
+  over the page on screen. Sharp, correctly sized, correctly placed: every visual
+  property a screenshot can judge, and the wrong picture. Look for content that changes
+  when it should not, or a page that is visibly the previous one.
+- **`Ctrl+C` on page 2 of a document, and confirm the pasted pixels are page 2.** Same
+  cause, and the only check that reaches it is outside the window entirely.
+  `tests/probe_chords.ps1` uses a real `.jpg`, which has exactly one page, so the
+  script cannot see this and the checklist has to say so by hand.
+
+**The generalisable form, and the reason this section exists:** the useful question is
+not "does it look right" but **"which value is on screen, and is it the one the user
+asked for"**. Every bug in this feature's review history was a value that was latched
+at one event and read at another — and a latch produces a *stable, plausible* screen,
+which is exactly what a visual check passes.
+
+### Deferred from the fix wave: a per-gallery anchor list
+
+`anchor_of` and `prev_anchor` both walk forward from `(0, 0)`, because backward cannot
+be answered locally. **The corrected cost, measured as a count rather than a time**
+(`tests/spreads.rs::a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor`):
+
+| | turns | `dims` reads | per turn |
+|---|---|---|---|
+| `anchor_of` to the last turn, 400 portrait files | 200 | 1990 | 10 |
+| `prev_anchor` from the last turn, same gallery | 200 | 995 | 5 |
+
+Linear in the turns *behind* the cursor, exactly, and **the same order of magnitude in
+both directions** — `MyApp::turn_forward` calls `next_turn`, which snaps first, so
+forward is marginally the more expensive of the two rather than the free one. At the
+back of a 2000-file gallery that is ~1000-2000 warm-cache lookups: microseconds,
+against a preview decode measured in hundreds of milliseconds, so this is not a hang
+and not a frame-time risk.
+
+**The fix is an anchor list per gallery**, recomputed when a dimension is learned, a
+file is re-exported or the filter changes — which is exactly the three-invalidation-
+paths cost the design declined to pay (see the spec, "Why this needs no page map").
+That reasoning holds today, at a cost nobody has measured in a real folder; it stops
+holding if a 2000-file gallery ever shows up in a frame time. So: **measure it before
+building it**, and `bench_browse` is where that measurement belongs. Do not build it
+because a test says O(1) — the test says linear, which is the corrected claim.
+
+**And do not "optimise" either walk into a local rule.** Three local formulations were
+tried and all three are wrong on `[Single, Single, Single, Double]`; the enumeration is
+in `prev_anchor`'s doc comment, and the walk is the price of not having a wrong answer.
 
 ---
 
@@ -321,4 +392,13 @@ unseen**, and that is the honest state of it.
   from page 1, so saving would write page 1's pixels under the document's name and
   call it a lossless save of what you were looking at. Supporting it means a new
   save mode and re-examining the "lossless" claim rather than assuming it.
+- **`Ctrl+C` on page 2+ of a document**, refused for the same family of reason
+  though not the same one. The save's reason is that the *write* is about a file;
+  the clipboard's is that the **crop and the turn live in `ImageEdits`, which is
+  keyed by path** because they are an edit to the document — so a frame drawn on
+  page 1 applied to page 3's picture is a valid picture of the wrong part of the
+  scan, with no error anywhere. (The `self.full` page bug that made `Ctrl+C` paste
+  page 1 outright is fixed; what is left is the crop, and the crop cannot be right
+  for a page until the edit store is keyed per page or the path-keyed crop is
+  explicitly scoped to page 1.)
 - **One grid cell per file**, so a 200-page document is not a 200-cell row.

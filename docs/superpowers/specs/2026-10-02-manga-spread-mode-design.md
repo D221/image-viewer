@@ -214,12 +214,17 @@ unknown-length chapter. Aidoku maintains an `isolatedPages` set *and* a
 `shiftIsolation(after:by:)` to repair its indices when it physically inserts split pages.
 Kavita precomputes the entire pairing table server-side and must invalidate the whole thing
 when a file changes. We have none of that, because **every query is relative to a cursor
-that is always an anchor**, and no state is carried between queries. **Forward is O(1);
-backward is O(distance from the front)** — this document originally claimed both were a
-bounded number of local reads, and that claim was withdrawn during implementation once the
-local formulation above was found to be wrong. The walk is in-memory arithmetic over cached
-dimensions, and the pathological case is a `prev` immediately after jumping into a cold
-chapter.
+that is always an anchor**, and no state is carried between queries. **Both directions
+cost O(distance from the front)**, because the walk that finds an anchor starts at page
+0 — this document originally claimed "forward is O(1); backward is O(distance from the
+front)", and **that "O(1)" was wrong**: `next_anchor` is one addition *when asked of an
+anchor*, but the navigation the app actually performs is `next_turn`, which snaps to the
+anchor first, so a forward press pays the whole walk. The walk is in-memory arithmetic
+over cached dimensions and is measured at ~5-10 `dims` reads per turn visited
+(`tests/spreads.rs::a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor`),
+so the pathological case is a press at the back of a 2000-file gallery — microseconds
+against a decode measured in hundreds of milliseconds, and not a hang, but not O(1)
+either. The deferred fix is a per-gallery anchor list; see `TODO.md`.
 
 This is also why no whole-book precomputation appears anywhere in the design: a precomputed
 table would have to be rebuilt whenever a dimension is learned, a file is re-exported, or
@@ -474,8 +479,16 @@ which writes to the OS). Neither can touch a user's image.
   Defaults to `None`, so `tests/flip_through.rs` is unaffected.
 - **`Msg::Preview` needs no change.** It is keyed by the key it carries and already inserts
   into the cache whatever arrives.
-- **`protected_preview_keys` needs no change.** The partner is index ±1, well inside
-  `PRELOAD_RADIUS = 3`.
+- **`protected_preview_keys` needs no change — but the premise was wrong, so do not
+  trust it.** The partner of a turn across two files is index ±1, well inside
+  `PRELOAD_RADIUS = 3`. **For a turn inside a multi-page document the partner is
+  `(index, page + 1)`, not `ImgKey::first` of a neighbour file**, and the window
+  inserts `ImgKey::first` of each neighbour — so an in-document partner is *not* in the
+  protected set. It is not the LRU victim in practice because `central` stamps the
+  on-screen page's `used` every frame, but that is the mitigation, not the policy. If
+  the eviction policy ever changes to prefer anything other than `used`, this set is
+  where the in-document partner has to be added. Recorded on
+  `protected_preview_keys` itself rather than left here.
 - **`PREVIEW_CACHE_CAP = 16`** holds two pages per turn without strain.
 - **`display_dim` halves** in a spread, so `preview_target` is computed from the half panel.
 - **Config:** `manga_mode: bool` (`#[serde(default)]`) and `manga_rtl: bool`
