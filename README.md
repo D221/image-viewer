@@ -412,6 +412,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Load all images in folder | on | Build the queue from the whole folder on startup |
 | Linear-light downsampling | on | Resample in linear light instead of gamma space — noticeably cleaner on line art |
 | Downscale filter | Hermite | Hermite / Catrom / Lanczos3, applied live |
+| Smooth | **on** | Low-passes a downscaled page harder, so fine detail cannot fold back on itself into a dark grid. Costs a little edge sharpness — turn it off for crisper line art |
 | Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
 | Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB. See the note below |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
@@ -421,8 +422,15 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Right-to-left pages | **on** | A turn opens on the right, so `←` reads forwards. `D`. On by default because it is only read while manga mode is |
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
 
-The downscale filter and sort mode re-decode immediately; the linear-light
-toggle applies to newly decoded images (see the known caveat below).
+The downscale filter, **Smooth** and sort mode re-decode immediately; the
+linear-light toggle applies to newly decoded images (see the known caveat below).
+
+**Smooth does not abolish the grid, it reduces it.** A page scanned at
+~2600 px carries tone finer than a 1080-px panel can show, and that detail has to
+go *somewhere*; what a wider low-pass changes is whether it lands as a
+pattern you can see. On a clean dot pattern the residue drops to near nothing;
+on real screentone roughly half of it goes and the rest is a faint texture
+rather than a grid. If you want the crispest possible line art, switch it off.
 
 ### Why the grid thumbnail cache exists
 

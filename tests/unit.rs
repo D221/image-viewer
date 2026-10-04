@@ -9,11 +9,28 @@ static FILTER_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Run `f` with the downscale filter globals forced to `linear`, restoring the
 /// previous setting afterwards.
 fn with_linear_resample<T>(linear: bool, f: impl FnOnce() -> T) -> T {
+    with_resample(linear, image_viewer::downscale_strength(), f)
+}
+
+/// Set both filter globals at once, restore both after.
+///
+/// **One lock acquisition, never two.** These used to be separate helpers and
+/// nesting them - `with_strength(s, || with_linear_resample(true, ..))` -
+/// deadlocked on the second `lock()` of a non-reentrant `Mutex`, which is why the
+/// strengths are swept through here rather than through a wrapper of its own.
+/// A guard that only worked when the two settings were never changed together
+/// would have been a guard that hung instead of testing anything.
+fn with_resample<T>(linear: bool, strength: f32, f: impl FnOnce() -> T) -> T {
     let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
-    let was = image_viewer::linear_resample_enabled();
+    let (was_linear, was_strength) = (
+        image_viewer::linear_resample_enabled(),
+        image_viewer::downscale_strength(),
+    );
     image_viewer::set_linear_resample(linear);
+    image_viewer::set_downscale_strength(strength);
     let out = f();
-    image_viewer::set_linear_resample(was);
+    image_viewer::set_linear_resample(was_linear);
+    image_viewer::set_downscale_strength(was_strength);
     out
 }
 
@@ -531,9 +548,217 @@ fn probe_mean(d: &image_viewer::ImageData) -> f32 {
     d.rgba.iter().step_by(4).map(|&v| v as f32).sum::<f32>() / (d.rgba.len() / 4) as f32
 }
 
+// ---------------------------------------------------------------------------
+// The downscale low-pass strength
+//
+// **The probe that found the artefact was wrong, and that is the whole reason
+// this section exists.** `probe_sinusoid` varies along x only, so it can report
+// "the alias band is down to 4 codes" while a square lattice is plainly visible:
+// a 1-D probe structurally cannot produce a lattice, because a lattice needs two
+// axis-aligned frequencies beating in *both* axes. `probe_square_lattice` below
+// is axis-aligned in both axes and is what the strength is measured on.
+//
+// Three metrics, each stated once and applied identically at every strength:
+//
+// * `alias_amp` - p95-p5 of the red channel over the **whole** output, both axes.
+//   For a pure lattice this is the amplitude of what survived the low-pass.
+// * `beat_amp`  - the amplitude of the pattern at **its own output period**,
+//   fitted by least squares. This is the visible moire: the lattice the eye
+//   groups, which is not the same thing as broadband alias energy.
+// * `edge_grad` - mean |dx| over a fixed crop, in codes per output pixel. The
+//   cost side of the trade, so it is measured in the same runs as the benefit.
+// ---------------------------------------------------------------------------
+
+/// Square dot lattice: `d`-px dots on a `p`-px grid in **both** axes. This is
+/// the probe the artefact needs; a stripe pattern in one axis only cannot make
+/// one.
+fn probe_square_lattice(w: u32, h: u32, p: f32, d: f32, lo: u8, hi: u8) -> image_viewer::ImageData {
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let on = (x as f32) % p < d && (y as f32) % p < d;
+            let v = if on { hi } else { lo };
+            let o = (y * w as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    }
+}
+
+/// p95-p5 of the red channel over the whole output. Two-dimensional on purpose:
+/// the single-row statistic in `probe_amplitude` cannot see a vertical lattice.
+fn alias_amp(d: &image_viewer::ImageData) -> f32 {
+    let mut v: Vec<u8> = d.rgba.iter().step_by(4).copied().collect();
+    v.sort_unstable();
+    let p = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize] as f32;
+    p(0.95) - p(0.05)
+}
+
+/// Amplitude of the lattice at **its own output period**, by least squares over
+/// the interior (a 2-px border, so an edge clamp cannot leak in).
+///
+/// A square lattice of source pitch `p` reduced by `r` has output pitch `p/r`,
+/// and the eye groups that into the artefact. This projects the output onto
+/// `sin`/`cos` at that period in both axes and returns the combined amplitude in
+/// codes - so it measures the visible lattice, not the broadband residue.
+fn beat_amp(d: &image_viewer::ImageData, p_out: f32) -> f32 {
+    let (w, h) = (d.width as usize, d.height as usize);
+    let (mut ss, mut sc, mut ys, mut yc, mut n) = (0f64, 0f64, 0f64, 0f64, 0f64);
+    let kx = 2.0 * std::f64::consts::PI / p_out as f64;
+    let ky = 2.0 * std::f64::consts::PI / p_out as f64;
+    for y in 2..h.saturating_sub(2) {
+        for x in 2..w.saturating_sub(2) {
+            let v = d.rgba[(y * w + x) * 4] as f64;
+            let s = (kx * x as f64).sin() + (ky * y as f64).sin();
+            let c = (kx * x as f64).cos() + (ky * y as f64).cos();
+            ss += s * s;
+            sc += s * c;
+            ys += v * s;
+            yc += v * c;
+            n += 1.0;
+        }
+    }
+    if ss <= 0.0 || n <= 0.0 {
+        return 0.0;
+    }
+    // Solve [ss sc; sc ss] [a;b] = [ys;yc], taking the off-diagonal's weight
+    // into account so a non-integer period's two phase terms are not counted as
+    // independent and the amplitude does not come out inflated.
+    let (a, b);
+    if sc.abs() < 1e-9 * ss.max(1.0) {
+        a = ys / ss;
+        b = yc / ss;
+    } else {
+        let det = ss * ss - sc * sc;
+        if det.abs() < 1e-9 {
+            return 0.0;
+        }
+        a = (ys * ss - yc * sc) / det;
+        b = (yc * ss - ys * sc) / det;
+    }
+    (a * a + b * b).sqrt() as f32
+}
+
+/// Mean |dx| over a fixed crop of the output, in codes per output pixel. The
+/// sharpness number: applied identically at every strength, and on the same
+/// crop, so the only thing that moves it is the kernel.
+fn edge_grad(d: &image_viewer::ImageData, crop: (u32, u32, u32, u32)) -> f32 {
+    let (cx, cy, cw, ch) = crop;
+    let w = d.width as usize;
+    let mut sum = 0f64;
+    let mut n = 0f64;
+    for y in cy as usize..(cy + ch) as usize {
+        for x in cx as usize..(cx + cw - 1) as usize {
+            sum += (d.rgba[(y * w + x + 1) * 4] as f64 - d.rgba[(y * w + x) * 4] as f64).abs();
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        0.0
+    } else {
+        (sum / n) as f32
+    }
+}
+
+/// Which output pixels sit on **flat tone** and which on a **strong edge**.
+///
+/// **Decided from the full-resolution source, once, and the same mask is scored
+/// at every strength.** This is the split the two questions actually need, and
+/// without it neither is answerable on a real page:
+///
+/// * The lattice lives in *screentone*. A page's global p95-p5 is set by its
+///   black line art against white paper (242-255 codes on all three fixtures,
+///   essentially unmoved by any strength), so a whole-page statistic cannot see
+///   the artefact at all - measured: `print_real_page_strength_sweep` moves it
+///   by 7% on 32.jpg while `grad` falls 54% at the same strength.
+/// * The cost lands on *edges*. A whole-page mean gradient spends most of its
+///   samples on flat tone, so it reads a sparkle removal as a sharpness loss.
+///
+/// Both masks are computed from the source with a 3x3 window, and neither looks
+/// at the output, so the two numbers cannot flatter or punish a strength by
+/// picking different pixels per arm.
+fn tone_and_edge_masks(
+    src: &image_viewer::ImageData,
+    out_w: u32,
+    out_h: u32,
+) -> (Vec<bool>, Vec<bool>) {
+    let (sw, sh) = (src.width as usize, src.height as usize);
+    let g = |x: usize, y: usize| src.rgba[(y * sw + x) * 4] as f32;
+    // Per source pixel: local range over a 3x3 window. A screentone's range is
+    // its own dither amplitude; a line edge's is the full black-to-white step.
+    let mut tone = Vec::with_capacity((out_w as usize) * (out_h as usize));
+    let mut edge = Vec::with_capacity(tone.capacity());
+    for oy in 0..out_h as usize {
+        for ox in 0..out_w as usize {
+            // Nearest source pixel, matching the resize's own sampling density.
+            let sx = ((ox as f32 + 0.5) * sw as f32 / out_w as f32) as usize;
+            let sy = ((oy as f32 + 0.5) * sh as f32 / out_h as f32) as usize;
+            let x0 = sx.saturating_sub(1);
+            let y0 = sy.saturating_sub(1);
+            let x1 = (sx + 1).min(sw - 1);
+            let y1 = (sy + 1).min(sh - 1);
+            let (mut lo, mut hi) = (255f32, 0f32);
+            for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    let v = g(xx, yy);
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            let range = hi - lo;
+            // Flat tone: local range under a quarter of the full scale. Edge:
+            // over half. The two cannot both be true and the gap is wide, so the
+            // thresholds are not delicate.
+            tone.push(range < 64.0);
+            edge.push(range > 128.0);
+        }
+    }
+    (tone, edge)
+}
+
+/// Mean |dx| over the pixels `mask` selects, in codes per output pixel.
+///
+/// On the **edge** mask this is the sharpness number and it should fall as the
+/// kernel widens; on the **tone** mask it is the sparkle number and it is what
+/// the setting is for.
+fn masked_grad(d: &image_viewer::ImageData, mask: &[bool]) -> f32 {
+    let w = d.width as usize;
+    let mut sum = 0f64;
+    let mut n = 0f64;
+    for y in 0..d.height as usize {
+        for x in 0..w.saturating_sub(1) {
+            if !mask[y * w + x] {
+                continue;
+            }
+            sum += (d.rgba[(y * w + x + 1) * 4] as f64 - d.rgba[(y * w + x) * 4] as f64).abs();
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        0.0
+    } else {
+        (sum / n) as f32
+    }
+}
+
 fn probe_resize(src: &image_viewer::ImageData) -> image_viewer::ImageData {
-    with_linear_resample(true, || {
-        image_viewer::downscale_image(src, PROBE_TARGET)
+    resize_at(src, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH)
+}
+
+/// Resize at an explicit strength and explicit target. Both the probe geometry
+/// and the strength are arguments so one table can carry the whole sweep.
+fn resize_at(
+    src: &image_viewer::ImageData,
+    target: u32,
+    strength: f32,
+) -> image_viewer::ImageData {
+    with_resample(true, strength, || {
+        image_viewer::downscale_image(src, target)
     })
 }
 
@@ -576,7 +801,7 @@ fn print_prefilter_pins() {
     print!("8x reduction:      ");
     for p in [2.5f32, 3.0, 5.0, 6.0, 11.0] {
         let src = probe_sinusoid(1200, 1200, p, 100.0);
-        let out = with_linear_resample(true, || image_viewer::downscale_image(&src, 150));
+        let out = resize_at(&src, 150, image_viewer::FAST_STRENGTH);
         print!("{}:{:.0} ", p, probe_amplitude(&out));
     }
     println!();
@@ -598,6 +823,847 @@ fn print_prefilter_pins() {
         probe_mean(&probe_resize(&dither)),
         probe_mean(&dither),
         probe_mean(&flat)
+    );
+}
+
+/// Where the real-content fixtures live, if they do. `target/release/examples`
+/// is a build output and gitignored, so every reader of it skips rather than
+/// dying - the same exemption the criterion targets take for `test-images/`.
+fn real_page(name: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("release")
+        .join("examples")
+        .join(name);
+    p.exists().then_some(p)
+}
+
+/// Copy a real page into a tempdir and load it, so nothing in the fixture
+/// directory is opened for writing. The real pages are read-only inputs.
+fn load_real_page(dir: &std::path::Path, name: &str) -> Option<image_viewer::ImageData> {
+    let src = real_page(name)?;
+    let dst = dir.join(name);
+    std::fs::copy(&src, &dst).ok()?;
+    image_viewer::load_image(&dst, image_viewer::MAX_TEXTURE_DIM).ok()
+}
+
+const SWEEP_STRENGTHS: &[f32] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+/// The synthetic square-lattice sweep. `cargo test --test unit -- --ignored
+/// --nocapture print_square_lattice_sweep`. Cheap (a ~1.1 MP source), so it is
+/// the one to re-run when re-pinning.
+#[test]
+#[ignore]
+fn print_square_lattice_sweep() {
+    println!(
+        "== synthetic square lattice, {PROBE_W}x{PROBE_H} -> {PROBE_TARGET} =="
+    );
+    println!(
+        "{:>8} {:>6} | {:>9} {:>9} | {:>9} {:>9} | {:>9}",
+        "strength", "pitch", "amp", "amp x", "beat", "beat x", "grad x"
+    );
+    for &pitch in &[2.5f32, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0] {
+        let src = probe_square_lattice(PROBE_W, PROBE_H, pitch, 1.0, 0, 100);
+        let base = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+        let r = PROBE_W as f32 / base.width as f32;
+        let p_out = pitch / r;
+        let (a_base, b_base) = (alias_amp(&base), beat_amp(&base, p_out));
+        let crop = (base.width / 4, base.height / 4, base.width / 2, base.height / 2);
+        let g_base = edge_grad(&base, crop);
+        for &strength in SWEEP_STRENGTHS {
+            let out = resize_at(&src, PROBE_TARGET, strength);
+            let (a, b, g) = (alias_amp(&out), beat_amp(&out, p_out), edge_grad(&out, crop));
+            println!(
+                "{strength:>8.2} {pitch:>6.1} | {a:>9.2} {:>9.3} | {b:>9.2} {:>9.3} | {:>9.3}",
+                a / a_base.max(1e-6),
+                b / b_base.max(1e-6),
+                g / g_base.max(1e-6)
+            );
+        }
+    }
+}
+
+/// The same sweep on real pages. Separate from the synthetic one because a full
+/// decode of a 6.9 MP page is slow in a debug build and the two want different
+/// iteration cycles.
+#[test]
+#[ignore]
+fn print_real_page_strength_sweep() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, target) in [("32.jpg", 1080u32), ("12.jpg", 1080), ("028.jpg", 1080)] {
+        let Some(page) = load_real_page(tmp.path(), name) else {
+            println!("== {name}: absent, skipped ==");
+            continue;
+        };
+        let base = resize_at(&page, target, image_viewer::FAST_STRENGTH);
+        println!(
+            "== {name} {}x{} -> {}x{} (R {:.4}) ==",
+            page.width,
+            page.height,
+            base.width,
+            base.height,
+            page.width as f32 / base.width as f32
+        );
+        let (tone, edge) = tone_and_edge_masks(&page, base.width, base.height);
+        let n_tone = tone.iter().filter(|b| **b).count();
+        let n_edge = edge.iter().filter(|b| **b).count();
+        println!(
+            "   flat-tone pixels {n_tone} ({:.1}%), edge pixels {n_edge} ({:.1}%)",
+            100.0 * n_tone as f64 / tone.len() as f64,
+            100.0 * n_edge as f64 / edge.len() as f64
+        );
+        println!(
+            "{:>8} | {:>10} {:>6} | {:>10} {:>6} | {:>8} {:>6}",
+            "strength", "tone HF", "x", "edge grad", "x", "p95-5", "x"
+        );
+        let (t_base, e_base, a_base) = (
+            masked_grad(&base, &tone),
+            masked_grad(&base, &edge),
+            alias_amp(&base),
+        );
+        for &strength in SWEEP_STRENGTHS {
+            let out = resize_at(&page, target, strength);
+            let (t, e, a) = (
+                masked_grad(&out, &tone),
+                masked_grad(&out, &edge),
+                alias_amp(&out),
+            );
+            println!(
+                "{strength:>8.2} | {t:>10.3} {:>6.3} | {e:>10.3} {:>6.3} | {a:>8.1} {:>6.3}",
+                t / t_base.max(1e-6),
+                e / e_base.max(1e-6),
+                a / a_base.max(1e-6)
+            );
+        }
+    }
+}
+
+/// Hard vertical step edge, white left of `x0`, black right of it. The
+/// sharpness probe: a wider kernel cannot help but widen the transition.
+fn probe_step(w: u32, h: u32, x0: u32) -> image_viewer::ImageData {
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let v = if (x as u32) < x0 { 255u8 } else { 0 };
+            let o = (y * w as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    }
+}
+
+/// 10-90% rise distance of the step edge, in **output pixels**, averaged over
+/// rows and over both edges' orientations.
+///
+/// The unambiguous sharpness number: it is a length, not an energy, so it cannot
+/// be moved by the picture's contrast, and a wider low-pass cannot do anything
+/// but lengthen it. Reported for the probe's own 2.880x reduction.
+fn step_rise(out: &image_viewer::ImageData) -> f32 {
+    let w = out.width as usize;
+    // The probe is white to the left of the edge, so the profile descends. 90%
+    // is the first crossing of 229.5 and 10% the first of 25.5; interpolating
+    // between the straddling pair makes the measure sub-pixel, which matters
+    // because the whole effect is a fraction of an output pixel per strength
+    // step.
+    let (t90, t10) = (0.9f32 * 255.0, 0.1f32 * 255.0);
+    // `crossing` finds the first sample below `t` and interpolates against its
+    // predecessor. Scanned as "first below" rather than "straddling pair"
+    // because the profile can step from above the threshold straight past it:
+    // at strength 1.0 the edge is 254, 187, 21, 0, so the 10% threshold of 25.5
+    // is already behind the 21 sample and a straddling-pair test never fires.
+    // That was a bug in the metric, not a limit of the resampler - it reported
+    // 0.000 at every strength, which `print_step_edge_profile` is what caught.
+    let crossing = |get: &dyn Fn(usize) -> f32, t: f32| -> Option<f32> {
+        for x in 1..w {
+            let (v0, v1) = (get(x - 1), get(x));
+            if v1 < t {
+                return (v0 >= t).then(|| (x - 1) as f32 + (v0 - t) / (v0 - v1).max(1e-6));
+            }
+        }
+        None
+    };
+    let mut total = 0f64;
+    let mut n = 0f64;
+    for y in 0..out.height as usize {
+        let row = |x: usize| out.rgba[(y * w + x) * 4] as f32;
+        let hi = crossing(&row, t90);
+        let lo = crossing(&row, t10);
+        if let (Some(hi), Some(lo)) = (hi, lo) {
+            // `lo - hi`, not `hi - lo`: the profile **descends** (white to the
+            // left), so the 10% crossing is to the *right* of the 90% one and the
+            // difference is negative. Taking `.max(0.0)` on the wrong order turns
+            // every row into a zero-length edge and the metric into a constant
+            // 0.000 that looks like a limit on the resampler. That is what it
+            // did for two runs before `print_step_edge_profile` was written.
+            total += (lo - hi).abs() as f64;
+            n += 1.0;
+        }
+    }
+    if n == 0.0 {
+        0.0
+    } else {
+        (total / n) as f32
+    }
+}
+
+/// Write the **same crop** of a real page at each strength, scaled 2x nearest,
+/// so the artefact and the cost can be looked at rather than only measured.
+///
+/// `cargo test --test unit --release -- --ignored --nocapture
+/// export_strength_crops`. Writes into `target/strength-probe/`. This is the one
+/// piece of evidence a number cannot give, and it is why the strength was chosen
+/// by eye as well as by table - a 71% wider step edge is either obviously softer
+/// or not, and only a picture says which.
+#[test]
+#[ignore]
+fn export_strength_crops() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("strength-probe");
+    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    // Crops as fractions of the output, so one entry works at either page size.
+    // (x, y, w, h) in 1000ths of the output's dimensions.
+    for (name, target, frac) in [
+        // The screentone field: where the lattice lives.
+        ("32.jpg", 1080u32, (60u32, 430u32, 500u32, 320u32)),
+        // Line art: where the cost of removing it lands.
+        ("028.jpg", 1080, (330, 60, 620, 420)),
+    ] {
+        let Some(page) = load_real_page(tmp.path(), name) else {
+            println!("{name} absent, skipped");
+            continue;
+        };
+        for &s in &[1.0f32, 1.5, 1.75, 2.0] {
+            let out = resize_at(&page, target, s);
+            let (w, h) = (out.width as usize, out.height as usize);
+            let cx = w * frac.0 as usize / 1000;
+            let cy = h * frac.1 as usize / 1000;
+            let cw = (w * frac.2 as usize / 1000).min(w - cx);
+            let ch = (h * frac.3 as usize / 1000).min(h - cy);
+            // 2x nearest so the sparkle is visible at 1:1 on screen.
+            let (sw, sh) = (cw * 2, ch * 2);
+            let mut buf = vec![0u8; sw * sh * 4];
+            for y in 0..sh {
+                for x in 0..sw {
+                    let si = ((cy + y / 2) * w + cx + x / 2) * 4;
+                    let di = (y * sw + x) * 4;
+                    buf[di..di + 4].copy_from_slice(&out.rgba[si..si + 4]);
+                }
+            }
+            let img = image::RgbaImage::from_raw(sw as u32, sh as u32, buf).unwrap();
+            let stem = name.trim_end_matches(".jpg");
+            let p = dir.join(format!("{stem}-s{s:.2}.png"));
+            img.save(&p).unwrap();
+            println!("wrote {}", p.display());
+        }
+
+        // A side-by-side strip of the same crop at every strength, so the
+        // comparison is one image rather than four read one at a time - which is
+        // how a difference gets looked at honestly.
+        let arms: Vec<image_viewer::ImageData> = [1.0f32, 1.5, 1.75, 2.0]
+            .iter()
+            .map(|&s| resize_at(&page, target, s))
+            .collect();
+        let base = &arms[0];
+        let w = base.width as usize;
+        let h = base.height as usize;
+        let (cx, cy) = (
+            (w * frac.0 as usize / 1000).min(w.saturating_sub(1)),
+            (h * frac.1 as usize / 1000).min(h.saturating_sub(1)),
+        );
+        let cw = (w * frac.2 as usize / 1000).min(w - cx);
+        let ch = (h * frac.3 as usize / 1000).min(h - cy);
+        let (sw, sh) = (cw * 2, ch * 2);
+        let strip_w = sw * arms.len() + 4 * (arms.len() - 1);
+        let mut strip = vec![255u8; strip_w * sh * 4];
+        for (i, arm) in arms.iter().enumerate() {
+            let ox = i * (sw + 4);
+            for y in 0..sh {
+                for x in 0..sw {
+                    let si = ((cy + y / 2) * w + cx + x / 2) * 4;
+                    let di = (y * strip_w + ox + x) * 4;
+                    strip[di..di + 4].copy_from_slice(&arm.rgba[si..si + 4]);
+                }
+            }
+        }
+        let stem = name.trim_end_matches(".jpg");
+        let p = dir.join(format!("{stem}-strip.png"));
+        image::RgbaImage::from_raw(strip_w as u32, sh as u32, strip)
+            .unwrap()
+            .save(&p)
+            .unwrap();
+        println!("wrote {} (left to right: 1.00, 1.50, 1.75, 2.00)", p.display());
+    }
+}
+
+/// The step edge's output profile, printed. Exists because `step_rise` reads
+/// 0.000 at every strength and that is either a real limit or a bug in the
+/// metric, and those are very different things to build a sharpness number on.
+#[test]
+#[ignore]
+fn print_step_edge_profile() {
+    let src = probe_step(PROBE_W, PROBE_H, PROBE_W / 2);
+    for &s in &[1.0f32, 2.0, 3.0] {
+        let out = resize_at(&src, PROBE_TARGET, s);
+        let w = out.width as usize;
+        let mid = out.height as usize / 2;
+        let prof: Vec<u8> = (w / 2 - 5..w / 2 + 5)
+            .map(|x| out.rgba[(mid * w + x) * 4])
+            .collect();
+        println!("  strength {s}: {} values around the edge: {:?}", out.width, prof);
+    }
+}
+
+/// Step-edge rise at each strength, plus the real-page numbers beside it.
+#[test]
+#[ignore]
+fn print_step_edge_sharpness() {
+    println!("== step edge, 890x1244 -> 432 (R 2.880); rise in output px ==");
+    let src = probe_step(PROBE_W, PROBE_H, PROBE_W / 2);
+    for &s in SWEEP_STRENGTHS {
+        let out = resize_at(&src, PROBE_TARGET, s);
+        println!(
+            "  strength {s:>4.2}: rise {:.3} output px  ({:.3} source px)",
+            step_rise(&out),
+            step_rise(&out) * PROBE_W as f32 / out.width as f32
+        );
+    }
+    // A thin-line probe too: a 1.5 source px line is what a line-art page is
+    // mostly made of, and it is the case where widening the kernel is most
+    // visible.
+    println!("== 3-source-px bar, 890x1244 -> 432 ==");
+    let mut rgba = vec![0u8; (PROBE_W as usize) * (PROBE_H as usize) * 4];
+    for y in 0..PROBE_H as usize {
+        for x in 0..PROBE_W as usize {
+            let v = if (x as u32) % 40 < 3 { 0u8 } else { 255 };
+            let o = (y * PROBE_W as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let bars = image_viewer::ImageData {
+        width: PROBE_W,
+        height: PROBE_H,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    };
+    let base = resize_at(&bars, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+    let crop = (base.width / 4, base.height / 4, base.width / 2, base.height / 2);
+    let g0 = edge_grad(&base, crop);
+    for &s in SWEEP_STRENGTHS {
+        let out = resize_at(&bars, PROBE_TARGET, s);
+        println!(
+            "  strength {s:>4.2}: bar grad {:.3} codes/px  ({:.3}x of fast)",
+            edge_grad(&out, crop),
+            edge_grad(&out, crop) / g0
+        );
+    }
+}
+
+/// Is the residual on the worst-case page still a **lattice**, or is it now
+/// broadband? This is the question the honest limit turns on.
+///
+/// `alias_amp` going down does not say the artefact went away - it says *some*
+/// amplitude went down, and a 1-px sparkle and a lattice of the same amplitude
+/// are not the same defect. So: project the flat-tone pixels of the output onto
+/// a 2-D sinusoid at every output period from 1.5 to 8 px, and look at the
+/// **peak** and at where it sits. A lattice shows one sharp peak at the pitch of
+/// the artefact; broadband residue shows a low, flat curve.
+#[test]
+#[ignore]
+fn print_tone_residual_spectrum() {
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, target) in [("32.jpg", 1080u32), ("12.jpg", 1080)] {
+        let Some(page) = load_real_page(tmp.path(), name) else {
+            println!("{name} absent, skipped");
+            continue;
+        };
+        let base = resize_at(&page, target, image_viewer::FAST_STRENGTH);
+        let (tone, _) = tone_and_edge_masks(&page, base.width, base.height);
+        println!(
+            "== {name} -> {}x{}, flat-tone 2-D spectrum of mean amplitude per output px ==",
+            base.width, base.height
+        );
+        let arms: Vec<image_viewer::ImageData> = SWEEP_STRENGTHS
+            .iter()
+            .map(|&s| resize_at(&page, target, s))
+            .collect();
+        let mut names: Vec<String> = SWEEP_STRENGTHS.iter().map(|s| format!("{s:.2}")).collect();
+        names.push("mean".into());
+        println!("{:>6} | {}", "period", names.join(" | "));
+        for &p_out in &[1.5f32, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0] {
+            let row: Vec<f32> = arms
+                .iter()
+                .map(|d| tone_spectrum_amp(d, &tone, p_out))
+                .collect();
+            let mean = row.iter().sum::<f32>() / row.len() as f32;
+            let cells: Vec<String> = row
+                .iter()
+                .map(|v| format!("{v:.3}"))
+                .chain(std::iter::once(format!("{mean:.3}")))
+                .collect();
+            println!("{p_out:>6.1} | {}", cells.join(" | "));
+        }
+    }
+}
+
+/// Amplitude of a 2-D sinusoid of output period `p_out`, averaged over the
+/// flat-tone pixels only. Same projection as `beat_amp`, restricted to the mask.
+fn tone_spectrum_amp(d: &image_viewer::ImageData, mask: &[bool], p_out: f32) -> f32 {
+    let (w, h) = (d.width as usize, d.height as usize);
+    let k = 2.0 * std::f64::consts::PI / p_out as f64;
+    // Subtract the mask's own mean first, or a non-zero DC leaks into the
+    // projection and reads as structure that is not there.
+    let (mut n, mut mean) = (0f64, 0f64);
+    for (i, m) in mask.iter().enumerate().take(w * h) {
+        if *m {
+            mean += d.rgba[i * 4] as f64;
+            n += 1.0;
+        }
+    }
+    if n < 8.0 {
+        return 0.0;
+    }
+    mean /= n;
+    let (mut sss, mut ssc, mut sys, mut syc) = (0f64, 0f64, 0f64, 0f64);
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !mask[i] {
+                continue;
+            }
+            let v = d.rgba[i * 4] as f64 - mean;
+            let s = (k * x as f64).sin() + (k * y as f64).sin();
+            let c = (k * x as f64).cos() + (k * y as f64).cos();
+            sss += s * s;
+            ssc += s * c;
+            sys += v * s;
+            syc += v * c;
+        }
+    }
+    if sss <= 0.0 {
+        return 0.0;
+    }
+    let (a, b) = if ssc.abs() < 1e-9 * sss.max(1.0) {
+        (sys / sss, syc / sss)
+    } else {
+        let det = sss * sss - ssc * ssc;
+        if det.abs() < 1e-9 {
+            return 0.0;
+        } else {
+            ((sys * sss - syc * ssc) / det, (syc * sss - sys * ssc) / det)
+        }
+    };
+    ((a * a + b * b).sqrt() / n.sqrt()) as f32
+}
+
+/// Wall clock at the two shipped positions, on the worst-case real page.
+/// Interleaved arms, both warmed before either is timed.
+#[test]
+#[ignore]
+fn print_downscale_strength_wall_clock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let Some(page) = load_real_page(tmp.path(), "32.jpg") else {
+        println!("32.jpg absent, skipped");
+        return;
+    };
+    println!("== wall clock, 32.jpg 2223x3109 -> 1080, ms (release) ==");
+    // **Interleaved one at a time, in alternating order, not arm-after-arm.**
+    // The first version of this ran all of `fast` and then all of `smooth`, and
+    // the two `fast` blocks it reported on either side of `smooth` disagreed by
+    // 38% (76 ms then 105 ms) - so whatever drifts here (thread pool warming,
+    // the turbojpeg scratch buffers, the page cache) is worth more than the
+    // effect being measured. One resize per alternating step means the drift is
+    // shared between the arms instead of accumulating on one of them.
+    let mut fast = Vec::new();
+    let mut smooth = Vec::new();
+    // Warm both first: the cache and the thread pool are shared process state,
+    // and the first call into either arm pays for both.
+    for &s in &[image_viewer::FAST_STRENGTH, image_viewer::SMOOTH_STRENGTH] {
+        let _ = resize_at(&page, 1080, s);
+    }
+    for i in 0..9 {
+        // Alternate which arm goes first, so neither systematically inherits the
+        // other's warm-up or cool-down.
+        let order: &[f32] = if i % 2 == 0 {
+            &[image_viewer::FAST_STRENGTH, image_viewer::SMOOTH_STRENGTH]
+        } else {
+            &[image_viewer::SMOOTH_STRENGTH, image_viewer::FAST_STRENGTH]
+        };
+        for &s in order {
+            let t = std::time::Instant::now();
+            let _ = resize_at(&page, 1080, s);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            if s == image_viewer::FAST_STRENGTH {
+                fast.push(ms);
+            } else {
+                smooth.push(ms);
+            }
+        }
+    }
+    for (name, mut v) in [("fast 1.0", fast), ("smooth 2.0", smooth)] {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "  {name:>11}: median {:.0} ms   min {:.0}   max {:.0}",
+            v[v.len() / 2],
+            v[0],
+            v[v.len() - 1]
+        );
+    }
+}
+
+/// THE guard on the strength: on a **square lattice**, which is the only probe
+/// that can show the artefact, `Smooth` must leave strictly less than `Fast`.
+///
+/// **Why a square lattice and not the sinusoid above.** `probe_sinusoid` varies
+/// along x only, so it cannot produce a lattice in the first place — it reports
+/// the horizontal transfer function, and a horizontal transfer function reading
+/// 4 codes says nothing about a *square* grid. That is not a criticism of the
+/// probe: it is exactly the right probe for the question it asks, which is why it
+/// is kept. It is the wrong probe for this one, and the previous session's
+/// "4 codes, therefore fixed" came from asking it this.
+///
+/// **Why `Fast` is the control rather than an absolute number.** An absolute
+/// pin would say one strength is good enough and would go stale silently if the
+/// kernel changed. The property that matters is the *direction and the size* of
+/// the trade, and it is measurable without a reference implementation: more
+/// strength must mean less lattice. The absolute numbers are in the comment.
+#[test]
+fn smooth_low_passes_a_square_lattice_harder_than_fast() {
+    // alias_amp (p95-p5, whole output, both axes) at the probe's 2.880x:
+    //
+    //   pitch   2.5   3.0   3.5   4.0   5.0   6.0   8.0
+    //   Fast   10.0   2.0  14.0  10.0  19.0  22.0  23.0
+    //   Smooth  1.0   0.0   1.0   1.0   0.0   0.0   4.0
+    //
+    // Pins are the Smooth numbers plus one code, the same slack the prefilter
+    // tests use: the most a different target's f32 contraction could move a
+    // weighted sum. At every pitch the ratio is 0.00-0.17x.
+    let cases = [
+        (2.5f32, 2.0f32),
+        (3.0, 1.0),
+        (3.5, 2.0),
+        (4.0, 2.0),
+        (5.0, 1.0),
+        (6.0, 1.0),
+        (8.0, 5.0),
+    ];
+    for (pitch, max_codes) in cases {
+        let src = probe_square_lattice(PROBE_W, PROBE_H, pitch, 1.0, 0, 100);
+        let fast = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+        let smooth = resize_at(&src, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH);
+        let (a_fast, a_smooth) = (alias_amp(&fast), alias_amp(&smooth));
+        assert!(
+            a_smooth <= max_codes,
+            "square lattice at source pitch {pitch} px: Smooth left {a_smooth} codes, \
+             want <= {max_codes} (Fast leaves {a_fast})"
+        );
+        assert!(
+            a_smooth < a_fast,
+            "square lattice at source pitch {pitch} px: Smooth {a_smooth} codes is \
+             not below Fast {a_fast} - the strength is not reaching the kernel"
+        );
+    }
+}
+
+/// The same trade, measured as the amplitude of the lattice **at its own output
+/// period** rather than as broadband spread.
+///
+/// The eye groups the surviving pattern into the visible artefact; it is not
+/// reading a percentile. So this asks the narrower question — is the lattice's
+/// own frequency still there? — and it is a separate projection from
+/// `alias_amp`, so the two agreeing is evidence rather than one number twice.
+#[test]
+fn smooth_removes_the_lattice_at_its_own_output_pitch() {
+    // beat_amp at the lattice's own output period, codes:
+    //
+    //   pitch   3.5   4.0   5.0   6.0
+    //   Fast    1.24  2.74  5.75  7.09
+    //   Smooth  0.08  0.06  0.10  0.04
+    let cases = [(3.5f32, 0.2f32), (4.0, 0.2), (5.0, 0.2), (6.0, 0.2)];
+    for (pitch, max_codes) in cases {
+        let src = probe_square_lattice(PROBE_W, PROBE_H, pitch, 1.0, 0, 100);
+        let fast = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+        let smooth = resize_at(&src, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH);
+        let r = PROBE_W as f32 / fast.width as f32;
+        let p_out = pitch / r;
+        let (b_fast, b_smooth) = (beat_amp(&fast, p_out), beat_amp(&smooth, p_out));
+        assert!(
+            b_smooth <= max_codes,
+            "square lattice at source pitch {pitch} px ({p_out:.2} output px): \
+             {b_smooth:.2} codes of lattice at its own pitch survived, want \
+             <= {max_codes} (Fast leaves {b_fast:.2})"
+        );
+    }
+}
+
+/// The cost, stated as a number: `Smooth` makes a hard edge wider. Pinned so
+/// that "it removes the artefact" cannot be re-earned later by a change that
+/// quietly gives the sharpness back — which would mean the setting is no longer
+/// doing the thing it is named for.
+///
+/// 10-90% rise on a step edge at the probe's 2.880x reduction, output pixels:
+///
+///   Fast 1.607 -> Smooth 2.747   (1.71x)
+///
+/// The bar probe is the same statement on content a manga page is mostly made
+/// of: 3-source-px bars at 2x output. Fast 14.118 -> Smooth 7.634 codes/px.
+#[test]
+fn smooth_costs_edge_sharpness_and_the_cost_is_bounded() {
+    let step = probe_step(PROBE_W, PROBE_H, PROBE_W / 2);
+    let fast = resize_at(&step, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+    let smooth = resize_at(&step, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH);
+    let (r_fast, r_smooth) = (step_rise(&fast), step_rise(&smooth));
+    assert!(
+        r_smooth > r_fast,
+        "Smooth must widen the step edge ({r_fast:.3} -> {r_smooth:.3} output px); \
+         it did not, so the strength is not reaching the kernel"
+    );
+    assert!(
+        r_smooth <= r_fast * 1.75,
+        "the step edge grew to {r_smooth:.3} output px from {r_fast:.3} \
+         ({:.2}x) - past the 1.71x the trade was chosen at, which means the \
+         default has moved",
+        r_smooth / r_fast.max(1e-6)
+    );
+
+    let mut rgba = vec![0u8; (PROBE_W as usize) * (PROBE_H as usize) * 4];
+    for y in 0..PROBE_H as usize {
+        for x in 0..PROBE_W as usize {
+            let v = if (x as u32) % 40 < 3 { 0u8 } else { 255 };
+            let o = (y * PROBE_W as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    let bars = image_viewer::ImageData {
+        width: PROBE_W,
+        height: PROBE_H,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    };
+    let crop = |d: &image_viewer::ImageData| {
+        (
+            d.width / 4,
+            d.height / 4,
+            d.width / 2,
+            d.height / 2,
+        )
+    };
+    let (b_fast, b_smooth) = (
+        resize_at(&bars, PROBE_TARGET, image_viewer::FAST_STRENGTH),
+        resize_at(&bars, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH),
+    );
+    let g_fast = edge_grad(&b_fast, crop(&b_fast));
+    let g_smooth = edge_grad(&b_smooth, crop(&b_smooth));
+    assert!(
+        g_smooth < g_fast * 0.60,
+        "3-px bar gradient {g_smooth:.3} vs Fast {g_fast:.3} ({:.3}x); it must fall \
+         below 0.60x - 0.541x is what the default was chosen at",
+        g_smooth / g_fast.max(1e-6)
+    );
+}
+
+/// `Fast` is **today's kernel, bit for bit**, and that is checkable without a
+/// reference build: at strength 1.0 the multiplier is the identity, so the
+/// output has to equal what an unscaled `filter_scale` would produce. Held by
+/// asserting `FAST_STRENGTH == 1.0` and that `set_downscale_smoothing(false)`
+/// lands exactly on it — the two facts together mean the `Fast` position is the
+/// pre-existing code path and not a third flavour of it.
+///
+/// This is the guard that would catch someone "tidying" `FAST_STRENGTH` to
+/// something else, which would silently make the toggle a lie: the label would
+/// say Fast and the picture would change anyway.
+#[test]
+fn fast_is_exactly_the_pre_existing_kernel_width() {
+    assert_eq!(image_viewer::FAST_STRENGTH, 1.0);
+    assert!(image_viewer::SMOOTH_STRENGTH > image_viewer::FAST_STRENGTH);
+
+    let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
+    let was = image_viewer::downscale_strength();
+    image_viewer::set_downscale_smoothing(false);
+    let at_fast = image_viewer::downscale_strength();
+    let smoothing_off = image_viewer::downscale_smoothing();
+    image_viewer::set_downscale_smoothing(true);
+    let at_smooth = image_viewer::downscale_strength();
+    let smoothing_on = image_viewer::downscale_smoothing();
+    image_viewer::set_downscale_strength(was);
+
+    assert_eq!(at_fast, 1.0, "Fast must be the identity multiplier");
+    assert!(!smoothing_off);
+    assert_eq!(at_smooth, image_viewer::SMOOTH_STRENGTH);
+    assert!(smoothing_on);
+}
+
+/// **The strength has to reach both halves of the resize, and it has to be one
+/// value.** Pinned against the source text, because the failure is not
+/// observable from outside and the library cannot reach `main.rs`.
+///
+/// Two halves, two failure modes, both silent:
+///
+/// * the prefilter widened but the final passes not, or the reverse. Either way
+///   the artefact is only partly removed and nothing says so. The prefilter's
+///   own `filter_scale` and the final pass's are separate `contributions` calls.
+/// * **the two halves reading the setting separately.** A toggle pressed between
+///   the prefilter's weights and the final pass's would resize with a prefilter
+///   of one width feeding a final pass of another — a picture that is neither
+///   setting. That is the same class as the two manga-mode sites that were each
+///   correct alone, which is why this reads the count and not just presence.
+///
+/// Verified to fail both ways: with `strength` dropped from either
+/// `contributions` call site, and with `downscale_strength()` moved into
+/// `contributions` so each call site reads it for itself.
+#[test]
+fn one_strength_reaches_both_halves_of_the_resize() {
+    let src = include_str!("../src/lib.rs");
+
+    // Brace-match a function body rather than slicing to the first `\n}`: a
+    // nested block at column 0 would end the slice early and the scan would pass
+    // on a truncated function.
+    let body_of = |name: &str| -> &str {
+        let start = src
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("{name} exists"));
+        let body = &src[start..];
+        let mut depth = 0i32;
+        let end = body
+            .char_indices()
+            .find(|&(_, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0 && c == '}'
+            })
+            .map(|(i, _)| i + 1)
+            .expect("braces balance");
+        &body[..end]
+    };
+
+    let lr = body_of("linear_resize");
+    assert_eq!(
+        lr.matches("downscale_strength()").count(),
+        1,
+        "linear_resize must read downscale_strength() exactly once, so the \
+         pre-reduction and the final passes cannot disagree"
+    );
+    assert!(
+        lr.contains("kernel_reduce_linear(data, pre_w, pre_h, strength)"),
+        "the pre-reduction must be handed the strength linear_resize read"
+    );
+    assert!(
+        lr.contains("contributions(lw, new_w, &kern, support, strength)")
+            && lr.contains("contributions(lh, new_h, &kern, support, strength)"),
+        "both final-pass axes must be handed the same strength"
+    );
+
+    let kr = body_of("kernel_reduce_linear");
+    assert!(
+        kr.contains("strength: f32")
+            && kr.contains("contributions(sw as u32, pw as u32, &kern, support, strength)")
+            && kr.contains("contributions(sh as u32, ph as u32, &kern, support, strength)"),
+        "the pre-reduction must take the strength as an argument and use it on \
+         both axes - reading it for itself would let it disagree with the final \
+         passes"
+    );
+
+    let con = body_of("contributions");
+    assert!(
+        !con.contains("downscale_strength()"),
+        "contributions must take the strength as a parameter, not read the \
+         setting: it is called four times per resize and a read there is four \
+         chances for the halves to disagree"
+    );
+    assert!(
+        con.contains("strength / scale"),
+        "the multiplier has to scale filter_scale, which is the only term that \
+         widens the kernel - widening the span alone evaluates every extra tap \
+         at exactly zero and is bit-identical"
+    );
+}
+
+/// The settings toggle must be **wired**, and `main.rs` is unreachable from every
+/// test, so this is a source scan - the established pattern here (`spreads.rs`,
+/// `keybindings.rs`, `renderer.rs`).
+///
+/// Three things it checks, each a way the setting could exist and do nothing:
+/// the label exists, the config load applies it, and the panel's changed arm
+/// **invalidates the previews**. The third is the one that matters: a
+/// decode-time setting that leaves `previews` alone flips the box, changes
+/// nothing visible, and reads as a broken feature. `linear_resample` is the
+/// documented counter-example in `AGENTS.md`.
+#[test]
+fn the_smooth_toggle_is_wired_and_invalidates_the_previews() {
+    let src = include_str!("../src/main.rs");
+
+    assert!(
+        src.contains("set_downscale_smoothing(config.smooth_downscale);"),
+        "startup must apply config.smooth_downscale to the resampler"
+    );
+    assert!(
+        src.contains("&mut self.config.smooth_downscale"),
+        "the settings panel must have a checkbox bound to it"
+    );
+
+    // The checkbox's own arm: find the `.changed()` block that mentions the
+    // field and require it to set `refilter`. Locating it by field name rather
+    // than by a fixed offset is what makes this survive the panel being
+    // reordered, which it will be.
+    let at = src
+        .find("&mut self.config.smooth_downscale")
+        .expect("the checkbox exists");
+    let after = &src[at..];
+    let arm_end = after
+        .find("}\n                ")
+        .expect("the changed() arm closes");
+    let arm = &after[..arm_end];
+    assert!(
+        arm.contains("set_downscale_smoothing("),
+        "the changed arm must apply the setting immediately, not only on the \
+         next launch"
+    );
+    assert!(
+        arm.contains("refilter = true"),
+        "the changed arm must set refilter, or the previews decoded by the old \
+         kernel stay on screen and the toggle appears broken (AGENTS.md records \
+         exactly this for linear_resample)"
+    );
+    assert!(
+        src.contains("if refilter {"),
+        "the refilter flag must still be acted on"
+    );
+}
+
+/// A config written before this setting existed still loads, and gets the
+/// setting that hides the artefact.
+///
+/// Both halves, because they are opposites: it must load *and* it must come up
+/// `true`. A `#[serde(default)]` with the wrong default compiles, passes every
+/// other test in the suite, and hands every existing reader a lattice.
+#[test]
+fn a_config_written_before_smooth_downscale_still_loads_and_gets_smooth() {
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert!(
+        cfg.smooth_downscale,
+        "Smooth must default on: a config that has never heard of the setting is \
+         the majority of them, and the artefact it removes is the visible defect"
+    );
+
+    // And the default a *missing file* gets, which is a different construction
+    // (`Config::load`'s hand-built struct) and was a separate way for the field
+    // to be forgotten.
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
+    assert!(
+        fresh.smooth_downscale,
+        "a first run must also come up Smooth"
     );
 }
 

@@ -35,7 +35,8 @@ use image_viewer::{
     buffer_has_alpha, extract_zip, fit_scale_no_upscale, forget_thumbnail, grid_cols,
     is_archive_path, last_anchor, load_grid_thumbnail, load_image_full, load_page_preview_full,
     load_spread_overrides, nav_is_forward, protected_preview_keys, save_spread_overrides,
-    scan_folder_sorted, set_downscale_filter, set_linear_resample, set_thumbnail_cache,
+    scan_folder_sorted, set_downscale_filter, set_downscale_smoothing, set_linear_resample,
+    set_thumbnail_cache,
     spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
     DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
     SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
@@ -1580,6 +1581,7 @@ impl MyApp {
 
         set_linear_resample(config.linear_resample);
         set_downscale_filter(config.downscale_filter);
+        set_downscale_smoothing(config.smooth_downscale);
         image_viewer::set_wide_gamut_conversion(config.convert_wide_gamut);
         set_thumbnail_cache(config.thumbnail_cache);
 
@@ -6095,6 +6097,49 @@ impl eframe::App for MyApp {
                             }
                         });
                 });
+                // Sits with the shape dropdown rather than under it because it is
+                // the same decision — how a downscaled page is resampled — and
+                // the two axes have to be read together to make sense of either.
+                // The label says what it *does*, not that a `filter_scale` is
+                // multiplied: the user is choosing between a clean tone field
+                // and a crisp line, and neither word describes the mechanism.
+                //
+                // **Labelled for the effect, because the effect is what the user
+                // can see.** "Low-pass strength" is a true description and a
+                // useless one; nobody looking at a page with a lattice in it is
+                // going to find a checkbox that says "low-pass strength".
+                if ui
+                    .checkbox(
+                        &mut self.config.smooth_downscale,
+                        "Smooth: keep fine detail from forming a grid",
+                    )
+                    .changed()
+                {
+                    // Apply straight away. Nothing re-queues a decode on its own,
+                    // so the alternative is "looks like it worked after a
+                    // restart", which is the same failure as not applying it.
+                    set_downscale_smoothing(self.config.smooth_downscale);
+                    self.config.save(&self.config_path);
+                    // **Invalidate, or this reads as a broken setting.** The
+                    // previews already in `previews` were decoded by the *other*
+                    // kernel, and nothing else would ever re-queue them: the
+                    // filter dropdown has carried `refilter` for exactly this
+                    // reason, and `linear_resample` a few rows up is the
+                    // documented counter-example of what happens without it.
+                    refilter = true;
+                }
+                // **Says "noticeably softer", not "a little softer", because the
+                // measured cost is a 1.71x wider step edge** - that is the
+                // trade being offered and a reader deciding between these two
+                // boxes is entitled to know its size. Overstating the benefit
+                // would be the same defect as hiding the cost.
+                ui.small(
+                    "A downscaled page's fine detail folds back on itself into a \
+                     grid of dark and light. Smooth low-passes harder to stop it; \
+                     it does not remove it entirely, and edges come out \
+                     noticeably softer. Fast keeps the picture crisper and the \
+                     grid visible.",
+                );
                 if ui
                     .checkbox(
                         &mut self.config.block_while_loading,

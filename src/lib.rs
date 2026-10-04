@@ -185,6 +185,30 @@ pub struct Config {
     #[serde(default)]
     pub downscale_filter: DownscaleFilter,
 
+    /// Low-pass a downscaled page harder than the Nyquist minimum, so a fine
+    /// pattern cannot survive as a square sparkle.
+    ///
+    /// **This is the strength axis, and the filter *shape* dropdown is not.** A
+    /// 2223x3109 page at the manga half-panel target reduces 2.879x, and the
+    /// content at the source Nyquist comes through as a hard 1-2 px lattice.
+    /// Measured over the three shapes, on screentone: Hermite had the lowest
+    /// residual and Lanczos3 the highest at 1.93x the cost, so shape has no
+    /// useful dynamic range for this artefact - only the kernel's *width* does,
+    /// and there was no axis for it until this field. Both are kept: shape was
+    /// never measured on photographic edges, and removing a shipped setting is
+    /// a worse change than adding one.
+    ///
+    /// **On by default**, and `#[serde(default = "default_true")]` for the same
+    /// reason `manga_rtl` carries it: an old config has to load *and* land on
+    /// the setting that hides the artefact.
+    ///
+    /// Unlike `linear_resample`, this one **does** invalidate the previews on
+    /// the same frame it flips (the filter dropdown's `refilter`). A decode-time
+    /// setting that leaves the cached previews alone reads as a broken toggle:
+    /// the box moves, the picture does not change.
+    #[serde(default = "default_true")]
+    pub smooth_downscale: bool,
+
     /// Hold-to-browse: arrow keys advance only as fast as images decode.
     #[serde(default)]
     pub block_while_loading: bool,
@@ -317,6 +341,7 @@ impl Config {
             sort: SortMode::Name,
             linear_resample: true,
             downscale_filter: DownscaleFilter::Hermite,
+            smooth_downscale: true,
             block_while_loading: false,
             wheel_navigation: false,
             loop_back: true,
@@ -6756,6 +6781,58 @@ fn downscale_filter() -> DownscaleFilter {
     }
 }
 
+/// How much wider than the Nyquist minimum the resampling kernel runs when
+/// `Smooth` is on. **This is the strength axis, and it is the only one this
+/// codebase has.**
+///
+/// `FAST_STRENGTH` is exactly the width the kernel had before the setting
+/// existed, so `Fast` is the old behaviour and not a third flavour of it.
+/// `SMOOTH_STRENGTH` is measured rather than chosen: see
+/// `tests/unit.rs::print_square_lattice_sweep` and `print_real_page_strength_sweep`
+/// for the sweep it came out of, and `smooth_costs_edge_sharpness_and_the_cost_is_bounded`
+/// for the cost it was accepted at.
+///
+/// **Why a multiplier on `filter_scale` and not on the tap count.**
+/// `contributions` already divides the kernel argument by `filter_scale`, so
+/// widening the *span* while leaving `filter_scale` alone evaluates every extra
+/// tap at exactly zero and is bit-identical - that is a measured result, not an
+/// inference. Widening `filter_scale` widens the argument *and* the span
+/// together, so the extra taps are real. And it is the one lever that reaches
+/// both halves of the resize: the pre-reduction's own `filter_scale` and the
+/// final pass's.
+pub const FAST_STRENGTH: f32 = 1.0;
+pub const SMOOTH_STRENGTH: f32 = 2.0;
+
+/// The strength a worker sees, as a float in an atomic. Workers read it; the UI
+/// thread writes it, from the settings toggle.
+static DOWNSCALE_STRENGTH: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(SMOOTH_STRENGTH.to_bits());
+
+/// Set the kernel strength directly. `set_downscale_smoothing` is the user-facing
+/// spelling; this exists so a test can put an arbitrary strength on the axis and
+/// sweep it.
+pub fn set_downscale_strength(strength: f32) {
+    DOWNSCALE_STRENGTH.store(strength.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The kernel strength in force, as read by the resampler.
+pub fn downscale_strength() -> f32 {
+    f32::from_bits(DOWNSCALE_STRENGTH.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The `Smooth` / `Fast` toggle. `true` is `SMOOTH_STRENGTH`, `false` is
+/// `FAST_STRENGTH`, which is what the path did before either existed.
+pub fn set_downscale_smoothing(on: bool) {
+    set_downscale_strength(if on { SMOOTH_STRENGTH } else { FAST_STRENGTH });
+}
+
+/// Is the strength at least `SMOOTH_STRENGTH`? Public so tests can save and
+/// restore it around assertions that only hold on one side of the toggle, the
+/// same reason `linear_resample_enabled` exists.
+pub fn downscale_smoothing() -> bool {
+    downscale_strength() >= SMOOTH_STRENGTH
+}
+
 /// Kernel weight and support radius for each filter.
 fn kernel(f: DownscaleFilter) -> (Box<dyn Fn(f32) -> f32>, f32) {
     match f {
@@ -6953,13 +7030,13 @@ pub fn prefilter_dim(dim: u32, target: u32) -> u32 {
 /// Both passes are row-parallel, which the box's vertical pass could not be: it
 /// summed a sliding window down a column accumulator, so it ran on one thread.
 /// That, not the arithmetic, is where the speedup comes from.
-fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32) -> Vec<u8> {
+fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32, strength: f32) -> Vec<u8> {
     let (to_lin, to_srgb) = lin_tables();
     let (sw, sh) = (data.width as usize, data.height as usize);
     let (pw, ph) = (pre_w as usize, pre_h as usize);
     let (kern, support) = kernel(downscale_filter());
-    let horizontal = contributions(sw as u32, pw as u32, &kern, support);
-    let vertical = contributions(sh as u32, ph as u32, &kern, support);
+    let horizontal = contributions(sw as u32, pw as u32, &kern, support, strength);
+    let vertical = contributions(sh as u32, ph as u32, &kern, support, strength);
 
     // Horizontal: source width -> pre_w, at full height.
     let mut tmp = vec![0u8; pw * sh * 4];
@@ -7035,10 +7112,19 @@ fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32) -> Vec<u8> {
 /// the one place the values are combined rather than at each of a function's
 /// return points.
 ///
-/// The final pass therefore still sees `dFactor` 2.0000 and Hermite's 4-5 taps,
-/// unchanged from when the prefilter was a box.
+/// The final pass therefore still sees `dFactor` 2.0000, unchanged from when the
+/// prefilter was a box — its **tap count**, however, is whatever the strength
+/// asks for: Hermite's 4-5 at `FAST_STRENGTH` and about twice that at
+/// `SMOOTH_STRENGTH`, which is the whole of the extra ~25 ms a resize pays.
 fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     let (to_lin, to_srgb) = lin_tables();
+
+    // **One read of the strength, one value, both halves.** The pre-reduction
+    // and the final passes each call `contributions`, and the pre-reduction's
+    // output is the final pass's input - so a strength read separately in each
+    // would let the two halves disagree, i.e. resize with a prefilter of one
+    // width feeding a final pass of another. Read once, thread it.
+    let strength = downscale_strength();
 
     // Pass 1: reduce to at most 2x the target, in linear light, then convert
     // *that* to 12-bit linear. The conversion is the expensive part, so it must
@@ -7048,7 +7134,7 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     let t0 = std::time::Instant::now();
     let (small, lw, lh): (Cow<'_, [u8]>, u32, u32) = if pre_w < data.width || pre_h < data.height {
         (
-            Cow::Owned(kernel_reduce_linear(data, pre_w, pre_h)),
+            Cow::Owned(kernel_reduce_linear(data, pre_w, pre_h, strength)),
             pre_w,
             pre_h,
         )
@@ -7073,8 +7159,8 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     let t2 = std::time::Instant::now();
     // Separable kernel resample in 12-bit linear light with precomputed weights.
     let (kern, support) = kernel(downscale_filter());
-    let horizontal = contributions(lw, new_w, &kern, support);
-    let vertical = contributions(lh, new_h, &kern, support);
+    let horizontal = contributions(lw, new_w, &kern, support, strength);
+    let vertical = contributions(lh, new_h, &kern, support, strength);
 
     // Horizontal pass: width -> new_w.
     let mut tmp = vec![0u16; (new_w as usize) * (lh as usize) * 4];
@@ -7141,11 +7227,15 @@ fn contributions(
     dst_len: u32,
     kern: &impl Fn(f32) -> f32,
     support: f32,
+    strength: f32,
 ) -> Vec<Vec<(usize, f32)>> {
     let mut out = Vec::with_capacity(dst_len as usize);
     let scale = dst_len as f32 / src_len as f32;
-    // When downscaling, widen the filter by the inverse ratio (anti-aliasing).
-    let filter_scale = if scale < 1.0 { 1.0 / scale } else { 1.0 };
+    // When downscaling, widen the filter by the inverse ratio (anti-aliasing),
+    // then by `strength` on top: one multiplier reaching the pre-reduction and
+    // the final passes alike, rather than a per-call-site decision that could
+    // disagree with itself.
+    let filter_scale = if scale < 1.0 { strength / scale } else { 1.0 };
     let radius = support * filter_scale;
     for dst in 0..dst_len as usize {
         let center = (dst as f32 + 0.5) / scale - 0.5;

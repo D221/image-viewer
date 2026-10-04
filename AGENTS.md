@@ -1025,7 +1025,9 @@ an edit.
   over the full-resolution source, a reciprocal **division inside the inner loop
   cost more than everything else combined**, and **overshoot must clamp LUT
   indices to 4095** (index 4097 was a worker panic). Toggling `linear_resample`
-  does not re-decode cached previews (the filter dropdown does — see `refilter`).
+  does not re-decode cached previews (the filter dropdown does — see `refilter`;
+  and so does the new `Smooth` toggle, deliberately, which is the fix and not the
+  status quo).
   - **The prefilter is a kernel, not a box, and it averages in *linear light*.**
     Both halves were measured on a 2223×3109 page at the real 2.879× reduction
     (the manga half-panel target of 1080), with a harness mirroring
@@ -1066,11 +1068,86 @@ an edit.
       (565–707 ms), so the LUT stays in the inner loop.
   - **What this does not do.** It reduces the artefact; it cannot abolish it.
     Content at the source Nyquist cannot survive a 2.879× downscale without
-    aliasing: at source period 5 (1.7 output px) 23 codes still get through, and
-    the artefact is a hard 1–2 px sparkle, not a low-frequency beat (a dot lattice
-    at output pitch 3–6 beats by **0.00** codes either way). Measured on real
-    pages, mean |Δ| between adjacent output pixels inside flat tone drops
-    17.996 → 13.533 on 32.jpg — better, not gone.
+    aliasing, and the artefact is a hard 1–2 px sparkle, not a low-frequency
+    beat. Measured on real pages, mean |Δ| between adjacent output pixels inside
+    flat tone drops 17.996 → 13.533 on 32.jpg — better, not gone.
+    - **The "dot lattice at output pitch 3–6 beats by 0.00 codes" note above was
+      true and was also measuring the wrong thing.** Those were **1-D** probes —
+      `probe_sinusoid` and `probe_dots` both vary along x only — and a stripe
+      pattern cannot produce a lattice in the first place. It takes **two
+      axis-aligned frequencies beating in both axes**, which is why "the alias
+      band is down to 4 codes" was reported as *fixed* while a square grid was
+      plainly visible in the app. `probe_square_lattice` is the probe that can
+      show it, and the conclusion from it is much less comfortable (below).
+  - **The downscale low-pass has a strength axis now, and the `DownscaleFilter`
+    shape dropdown is not it.** The square-lattice probe at the real 2.880×
+    reduction, residual in codes (Fast → Smooth):
+    - source pitch 2.5 → 3.0 → 3.5 → 4.0 → 5.0 → 6.0 → 8.0 px
+    - Fast: **10 / 2 / 14 / 10 / 19 / 22 / 23**
+    - Smooth (2.0): **1 / 0 / 1 / 1 / 0 / 0 / 4**
+    - and as the lattice's **own** output period, which is the artefact rather
+      than broadband spread (pitches 3.5 / 4.0 / 5.0 / 6.0): Fast **1.24 / 2.74 /
+      5.75 / 7.09**, Smooth **0.08 / 0.06 / 0.10 / 0.04**.
+    - **The residual does not fully vanish, and that is the honest limit.** At
+      pitch 8 (2.8 output px, i.e. *above* the output Nyquist) Smooth still
+      leaves 4 codes — content there is legitimate and a low-pass is entitled to
+      keep some of it. On the worst real page, 32.jpg, flat-tone high-frequency
+      energy falls only 13.38 → 7.37 codes/px (0.55×) and at strength 3.0 it is
+      still 0.39×. **So the setting reduces the artefact substantially on a clean
+      lattice and only about half of it on real screentone; it does not abolish
+      either.** What is left is broadband residue, not a lattice: a 2-D spectrum
+      of the flat-tone pixels has **no peak at any output period from 1.5 to 8 px
+      at any strength** (all amplitudes ≤ 0.002 codes/px), which is what "reduced,
+      not abolished" looks like numerically.
+    - **The cost is real and it is the reason this is a toggle.** A hard step
+      edge's 10–90% rise at 2.880×: Fast **1.607** → Smooth **2.747** output px
+      (**1.71×**). 3-source-px bars: 14.118 → 7.634 codes/px (**0.54×**). On real
+      pages, edge-masked gradient falls to 0.37–0.56× depending on the page.
+    - **Wall clock, release, 2223×3109 → 1080: Fast 73–77 ms median → Smooth
+      95–100 ms median** (interleaved one resize at a time, alternating order,
+      both arms warmed). This is a **one-off per resize, not a per-page cost**:
+      previews are cached and the cache is what `refilter` drops when the toggle
+      flips, so the extra ~25 ms is paid once per image per target size.
+      **Measure the arms interleaved.** Run arm-after-arm instead, and the two
+      `Fast` blocks bracketing `Smooth` disagreed by 38% (76 ms then 105 ms) —
+      the drift is larger than the effect.
+    - **`FAST_STRENGTH` is 1.0**, the identity multiplier, so `Fast` is
+      *exactly* the pre-existing code path and not a third flavour of it.
+      `SMOOTH_STRENGTH` is 2.0. Pinned by
+      `fast_is_exactly_the_pre_existing_kernel_width` and by the bounded cost in
+      `smooth_costs_edge_sharpness_and_the_cost_is_bounded`.
+  - **A strength multiplier is not a tap-count change, and the earlier "widening
+    is a no-op" note is about the other one.** `contributions` already divides
+    the kernel argument by `filter_scale`, so widening only the *span* evaluates
+    every extra tap at exactly zero and is bit-identical — that stays true. The
+    strength multiplies **`filter_scale`** itself, so the argument and the span
+    widen together and the extra taps are real. Both widenings "add taps"; only
+    one of them does anything.
+  - **One value, read once, threaded to both halves.** `linear_resize` reads
+    `downscale_strength()` exactly **once** and hands it to `kernel_reduce_linear`
+    and to both `contributions` calls; `contributions` takes it as a parameter
+    and does not read the setting. Two halves that read it separately would let
+    a toggle pressed between them produce a prefilter of one width feeding a
+    final pass of another — a picture that is neither setting, with no error.
+    That is the same class as the two manga-mode sites that were each correct
+    alone, so `one_strength_reaches_both_halves_of_the_resize` checks the
+    **count** (exactly 1) and not just presence.
+  - **`Config::smooth_downscale`, default `true`, and it invalidates the previews
+    on the same frame it flips** (the filter dropdown's `refilter`, pinned by
+    `the_smooth_toggle_is_wired_and_invalidates_the_previews` — a source scan,
+    since `main.rs` is unreachable from every test). Toggling `linear_resample`
+    does *not*, and that asymmetry is the documented counter-example: a
+    decode-time setting that leaves the cache alone flips the box, changes nothing
+    visible, and reads as a broken feature.
+  - **The filter *shape* dropdown is kept, and its irrelevance to this artefact
+    was only measured on screentone.** Hermite had the lowest lattice residual of
+    the three and Lanczos3 the highest at 1.93× the cost, which is why shape has
+    no useful dynamic range here — but that sweep was on a synthetic lattice and
+    **not** on photographic edges, where shape plausibly still matters. **Follow-up
+    worth doing: measure shape on real photographic content.** If it turns out to
+    be irrelevant there too, collapsing the three shapes into the strength axis
+    would be the simplification — **but do not remove a shipped setting on the
+    strength of a screentone-only measurement.**
 - The old reciprocal-multiply box average (`box_spans` / `box_reciprocal` /
   `ROUND`) and its running column accumulator are **gone**; the notes above about
   integer division and cache misses in those loops no longer apply to this path.
