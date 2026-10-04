@@ -321,17 +321,23 @@ reader has asked for the one thing that makes it one. Both are in the settings p
 too, under the same names.
 
 The **seam is the middle of the picture** and there is **no gutter** between the two
-pages, so facing pages touch and a drawing that crosses the fold is unbroken. A lone
-page is not centred either — it hangs off the seam on its own side, at no more than
-half the window's width, which is what a book's cover does.
+pages, so facing pages touch and a drawing that crosses the fold is unbroken.
 
-A lone page and a page **whose partner has not arrived yet look the same**: one or two
-slots are laid out, and the far half is empty either way. That is deliberate — a
-half-width page in an empty half is the cover, and centring it instead would stop it
-sharing the seam every other turn's pages meet on — but it means a blank half is not
-by itself a sign of a problem. Wait a moment: the partner is in the decode queue and
-will appear on its own. If it does not, the pairing is what changed, and the notice
-line will say so.
+A lone page depends on what it is. A lone **portrait** page - a cover, which
+genuinely is one page wide - is not centred: it hangs off the seam on its own
+side, at no more than half the window's width. A lone **spread** is the other
+case, because it is not a page but the whole spread: it takes the full width of
+the window and is centred across the seam, in both reading directions.
+
+A lone **portrait** page and a page **whose partner has not arrived yet look the
+same**: one slot is laid out in half the window, and the far half is empty either
+way. That is deliberate - a half-width page in an empty half is the cover, and
+centring it instead would stop it sharing the seam every other turn's pages meet
+on - but it means a blank half is not by itself a sign of a problem. Wait a
+moment: the partner is in the decode queue and will appear on its own. If it does
+not, the pairing is what changed, and the notice line will say so. A lone
+**spread** is not in this class at all: it fills the width, so it never leaves a
+half empty.
 
 **Every navigation key moves as one unit.** The arrows, `Space`, `PgUp` / `PgDn` and
 both mouse side buttons are all resolved through one rule, so under right-to-left a

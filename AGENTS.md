@@ -491,11 +491,44 @@ are wrong in a way that *looks* right.
   mid-read. A wrong placeholder is only a sliver at the seam; a reflow is a
   picture that moves by itself. `MAX_TILES` stays one global bound, counted
   across both pages, because cuts are on demand.
+- **A lone page is not one rule, it is two, and the split is the *shape* and not
+  the geometry.** A lone **portrait** page keeps its half, hanging off the seam —
+  a book's cover genuinely is one page wide. A lone **spread** — a page above
+  `SPREAD_ASPECT`, which `pairable` never pairs so it takes the whole turn
+  *because* it is the whole spread — **fills the turn**: fitted against the
+  panel's whole width and centred on the seam, which is the single-image layout.
+  Confirmed on a real volume (pages 1350x1920, one of them 2700x1920 = 1.41),
+  where the wide one alone rendered in the right half at 960x682.67 on a
+  1920x1080 panel and now gets 1518.75x1080 centred, in both `rtl` values. The
+  two claims were both in this section and contradicted, and the half was applied
+  unconditionally. `spread_fit` computed `half_w = panel.0 / 2.0` and
+  `spread_rects` put every lone page on one side of the seam.
+  * **The caller decides, and `turn_is_a_lone_spread(page_count, shape)` is the
+    decision as a pure function.** Not `w > h`, in both directions: a near-square
+    page (1.05) is wider than tall, is a `Single`, and must keep its half; and
+    `X` can force a *portrait* page to `Double`, and "treat this as a spread" has
+    to mean *give it the whole turn*, or the key re-pairs the book and then draws
+    the result at half size.
+  * `lone_spread_fills_turn` is threaded through `spread_fit`, `spread_rects`,
+    **`spread_centre` and `spread_pan_bounds`** — all four. Passing it to three of
+    them is a plausible picture with no error: a full-panel page zoomed about the
+    half-width centre creeps under the cursor, and one clamped by a pan bound
+    derived from a half-width box cannot be panned at all, so the zoom's wanted
+    offset is silently truncated. Both re-check `pages.len() == 1` rather than
+    trusting the flag, because honouring it on a turn of two would stack both
+    pages on the centre.
+  * The flag is computed from **`spread_dims.len()`**, not
+    `shown_partner.is_none()`: one rule reading the list `spread_rects` is about
+    to be handed. `main.rs` is untestable, so the four call sites are pinned by a
+    source scan (`central_decides_and_threads_the_lone_spread_flag`), not by the
+    library tests — the library is correct and the app still wrong if the flag is
+    not passed.
 - **The content of a spread is not centred on the panel's centre; the *seam*
   is.** Pages extend outward from the seam and the turn is top-aligned, so the
   content's centre is displaced on both axes — horizontally by half the width
   difference, vertically by half the tallest page. Both are zero for two equal
-  pages and for a single image, **which is why a bug here hides.** The zoom
+  pages, for a single image, **and for a lone spread** (it is centred, and its
+  height is the panel's) — **which is why a bug here hides.** The zoom
   anchor (`spread_centre`, asked at two scales, or the point under the cursor
   moves) and the pan clamp (`spread_pan_bounds`, the content's own edges against
   the panel's, per axis and not symmetric) both measure from the content. The old

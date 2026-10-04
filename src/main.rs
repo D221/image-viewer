@@ -3652,11 +3652,26 @@ impl MyApp {
         // **The half panel in manga mode**, and both halves of the change hang off
         // the same number. `preview_target` takes the *long* side, so halving the
         // width is what makes `display_dim`, `schedule`'s `target_dim` and the
-        // resize refine ask for half-width textures — and a page in a spread can
-        // never need more than half the panel's width, so decoding for the whole
-        // panel would make every turn cost twice what it needs to. It is the width
+        // resize refine ask for half-width textures — and a page in a **two-page**
+        // spread can never need more than half the panel's width, so decoding for the
+        // whole panel would make every turn cost twice what it needs to. It is the width
         // that is halved and not the height because the seam runs vertically: the
         // panel's full height is what one page is fitted into.
+        //
+        // **A lone spread is the case this over-reserves for, and it is not corrected
+        // here** — `lone_spread_fills_turn` below fits that page against the *whole*
+        // panel. The correction is not free: this number is read before `pages` exists
+        // (`turn_pages` needs `shown` and its `orig`), so it would have to guess the
+        // turn's length, and the guess is only sound because a `Double` never pairs —
+        // `lone` returns true on it, so `turn_len` is 1 and `spread_dims.len()` is
+        // provably 1. What it costs today is a *soft* lone spread, not a misplaced
+        // one, and only where the long side binds: at `ppp` 1 a 2700x1920 page on a
+        // 1920x1080 panel is previewed at 1620x1152 and drawn at 1518.75 points, so it
+        // is very slightly downscaled and nothing is visible. At `ppp` 2 the panel wants
+        // 3840 physical px across and the preview is asked for 2880 — about 0.75 of
+        // what it should be, which reads as soft until the full-res tiles arrive.
+        // Recorded rather than fixed, so the next reader of `lone_spread_fills_turn`
+        // knows the layout and the decode target were moved separately and why.
         //
         // `self.config.manga_mode` is read here, on the frame, rather than snapshotted
         // at construction, so toggling it takes effect without a restart.
@@ -3811,6 +3826,28 @@ impl MyApp {
             .map(|(_, (w, h), xf)| xformed_footprint(*w as f32, *h as f32, *xf))
             .collect();
 
+        // **A turn of one page that is a spread fills the turn, and the page _is_ the
+        // whole spread** — so it is fitted against the panel's whole width and centred
+        // on the seam, rather than confined to a half with an empty one beside it.
+        //
+        // **The discriminator is `Shape`, and the caller asks**, because the geometry
+        // answers wrongly in both directions (`turn_is_a_lone_spread`'s doc has both): a
+        // near-square page is wider than tall and is a `Single`, and `X` can make a
+        // portrait page a `Double` — and "treat this as a spread" has to mean the
+        // whole turn. Asked of `shown` rather than of the cursor, for the reason
+        // `turn_pages` gives: the layout describes the picture on screen, and during
+        // the lag between a navigation and its decode landing those are two pages.
+        //
+        // **`spread_dims.len()` is the count**, not `shown_partner.is_none()`: one rule
+        // reading one list, so the fit and the rects cannot disagree about whether this
+        // is a lone spread.
+        let lone_spread_fills_turn = self.shown_pos().is_some_and(|pos| {
+            image_viewer::turn_is_a_lone_spread(
+                spread_dims.len(),
+                image_viewer::shape_of(pos, &self.page_ctx()),
+            )
+        });
+
         // One shared scale for the whole turn, and the cursor page's own fit when
         // the mode is off. `spread_fit` clamps to the same `(1e-4, 8.0)` the
         // single-image fit uses, and is used as this frame's `fit_scale` so the
@@ -3823,7 +3860,11 @@ impl MyApp {
                 .min(panel.height() / display_px.y)
                 .clamp(1e-4, 8.0)
         } else {
-            image_viewer::spread_fit((panel.width(), panel.height()), &spread_dims)
+            image_viewer::spread_fit(
+                (panel.width(), panel.height()),
+                &spread_dims,
+                lone_spread_fills_turn,
+            )
         };
         let max_scale = MAX_SCALE.max(fit_scale);
 
@@ -3928,6 +3969,7 @@ impl MyApp {
                     &spread_dims,
                     s,
                     self.config.manga_rtl,
+                    lone_spread_fills_turn,
                 );
                 Pos2::new(cx, cy)
             };
@@ -4005,6 +4047,7 @@ impl MyApp {
             &spread_dims,
             scale,
             self.config.manga_rtl,
+            lone_spread_fills_turn,
         );
         offset.x = offset.x.clamp(off_lo[0], off_hi[0]);
         offset.y = offset.y.clamp(off_lo[1], off_hi[1]);
@@ -4046,6 +4089,7 @@ impl MyApp {
                 &spread_dims,
                 scale,
                 self.config.manga_rtl,
+                lone_spread_fills_turn,
             )
             .into_iter()
             // `x` and `y` snapped, and only those: 1:1 has to stay pixel-sharp,

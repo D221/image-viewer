@@ -23,9 +23,9 @@ use image_viewer::{
     anchor_of, exif_orientation, last_anchor, load_spread_overrides, lone, next_anchor, next_turn,
     page_dims, pairable, prev_anchor, prev_turn, save_spread_overrides, shape_of, spread_centre,
     spread_fit, spread_pan_bounds, spread_rects, spread_root_key, spreads_root, spreads_tmp,
-    thumb_cache_root, turn_len, turn_partner, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos,
-    Rect4, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES,
-    SPREADS_MAX_PAGES,
+    thumb_cache_root, turn_is_a_lone_spread, turn_len, turn_partner, Gallery, GallerySpreads,
+    ImgKey, PageCtx, PagePos, Rect4, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, PROBE_PREFIX_BYTES,
+    SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -3084,7 +3084,7 @@ fn overlap(a: Rect4, b: Rect4) -> f32 {
 #[test]
 fn a_two_page_turn_meets_at_the_seam() {
     let pages = [(600.0, 800.0), (600.0, 800.0)];
-    let rects = spread_rects(PANEL, &pages, 0.5, false);
+    let rects = spread_rects(PANEL, &pages, 0.5, false, false);
 
     assert_eq!(rects.len(), 2);
     // Zero gutter: the two halves touch at exactly the panel's centre, so a drawing
@@ -3107,7 +3107,7 @@ fn a_two_page_turn_meets_at_the_seam() {
 #[test]
 fn a_right_to_left_turn_opens_on_the_right() {
     let pages = [(600.0, 800.0), (600.0, 800.0)];
-    let rects = spread_rects(PANEL, &pages, 1.0, true);
+    let rects = spread_rects(PANEL, &pages, 1.0, true, false);
 
     assert_eq!(rects[0][0], 400.0, "page 0 starts at the seam");
     assert_eq!(
@@ -3128,8 +3128,8 @@ fn a_right_to_left_turn_opens_on_the_right() {
 #[test]
 fn a_lone_page_rests_with_the_seam_on_the_centre() {
     let pages = [(400.0, 800.0)];
-    let scale = spread_fit((PANEL[2], PANEL[3]), &pages);
-    let rects = spread_rects(PANEL, &pages, scale, true);
+    let scale = spread_fit((PANEL[2], PANEL[3]), &pages, false);
+    let rects = spread_rects(PANEL, &pages, scale, true, false);
 
     assert_eq!(rects.len(), 1);
     assert_eq!(rects[0][0], 400.0, "the lone page's inner edge is the seam");
@@ -3150,8 +3150,8 @@ fn a_lone_page_rests_with_the_seam_on_the_centre() {
 #[test]
 fn a_lone_page_rests_on_the_left_when_reading_left_to_right() {
     let pages = [(400.0, 800.0)];
-    let scale = spread_fit((PANEL[2], PANEL[3]), &pages);
-    let rects = spread_rects(PANEL, &pages, scale, false);
+    let scale = spread_fit((PANEL[2], PANEL[3]), &pages, false);
+    let rects = spread_rects(PANEL, &pages, scale, false, false);
 
     assert_eq!(rects.len(), 1);
     assert_eq!(
@@ -3171,7 +3171,7 @@ fn a_lone_page_rests_on_the_left_when_reading_left_to_right() {
 fn the_whole_turn_is_top_aligned() {
     let panel: Rect4 = [0.0, 40.0, 800.0, 600.0];
     let pages = [(400.0, 800.0), (400.0, 200.0)];
-    let rects = spread_rects(panel, &pages, 0.5, false);
+    let rects = spread_rects(panel, &pages, 0.5, false, false);
 
     assert_eq!(rects.len(), 2);
     for (i, r) in rects.iter().enumerate() {
@@ -3202,7 +3202,7 @@ fn rects_come_back_in_input_order() {
     // Asymmetric, so "the first one" and "the narrow one" cannot be confused.
     let pages = [(400.0, 800.0), (700.0, 800.0)];
     for rtl in [false, true] {
-        let rects = spread_rects(PANEL, &pages, 1.0, rtl);
+        let rects = spread_rects(PANEL, &pages, 1.0, rtl, false);
         assert_eq!(rects.len(), 2);
         assert_eq!(rects[0][2], 400.0, "rtl={rtl}: rect 0 is the 400-wide page");
         assert_eq!(rects[1][2], 700.0, "rtl={rtl}: rect 1 is the 700-wide page");
@@ -3210,8 +3210,8 @@ fn rects_come_back_in_input_order() {
 
     // ...and the two orders really are opposite under `rtl`, which is what makes the
     // assertions above mean something. Screen order fails them there.
-    let ltr = spread_rects(PANEL, &pages, 1.0, false);
-    let rtl = spread_rects(PANEL, &pages, 1.0, true);
+    let ltr = spread_rects(PANEL, &pages, 1.0, false, false);
+    let rtl = spread_rects(PANEL, &pages, 1.0, true, false);
     assert!(ltr[0][0] < ltr[1][0], "ltr: page 0 is leftmost, so input order is screen order");
     assert!(
         rtl[0][0] > rtl[1][0],
@@ -3230,46 +3230,351 @@ fn spread_fit_is_the_more_constrained_of_the_pages() {
     let pages = [(400.0, 800.0), (400.0, 1600.0)];
 
     assert_eq!(
-        spread_fit(panel, &pages),
+        spread_fit(panel, &pages, false),
         0.375,
         "600.0 / 1600.0: the tall page's own fit decides the turn"
     );
     assert_eq!(
-        spread_fit(panel, &pages[..1]),
+        spread_fit(panel, &pages[..1], false),
         0.75,
         "the short page alone would be drawn larger, which is exactly the per-page fit this is not"
     );
     assert!(
-        spread_fit(panel, &pages) < spread_fit(panel, &pages[..1]),
+        spread_fit(panel, &pages, false) < spread_fit(panel, &pages[..1], false),
         "so the turn's scale is the constrained page's and the short page keeps a margin"
     );
 }
 
-/// A page wider than its half — a fold-out insert, a landscape layout page — is
-/// fitted into its half and laid out there.
+/// An **unflagged** turn — a lone portrait page, which is what a lone page in practice
+/// is now — is fitted into its half and laid out there.
 ///
 /// The case a naive fit gets wrong: fitting it into the *whole* panel gives
-/// `800 / 1200 = 0.667` and hands it the entire screen, and the page then reads as a
-/// two-page scan drawn across both halves.
+/// `800 / 1200 = 0.667` and hands it the entire screen.
+///
+/// **This page is 1200x800, which is a `Shape::Double`**, so the caller does *not*
+/// hand it to the layout unflagged: `X` on it, or the detector on its own, puts it
+/// on the other side of `lone_spread_fills_turn` and it fills the turn instead
+/// ([`a_lone_spread_fills_the_whole_turn`]). What is pinned here is therefore the
+/// **unchanged half rule**, and the last assertion is the guard: the flag is what
+/// moves a page off its half, so a layout that ignored the flag entirely would leave
+/// every one of these numbers right and still be the bug that was reported.
 #[test]
-fn a_wide_insert_page_lays_out_at_the_half_the_seam_is_on() {
+fn an_unflagged_lone_page_lays_out_at_the_half_the_seam_is_on() {
     let panel: (f32, f32) = (800.0, 600.0);
     let pages = [(1200.0, 800.0)];
-    let fit = spread_fit(panel, &pages);
+    let fit = spread_fit(panel, &pages, false);
     let naive = (panel.0 / 1200.0).min(panel.1 / 800.0);
     assert!(
         (fit - naive / 2.0).abs() < 1e-6,
         "fitted into its half, not into the panel: {fit} against {naive} for the whole panel"
     );
 
-    let rtl = spread_rects(PANEL, &pages, fit, true);
+    let rtl = spread_rects(PANEL, &pages, fit, true, false);
     assert_eq!(rtl.len(), 1, "a page comes back, not an empty vector");
     assert_eq!(rtl[0][0], 400.0, "its inner edge is the seam");
     assert!((rtl[0][2] - 400.0).abs() < 1e-3, "as wide as the half it is on");
     assert!(rtl[0][3] <= PANEL[3], "and no taller than the panel");
 
-    let ltr = spread_rects(PANEL, &pages, fit, false);
+    let ltr = spread_rects(PANEL, &pages, fit, false, false);
     assert_eq!(right(ltr[0]), 400.0, "the seam side under ltr is the left half");
+
+    // The guard: same panel, same page, same scale - the flag alone moves it.
+    let filled = spread_rects(PANEL, &pages, spread_fit(panel, &pages, true), true, true);
+    assert!(
+        (filled[0][2] - 400.0).abs() > 1e-3,
+        "a flagged lone spread is NOT as wide as the half it is on: {} wide",
+        filled[0][2]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A lone spread fills the turn
+// ---------------------------------------------------------------------------
+//
+// A page above `SPREAD_ASPECT` is a scan of two printed pages, and it takes a whole
+// turn to itself *because* it is the whole spread. Hanging it off a seam with nothing
+// on the far side drew half a spread at half size in half the window: confirmed on a
+// real volume where the pages are 1350x1920 (0.70) and exactly one is 2700x1920
+// (1.41), and that one alone rendered in the right half.
+//
+// The fix passes the decision in rather than measuring it, because two of the three
+// ways to measure it are wrong on their own:
+//
+// * **A forced portrait page** (`X` -> `Double`) is wider than nothing and still wants
+//   the whole turn, because "treat this as a spread" promises the whole turn.
+// * **A near-square page** (1.05) is wider than tall, is a `Single`, and a lone one
+//   keeps its half like a cover.
+//
+// So the discriminator is [`Shape`] and the caller decides it: [`turn_is_a_lone_spread`].
+
+/// The fixture panel's seam is 400 and its half is 400 wide; both appear in the
+/// assertions as named numbers so "the full panel" cannot be satisfied by "a half".
+const HALF: f32 = 400.0;
+const SEAM: f32 = 400.0;
+
+/// A real two-page scan's proportions, from the volume this was reported on: 1.41,
+/// comfortably above [`image_viewer::SPREAD_ASPECT`] so the detector agrees it is a
+/// spread. 2700x1920 rather than a round pair so the fit is not an exact division and
+/// a rect cannot land on a nice number by accident.
+const WIDE_SCAN: (f32, f32) = (2700.0, 1920.0);
+
+/// A lone spread fills the whole panel, centred, in **both** reading directions.
+///
+/// `scale` is the real one from [`spread_fit`] rather than a round number, so the rect
+/// is what the app would draw and not an idealisation of it. Under rtl a 2700x1920 page
+/// in an 800x600 panel fits at `800 / 2700 = 0.296` on width and `600 / 1920 = 0.3125`
+/// on height, so it is 800 wide by 568.9 high and its horizontal centre is the seam.
+#[test]
+fn a_lone_spread_fills_the_whole_turn() {
+    let pages = [WIDE_SCAN];
+    let scale = spread_fit((PANEL[2], PANEL[3]), &pages, true);
+
+    for rtl in [false, true] {
+        let rects = spread_rects(PANEL, &pages, scale, rtl, true);
+        assert_eq!(rects.len(), 1, "one page, one rect");
+        let r = rects[0];
+
+        assert!(
+            (r[0] - PANEL[0]).abs() < 1e-3 && (right(r) - right(PANEL)).abs() < 1e-3,
+            "rtl={rtl}: a lone spread spans the whole panel, [{r:?}] against the panel {PANEL:?}"
+        );
+        assert!(
+            (r[0] + r[2] * 0.5 - SEAM).abs() < 1e-3,
+            "rtl={rtl}: and is centred on the seam, not hung off it: centre {}",
+            r[0] + r[2] * 0.5
+        );
+        // **The guard that matters: a full-width page has no side to be on.** Both
+        // readings must agree exactly, and neither may satisfy the assertion by being
+        // the seam-adjacent half that this defect shipped as.
+        assert!(
+            r[2] > HALF,
+            "rtl={rtl}: {} wide, which is the half a lone *portrait* page keeps - so this is \
+             the reported defect, unchanged",
+            r[2]
+        );
+        assert!(
+            r[3] <= PANEL[3] + 1e-3,
+            "rtl={rtl}: fitted, so it is no taller than the panel either"
+        );
+    }
+
+    // The two directions really are identical, rather than the loop above comparing a
+    // rect against itself: a lone spread is the one case where `rtl` decides nothing.
+    assert_eq!(
+        spread_rects(PANEL, &pages, scale, false, true),
+        spread_rects(PANEL, &pages, scale, true, true),
+        "a page on both sides of the seam has no reading direction of its own"
+    );
+}
+
+/// The cover case, unchanged: a lone **portrait** page keeps its half, on the seam, in
+/// both directions.
+///
+/// This is the regression guard for the fix. Everything above it is about a page that
+/// should have been bigger; this is about the page that must not have been, and the
+/// temptation a fix like that creates is to widen the rule to "a lone page fills the
+/// turn" — which would give a cover the whole window and lose the seam it shares with
+/// every other turn.
+#[test]
+fn a_lone_portrait_page_still_keeps_its_half() {
+    let pages = [(400.0, 800.0)];
+    let scale = spread_fit((PANEL[2], PANEL[3]), &pages, false);
+
+    for rtl in [false, true] {
+        let rects = spread_rects(PANEL, &pages, scale, rtl, false);
+        assert_eq!(rects.len(), 1);
+        let r = rects[0];
+        let inner = if rtl { r[0] } else { right(r) };
+        assert_eq!(
+            inner, SEAM,
+            "rtl={rtl}: a lone portrait page's inner edge is still the seam, on its own half"
+        );
+        assert!(
+            r[2] <= HALF,
+            "rtl={rtl}: and it still keeps to that half: {} wide",
+            r[2]
+        );
+        // **Flush against the seam, with the leftover at its _outer_ edge**, which is the
+        // other half of the rule and is what makes this the cover layout rather than the
+        // lone-spread one. This page fits at `min(400/400, 600/800) = 0.75`, so it is
+        // 300 wide in a 400 half: it touches the seam and stops 100 short of the panel's
+        // edge. Centring it in its half instead would put 50 points of bare panel
+        // *between it and the seam*, which is a hairline down the middle of every turn
+        // this rule is for.
+        let half_centre = if rtl { SEAM + HALF / 2.0 } else { SEAM - HALF / 2.0 };
+        assert_ne!(
+            r[0] + r[2] * 0.5,
+            half_centre,
+            "rtl={rtl}: a cover is flush with the seam, not centred in its half - 50 points \
+             of bare panel beside the seam is a hairline, and it is what a layout that \
+             centred this page would draw"
+        );
+        assert!(
+            r[0] >= PANEL[0] && right(r) <= PANEL[0] + PANEL[2],
+            "rtl={rtl}: and it never overhangs the panel: {r:?}"
+        );
+    }
+}
+
+/// The flag moves the **fit**, not only the placement: a lone spread is fitted against
+/// the panel's whole width, and the rect that comes out is larger than the same page's
+/// unflagged rect in both directions.
+///
+/// The height half alone is not enough to catch this: 2700x1920 at
+/// `min(400/2700, 600/1920)` is 148x106 in a half, at `min(800/2700, 600/1920)` it is
+/// 296x178 in the panel — so a fix that only centred the rect would leave the page at
+/// half size in the middle of the window, which is a different wrong picture and just
+/// as wrong.
+#[test]
+fn a_lone_spread_is_fitted_to_the_whole_panel() {
+    let panel = (PANEL[2], PANEL[3]);
+    let pages = [WIDE_SCAN];
+    let wide = (PANEL[2] / WIDE_SCAN.0).min(PANEL[3] / WIDE_SCAN.1);
+    let half = (PANEL[2] / 2.0 / WIDE_SCAN.0).min(PANEL[3] / WIDE_SCAN.1);
+
+    let flagged = spread_fit(panel, &pages, true);
+    assert!(
+        (flagged - wide).abs() < 1e-6,
+        "fitted into the whole panel: {flagged} against {wide} for the panel and {half} for \
+         its half"
+    );
+    assert!(
+        flagged > half * 1.5,
+        "and the half's fit is {half}: a flag that did not reach `spread_fit` would answer \
+         that, giving half the picture"
+    );
+
+    // "At least as large", on the rect and not on the scale, because that is the
+    // user-visible claim: the same page, flagged, is never drawn smaller.
+    for rtl in [false, true] {
+        let flagged_rect = spread_rects(PANEL, &pages, flagged, rtl, true)[0];
+        let half_rect = spread_rects(PANEL, &pages, spread_fit(panel, &pages, false), rtl, false)[0];
+        assert!(
+            flagged_rect[2] >= half_rect[2] && flagged_rect[3] >= half_rect[3],
+            "rtl={rtl}: the flagged rect {flagged_rect:?} is smaller than the unflagged \
+             {half_rect:?}"
+        );
+        assert!(
+            (flagged_rect[2] - PANEL[2]).abs() < 1e-3,
+            "rtl={rtl}: and this fixture's width is the binding constraint, so it is exactly \
+             the panel's width: {} against {}",
+            flagged_rect[2],
+            PANEL[2]
+        );
+    }
+}
+
+/// A two-page turn ignores the flag entirely: it is not a lone spread, and both halves
+/// are already on the seam.
+///
+/// Asserted over both flags and both directions rather than one, because the flag is a
+/// new parameter on a shared function and the failure it invites is a `len() == 1` check
+/// that is too wide — which would hand a real spread two half-width slots.
+#[test]
+fn a_two_page_turn_is_unaffected() {
+    let panel = (PANEL[2], PANEL[3]);
+    let pages = [(400.0, 800.0), (700.0, 800.0)];
+    let scale = spread_fit(panel, &pages, false);
+
+    assert_eq!(
+        spread_fit(panel, &pages, true),
+        scale,
+        "the fit of a two-page turn does not depend on the flag at all"
+    );
+    for rtl in [false, true] {
+        assert_eq!(
+            spread_rects(PANEL, &pages, scale, rtl, true),
+            spread_rects(PANEL, &pages, scale, rtl, false),
+            "rtl={rtl}: the flag changes nothing about a pair's layout"
+        );
+    }
+
+    // The control: a pair whose pages *are* wide still pairs into halves, because
+    // `pairable` is what keeps a `Double` out of a pair — not the layout's flag. Without
+    // this, "a two-page turn is unaffected" is satisfiable by a `spread_rects` that lays
+    // every turn out as a lone spread whenever the flag happens to be true, on a page
+    // count nobody checked.
+    let wide_pair = spread_rects(PANEL, &[WIDE_SCAN, WIDE_SCAN], scale, true, true);
+    assert_eq!(
+        wide_pair[0][0], SEAM,
+        "two wide pages still meet at the seam: a flag true on a turn of two is not a \
+         request to fill the panel twice over"
+    );
+    assert!(
+        overlap(wide_pair[0], wide_pair[1]) == 0.0,
+        "and do not overlap while doing it"
+    );
+}
+
+/// The discriminator is the **shape**, and these are the two cases where a geometric
+/// `w > h` would answer differently.
+///
+/// A lone near-square page is 1.05 — wider than tall, so a geometry test calls it a
+/// spread — and it is a `Single` (`SPREAD_ASPECT` is 1.2), so it keeps its half like a
+/// cover. The forced portrait page is the mirror: 0.70, so a geometry test calls it a
+/// page, and `X` has called it a `Double`, so it fills the turn.
+#[test]
+fn a_lone_near_square_page_is_not_a_spread() {
+    struct One(u32, u32, Option<Shape>);
+    impl PageCtx for One {
+        fn step(&self, _from: PagePos, _by: isize) -> Option<PagePos> {
+            None
+        }
+        fn step_no_wrap(&self, _from: PagePos, _by: isize) -> Option<PagePos> {
+            None
+        }
+        fn key(&self, _pos: PagePos) -> Option<ImgKey> {
+            None
+        }
+        fn dims(&self, _pos: PagePos) -> Option<(u32, u32)> {
+            Some((self.0, self.1))
+        }
+        fn override_shape(&self, _pos: PagePos) -> Option<Shape> {
+            self.2
+        }
+        fn flat(&self, _pos: PagePos) -> Option<usize> {
+            Some(0)
+        }
+    }
+    let page = PagePos { index: 0, page: 0 };
+
+    // 1050x1000: 1.05, wider than tall, and a `Single`.
+    let squareish = One(1050, 1000, None);
+    assert_eq!(shape_of(page, &squareish), Single, "1.05 is a page, not a spread");
+    assert!(
+        !turn_is_a_lone_spread(1, shape_of(page, &squareish)),
+        "so a lone one keeps its half, which a `w > h` test would have taken away from it"
+    );
+    let fit = spread_fit((PANEL[2], PANEL[3]), &[(1050.0, 1000.0)], false);
+    let rects = spread_rects(PANEL, &[(1050.0, 1000.0)], fit, true, false);
+    assert_eq!(rects[0][0], SEAM, "and its inner edge is the seam");
+    assert!(rects[0][2] <= HALF, "{} wide", rects[0][2]);
+
+    // 1000x1400 forced to `Double` by `X`: taller than wide, and a spread.
+    let forced = One(1000, 1400, Some(Double));
+    assert_eq!(shape_of(page, &forced), Double, "an override beats the geometry");
+    assert!(
+        turn_is_a_lone_spread(1, shape_of(page, &forced)),
+        "and a lone one therefore fills the turn, which a `w > h` test would have refused"
+    );
+    let fit = spread_fit((PANEL[2], PANEL[3]), &[(1000.0, 1400.0)], true);
+    let rects = spread_rects(PANEL, &[(1000.0, 1400.0)], fit, true, true);
+    assert!(
+        (rects[0][0] + rects[0][2] * 0.5 - SEAM).abs() < 1e-3,
+        "centred on the seam: the user asked for a spread and got the whole turn"
+    );
+
+    // The count is the other half of the rule, and it is checked here rather than in the
+    // layout tests so the decision has one place it is pinned: a `Double` is only a lone
+    // spread when the turn really holds one page.
+    assert!(
+        !turn_is_a_lone_spread(2, Double),
+        "a turn of two pages is not a lone spread, whatever the shape says"
+    );
+    assert!(
+        !turn_is_a_lone_spread(0, Double),
+        "and neither is the empty turn, which is the single-image path"
+    );
 }
 
 /// No degenerate input may produce a scale or a rect that cannot be painted, and a
@@ -3289,12 +3594,12 @@ fn spread_fit_survives_an_empty_panel_and_a_zero_sized_page() {
         ((400.0, 800.0), vec![(400.0, 0.0)]),
         ((800.0, 0.0), vec![(400.0, 800.0)]),
     ] {
-        let scale = spread_fit(panel, &pages);
+        let scale = spread_fit(panel, &pages, false);
         assert!(
             scale.is_finite() && scale > 0.0,
             "panel {panel:?} pages {pages:?} gave the scale {scale}"
         );
-        let rects = spread_rects([0.0, 0.0, panel.0, panel.1], &pages, scale, false);
+        let rects = spread_rects([0.0, 0.0, panel.0, panel.1], &pages, scale, false, false);
         assert_eq!(rects.len(), pages.len(), "one rect per page, at any size");
         for r in &rects {
             assert!(
@@ -3308,8 +3613,8 @@ fn spread_fit_survives_an_empty_panel_and_a_zero_sized_page() {
     // The value itself, which the loop above cannot see: the clamp would hand back
     // 1e-4 for an empty panel and 8.0 for no pages, and both are finite, so only
     // these two assertions tell the early return apart from its absence.
-    assert_eq!(spread_fit((0.0, 0.0), &[(400.0, 800.0)]), 1.0, "no panel, no fit");
-    assert_eq!(spread_fit((800.0, 600.0), &[]), 1.0, "no pages, no fit");
+    assert_eq!(spread_fit((0.0, 0.0), &[(400.0, 800.0)], false), 1.0, "no panel, no fit");
+    assert_eq!(spread_fit((800.0, 600.0), &[], false), 1.0, "no pages, no fit");
 }
 
 // ---------------------------------------------------------------------------
@@ -3353,7 +3658,7 @@ fn the_zoom_anchor_is_the_content_centre_not_the_panel_centre() {
     let half_difference = (700.0 - 400.0) * scale / 2.0; // 75.0
 
     for (rtl, expected) in [(true, seam - half_difference), (false, seam + half_difference)] {
-        let (cx, _) = spread_centre(PANEL, &pages, scale, rtl);
+        let (cx, _) = spread_centre(PANEL, &pages, scale, rtl, false);
         assert_eq!(
             cx, expected,
             "rtl={rtl}: the content's centre is the seam plus half the width difference, \
@@ -3365,7 +3670,7 @@ fn the_zoom_anchor_is_the_content_centre_not_the_panel_centre() {
             "rtl={rtl}: the displacement itself, which is what `anchor - panel.center()` cannot see"
         );
         assert_ne!(
-            (cx, spread_centre(PANEL, &pages, scale, rtl).1),
+            (cx, spread_centre(PANEL, &pages, scale, rtl, false).1),
             panel_centre,
             "rtl={rtl}: and it is not the panel centre on either axis"
         );
@@ -3383,21 +3688,21 @@ fn a_lone_page_anchors_its_zoom_on_itself() {
     let pages = [(400.0, 800.0)];
     let scale = 0.5;
     for (rtl, expected_x) in [(true, 500.0), (false, 300.0)] {
-        let rects = spread_rects(PANEL, &pages, scale, rtl);
+        let rects = spread_rects(PANEL, &pages, scale, rtl, false);
         let slot = rects[0];
         assert_eq!(
-            spread_centre(PANEL, &pages, scale, rtl),
+            spread_centre(PANEL, &pages, scale, rtl, false),
             (slot[0] + slot[2] * 0.5, slot[1] + slot[3] * 0.5),
             "rtl={rtl}: the middle of the page's own slot, which is what the zoom measures from"
         );
-        assert_eq!(spread_centre(PANEL, &pages, scale, rtl).0, expected_x, "rtl={rtl}: pinned");
+        assert_eq!(spread_centre(PANEL, &pages, scale, rtl, false).0, expected_x, "rtl={rtl}: pinned");
         assert_eq!(
-            spread_centre(PANEL, &pages, scale, rtl).1,
+            spread_centre(PANEL, &pages, scale, rtl, false).1,
             200.0,
             "rtl={rtl}: and vertically the page's own middle, not the panel's"
         );
         assert_ne!(
-            spread_centre(PANEL, &pages, scale, rtl).0,
+            spread_centre(PANEL, &pages, scale, rtl, false).0,
             PANEL[0] + PANEL[2] * 0.5,
             "rtl={rtl}: the whole point - a lone page is nowhere near the panel centre"
         );
@@ -3417,7 +3722,7 @@ fn a_single_page_turn_anchors_on_the_panel_centre() {
     let panel_centre = (PANEL[0] + PANEL[2] * 0.5, PANEL[1] + PANEL[3] * 0.5);
     let equal = [(600.0, 800.0), (600.0, 800.0)];
     for rtl in [false, true] {
-        let (cx, cy) = spread_centre(PANEL, &equal, 0.5, rtl);
+        let (cx, cy) = spread_centre(PANEL, &equal, 0.5, rtl, false);
         assert_eq!(
             cx, panel_centre.0,
             "rtl={rtl}: two equal pages are symmetric about the seam, so this axis is the panel's"
@@ -3439,7 +3744,7 @@ fn a_single_page_turn_anchors_on_the_panel_centre() {
     // no pages and offsets by it, so a different answer here moves one image.
     for rtl in [false, true] {
         assert_eq!(
-            spread_centre(PANEL, &[], 0.5, rtl),
+            spread_centre(PANEL, &[], 0.5, rtl, false),
             panel_centre,
             "rtl={rtl}: no pages means the content is the panel, so the anchor is its centre"
         );
@@ -3462,19 +3767,19 @@ fn the_zoom_anchor_is_top_aligned_over_the_tallest_page() {
     let tall_first = [(400.0, 1600.0), (400.0, 800.0)];
     let panel_vertical_centre = panel[1] + panel[3] * 0.5;
 
-    let cy = spread_centre(panel, &tall_second, 0.5, true).1;
+    let cy = spread_centre(panel, &tall_second, 0.5, true, false).1;
     assert_eq!(cy, 440.0, "40 + 800/2: the panel's top plus half the tallest page at 0.5");
     assert_ne!(
         cy, panel_vertical_centre,
         "not the panel's vertical centre, which is the half of this that survives a clean pair"
     );
     assert_eq!(
-        spread_centre(panel, &tall_first, 0.5, true).1,
+        spread_centre(panel, &tall_first, 0.5, true, false).1,
         cy,
         "the tallest page decides it, whichever of the two it is"
     );
     assert_eq!(
-        spread_centre(panel, &tall_second, 1.0, true).1,
+        spread_centre(panel, &tall_second, 1.0, true, false).1,
         840.0,
         "40 + 1600/2: at 1.0 the tallest page is twice as tall, so the anchor moves with the scale"
     );
@@ -3596,7 +3901,7 @@ fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
 /// two can be compared rather than the test restating the bound's own arithmetic.
 fn content_box(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> [f32; 4] {
     let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for r in spread_rects(panel, pages, scale, rtl) {
+    for r in spread_rects(panel, pages, scale, rtl, false) {
         b[0] = b[0].min(r[0]);
         b[1] = b[1].min(r[1]);
         b[2] = b[2].max(r[0] + r[2]);
@@ -3647,7 +3952,7 @@ fn a_spread_pans_to_both_of_its_own_edges() {
         // because a bound that ignored `rtl` would otherwise be checked on one axis only.
         for (rtl, want_x) in [(true, x_rtl), (false, [-x_rtl[1], -x_rtl[0]])] {
             let b = content_box(PANEL, pages, scale, rtl);
-            let (low, high) = spread_pan_bounds(PANEL, foot, pages, scale, rtl);
+            let (low, high) = spread_pan_bounds(PANEL, foot, pages, scale, rtl, false);
 
             // Horizontal, pinned. At 1.0 the two slots are 400 and 700 wide, so the pair
             // spans 990 either way and its content is 190 wider than the panel: 150 of
@@ -3704,7 +4009,7 @@ fn a_spread_pans_to_both_of_its_own_edges() {
     // already the panel's edge and there is no drag left in that direction.
     for rtl in [false, true] {
         let b = content_box(PANEL, &lone, 1.0, rtl);
-        let (low, high) = spread_pan_bounds(PANEL, folded_footprint(&lone), &lone, 1.0, rtl);
+        let (low, high) = spread_pan_bounds(PANEL, folded_footprint(&lone), &lone, 1.0, rtl, false);
         assert_eq!((low[0], high[0]), (0.0, 0.0), "rtl={rtl}: a lone page never pans sideways");
         let (inner, outer) = if rtl { (b[0], b[2]) } else { (b[2], b[0]) };
         assert!((inner - 400.0).abs() < 1e-3, "rtl={rtl}: its inner edge is the seam");
@@ -3747,7 +4052,7 @@ fn the_pan_bound_is_symmetric_only_when_the_content_is_centred() {
         // agree, and a bound computed by a different route (a hand-restated seam, say)
         // would fail it rather than pass within a tolerance.
         let foot = folded_footprint(&equal);
-        let (low, high) = spread_pan_bounds(PANEL, foot, &equal, 1.5, rtl);
+        let (low, high) = spread_pan_bounds(PANEL, foot, &equal, 1.5, rtl, false);
         let half = [
             ((foot.0 * 1.5 - PANEL[2]) * 0.5).max(0.0),
             ((foot.1 * 1.5 - PANEL[3]) * 0.5).max(0.0),
@@ -3768,8 +4073,8 @@ fn the_pan_bound_is_symmetric_only_when_the_content_is_centred() {
         for pages in [&equal[..], &[(400.0, 800.0), (700.0, 800.0)], &[(400.0, 800.0)]] {
             let foot = folded_footprint(pages);
             for scale in [0.6f32, 0.9, 1.1, 1.5] {
-                let (low, high) = spread_pan_bounds(PANEL, foot, pages, scale, rtl);
-                let (cx, cy) = spread_centre(PANEL, pages, scale, rtl);
+                let (low, high) = spread_pan_bounds(PANEL, foot, pages, scale, rtl, false);
+                let (cx, cy) = spread_centre(PANEL, pages, scale, rtl, false);
                 let b = content_box(PANEL, pages, scale, rtl);
                 for axis in 0..2 {
                     let mid = (low[axis] + high[axis]) * 0.5;
@@ -3824,7 +4129,7 @@ fn the_pan_bound_is_symmetric_only_when_the_content_is_centred() {
     // --- the single-image path, unchanged and not approximately unchanged.
     for rtl in [false, true] {
         for (foot, scale) in [((1600.0, 1200.0), 1.0f32), ((1600.0, 1200.0), 0.4), ((400.0, 300.0), 2.0)] {
-            let (low, high) = spread_pan_bounds(PANEL, foot, &[], scale, rtl);
+            let (low, high) = spread_pan_bounds(PANEL, foot, &[], scale, rtl, false);
             let half = [
                 ((foot.0 * scale - PANEL[2]) * 0.5).max(0.0),
                 ((foot.1 * scale - PANEL[3]) * 0.5).max(0.0),
@@ -3874,7 +4179,7 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
         // 400-wide page still fits an 800 panel - at 2.0 it is exactly as wide as the
         // panel - and it is where the sweep stops being about the seam at all (below).
         for scale in [0.75f32, 1.0, 1.5, 2.0] {
-            let (low, high) = spread_pan_bounds(PANEL, foot, &lone, scale, rtl);
+            let (low, high) = spread_pan_bounds(PANEL, foot, &lone, scale, rtl, false);
             assert_eq!(
                 (low[0], high[0]),
                 (0.0, 0.0),
@@ -3891,6 +4196,7 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
                     &lone,
                     scale,
                     rtl,
+                    false,
                 );
                 let inner = if rtl {
                     rects[0][0]
@@ -3921,7 +4227,7 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
         // because the tempting "fix" for the assertions above is to lock a lone page
         // sideways **forever**, which would make the leftmost fifth of a zoomed page
         // unreachable.
-        let (low, high) = spread_pan_bounds(PANEL, foot, &lone, 3.0, rtl);
+        let (low, high) = spread_pan_bounds(PANEL, foot, &lone, 3.0, rtl, false);
         assert_eq!(
             (low[0], high[0]),
             if rtl { (-800.0, -400.0) } else { (400.0, 800.0) },
@@ -3930,7 +4236,7 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
 
         let pair = [(400.0, 800.0), (700.0, 800.0)];
         for scale in [0.75f32, 1.0, 1.5] {
-            let (low, high) = spread_pan_bounds(PANEL, folded_footprint(&pair), &pair, scale, rtl);
+            let (low, high) = spread_pan_bounds(PANEL, folded_footprint(&pair), &pair, scale, rtl, false);
             pair_had_room |= low[0] != 0.0 || high[0] != 0.0;
         }
     }
@@ -3981,7 +4287,7 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
     let pages = [(400.0, 1200.0), (700.0, 1200.0)];
     let foot = folded_footprint(&pages);
     assert_eq!(
-        spread_fit((PANEL[2], PANEL[3]), &pages),
+        spread_fit((PANEL[2], PANEL[3]), &pages, false),
         0.5,
         "the fixture starts at fit, so the step below starts from offset zero"
     );
@@ -3996,7 +4302,7 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
     ] {
         for (anchor_x, want_x) in anchors {
             let anchor = (anchor_x, 599.0f32);
-            let partner = spread_rects(PANEL, &pages, from, rtl)[1];
+            let partner = spread_rects(PANEL, &pages, from, rtl, false)[1];
             assert!(
                 anchor.0 >= partner[0] && anchor.0 <= partner[0] + partner[2],
                 "rtl={rtl}: the anchor at x={} is on the partner's half [{:.1}, {:.1}], not \
@@ -4008,7 +4314,7 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
             );
 
             let wanted = zoom_offset_about(PANEL, &pages, from, to, rtl, anchor, (0.0, 0.0));
-            let (low, high) = spread_pan_bounds(PANEL, foot, &pages, to, rtl);
+            let (low, high) = spread_pan_bounds(PANEL, foot, &pages, to, rtl, false);
             let clamped = (
                 wanted.0.clamp(low[0], high[0]),
                 wanted.1.clamp(low[1], high[1]),
@@ -4016,8 +4322,8 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
 
             // The content point under the pointer, and where it lands after the clamp.
             let (cf, ct) = (
-                spread_centre(PANEL, &pages, from, rtl),
-                spread_centre(PANEL, &pages, to, rtl),
+                spread_centre(PANEL, &pages, from, rtl, false),
+                spread_centre(PANEL, &pages, to, rtl, false),
             );
             let q = (
                 (anchor.0 - cf.0 - 0.0) / from,
@@ -4113,7 +4419,7 @@ fn zoom_offset_about(
     anchor: (f32, f32),
     offset: (f32, f32),
 ) -> (f32, f32) {
-    let centre_at = |s: f32| spread_centre(panel, pages, s, rtl);
+    let centre_at = |s: f32| spread_centre(panel, pages, s, rtl, false);
     let (cf, ct) = (centre_at(scale), centre_at(target));
     let c_from = (anchor.0 - cf.0, anchor.1 - cf.1);
     let c_to = (anchor.0 - ct.0, anchor.1 - ct.1);
@@ -4145,7 +4451,7 @@ fn the_pan_range_is_the_footprint_the_caller_folded() {
         for scale in [0.3f32, 0.75, 1.0, 2.0] {
             for rtl in [false, true] {
                 let b = content_box(PANEL, pages, scale, rtl);
-                let (low, high) = spread_pan_bounds(PANEL, foot, pages, scale, rtl);
+                let (low, high) = spread_pan_bounds(PANEL, foot, pages, scale, rtl, false);
                 for axis in 0..2 {
                     let content = [b[2] - b[0], b[3] - b[1]][axis];
                     let panel = [PANEL[2], PANEL[3]][axis];
@@ -4195,7 +4501,7 @@ fn a_pan_range_is_always_ordered_and_finite() {
         let foot = folded_footprint(&pages);
         for scale in [0.0f32, 1e-4, 0.5, 1.0, 8.0] {
             for rtl in [false, true] {
-                let (low, high) = spread_pan_bounds(panel, foot, &pages, scale, rtl);
+                let (low, high) = spread_pan_bounds(panel, foot, &pages, scale, rtl, false);
                 for axis in 0..2 {
                     assert!(
                         low[axis].is_finite() && high[axis].is_finite(),
@@ -6223,6 +6529,117 @@ fn copy_refuses_a_page_of_a_multi_page_document() {
          lossless path rewrites the whole file). Its removal is not this test's business \
          but the divergence is worth a look.\nBody was:\n{save}"
     );
+}
+
+/// `central` asks the library whether this is a lone spread, and passes the answer to
+/// **every** layout call — the fit, the rects, the zoom anchor and the pan bound.
+///
+/// **This is a source scan, and it is the only thing covering the wiring.** The five
+/// behavioural tests above drive `spread_fit` / `spread_rects` / `shape_of` directly, so
+/// every one of them stays green if `MyApp::central` never computes the flag at all:
+/// the library would be correct and the app would still draw the reported bug, because
+/// the call sites default to `false`. `central` lives in the binary, which no integration
+/// test can reach, so the call is asserted against the source for the same reason
+/// `tests/renderer.rs`, `tests/keybindings.rs` and the scans above do.
+///
+/// **Four sites, not one, and the reason is that they are four separate claims.** A
+/// lone spread drawn full-panel but zoomed about the *half*-width centre drifts a point
+/// on every wheel notch; drawn full-panel but clamped by a pan bound derived from a
+/// half-width content box cannot be panned at all, and the zoom's wanted offset is
+/// silently truncated instead. Each of those is a plausible picture with no error, which
+/// is the shape of defect this feature keeps producing, so passing the flag to three of
+/// the four sites is a state this test has to be able to see.
+///
+/// The negative assertion matters as much as the four positives: `central` comparing the
+/// page's **dimensions** instead of asking `shape_of` still compiles and is still right
+/// for every single-page image in every fixture, while breaking the two cases
+/// `turn_is_a_lone_spread`'s doc names - a forced portrait page keeps its half (so `X`
+/// does nothing visible) and a near-square page takes the whole window.
+#[test]
+fn central_decides_and_threads_the_lone_spread_flag() {
+    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let central = fn_body(&src, "fn central(");
+
+    assert!(
+        central.contains("image_viewer::turn_is_a_lone_spread("),
+        "`central` no longer asks the library whether this is a lone spread, so the flag is\n\
+         always false and every lone spread is fitted into a half and hung off the seam -\n\
+         which is the reported defect, unchanged.\nBody was:\n{central}"
+    );
+    assert!(
+        central.contains("image_viewer::shape_of("),
+        "and it must ask `shape_of` rather than compare dimensions itself: a near-square page\n\
+         is wider than tall, and a page `X` forced to `Double` is taller than wide, so a\n\
+         `w > h` test gets both wrong.\nBody was:\n{central}"
+    );
+
+    // Every layout call, in both spellings, with the flag as an argument. `spread_fit`
+    // and `spread_rects` on one line in the common case and spread over several in this
+    // one, so the window is taken from the call's name to the end of its line.
+    for (call, what) in [
+        ("spread_fit(", "the fit: a lone spread drawn at half size in the middle of the window"),
+        ("spread_rects(", "the rects: the reported defect itself"),
+        ("spread_centre(", "the zoom anchor: a wheel notch would creep the page under the cursor"),
+        (
+            "spread_pan_bounds(",
+            "the pan clamp: the zoom's wanted offset would be silently truncated",
+        ),
+    ] {
+        let at = central
+            .find(call)
+            .unwrap_or_else(|| panic!("`central` no longer calls `{call}`, so {what}"));
+        let args = call_args(central, at);
+        assert!(
+            args.contains("lone_spread_fills_turn"),
+            "`central`'s `{call}` no longer receives `lone_spread_fills_turn`, so {what}, while \
+             the library's own tests stay green because they pass the flag directly.\n\
+             Arguments were:\n{args}"
+        );
+    }
+
+    // And it is computed from the **page count** rather than from the partner being absent,
+    // so the fit and the rects cannot disagree about what the turn is. `spread_dims` is
+    // the list `spread_rects` is about to be handed, which is what makes that true.
+    let at = central
+        .find("turn_is_a_lone_spread(")
+        .expect("the decision is there; the assertion above says so");
+    assert!(
+        call_args(central, at).contains("spread_dims.len()"),
+        "the lone-spread decision must be made from the number of pages actually being laid\n\
+         out, not from `shown_partner.is_none()`: those are two statements of the same thing\n\
+         and they would be free to disagree.\nArguments were:\n{}",
+        call_args(central, at)
+    );
+}
+
+/// The text between a call's `(` and its matching `)`, starting from the call's own name.
+///
+/// **Paren-matched rather than a line or a fixed window**, because every one of the four
+/// calls this is used on is written across several lines - two of them end with a `)` on a
+/// line of its own, which is not `);` - so both a `find(");")` and a 400-byte window are
+/// guesses about formatting rather than about the call. This is the same brace-matching
+/// [`fn_body`] does, for parentheses.
+///
+/// Weak in the way every source scan here is: it reads the text, so it cannot tell
+/// whether the value passed is the one the reader expects, only that *an* argument by
+/// that name is there. What it does catch is the regression that actually happens, which
+/// is a call site dropping a parameter that a later edit added.
+fn call_args<'a>(src: &'a str, at: usize) -> &'a str {
+    let open = src[at..].find('(').map(|i| at + i).expect("no `(` after the call name");
+    let mut depth = 0i32;
+    for (i, b) in src.as_bytes()[open..].iter().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &src[open + 1..open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("the call at {at} has no closing parenthesis; its parens do not balance");
 }
 
 /// A navigation walk costs one `turn_len` per turn *behind* the cursor, in both

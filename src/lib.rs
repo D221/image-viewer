@@ -841,14 +841,59 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
 //   than equal, so a turn of two differently shaped pages is ordinary, not exotic.
 // * **The seam is the panel's horizontal centre, always.** Zero gutter, so two
 //   facing pages touch and a drawing across the seam is unbroken; and no special
-//   case for a lone page, because a page with nothing on the far side of the seam
-//   *is* the lone-page case. Getting this wrong shows as a picture a reader only
-//   notices pages later.
+//   case for a lone *portrait* page, because a page with nothing on the far side
+//   of the seam *is* the lone-page case. Getting this wrong shows as a picture a
+//   reader only notices pages later.
 // * **Input order out, screen order never.** See `spread_rects` — a swap that is
 //   wrong in one reading direction and right in the other.
+//
+// **A lone spread is the exception, and it is the exception to the *rule about lone
+// pages*, not to the seam rule.** A page wider than [`SPREAD_ASPECT`] is a scan of two
+// printed pages ([`shape_of`]) and takes a whole turn to itself *because* it is the
+// whole spread — so hanging it off a seam with nothing on the far side draws half a
+// spread at half size, in half the window. It gets the full width instead, which is
+// the single-image layout, and it is still **centred on the seam**: the seam stays
+// where it is, the page simply straddles it. **Four functions carry the decision, not
+// two** — [`spread_fit`] and [`spread_rects`] because they *are* the layout, and
+// [`spread_centre`] and [`spread_pan_bounds`] because they derive their numbers from
+// those same rects, where a half-width box is a wrong zoom anchor and a pan bound that
+// drags the page off the panel. Each takes the decision as `lone_spread_fills_turn`
+// rather than measuring the page, because the caller's answer is the one that is right —
+// see [`turn_is_a_lone_spread`] for why that is the shape and not the geometry.
+
+/// Whether a turn of `page_count` pages, whose cursor page is judged `shape`, is
+/// **one page that is itself a spread** and so fills the whole turn.
+///
+/// The discriminator is [`Shape`], and it has to be, because the geometry lies in both
+/// directions:
+///
+/// * **A user override outranks the pixels.** `X` forces a page to `Double` whatever
+///   it looks like, and "treat this as a spread" has to mean *give it the whole turn* —
+///   which is the thing the key promises. A `w > h` test would decline to honour a
+///   forced *portrait* page, so the key would re-pair the book and then draw the
+///   result at half size: the override half working, silently.
+/// * **A near-square page is not a spread.** 1.05 is wider than tall and is a single
+///   page (`SPREAD_ASPECT` is 1.2, and above it not at it), so a `w > h` test would
+///   hand a lone square-ish page the entire screen instead of the half a cover keeps.
+///
+/// And the whole point of asking the *caller* is that the layout cannot disagree with
+/// the pairing: a turn holds one page either because that page is a spread or because
+/// it is front matter ([`LEAD_LONE_DEFAULT`]), those are the only two ways, and they
+/// are laid out differently. The pairing already made this exact decision — a `Double`
+/// never pairs (`pairable`), so a lone `Double` **is** a lone spread by construction
+/// rather than by inference.
+pub fn turn_is_a_lone_spread(page_count: usize, shape: Shape) -> bool {
+    page_count == 1 && shape == Shape::Double
+}
 
 /// The scale a whole turn is drawn at: the more constrained fit of every page
 /// present into *its half* of the panel, so every page fits at one shared factor.
+///
+/// **"Its half", except for a lone spread**, which is fitted against the panel's whole
+/// width — `lone_spread_fills_turn`, the caller's [`turn_is_a_lone_spread`]. That is
+/// not a second fit rule bolted on: it is the same single-image fit, on the one turn
+/// that is one picture rather than two, and both pages of a two-page turn get exactly
+/// the number they got before.
 ///
 /// A `min` over the pages rather than a fit per page, and that is the load-bearing
 /// part. The reference reader does the same thing — `webgpuviewer`'s `ImagePage.kt`
@@ -863,8 +908,8 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
 /// page sizes and that is the whole of what a layout needs to know.
 ///
 /// Unlike [`fit_scale_no_upscale`] this **may exceed 1.0**, as the single-image
-/// view's own fit does: a page is drawn to fill its half. The clamp is the same
-/// `(1e-4, 8.0)` that view uses.
+/// view's own fit does: a page is drawn to fill the area it is given. The clamp is the
+/// same `(1e-4, 8.0)` that view uses.
 ///
 /// A panel with no area, or a turn with no pages, answers **1.0**, exactly as
 /// [`fit_scale_no_upscale`] does for its own degenerate cases. Not a `NaN` guard —
@@ -872,13 +917,23 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
 /// the early return the clamp answers `1e-4` for an empty panel, which draws a page a
 /// fraction of a point across, and `8.0` for a turn with no pages, where no rect is wrong
 /// either way. `1.0` is the one answer that means "as drawn".
-pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)]) -> f32 {
-    let half_w = panel.0 / 2.0;
-    if half_w <= 0.0 || panel.1 <= 0.0 || pages.is_empty() {
+pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)], lone_spread_fills_turn: bool) -> f32 {
+    // **The width a page is fitted into is the panel's *half*, or its whole width when
+    // the turn is a lone spread** — `turn_is_a_lone_spread`'s decision, handed in.
+    // The `pages.len() == 1` half of it is re-checked here rather than trusted, because
+    // this is the function that turns the answer into a width: a flag true on a turn of
+    // two is a caller's bug, and honouring it would fit each page against the whole
+    // panel and put them on top of each other.
+    let fit_w = if lone_spread_fills_turn && pages.len() == 1 {
+        panel.0
+    } else {
+        panel.0 / 2.0
+    };
+    if fit_w <= 0.0 || panel.1 <= 0.0 || pages.is_empty() {
         return 1.0;
     }
     pages.iter()
-        .map(|&(w, h)| (half_w / w.max(1.0)).min(panel.1 / h.max(1.0)))
+        .map(|&(w, h)| (fit_w / w.max(1.0)).min(panel.1 / h.max(1.0)))
         .fold(f32::INFINITY, f32::min)
         .clamp(1e-4, 8.0)
 }
@@ -887,12 +942,20 @@ pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)]) -> f32 {
 ///
 /// One shared scale, zero gutter, top-aligned. The seam is always at the panel's
 /// horizontal centre: page 0 extends from the seam outward in `rtl`'s direction and
-/// page 1 the other way, so a lone page needs no special case — it simply has nothing
-/// on the far side of the seam, and renders at no more than half the panel's width,
-/// hanging off the seam, which is what a book's cover does. Centring a lone page
-/// instead is the tempting "fix" and it is wrong twice over: it stops sharing the
-/// seam that every other turn's pages meet on, and a centred lone page is
+/// page 1 the other way, so a lone **portrait** page needs no special case — it simply
+/// has nothing on the far side of the seam, and renders at no more than half the
+/// panel's width, hanging off the seam, which is what a book's cover does. Centring a
+/// lone page instead is the tempting "fix" and it is wrong twice over: it stops sharing
+/// the seam that every other turn's pages meet on, and a centred lone page is
 /// indistinguishable from a page with no partner.
+///
+/// **A lone spread is the one page that does get a special case**, and it is a
+/// correction rather than an exception to taste — see `lone_spread_fills_turn`'s
+/// discussion at the section head. It straddles the seam (so `rtl` decides nothing
+/// about it) and [`spread_fit`] gave it the panel's whole width, which together make
+/// it the single-image layout. It is **not** centred in the sense the paragraph above
+/// warns about: its inner edge is the seam's mirror, not a margin beside it, and the
+/// partner slide further down cannot fire on it because there is no second rect.
 ///
 /// Top-aligned rather than centred, so a page shorter than its partner leaves its
 /// gap beneath instead of floating in the middle of its half. A page narrower than
@@ -906,12 +969,29 @@ pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)]) -> f32 {
 /// input that cannot happen — the alternative is a `take(2)` that silently drops a
 /// page — and the rule stays in `turn_len` rather than restated here where the two
 /// copies could drift apart.
-pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> Vec<Rect4> {
+pub fn spread_rects(
+    panel: Rect4,
+    pages: &[(f32, f32)],
+    scale: f32,
+    rtl: bool,
+    lone_spread_fills_turn: bool,
+) -> Vec<Rect4> {
     let seam = panel[0] + panel[2] * 0.5;
+    // **A lone spread straddles the seam instead of hanging off it**, so `rtl` decides
+    // nothing about it: a page with the whole turn to itself has no side to be on, and
+    // the `if let [cursor, partner]` seam slide below cannot fire either (it needs two
+    // rects), so its edges are the panel's own.
+    //
+    // The seam is still where it was — the page is *centred* on it rather than moved,
+    // so a zoom anchored here and a pan clamped to this box are the same geometry the
+    // single-image path already uses. Re-checked `len() == 1` here as in `spread_fit`,
+    // because a flag true on a turn of two would stack both pages on the centre.
+    let lone_spread = lone_spread_fills_turn && pages.len() == 1;
     pages.iter().enumerate().map(|(i, &(pw, ph))| {
         let w = pw * scale;
         let on_right = if i == 0 { rtl } else { !rtl };
-        [if on_right { seam } else { seam - w }, panel[1], w, ph * scale]
+        let x = if lone_spread { seam - w * 0.5 } else if on_right { seam } else { seam - w };
+        [x, panel[1], w, ph * scale]
     }).collect()
 }
 
@@ -924,10 +1004,15 @@ pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -
 /// for two pages of equal width, which is why the displacement is invisible on a
 /// clean pair and shows up the moment pages differ. Vertically it is not the panel's
 /// centre either: the turn is **top-aligned**, so the centre is the panel's top plus
-/// half the *tallest* page. For a lone page the content sits entirely on one side of
-/// the seam, displaced by up to half its own half. Both offsets are zero for a single
-/// image, which is the case the single-image view's own zoom maths was written for and
-/// the assumption this replaces.
+/// half the *tallest* page. For a lone **portrait** page the content sits entirely on
+/// one side of the seam, displaced by up to half its own half. Both offsets are zero
+/// for a single image, which is the case the single-image view's own zoom maths was
+/// written for and the assumption this replaces — **and for a lone spread**, which is
+/// centred on the seam and top-aligned like everything else, so its horizontal
+/// displacement is zero where the lone portrait page's is the largest here. That is
+/// worth saying because it is a *third* case that behaves like the first two on screen:
+/// `lone_spread_fills_turn` has to be threaded here as well, or a full-panel page is
+/// zoomed about a centre taken from a half-width box.
 ///
 /// ## Derived from `spread_rects`, not restated
 ///
@@ -960,8 +1045,14 @@ pub fn spread_rects(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -
 /// Same arguments as [`spread_rects`], and the same deliberate non-checks: a turn is
 /// one page or two by construction ([`turn_len`]), and a third page would land on top
 /// of the second rather than widening the box.
-pub fn spread_centre(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> (f32, f32) {
-    match spread_box(panel, pages, scale, rtl) {
+pub fn spread_centre(
+    panel: Rect4,
+    pages: &[(f32, f32)],
+    scale: f32,
+    rtl: bool,
+    lone_spread_fills_turn: bool,
+) -> (f32, f32) {
+    match spread_box(panel, pages, scale, rtl, lone_spread_fills_turn) {
         Some(b) => ((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5),
         None => (panel[0] + panel[2] * 0.5, panel[1] + panel[3] * 0.5),
     }
@@ -976,8 +1067,14 @@ pub fn spread_centre(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) 
 /// seam rule. `spread_rects` is called once per caller rather than passed in: it
 /// allocates a `Vec` either way and borrowing it would invite a caller to hand over
 /// rects from somewhere other than this rule, which is the drift being avoided.
-fn spread_box(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> Option<[f32; 4]> {
-    let rects = spread_rects(panel, pages, scale, rtl);
+fn spread_box(
+    panel: Rect4,
+    pages: &[(f32, f32)],
+    scale: f32,
+    rtl: bool,
+    lone_spread_fills_turn: bool,
+) -> Option<[f32; 4]> {
+    let rects = spread_rects(panel, pages, scale, rtl, lone_spread_fills_turn);
     let first = rects.first()?;
     let (mut min_x, mut max_x, mut min_y, mut max_y) =
         (first[0], first[0] + first[2], first[1], first[1] + first[3]);
@@ -1014,15 +1111,29 @@ fn spread_box(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> Opti
 /// the clamp and the picture have to be one geometry, not two that agree today.
 ///
 /// **An axis the content fits in is locked at zero**, which is what "centre it on axes
-/// where it fits" means and what `.max(ZERO)` meant in the old expression. A lone page
-/// is the case that makes this visible: [`spread_fit`] draws it at no more than half the
-/// panel's width, so for every zoom at which it fits the panel it cannot be dragged
-/// sideways at all - it stays on its own side of the seam, which is
+/// where it fits" means and what `.max(ZERO)` meant in the old expression. A lone
+/// **portrait** page is the case that makes this visible: [`spread_fit`] draws it at no
+/// more than half the panel's width, so for every zoom at which it fits the panel it
+/// cannot be dragged sideways at all - it stays on its own side of the seam, which is
 /// `a_lone_page_rests_with_the_seam_on_the_centre`'s rule and this function's
 /// consequence. Past `2 × fit` the page is wider than the panel, has no half left to stay
 /// in, and the ordinary bound takes over; the part of it that a zoom pushes past the
 /// panel's edge before that does not pan into view, which is the old behaviour too and
 /// unchanged by this.
+///
+/// **A lone spread is the counter-case, and it needs the flag threaded here too.**
+/// `spread_fit` gave it the panel's whole width, so at fit it exactly fills the panel
+/// on any axis the width bound and this returns `(0, 0)` on it - the same answer as the
+/// lone portrait page, reached for the **opposite** reason, and the two are one edit
+/// apart. One zoom step past fit separates them. On a 2400x1200 page (ratio 2.0, wider
+/// than this 1920x1080 panel, so width-bound) at `1.01 x fit` the flagged bound is
+/// `x (-9.6, 9.6)` - symmetric, because the lone spread is centred on the seam, which
+/// is the single-image behaviour - and a bound derived from the **half-width** box the
+/// flag forgot about answers `x (-979.2, -960.0)`: it would drag a page that is only
+/// 1% too wide to nine hundred points off the panel, and the zoom's wanted offset
+/// would be silently truncated to that. A 2700x1920 page does not show this at all
+/// (it is height-bound, so `x` never opens), which is why the claim is stated for the
+/// width-bound case and the number is the one that was measured.
 ///
 /// **`pages` empty is the single-image path, and it is bit for bit what it always was**:
 /// the same `((foot·scale − panel.size()) * 0.5).max(0)` on each axis, the same
@@ -1047,6 +1158,7 @@ pub fn spread_pan_bounds(
     pages: &[(f32, f32)],
     scale: f32,
     rtl: bool,
+    lone_spread_fills_turn: bool,
 ) -> ([f32; 2], [f32; 2]) {
     // The single-image path, byte for byte: the same `((foot·scale − panel.size()) * 0.5)`
     // the binary computed inline, the same operations in the same order, and the same
@@ -1069,7 +1181,9 @@ pub fn spread_pan_bounds(
     // `spread_box` cannot answer `None` here - `spread_rects` returns one rect per page -
     // so the fallback is the unreachable one, and it is the *locked* answer rather than
     // the symmetric one, which is what a caller wanting to clamp needs.
-    let Some([min_x, min_y, max_x, max_y]) = spread_box(panel, pages, scale, rtl) else {
+    let Some([min_x, min_y, max_x, max_y]) =
+        spread_box(panel, pages, scale, rtl, lone_spread_fills_turn)
+    else {
         return ([0.0, 0.0], [0.0, 0.0]);
     };
     let axis = |c_lo: f32, c_hi: f32, p_lo: f32, p_hi: f32| {
