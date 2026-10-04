@@ -3342,7 +3342,7 @@ fn spread_fit_survives_an_empty_panel_and_a_zero_sized_page() {
 /// `[400-350, 400+200]` under `rtl` and `[400-200, 400+350]` under `ltr`. Both are
 /// 700 wide - the two halves together are always as wide as the seam plus both
 /// pages - so the centre is the midpoint of that span and the displacement is
-/// ┬▒(350-200)/2 = ┬▒75.
+/// ±(350-200)/2 = ±75.
 #[test]
 fn the_zoom_anchor_is_the_content_centre_not_the_panel_centre() {
     let pages = [(400.0, 800.0), (700.0, 800.0)];
@@ -3376,7 +3376,7 @@ fn the_zoom_anchor_is_the_content_centre_not_the_panel_centre() {
 ///
 /// `spread_rects` is used in the test as the definition of "its own slot", and the
 /// numbers are pinned as well: at 0.5 the page is 200 wide and 400 tall, so the
-/// centre is the seam ┬▒ 100 horizontally and 200 vertically.
+/// centre is the seam ± 100 horizontally and 200 vertically.
 #[test]
 fn a_lone_page_anchors_its_zoom_on_itself() {
     let pages = [(400.0, 800.0)];
@@ -3479,19 +3479,19 @@ fn the_zoom_anchor_is_top_aligned_over_the_tallest_page() {
     );
 }
 
-/// The zoom block asks for the content's centre ΓÇö **twice, at two scales** ΓÇö and
+/// The zoom block asks for the content's centre — **twice, at two scales** — and
 /// never for the panel's.
 ///
 /// **A source scan, and the four tests above are not it.** They pin
 /// [`spread_centre`]; nothing pins the call, because `MyApp::central` is in a binary
 /// no integration test can reach (`AGENTS.md`, "Tests"), and re-introducing
-/// `anchor - panel.center()` there leaves **all 84 tests in this file green** ΓÇö that
+/// `anchor - panel.center()` there leaves **all 84 tests in this file green** — that
 /// was run, and it is why this exists.
 ///
 /// It is weak in the way [`invalidate_path_drops_the_cached_dimensions`] is weak in:
 /// it cannot tell whether the anchor maths *works*, only that the centre asked for
 /// is the one the library computes. What it catches is the regression that actually
-/// happens ΓÇö the call being reverted, or a later edit reusing one centre where the
+/// happens — the call being reverted, or a later edit reusing one centre where the
 /// two scales differ. The behaviour was verified separately, by instrumenting the
 /// running app and checking its own per-frame offsets against the formula (see the
 /// task report); that evidence is not a test and does not survive here.
@@ -3535,12 +3535,12 @@ fn the_zoom_measures_from_the_content_centre_at_both_scales() {
 ///   hands every cached preview one) and the loop used to filter it away.
 /// * A `Kind::Full` result that is not the cursor's must be **kept**, on the page it
 ///   belongs to. Dropping it is what made the partner's half soft for the whole
-///   session rather than for one decode ΓÇö and because the plan asks again every
+///   session rather than for one decode — and because the plan asks again every
 ///   schedule, it was a re-decode of a 30 MB page on every navigation.
 ///
 /// Scoped to their own functions so a `pv.full` or a `Kind::Full` elsewhere in the
 /// file cannot stand in for either. The tile loop is inside `central`, so the scan
-/// cannot tell which page it was reading ΓÇö that was verified by instrumentation
+/// cannot tell which page it was reading — that was verified by instrumentation
 /// instead, and the numbers are in the task report.
 #[test]
 fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
@@ -4445,7 +4445,70 @@ fn every_position_is_on_the_turn_its_anchor_opens() {
     }
 }
 
-/// The `n`th page of a gallery, as a `PagePos` - the same ordering the pairing sees.
+/// Front matter is front matter even when the file in front of it has an unlearned
+/// page count.
+///
+/// **The case the old spelling of this rule got wrong, and it is a pairing, not a
+/// detail.** `lone`'s first arm used to be `ctx.flat(anchor).is_some_and(|f| f <
+/// lead_lone)`, and `Gallery::flat` answers `None` whenever a *preceding* file's page
+/// count has not been learned - so the `is_some_and` guard turned "I cannot tell you
+/// this page's ordinal" into "this page is not front matter". Three loose images with no
+/// counts learned and `lead_lone` 2: page 2 of the flat sequence is the second page, so
+/// it is front matter and opens alone, and the old rule paired it with page 3 instead.
+///
+/// The tiling is asserted rather than the predicate, because the predicate is one arm
+/// of three and the pairing is what a reader sees: `{0} {1} {2,3} {4,5} {6}` rather than
+/// `{0} {1,2} {3,4} {5,6}`.
+///
+/// The state is transient in the app - `goto` learns the page count of the file it
+/// arrives at, so by the time the cursor is on file 2 file 1 has been through it - which
+/// is exactly why a rule that degrades quietly in this state is worth pinning. What the
+/// step-based test asks is a question the page arithmetic can always answer, so the
+/// unknown count no longer reaches the answer at all.
+#[test]
+fn a_front_page_behind_an_unlearned_page_count_is_still_front_matter() {
+    // No `set_page_counts`: every page count is unknown, which is the state a gallery
+    // is in before anything has been opened.
+    let mut gal = Gallery::from_file(std::path::PathBuf::from("/vol/000.jpg"));
+    gal.files = (0..7).map(|i| std::path::PathBuf::from(format!("/vol/{i:03}.jpg"))).collect();
+    assert_eq!(gal.known_page_counts(), 0, "the premise: nothing is known about any file");
+    let lead = 2;
+
+    // The premise, stated as the failure it prevents: `flat` really does refuse.
+    assert_eq!(PageCtx::flat(&gal, PagePos { index: 1, page: 0 }), None);
+    // ...and the page is the second of the flat sequence under the counts as they stand.
+    assert_eq!(PageCtx::step_no_wrap(&gal, PagePos { index: 1, page: 0 }, -2), None);
+
+    assert!(lone(PagePos { index: 1, page: 0 }, lead, &gal), "the second page is front matter");
+    assert!(lone(PagePos { index: 0, page: 0 }, lead, &gal), "and so is the first");
+
+    // The tiling, which is the user-visible half. Seven loose images at lead_lone 2.
+    let mut anchors = vec![PagePos { index: 0, page: 0 }];
+    let mut cur = anchors[0];
+    while let Some(next) = image_viewer::next_anchor(cur, lead, &gal) {
+        if anchors.contains(&next) {
+            break;
+        }
+        anchors.push(next);
+        cur = next;
+    }
+    assert_eq!(
+        anchors,
+        vec![
+            PagePos { index: 0, page: 0 },
+            PagePos { index: 1, page: 0 },
+            PagePos { index: 2, page: 0 },
+            PagePos { index: 4, page: 0 },
+            PagePos { index: 6, page: 0 },
+        ],
+        "two pages open alone and the rest pair: {{0}} {{1}} {{2,3}} {{4,5}} {{6}}"
+    );
+    assert_eq!(
+        turn_partner(PagePos { index: 1, page: 0 }, lead, &gal),
+        None,
+        "so the second page has no partner, which is what 'front matter' means here"
+    );
+}
 fn flat_position(gal: &Gallery, n: usize) -> PagePos {
     let mut seen = 0usize;
     for (index, _) in gal.files.iter().enumerate() {

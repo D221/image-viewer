@@ -1292,7 +1292,7 @@ pub struct Plan<'a> {
     ///
     /// **A flag, not a key.** The key is [`Plan::partner`] itself, so a separate
     /// `Option<ImgKey>` here could name a page the plan is not showing a partner of
-    /// ΓÇö the stranding failure this planner's purity exists to rule out, arrived at
+    /// — the stranding failure this planner's purity exists to rule out, arrived at
     /// through a field nobody cross-checks. `false` with `partner: None` is simply
     /// not a state the app can produce: both come from one `turn_partner()` call.
     ///
@@ -1300,7 +1300,7 @@ pub struct Plan<'a> {
     /// corner one: a source over [`FAST_FULL_MAX_PIXELS`] is decoded DCT-scaled and
     /// carries no full buffer at all, and manga scans are frequently large JPEGs.
     /// When the single-pass decode *did* hand the partner a full buffer there is
-    /// nothing to ask for and the app says so ΓÇö [`MyApp::needs_full`] is the answer
+    /// nothing to ask for and the app says so — [`MyApp::needs_full`] is the answer
     /// for both halves.
     ///
     /// **Planned at [`PRIO_FULL`], unlike the partner's *preview*.** The preview is
@@ -1308,7 +1308,7 @@ pub struct Plan<'a> {
     /// screen and it sits at [`PRIO_CURRENT_PREVIEW`] with its counterpart. A full
     /// decode is the same refinement the cursor page's own is, so it is a peer of
     /// that one: at the current priority a 30 MB decode would outrank the cursor
-    /// page's own preview ΓÇö queued at 0 too, so insertion order would decide ΓÇö and
+    /// page's own preview — queued at 0 too, so insertion order would decide — and
     /// sit ahead of the entire preload window, to sharpen a page not yet drawn.
     pub partner_needs_full: bool,
     /// Images that already have a cached preview.
@@ -7118,10 +7118,12 @@ pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
 ///
 /// Three reasons to be alone, in the order they are asked:
 ///
-/// * **Front matter.** The first `lead_lone` pages of the gallery, by flat
-///   ordinal, because a book opens on its cover alone. `0` for a scan whose
-///   blank first page was dropped, which is the most-reported pairing complaint
-///   in every mature reader (Komga #123, #2132; OpenComic #456; Paperback #251).
+/// * **Front matter.** The first `lead_lone` pages of the gallery, because a book
+///   opens on its cover alone. `0` for a scan whose blank first page was dropped,
+///   which is the most-reported pairing complaint in every mature reader (Komga
+///   #123, #2132; OpenComic #456; Paperback #251). The test is [`is_lead`]'s one
+///   step, not a count of the pages before it - same rule, and it is the rule's
+///   cost and its behaviour under an unlearned page count that make it that way.
 /// * **A spread**, which takes a whole turn and re-pairs everything after it.
 ///   **This arm is redundant with `pairable`'s own `shape_of(a) != Double` check,
 ///   and is kept for legibility.** Deleting it was tried and changes no answer on
@@ -7129,8 +7131,8 @@ pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
 ///   anyway. It stays because it is the only statement of the re-pairing rule
 ///   visible at the point where re-pairing is decided, and because someone will
 ///   otherwise try to "remove the duplication". The arm that is genuinely
-///   load-bearing is the first one, `flat < lead_lone`: deleting that breaks the
-///   trace, `leading_pages_can_be_lone`, `backwards_agrees_with_forwards` and the
+///   load-bearing is the first one: deleting that breaks the trace,
+///   `leading_pages_can_be_lone`, `backwards_agrees_with_forwards` and the
 ///   round-trip property at once.
 /// * **Nothing to pair with**: the next page is a spread, it is a different
 ///   shape of page, or there is no next page at all.
@@ -7141,12 +7143,45 @@ pub fn pairable(a: PagePos, b: PagePos, ctx: &dyn PageCtx) -> bool {
 /// next press moves to page 1. A reader expects the last spread to be the last
 /// page alone, not that page beside the first one.
 pub fn lone(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> bool {
-    ctx.flat(anchor).is_some_and(|f| f < lead_lone as usize)
+    is_lead(anchor, lead_lone, ctx)
         || shape_of(anchor, ctx) == Shape::Double
         || match ctx.step_no_wrap(anchor, 1) {
             Some(next) => !pairable(anchor, next, ctx),
             None => true,
         }
+}
+
+/// Whether `pos` is one of the gallery's first `n` pages - the front matter a book
+/// opens alone.
+///
+/// **One step, not a count.** "`pos` has fewer than `n` pages before it" and "stepping
+/// back `n` pages runs off the front" are the same statement, so this asks
+/// [`PageCtx::step_no_wrap`] rather than [`PageCtx::flat`]. Both reasons for that were
+/// found by measurement and by reading what `flat` does with an unknown count:
+///
+/// * **O(1), where `flat` is O(files).** [`Gallery::flat`] sums the page counts of
+///   every file before `pos`, with a `PathBuf`-keyed lookup per element, and `lone` is
+///   called once per anchor of every walk - so one backward step over a folder of 2000
+///   loose images spent **117-385 ms** in it, measured in release on the development
+///   box. `n` is at most [`LEAD_LONE_MAX`] (4), so this is a single `step_no_wrap` call
+///   and not a loop of them.
+/// * **It cannot refuse to answer.** `flat` is `None` whenever a *preceding* file's
+///   page count has not been learned, and the spelling this replaces guarded that with
+///   `is_some_and`, which then answered "not front matter". So a front page that
+///   happened to sit behind an unlearned file lost its front-matter arm and paired with
+///   the page after it - a wrong pairing, silent, and the kind this whole section is
+///   built to avoid. `step_no_wrap` asks the position arithmetic, which is always
+///   answerable, so the page is judged by where it is rather than by what is known
+///   about the files ahead of it.
+///
+/// **Two boundaries, and neither earns a guard.** `n == 0` asks for
+/// `step_no_wrap(pos, 0)`, which is `Some(pos)` for any valid position, so the answer
+/// is "no" - right, since nothing can be among the first zero pages. And a position
+/// that does not exist also answers `None` and would be called front matter: `lone` is
+/// only ever asked at an anchor, which is a position a walk produced and so exists, so
+/// that cannot arise - and a guard there would be a branch that cannot change an output.
+fn is_lead(pos: PagePos, n: u32, ctx: &dyn PageCtx) -> bool {
+    ctx.step_no_wrap(pos, -(n as isize)).is_none()
 }
 
 /// How many pages the turn anchored at `s` holds: one, or two.
