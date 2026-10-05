@@ -39,7 +39,7 @@ use image_viewer::{
     set_thumbnail_cache,
     spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
     DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
-    SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS, PREVIEW_TEXTURE_DIM,
+    SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2279,10 +2279,32 @@ impl MyApp {
     fn schedule(&mut self) {
         // Preview texture target: the display area in physical pixels, so the
         // texture is exactly as sharp as the screen can show.
-        let target_dim = self
-            .display_dim
-            .map(image_viewer::preview_target)
-            .unwrap_or(PREVIEW_TEXTURE_DIM);
+        //
+        // **And no target at all until there is one.** `display_dim` is measured in
+        // `central`, and the first `schedule()` of a session runs from `goto` in
+        // `frame_prelude` — before `central` has ever drawn a frame. This used to
+        // answer `PREVIEW_TEXTURE_DIM` for that gap, which is the animation ceiling
+        // and not a decode request: **the current page, the turn's other half and
+        // the entire preload window were then all decoded at 4096**, and for every
+        // source under 4096 px `downscale_image` is a no-op, so those textures are
+        // the *full-resolution* page (measured byte-identical to the source decode
+        // on `32.jpg`) with no prefilter and no kernel pass anywhere in the
+        // pipeline. The GPU then minifies them with a bilinear sampler and no
+        // mipmaps: **3.397x the drawn rectangle in normal mode and 4.645x in manga
+        // mode** at a 957x914 panel, against 1.045 and 1.365 for a texture decoded
+        // for that panel. That is the reported lattice, and because whether a page
+        // was decoded in that first window or a later one is a race with start-up,
+        // it reads as "fine until I press right".
+        //
+        // `None` is a value, so this has to answer for it rather than invent a
+        // number: an empty plan, re-made by `central` on the frame it finally
+        // measures the display area. That costs one frame of "Loading..." — which
+        // is what the first frame already was — and it removes seven full-resolution
+        // decodes from every cold open (27 MB each on these pages, against 2 MB).
+        let Some(target_dim) = image_viewer::decode_target(self.display_dim) else {
+            self.loader.replace(Vec::new());
+            return;
+        };
 
         // The cache is keyed on (file, page), so this is the set of *images*
         // already decoded rather than of files. That is what lets the planner ask
@@ -3726,12 +3748,36 @@ impl MyApp {
         // every pair of them and never fires.
         let target = image_viewer::preview_target(panel_px);
         if self.display_dim != Some(panel_px) {
+            // **The first measurement is not a resize, and it is the frame the plan
+            // has been waiting for.** `schedule` answers no target at all until the
+            // display area exists (see its doc), so the plan built in
+            // `frame_prelude` was empty and *nothing* is queued. Re-planning here is
+            // what makes the current page decode at the panel's real size instead of
+            // `PREVIEW_TEXTURE_DIM`.
+            //
+            // **Inside this block, and that is the property rather than its
+            // presence.** `display_dim` is what `schedule` reads, so a call one line
+            // above the assignment would queue the plan a second time against the
+            // same empty `display_dim` and change nothing at all — which is the
+            // defect shape this feature has already produced once
+            // (`the_turns_second_half_is_derived_not_latched`). The scan
+            // `the_plan_is_empty_until_the_display_area_is_measured` brace-matches
+            // this block and checks the call is inside it.
+            //
+            // Deliberately *only* the first measurement. Every later change of the
+            // display area is a resize, and re-planning on each of those would issue
+            // a decode per frame of a window drag — the exact storm `ResizeTracker`
+            // exists to coalesce, and the reason `Wait` is not `Refine` below.
+            let first_measurement = self.display_dim.is_none();
             self.display_dim = Some(panel_px);
             // Hiding/showing panels resizes the display area but must not
             // reload the image: consume exactly one transition silently.
             if self.suppress_resize_redecode {
                 self.suppress_resize_redecode = false;
                 self.resize.suppress();
+            }
+            if first_measurement {
+                self.schedule();
             }
         }
         match self.resize.frame(target, self.current_needs_refine(target)) {

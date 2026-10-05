@@ -2010,13 +2010,67 @@ pub fn preview_target(panel_px: (u32, u32)) -> u32 {
         .clamp(256, PREVIEW_TEXTURE_DIM)
 }
 
+/// The long side a preview should be decoded for, or `None` while the display area
+/// has never been measured.
+///
+/// **The second arm is the reported defect, and it is one word in the wrong
+/// direction.** [`preview_target`] answers a *known* display area; before
+/// `central` has run there is none, and the caller used to answer
+/// `PREVIEW_TEXTURE_DIM` instead. So the **first plan of every session** — the
+/// current page, the turn's partner and the whole preload window — asked for a
+/// 4096-long texture, and for every source under 4096 px `downscale_image` is a
+/// **no-op**: measured on `32.jpg`,
+/// `load_page_preview_full(path, 4096, 0).preview` is **byte-identical** to the
+/// source decode. No prefilter, no kernel pass, no resampling of any kind
+/// anywhere in the pipeline; a full-resolution page then goes to the GPU's
+/// bilinear sampler, which has no mipmaps.
+///
+/// Measured on the running app at a 957x914 physical panel, painting one of
+/// those textures into the rectangle it is actually drawn at:
+///
+/// | state | texture | painted | ratio |
+/// |---|---|---|---|
+/// | fallback texture, normal mode | 2223x3109 | 654 x 915 | **3.397** |
+/// | fallback texture, manga mode | 2223x3109 | 478 x 669 | **4.645** |
+/// | decoded for the panel, normal | 684x957 | 654 x 915 | 1.045 |
+/// | decoded for the panel, manga | 653x914 | 478 x 669 | 1.365 |
+///
+/// 4.645x of *unfiltered* minification is the lattice the resample work removed,
+/// back again — and whether a given page shows it is a race with start-up, which
+/// is why it presents as "fine until I press right". `PREVIEW_TEXTURE_DIM` is
+/// the animation ceiling, not a decode request, and borrowing it as one is what
+/// put seven full-resolution textures in the cache at every cold open — 27 MB
+/// each for these pages against 2 MB.
+///
+/// `None` is a **value** rather than a fallback, so the caller has to decide what
+/// to do about not knowing the target: the plan it builds is empty, and the frame
+/// that finally measures the display area re-plans.
+pub fn decode_target(display_px: Option<(u32, u32)>) -> Option<u32> {
+    display_px.map(preview_target)
+}
+
 /// How much the display must grow before a sharper decode is worth issuing, in
 /// physical pixels. Below this the extra sharpness is invisible but the decode
 /// costs as much as any other, and a window drag produces a stream of these.
 pub const RESIZE_PX_FLOOR: u32 = 8;
 
-/// True when the cached preview is softer than the display can now show *and* a
-/// re-decode at `now_target` would actually be sharper.
+/// The factor the resize path pre-reduces by, and the factor past which a cached
+/// texture is **outside anything this crate ever filtered**.
+///
+/// One constant for both because they are one number: [`prefilter_dim`] reduces
+/// the source to at most `target * PREFILTER_FACTOR` before the final kernel
+/// pass, so a texture decoded *for* a target `T` is `T` on its long side and the
+/// GPU is left with at most a `PREFILTER_FACTOR` minify. A texture more than that
+/// above the target it is painted at is not a sharp-but-unfiltered picture — it is
+/// one where the pre-reduction could not have fired, which at `decoded_for` above
+/// the source's own long side means **no resampling ran at all**. It is also the
+/// threshold the prefilter's activation is written at, so citing one and meaning
+/// the other is not available.
+pub const PREFILTER_FACTOR: u32 = 2;
+
+/// True when the cached preview is not what the display can now show — in
+/// **either** direction — and a re-decode at `now_target` would actually be
+/// better.
 ///
 /// Pure, and in `lib.rs` so the rule can be tested without a window — this
 /// replaces "drop the preview on resize", which blanked the picture and
@@ -2024,12 +2078,26 @@ pub const RESIZE_PX_FLOOR: u32 = 8;
 ///
 /// * `preview_long` — long side of the texture on screen.
 /// * `source_long` — long side of the source, so a source that is *already*
-///   smaller than the target is never re-decoded (that is the loop guard: the
-///   target keeps growing while no decode can ever be sharper).
+///   smaller than the target is never re-decoded on the **growth** arm (that is
+///   the loop guard: the target keeps growing while no decode can ever be
+///   sharper).
 /// * `decoded_for` — the target the cached preview was decoded for, not its
 ///   pixel size. Comparing pixels would re-decode forever on a source smaller
 ///   than the display; comparing targets converges after one decode.
 /// * `floor` — [`RESIZE_PX_FLOOR`].
+///
+/// **The oversized arm is a hole in a rule about sharpness, not a second feature,
+/// and it is the arm this function was missing.** Every arm below compares against
+/// `decoded_for` in one direction, so a preview decoded for a much larger target
+/// could not be corrected by any resize for the rest of the session. Measured,
+/// on the panel in [`decode_target`]: a page decoded for a 4096 target and painted
+/// into a manga half-panel is at **4.645** of the drawn rectangle, and no resize
+/// would ever have said so.
+///
+/// The oversized arm is judged on the **request** for the same reason the growth
+/// arm is — a source smaller than the target returns its own size whatever it is
+/// asked for, so a pixel rule re-decodes forever — and the request converges after
+/// one decode and costs nothing while the display is not moving.
 pub fn needs_refine(
     preview_long: u32,
     source_long: u32,
@@ -2037,6 +2105,11 @@ pub fn needs_refine(
     now_target: u32,
     floor: u32,
 ) -> bool {
+    // **Oversized.** Past the factor the pipeline filters at, so what is on screen
+    // is being minified by more than anything in this crate low-passed for.
+    if decoded_for > now_target.saturating_mul(PREFILTER_FACTOR).saturating_add(floor) {
+        return true;
+    }
     // Not enough growth to be worth a decode.
     if now_target <= decoded_for.saturating_add(floor) {
         return false;
@@ -6998,8 +7071,15 @@ pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
 /// is read from inside the resampler.
 static PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Width or height the linear-light prefilter reduces to: **at most 2x the
-/// target**, and never larger than the dimension itself.
+/// Width or height the linear-light prefilter reduces to: **at most
+/// [`PREFILTER_FACTOR`]x the target**, and never larger than the dimension itself.
+///
+/// **This is also the threshold [`needs_refine`] judges an over-sized texture by**,
+/// and that sharing is the point rather than tidiness: the factor is what the
+/// pipeline filters at, so a texture more than that above the target it is painted
+/// at is a picture nothing in this crate has low-passed — and at a request above
+/// the source's own long side the pre-reduction cannot fire at all, which is how
+/// a texture ends up **unfiltered altogether**.
 ///
 /// This is the memory bound for `linear_resize`. The 12-bit linear conversion is
 /// the expensive step, so it runs on the pre-reduced buffer rather than on the
@@ -7014,7 +7094,7 @@ static PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// this codebase can be handed is `MAX_TEXTURE_DIM`, but the arithmetic should
 /// not depend on that staying true.
 pub fn prefilter_dim(dim: u32, target: u32) -> u32 {
-    dim.min(target.saturating_mul(2)).max(1)
+    dim.min(target.saturating_mul(PREFILTER_FACTOR)).max(1)
 }
 
 /// Source span `(start, len)` covered by each of `n` output samples when

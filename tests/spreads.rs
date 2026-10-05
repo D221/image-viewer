@@ -7072,6 +7072,114 @@ fn central_decides_and_threads_the_lone_spread_flag() {
     }
 }
 
+/// The **wiring** half of the decode-target rule: `schedule` must ask the library
+/// for a target rather than invent one, and `central` must re-plan from inside the
+/// block that records the display area.
+///
+/// **This is a source scan, and it is here rather than in `flip_through.rs`
+/// because it is the third scan in this suite of the same defect class** — the
+/// block, not the call, being the property — and because it wants the
+/// brace-matching [`fn_body`] and [`block_after`] this file already owns.
+/// `central` and `MyApp::schedule` are in the binary, which no integration test
+/// can reach; `flip_through.rs`'s
+/// `there_is_no_decode_target_before_the_display_area_is_measured` covers the rule
+/// the library applies and cannot see either of these two call sites.
+///
+/// **The load-bearing assertion is the negative one, and it is about position.**
+/// `display_dim` is what `schedule` reads, so a `self.schedule()` one line *above*
+/// the assignment inside `central` would be a correct-looking call in the correct
+/// function re-planning against the same empty `display_dim` it is trying to fill —
+/// the exact defect shape `the_turns_second_half_is_derived_not_latched` records,
+/// where the assignment was present, in the right function, in the wrong block.
+/// So this brace-matches the `if` that assigns `display_dim` and requires the call
+/// to be inside it, which a `contains` on the whole body could not tell.
+#[test]
+fn the_plan_is_empty_until_the_display_area_is_measured() {
+    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let schedule = fn_body(&src, "fn schedule(");
+
+    assert!(
+        schedule.contains("image_viewer::decode_target(self.display_dim)"),
+        "`MyApp::schedule` no longer asks the library for a decode target, so it is back \
+         to inventing one - and the fallback was `PREVIEW_TEXTURE_DIM`, which is the \
+         animation ceiling. On every cold open the first plan (current page, turn \
+         partner and all six preload neighbours) is then decoded at 4096, which for any \
+         source under 4096 px is the full-resolution page with `downscale_image` a \
+         no-op: measured byte-identical to the source decode on 32.jpg, and painted at \
+         3.397x (normal) / 4.645x (manga) the rectangle it is drawn in.\n\
+         Body was:\n{schedule}"
+    );
+    // **The old spelling, by its code and not by the constant it mentioned.** The
+    // removed line was
+    // `self.display_dim.map(image_viewer::preview_target).unwrap_or(PREVIEW_TEXTURE_DIM)`,
+    // so pinning the *call* catches it whatever the fallback is called - and a scan
+    // that trips on a comment is a scan that gets satisfied by rewording, which is
+    // the wrong pressure on the next editor.
+    assert!(
+        !schedule.contains("image_viewer::preview_target"),
+        "`MyApp::schedule` computes the target itself again. `display_dim.map(preview_target)` \
+         is the expression that had to answer for the `None`, and it must go through \
+         `decode_target`, which is the version that can say it does not know.\n\
+         Body was:\n{schedule}"
+    );
+    assert!(
+        schedule.contains("let Some(target_dim) ="),
+        "`MyApp::schedule` no longer takes the missing target as a case. There is no \
+         measured display area before `central`'s first frame, and that has to be a \
+         handled state rather than a default.\nBody was:\n{schedule}"
+    );
+    assert!(
+        schedule.contains("self.loader.replace(Vec::new())"),
+        "`MyApp::schedule` has no answer for a target it does not have: the plan it builds \
+         must be empty, so the frame that finally measures the display area is the one that \
+         queues the work.\nBody was:\n{schedule}"
+    );
+
+    // `central`: the call has to be *inside* the block that assigns `display_dim`.
+    let marker = "if self.display_dim != Some(panel_px)";
+    let block = block_after(&src, marker);
+    assert!(
+        block.contains("self.schedule()"),
+        "`central` assigns `display_dim` without re-planning, so the plan `frame_prelude` \
+         built - empty, because no target existed yet - stays empty and the first frame \
+         queues nothing at all: the viewer opens on a permanent \"Loading...\". The call \
+         belongs inside this block; brace-matched, because one line above the assignment \
+         it would read the same `display_dim` it is trying to fill.\nBlock was:\n{block}"
+    );
+    let assign = block
+        .find("self.display_dim = Some(panel_px)")
+        .unwrap_or_else(|| panic!("the block no longer assigns display_dim:\n{block}"));
+    let call = block
+        .find("self.schedule()")
+        .unwrap_or_else(|| panic!("the block has no schedule() call:\n{block}"));
+    assert!(
+        call > assign,
+        "`self.schedule()` sits before `display_dim` is assigned, so it builds a plan \
+         against the value it is meant to replace. This is the whole reason the assertion \
+         above is about position and not presence.\nBlock was:\n{block}"
+    );
+    // **And only on the first measurement.** Re-planning on every change of the
+    // display area is what a window drag must not do, so the call is gated on the
+    // transition and the gate has to be visible here rather than assumed.
+    assert!(
+        block.contains("is_none()"),
+        "`central` re-plans on every change of the display area rather than on the first \
+         measurement. That is a decode per frame of a window drag, which is the storm \
+         `ResizeTracker` exists to coalesce - `ResizeAction::Wait` is not `Refine` for \
+         exactly this reason.\nBlock was:\n{block}"
+    );
+    // One call in the block. (`central` has a second, unrelated `schedule()` in
+    // its `ResizeAction::Refine` arm, so the count is the block's - which is the
+    // unit the property is about.)
+    assert_eq!(
+        block.matches("self.schedule()").count(),
+        1,
+        "the `display_dim` block must re-plan exactly once: twice would be a second \
+         reading of the same transition, and a `ResizeAction::Refine` in the same block \
+         would re-plan for a target the block has only just replaced.\nBlock was:\n{block}"
+    );
+}
+
 /// The text between a call's `(` and its matching `)`, starting from the call's own name.
 ///
 /// **Paren-matched rather than a line or a fixed window**, because every one of the four

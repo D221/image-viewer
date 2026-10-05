@@ -376,6 +376,53 @@ in `prev_anchor`'s doc comment, and the walk is the price of not having a wrong 
 
 ---
 
+## 7. 1440p photos still moiré at `Fast`, because the prefilter's threshold is
+## above the reduction they actually get
+
+**Reported alongside the navigation regression, measured, and deliberately not
+fixed** — it is a different defect with a different fix and the wrong one to make
+in the same commit.
+
+**The numbers.** A 2560x1440 landscape photo is above `SPREAD_ASPECT`, so it is a
+lone spread filling the whole turn and is decoded for the **whole** panel. On a
+1920-long panel that is a reduction of **2560 / 1920 = 1.333x**, and
+`prefilter_dim(2560, 1920) = min(2560, 3840) = 2560` — the source, unchanged. So
+**the pre-reduction does not fire**: the path is bit-identical to the one before
+`cb0394c`, and the lattice that commit removed is not removed for these files at
+any strength the user has. The 2.879x manga pages and the 2223x3109 pages
+everything so far has been measured on all clear the threshold comfortably; a 1440p
+photo on a 1080p-tall panel does not, which is why this went unseen.
+
+**`Smooth` (2.0) does help these files, and it is worse on other screentone**, so
+there is no single good default and a default change is the wrong instrument. The
+three files that got *worse* under 2.0 (`12.jpg`, `21.jpg`, `44.jpg`, all reported
+as a black dot pattern appearing in grey screentone) are 2223x3109 pages at the
+manga half-panel target — the 2.879x case the prefilter already covers.
+
+**The likely real answer: lower or remove the prefilter's activation threshold.**
+`PREFILTER_FACTOR` is the number both `prefilter_dim` and the over-sized arm of
+`needs_refine` are written at, so changing it is one constant and one deliberate
+change to what the pipeline guarantees the GPU. What has to be measured before it
+is touched:
+
+- What the pre-reduction actually buys at **1.2–1.5x**, which is a regime nothing
+  has been probed in. `probe_square_lattice` was swept at 2.879x; a lattice at
+  1.333x lands at an output period above the output Nyquist and may need no
+  low-pass at all, in which case the threshold is right and the answer is elsewhere.
+- The **memory** claim in `prefilter_dim`'s doc is a claim about the *2x*
+  intermediate: at 1.333x the pre-reduced buffer is 1.5x the target rather than 2x,
+  so it is smaller, and at a 1.0x reduction it is the source — i.e. enabling the
+  prefilter everywhere means the 12-bit conversion can run over a
+  full-resolution buffer on exactly the images that were cheapest before.
+- Whether the foldover finding (widening moves energy between pitches) has a
+  cheaper form at low reduction ratios, where there is far less energy to move.
+
+**What is *not* claimed here:** that lowering the threshold fixes it, or that the
+1440p artefact is the prefilter's absence at all. It is the leading hypothesis with
+the arithmetic behind it, and the arithmetic is the only part that is established.
+
+---
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several

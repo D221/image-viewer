@@ -198,6 +198,66 @@ that are already in memory. One crate, no workspace, no CI.
   fires. `Wait` must call `request_repaint_after(RESIZE_SETTLE_REPAINT)` or the
   final size of a drag is never examined (nothing else asks for a repaint).
   Panel toggles and F11 call `suppress()` so layout changes don't read as growth.
+- **A decode target the app has not measured is `None`, never a default — and
+  `PREVIEW_TEXTURE_DIM` is the animation ceiling, never a decode request.** This
+  was a reported regression and it is the sharpest version of "a value read at the
+  wrong time". `schedule` runs from `goto` in `frame_prelude`, i.e. **before
+  `central` has ever measured a panel**, and it used to answer
+  `display_dim.map(preview_target).unwrap_or(PREVIEW_TEXTURE_DIM)` for the gap.
+  So the **first plan of every session** — the current page, the turn's partner and
+  all six preload neighbours — asked for a 4096-long texture, and for any source
+  under 4096 px `downscale_image` is a **no-op**: `load_page_preview_full(path, 4096,
+  0).preview` is *byte-identical* to the source decode. No prefilter, no kernel
+  pass, no resampling anywhere in the pipeline, and a full-resolution page handed
+  to a bilinear sampler with no mipmaps. Measured at a 957x914 physical panel
+  painting one of those into the rect it is drawn at: **3.397x in normal mode,
+  4.645x in manga mode**, against 1.045 and 1.365 for a texture decoded for that
+  panel. **Whether a given page shows the lattice is a race with start-up** —
+  whether it was in the first plan or a later one — which is why it presented as
+  "fine until I press right", and why the mode toggle and the navigation key were
+  both implicated and neither was the cause. `decode_target(Option<(u32,u32)>)`
+  returns `Option<u32>`, `schedule` emits an **empty** plan when there is none, and
+  `central` re-plans **inside the `if self.display_dim != Some(panel_px)` block**,
+  on the first measurement only (re-planning on every change is a decode per frame
+  of a drag, which is the storm `ResizeTracker` exists to stop). The re-plan is
+  pinned by **position**, not presence: `the_plan_is_empty_until_the_display_area_is_measured`
+  brace-matches that block, because a correct-looking `schedule()` one line above
+  the assignment re-plans against the very `display_dim` it is filling — the
+  `shown_partner` latch's defect shape.
+  * **A one-sided rule about sharpness is a hole, not a feature.**
+    `needs_refine` compared `decoded_for` in one direction only, so **no resize, for
+    the rest of the session, could ever correct a texture decoded for a much larger
+    target** — `914 <= 4096 + 8` short-circuits, and `source_long > preview_long`
+    is false besides (3109 > 3109). It now also fires past
+    `PREFILTER_FACTOR` × the target, which is `prefilter_dim`'s own factor: a
+    texture more than that above the target it is painted at is one whose
+    pre-reduction **could not fire**. Judged on the **request**, as the growth arm
+    is, because a pixel rule re-decodes forever on a source smaller than the
+    display (`an_oversized_refine_converges_after_one_decode`).
+  * **What this costs, measured.** Zero on the navigation path: 8 × `→` in manga
+    mode, before and after, 6 `decode calls started` and **0** resize-driven
+    re-decodes in every run, `next/prev -> first pixels` p50 16.3–18.2 ms before
+    and 16.6–17.6 ms after. It *removes* work: seven 27 MB full-resolution
+    textures per cold open become seven 2 MB ones. It *adds* work only on an
+    over-sized texture, and per decode the resize now actually runs — 178–225 ms
+    p50 after against 161–207 ms before, which is the price of doing the resample
+    the pipeline exists to do rather than skipping it.
+  * **And one thing it unmasked, which is pre-existing.** Pressing `M` moves the
+    panel's long side by 16 px (914 ↔ 957 on this box), which clears
+    `RESIZE_PX_FLOOR`, so the **growth** arm now charges a burst of
+    `resize-driven re-decodes` where it used to charge none — before this fix
+    nothing was ever decoded at a real target, so the arm was unreachable rather
+    than quiet. Bounded and self-healing (`M` + 8 × `→`: 0 or 6 re-decodes in 6
+    runs; the same 8 × `→` with no toggle: **0 in 6 of 6**). **Not fixed here**:
+    the growth floor is `RESIZE_PX_FLOOR`'s business and changing it is a policy
+    call, not a bug fix.
+  * **The band this leaves standing.** A page fitted into a *wider-than-tall*
+    panel is height-bound, so the GPU minifies by up to the panel's own aspect on
+    top of the `PREFILTER_FACTOR`: measured 2.313 for a portrait page on a
+    1050x800 window, unchanged by this fix and unchanged by the `2×` threshold,
+    because that is the pre-existing design (`the_decode_target_covers_the_picture_the_layout_draws`
+    only ever pinned the *lower* bound). Tightening it would re-decode on every
+    panel-shape change; it is a deliberate next task, not an oversight.
 - **Hold-to-browse**: `step()` is throttled while `waiting_load`; the queued
   `pending_advance` is consumed at the *start of the next frame* — consuming it
   in the same frame skips the render.
