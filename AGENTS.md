@@ -1381,6 +1381,27 @@ an edit.
   <hash(path, mtime, size)>` changes whenever the archive does, so editing a
   `.cbz` orphans every member's cached cell. They age out with everything else;
   no special case was written, and that is a decision rather than an oversight.
+- **"The extracted temp dir is stable" is FALSE, and the watcher is disabled
+  because of that claim.** `check_changed` and `rescan` both return early when
+  `zip_archive.is_some()`, and the comment says why. Measured false twice over
+  (IV_TRACE, debug build, `vol1.cbz` with 40 members): `extract_zip` truncates and
+  rewrites **every member on every open**, and `close_zip` **deletes the whole
+  directory while the app is running** — on `Esc`, on any folder/file open, and on
+  `on_exit`. A run that rewrote all 40 members and then deleted the directory got
+  `files=0 gallery=40` from the app's own poll, and ten consecutive 2 s polls all
+  logged `check_changed SKIPPED`: **it cannot notice, and `failed` is permanent,
+  so the first navigation after the bytes go away is a "Loading…" with no cure but
+  a restart.** Two amplifiers: there is **no single-instance guard**
+  (`CreateMutex` appears nowhere in `src/`), and the directory is content-addressed,
+  so **two instances of the same archive share one directory** — the second's open
+  rewrites the members the first is displaying and its exit deletes them (measured;
+  see `.superpowers/sdd/2026-10-02-manga-spread-mode/archive-member-disappears.md`).
+  And `close_zip` **discards `remove_dir_all`'s error**, so on exit — when a worker
+  almost always holds a member open — the delete fails and the directory leaks;
+  five zero-file directories were sitting in `%TEMP%\image-viewer` on this box.
+  **Do not "fix" this by enabling the watcher for archives**: it costs a stat per
+  member per 2 s on a 200-page volume, which is the trade this crate exists not to
+  make, and it would introduce blanking where there is none today.
 - **Any new CLI flag goes in `path_arg` (`lib.rs`) and its test.** Taking
   `args().nth(1)` is wrong the moment a flag can come first, and it failed
   *silently*: `--perf` was taken as the path, so the report described a folder
