@@ -875,6 +875,16 @@ enum Msg {
         path: PathBuf,
         info: Option<String>,
     },
+    /// A dropped file's copy, made on a worker.
+    ///
+    /// `src` is the path that was dropped, and it is here so a **stale** answer
+    /// can be recognised: a drop is a user action with a lifetime now, and a copy
+    /// that lands after the reader has dropped something else must not open over
+    /// the top of the newer one.
+    DropCopy {
+        src: PathBuf,
+        result: Result<image_viewer::DropCopy, String>,
+    },
 }
 
 /// Start the worker pool for this app: real decoding, real panic capture, and
@@ -1426,6 +1436,30 @@ struct MyApp {
     /// drop returns - so opening one in place is opening a file with an expiry
     /// date on it, and the 2 s poll then finds a *changed* file and blanks it.
     drop_copy: Option<image_viewer::DropCopy>,
+    /// The path whose copy is being made right now, or `None` when none is.
+    ///
+    /// **One drop in flight, and this is the identity of it rather than a
+    /// flag.** A second drop overwrites the first, and the first's copy then
+    /// lands against a request that is no longer the one the reader made — so it
+    /// is recognised by comparing the message's `src` against this and thrown
+    /// away. A counter would work the same way and would be one more thing to
+    /// keep in step.
+    pending_drop: Option<PathBuf>,
+    /// Where `start_drop_copy` sends its answer, and how it asks for a repaint.
+    ///
+    /// **Its own channel and thread rather than the loader's queue**, and the
+    /// reason is not tidiness: a drop copy is not a decode, so it is not in
+    /// `plan_jobs`' answer, and `Loader::replace` makes the queue match the plan
+    /// *exactly*. A copy job sitting in that queue is therefore discarded by the
+    /// next `schedule()` — which runs on the next step, the next resize or the
+    /// next dwell expiry — and never runs at all, so the drop silently does
+    /// nothing. That is the bug this whole path exists to prevent, arrived at
+    /// from the other direction. A plain thread cannot be discarded that way.
+    ///
+    /// One thread, not a pool: `pending_drop` is a single slot, so at most one
+    /// copy is ever outstanding.
+    drop_tx: Sender<Msg>,
+    drop_wake: Context,
     /// The user's own pairing decisions for the gallery on screen: which pages take
     /// a whole turn, and how many leading pages stand alone. Loaded when a gallery
     /// is opened, and one file's entries are dropped by `invalidate_path`, because
@@ -1599,7 +1633,10 @@ impl MyApp {
         }
 
         let (tx, rx) = mpsc::channel();
-        let loader = new_loader(ctx, tx);
+        // `tx` is cloned rather than moved: the loader owns one sender and the
+        // drop copy owns another, because a drop copy cannot go through the
+        // loader's queue (see `drop_tx`).
+        let loader = new_loader(ctx, tx.clone());
 
         // Taken before `gallery` is moved into the struct below.
         let all_files = gallery.files.clone();
@@ -1654,6 +1691,9 @@ impl MyApp {
             // dialog, neither of which is a transient hand-off, so there is never
             // a copy to release at start-up. `load_dropped` owns one instead.
             drop_copy: None,
+            pending_drop: None,
+            drop_tx: tx,
+            drop_wake: ctx.clone(),
             spreads: GallerySpreads::default(),
             spreads_key: None,
             wheel_acc: 0.0,
@@ -2598,6 +2638,65 @@ impl MyApp {
                         self.exif_loading = false;
                     }
                 }
+                Msg::DropCopy { src, result } => {
+                    // **Stale answers are thrown away, not opened.** The reader
+                    // dropped something else while this copy was running, and
+                    // opening it now would put the older file on top of the newer
+                    // one — with no error, and with the newer drop's copy
+                    // directory deleted by the next `close_transients`.
+                    if self.pending_drop.as_deref() != Some(src.as_path()) {
+                        // Whoever is no longer waiting for it owns it, and
+                        // `%TEMP%` is the place that has to be reclaimed — but
+                        // **not if it is the copy the app has already opened.**
+                        // That is reachable: two drops of the *same unchanged*
+                        // file resolve to the same directory, so the second
+                        // drop's answer can be handled first and this one's
+                        // directory is the one on screen.
+                        if let Ok(c) = result {
+                            if Some(&c.file) != self.drop_copy.as_ref().map(|d| &d.file) {
+                                image_viewer::forget_drop_copy(&c);
+                            }
+                        }
+                        continue;
+                    }
+                    self.pending_drop = None;
+                    match result {
+                        Ok(copy) => {
+                            self.notice = Some(if copy.reused {
+                                format!(
+                                    "Dropped file already copied to {} - the source may be temporary",
+                                    copy.dir.display()
+                                )
+                            } else {
+                                format!(
+                                    "Dropped file copied to {} - the source may be temporary",
+                                    copy.dir.display()
+                                )
+                            });
+                            // **`false`, and that is the answer the copy earns.**
+                            // The path is one this app owns, in a directory this
+                            // app deletes, so nothing else is going to remove it:
+                            // the transient hand-off ended when the copy was made.
+                            self.open_file(ctx, copy.file.clone(), false);
+                            // **After** `open_file`, because that call's
+                            // `close_transients` would delete the very copy we
+                            // went on to open. At this point the slot is empty —
+                            // the request released the previous copy before it
+                            // started this one — so this is a release, not a
+                            // deletion of anything in use.
+                            self.drop_copy = Some(copy);
+                        }
+                        Err(e) => {
+                            // **A failed copy must not refuse to show the image the
+                            // user actually dropped**: a full disk, or a source
+                            // that vanished between the drop and here. The watcher
+                            // will do what it does with the path, exactly as it
+                            // did before any of this.
+                            self.notice = Some(format!("Could not copy the dropped file ({e})"));
+                            self.open_file(ctx, src, false);
+                        }
+                    }
+                }
             }
         }
         if resched {
@@ -2778,6 +2877,14 @@ impl MyApp {
     /// would be deleted by the same call that opens it - a picture that never
     /// appears, with no error anywhere.
     fn close_transients(&mut self) {
+        // **A copy in flight is one of the things being let go of**, so it is
+        // cancelled here rather than at each of the six sites: the thread cannot
+        // be stopped, so the drop does not happen, and when its answer arrives
+        // `pump` recognises it as stale and releases the directory it wrote.
+        // Without this, dropping a file and then opening a folder would show the
+        // *folder* and then have the drop arrive on top of it, because the copy
+        // no longer finishes before the next action does.
+        self.pending_drop = None;
         if let Some(t) = self.zip_temp.take() {
             let _ = std::fs::remove_dir_all(t);
         }
@@ -2787,27 +2894,53 @@ impl MyApp {
         }
     }
 
-    /// Take a copy of a dropped file and return the path the app should open.
+    /// Ask a worker to take a copy of a dropped file.
     ///
-    /// The fallback is the original path with a notice: a failure to copy (a full
-    /// disk, a source that vanished between the drop and here) must not refuse
-    /// to show the image the user actually dropped, and the watcher will do what
-    /// it does with it.
-    fn own_drop(&mut self, src: &Path) -> PathBuf {
-        match image_viewer::own_dropped(src) {
-            Ok(c) => {
-                self.notice = Some(format!(
-                    "Dropped file copied to {} - the source may be temporary",
-                    c.dir.display()
-                ));
-                self.drop_copy = Some(c.clone());
-                c.file
-            }
-            Err(e) => {
-                self.notice = Some(format!("Could not copy the dropped file ({e})"));
-                src.to_path_buf()
-            }
-        }
+    /// **The copy is a read and a write of a file whose size the app does not
+    /// know, so it cannot happen on the thread that paints.** That is the first
+    /// line of `AGENTS.md`, and the synchronous form this replaced cost 3.8 ms
+    /// at 5 MB, 26 ms at 50 MB and 279 ms at 500 MB on this box — the last of
+    /// which is eighteen frames at 60 Hz, and is linear in a size nothing in the
+    /// app can predict.
+    ///
+    /// **The picture on screen does not change while the copy runs, and that is
+    /// deliberate.** The alternative — blanking the central panel for the length
+    /// of a 500 MB copy — replaces a stall the user might not notice with a
+    /// flicker they certainly would, on an interaction as ordinary as dropping a
+    /// file. The pixels already in memory are correct (they were decoded from
+    /// the source, not re-read), and the previous image's *copy* is the one thing
+    /// the flight does invalidate — `close_transients` released it before this
+    /// call, which is the ordering `open_file` is asserted on — so a zoom tile
+    /// or a save aimed at the *old* image during the flight fails, for a path
+    /// the drop is abandoning anyway.
+    ///
+    /// What the reader does get is the status line, because **a drop is
+    /// otherwise invisible**: nothing changes on screen until the copy lands, and
+    /// without a line a dropped file looks like a dropped keystroke.
+    ///
+    /// A thread rather than a loader job, and `drop_tx` says why at length: the
+    /// loader's queue is the plan's queue, and `replace` makes it match the plan
+    /// exactly, so a queued copy would be thrown away by the next `schedule()`
+    /// and the drop would silently never open.
+    fn start_drop_copy(&mut self, src: PathBuf) {
+        // Supersede any copy already in flight. The older one still finishes and
+        // still reports, and `pump` recognises it as stale by this comparison —
+        // which is also what releases the directory it wrote.
+        self.pending_drop = Some(src.clone());
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| src.to_string_lossy().into_owned());
+        self.notice = Some(format!("Copying {name}…"));
+        let tx = self.drop_tx.clone();
+        let wake = self.drop_wake.clone();
+        std::thread::spawn(move || {
+            let result = image_viewer::own_dropped(&src);
+            // The same shape as the loader: report, then ask for a repaint, so a
+            // copy that lands with nothing else happening still shows up.
+            let _ = tx.send(Msg::DropCopy { src, result });
+            wake.request_repaint();
+        });
     }
 
     /// Stable temp dir for an archive; reused when the archive is unchanged.
@@ -2899,10 +3032,17 @@ impl MyApp {
     /// forgotten: there is no default, so a new caller has to answer.
     fn open_file(&mut self, ctx: &Context, file: PathBuf, transient: bool) {
         self.close_transients();
-        // **After** `close_transients`, not before. That call releases the
-        // previous drop copy, so a copy taken above it would be removed by the
-        // very call that goes on to open it.
-        let file = if transient { self.own_drop(&file) } else { file };
+        if transient {
+            // **After** `close_transients`, not before. That call releases the
+            // previous drop copy, so a copy taken above it would be removed by the
+            // very call that goes on to open it.
+            //
+            // And *requested*, not performed: this returns without opening
+            // anything, and `pump` opens the copy when the worker reports in. That
+            // is what keeps a 500 MB copy off the thread that paints.
+            self.start_drop_copy(file);
+            return;
+        }
         self.folder = file.parent().unwrap_or(&file).to_path_buf();
         let mut g = Gallery::from_file(file);
         if self.config.load_all_on_startup {
@@ -2967,6 +3107,13 @@ impl MyApp {
             // path in place means the 2 s poll finds a changed file - it is a
             // different stamp, because the file is gone - and blanks the picture
             // it is showing, which is the reported symptom.
+            //
+            // **`true` now means "copy it first", and the copy is requested
+            // rather than performed**: `open_file` hands the work to a thread and
+            // returns, so nothing is on screen until that thread reports. The
+            // branch below is the only place the file reaches the app, which is
+            // why it does not have a "the copy failed, open it anyway" path of
+            // its own - `pump` owns that fallback.
             self.open_file(ctx, path, true);
         }
     }

@@ -46,6 +46,12 @@ that are already in memory. One crate, no workspace, no CI.
     cold figure is a floor that no amount of caching moves, and a benchmark that
     printed only the warm one would be how that got forgotten.
     `IV_BENCH_N` (24), `IV_BENCH_RUNS` (5).
+  - `bench_browse drop_copy_ab` — the same shape for a dropped file at 5 / 50 /
+    500 MB: a cold drop against a repeat of the *same unchanged* file, arms
+    interleaved and both warmed, with an identical third block printed as the
+    drift control. **The repeat arm is the one that changed the design**: it used
+    to cost the same as a cold drop, because the *directory* was reused and the
+    copy was remade. `IV_BENCH_RUNS` (7).
   - `bench_resize` — decodes per window drag.
   - `bench_rotate_save` — lossless save time **and output/input size ratio**;
     1.00–1.02x is the only evidence "lossless" is true, because it is a property
@@ -215,22 +221,98 @@ that are already in memory. One crate, no workspace, no CI.
     the *deletion* this is about, and shares the *file*, so any in-place write to
     the source mutates the copy — verified both ways a writer can do it (truncate-
     and-write, and rename-over). The app would show, and `Ctrl+S` would write,
-    bytes under a path it believes it owns. It is `std::fs::copy`, at the cost of
-    one read and one write of the dropped file on the UI thread, once per drop,
-    which is less work than the archive path's whole-volume extract. **The copy
-    directory name is a hash of path+mtime+len, so a repeated drop of an
-    unchanged file reuses one copy** instead of growing `%TEMP%` per drop, and a
-    re-exported source gets a *new* directory rather than overwriting a copy the
-    app may still hold. One slot: `close_zip` became `close_transients` and
-    releases both the archive dir and `drop_copy`, so the lifetime is one function
-    — and the copy is taken **after** that call, a position
+    bytes under a path it believes it owns. It is `std::fs::copy`, once per drop,
+    on a **worker thread** — see the next bullet for what that costs and for why
+    it is not on the UI thread. **The copy directory name is a hash of
+    path+mtime+len, so a repeated drop of an unchanged file reuses one copy**
+    instead of growing `%TEMP%` per drop, and a re-exported source gets a *new*
+    directory rather than overwriting a copy the app may still hold. One slot:
+    `close_zip` became `close_transients` and releases both the archive dir and
+    `drop_copy`, so the lifetime is one function — and the copy is taken
+    **after** that call, a position
     `a_drop_copies_its_source_after_releasing_the_previous_copy` asserts by byte
     offset, because the reversed order deletes the copy with the call that opens
     it. `open_file`'s `transient` parameter has no default on purpose.
+  - **The copy is made on a worker, so a drop is asynchronous — and the UI
+    thread's share of it is two `stat` calls.** `own_dropped` is a *blocking*
+    composition of `plan_drop_copy` (the decision: `metadata(src)`, the hash,
+    `metadata(dst)`, and whether a copy of this exact stamp is already there) and
+    `DropCopyPlan::materialise` (the bytes). `main.rs` calls neither on the paint
+    thread: `open_file(…, transient = true)` releases the previous copy, hands the
+    path to `start_drop_copy`, **spawns one thread** and returns without opening
+    anything, and `pump` opens the copy when `Msg::DropCopy` arrives. Measured on
+    this box, release, warm cache, NVMe (`bench_browse drop_copy_ab`, arms
+    interleaved, both warmed, an identical third block as the drift control):
+
+    | dropped file | UI stall, before | UI stall, after | repeated drop of an unchanged file, before | after |
+    |---|---|---|---|---|
+    | 5 MB | **3.84 ms** | ~0.2 ms | 3.19 ms | **0.21 ms** |
+    | 50 MB | **26.3 ms** | ~0.2 ms | 24.0 ms | **0.24 ms** |
+    | 500 MB | **279 ms** | ~0.2 ms | 244 ms | **0.24 ms** |
+
+    Two findings, and the second is the one that is easy to get wrong:
+    * 279 ms is **eighteen frames at 60 Hz** on the thread that paints, and it is
+      linear in a size the app has no way to know. That was the whole argument for
+      moving it.
+    * **A repeated drop did *not* already avoid the copy.** The old doc comment
+      claimed the reuse and the code did not implement it: `own_dropped` did
+      `remove_file` then `fs::copy` unconditionally, so the "reuse" was of the
+      *directory* and the copy was remade every time — 244 ms against 279 ms at
+      500 MB, i.e. the same work. `copy_is_current` now makes the claim true, and
+      it is a **length** check and not an existence check, because a half-written
+      copy from a killed session is a file that exists and is the wrong thing to
+      show. So the common case went from "as expensive as a first drop" to two
+      stats, at any size.
+  - **What the user sees during the flight, and why that.** **The previous image
+    stays on screen** and the status line reads `Copying <name>…`. The
+    alternative — blanking the central panel for the length of a 500 MB copy —
+    trades a stall the user might not notice for a flicker they certainly would,
+    on an interaction as ordinary as dropping a file; the pixels already in
+    memory are correct, since they were decoded from the source rather than
+    re-read. The label is not optional, though: **a drop is otherwise invisible**
+    until the copy lands, so without it a dropped file looks like a dropped
+    keystroke. What the flight *does* invalidate is the previous image's own copy
+    — `close_transients` released it before the copy was requested, which is that
+    ordering assertion — so a zoom tile or a `Ctrl+S` aimed at the old image
+    during the flight fails, for a path the drop is abandoning anyway. The failure
+    is a `failed` entry keyed on a path that leaves the gallery, so nothing
+    lasting is poisoned; a stale decode error banner for a moment is the honest
+    cost of not blanking.
+  - **A drop in flight is cancelled by `close_transients`, and a copy that lands
+    anyway is discarded rather than opened.** Because the copy no longer finishes
+    before the next action does, "the last action wins" needs saying out loud:
+    `close_transients` clears `pending_drop`, so dropping a file and then opening a
+    folder does the folder. The thread cannot be stopped, so its answer still
+    arrives, and `pump` recognises it by comparing the message's `src` against
+    `pending_drop` — an **identity, not a flag**, because two drops of the same
+    unchanged file resolve to the *same* directory and so the stale copy's is also
+    the copy on screen; that is why the reclamation is conditional on the app not
+    already holding that file. Both halves are byte-offset asserts in
+    `tests/drops.rs`, and each was verified to fail with its check removed.
+  - **The copy is on its own thread and its own channel, and the reason is that
+    `Loader::replace` would throw it away.** The loader's queue is *the plan's*
+    queue: `plan_jobs` is the viewer's desired set and `replace` makes the queue
+    match it exactly. A drop copy is not a decode and is not in the plan, so a
+    queued copy job is discarded by the next `schedule()` — which fires on a step,
+    a resize or a dwell expiry — and the drop then silently does nothing. That is
+    the bug this path exists to prevent, arrived at from the other direction. One
+    drop is in flight at a time (`pending_drop` is a single slot), so it is one
+    thread, not a second pool.
+  - **A copy that is in flight when the window closes leaks its directory**, which
+    is the same trade `close_zip` already makes (`remove_dir_all`'s error is
+    discarded on exit, and this box has five zero-file directories sitting in
+    `%TEMP%\image-viewer` because of it). It is bounded rather than open-ended:
+    the directory name is a hash of the source's path, mtime and length, so the
+    next drop of the same file *reuses* the leaked one instead of adding another,
+    and distinct files leak one directory each per session that is interrupted
+    mid-copy.
   - **Not claimed:** a mid-write first decode. It was a hypothesis and it is not
     what happens — the trace shows the file decoded and painted correctly at
     frame 2 and blanked at frame 14 because it vanished. A copy taken while
     Explorer is still writing captures a partial file; nothing here prevents that.
+    The reuse check makes that failure *quieter*, not rarer: a partial copy of a
+    partial file has the source's length, so it is a valid copy by the same rule
+    the watcher uses, and it is only the next write-back that changes the stamp.
 - **Resize is coalesced by comparing with the previous frame**, never with a
   wall-clock timer: `needs_refine` + `ResizeTracker` in `lib.rs` return
   `Wait` / `Refine` / `Idle`. A big preview takes ~800 ms to decode, so frames
@@ -1493,10 +1575,15 @@ an edit.
   arrival re-plans, and the five fix-wave scans), `unit.rs` (the glyph scan).
   `drops.rs` is a fifth, and is the one to copy for a **lifetime** rule: its scans
   are byte-offset comparisons inside one `fn_body` (`close_transients` before
-  `own_drop`), because presence is exactly what was true of the defect it guards.
-  They check the *premise* against a real context or queue, not a comment — and
-  none of them verifies that a bound key actually works, because that needs a
-  synthetic keystroke.
+  `start_drop_copy`, and `thread::spawn` before `own_dropped` before `tx.send`),
+  because presence is exactly what was true of the defect it guards. Two of them
+  guard a **thread** rather than a value — that the copy happens after the spawn
+  and before the send, which is the whole arrangement — and one of those had to
+  be a *count* (`own_dropped` appears exactly once in `main.rs`) after a first
+  version asserted the obvious thing, `!src.contains("own_dropped")`, and
+  contradicted itself two lines later. They check the *premise* against a real
+  context or queue, not a comment — and none of them verifies that a bound key
+  actually works, because that needs a synthetic keystroke.
 - **A property test can pass on the broken code, and this one did.** With a hard
   link, `a_dropped_file_survives_its_source_being_deleted` was **green** — the
   link genuinely survives an unlink, which is what that test asserts — while the

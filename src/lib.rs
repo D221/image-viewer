@@ -7413,6 +7413,102 @@ pub fn is_archive_path(p: &Path) -> bool {
 pub struct DropCopy {
     pub dir: PathBuf,
     pub file: PathBuf,
+    /// **The copy was already in `dir` and no bytes were moved.**
+    ///
+    /// Recorded because it is the difference between a drop that costs two
+    /// `stat` calls and a drop that costs a read and a write of the whole file,
+    /// and because a status bar that says "copied" when nothing was copied is
+    /// lying about the one thing the user just waited for.
+    pub reused: bool,
+}
+
+/// Where owning a dropped file *would* put its copy, and whether it is already
+/// there — the decision, with no bytes moved.
+///
+/// **Split from the copy so the copy can happen on a worker.** The decision is
+/// two `stat` calls and a hash, which is microseconds and is safe anywhere; the
+/// copy is a read and a write of a file whose size the app does not know, which
+/// is hundreds of milliseconds and is safe nowhere but off the UI thread. See
+/// `own_dropped`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DropCopyPlan {
+    pub dir: PathBuf,
+    pub file: PathBuf,
+    /// A copy of exactly this source is already in `dir`.
+    pub reuse: bool,
+}
+
+impl DropCopyPlan {
+    /// Carry out the plan: copy `src` into `file` **unless a valid copy is
+    /// already there**.
+    ///
+    /// **The validity check is made here rather than trusted from the plan.**
+    /// `plan.reuse` was decided at plan time and the bytes move later, so
+    /// re-deriving the source's length here is what makes the answer a property
+    /// of the file rather than of a value latched one message ago — the same
+    /// "derive it, do not remember it" rule the rest of this crate is built on.
+    /// Trusting the flag would mean a plan made before a 500 MB copy cannot be
+    /// wrong about it; re-checking cannot.
+    pub fn materialise(&self, src: &Path) -> Result<DropCopy, String> {
+        let want = std::fs::metadata(src)
+            .map_err(|e| format!("{}: {e}", src.display()))?
+            .len();
+        let reused = copy_is_current(&self.file, want);
+        if !reused {
+            std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+            // Re-owning must be idempotent, and `copy` writes through an existing
+            // destination rather than refusing it. Removing first is what makes a
+            // second drop of the same file a clean overwrite instead of leaving a
+            // stale tail. Only on the copy path: a reused copy is not touched at
+            // all, which is the whole point of `reuse`.
+            let _ = std::fs::remove_file(&self.file);
+            std::fs::copy(src, &self.file).map_err(|e| format!("{}: {e}", self.file.display()))?;
+        }
+        Ok(DropCopy {
+            dir: self.dir.clone(),
+            file: self.file.clone(),
+            reused,
+        })
+    }
+}
+
+/// Is there already a copy of exactly `want` bytes at `dst`?
+///
+/// **A length check, and the length is half the identity.** `drop_copy_dir`
+/// hashes the source's **path, mtime and length**, so reaching this function
+/// with `dst` inside the planned directory already means "same path, same
+/// mtime, same length" — the same `(mtime, len)` stamp the folder watcher calls
+/// a change, so the reuse check is exactly as strong as change detection
+/// anywhere else in this app. A rewrite that preserves *both* mtime and length
+/// is invisible here, and is invisible to the watcher too; there is no stamp
+/// that catches it.
+///
+/// A length check and not an existence check, because a half-written copy from a
+/// killed session is a file that exists and is the wrong thing to show.
+fn copy_is_current(dst: &Path, want: u64) -> bool {
+    std::fs::metadata(dst).is_ok_and(|m| m.is_file() && m.len() == want)
+}
+
+/// Decide what owning `src` would do, without moving any bytes.
+///
+/// Pure apart from the two `stat` calls it needs to answer the question, so the
+/// app can ask it on the UI thread and do the copy on a worker — or ask it and
+/// the copy in the same place, which is what `own_dropped` is.
+pub fn plan_drop_copy(src: &Path) -> Result<DropCopyPlan, String> {
+    let meta = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", src.display()));
+    }
+    let name = src
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", src.display()))?;
+    let dir = drop_copy_dir(src, &meta);
+    let file = dir.join(name);
+    Ok(DropCopyPlan {
+        reuse: copy_is_current(&file, meta.len()),
+        dir,
+        file,
+    })
 }
 
 /// Take a copy of a file that the app cannot expect to still be there, and say
@@ -7455,13 +7551,27 @@ pub struct DropCopy {
 /// texture: "keeping old pixels for a re-exported file is the one outcome that
 /// looks like a bug"). A snapshot is the whole point; an alias is not a snapshot.
 ///
-/// **What it costs, honestly: a read and a write of the dropped file, on the UI
-/// thread, once per drop.** Bounded by the size of the file the user just
-/// dropped - a 27 MB scan is tens of ms of sequential I/O, against the 380-415 ms
-/// its preview decode takes anyway, so it is inside the noise of a drop. It is
-/// strictly less work than the archive path, which extracts a whole volume on the
-/// same thread. A user should be told, which is why `MyApp::own_drop` puts the
-/// path in the status bar.
+/// **What it costs, honestly: a read and a write of the dropped file, once per
+/// drop — and not on the UI thread.** `own_dropped` is the *blocking* form: the
+/// plan, then the copy. The app does not call it from the drop handler. It calls
+/// [`plan_drop_copy`] on the UI thread — two `stat` calls and a hash — hands the
+/// copy to a worker thread, and opens the copy when the worker reports in. The
+/// reason is the first line of `AGENTS.md`: this app never does I/O of
+/// unbounded size on the thread that paints. Measured on this box, the
+/// synchronous form cost **3.8 ms at 5 MB, 26 ms at 50 MB and 279 ms at 500 MB**
+/// (`bench_browse drop_copy_ab`, release, warm cache, NVMe) — the 500 MB figure
+/// is eighteen frames at 60 Hz, and it is linear in a size the app has no way to
+/// know. A user should be told either way, which is why `MyApp::start_drop_copy`
+/// puts "Copying…" in the status bar.
+///
+/// **A repeated drop of an unchanged file moves no bytes at all**, which is what
+/// `reuse` is for and what the same benchmark pins: before the check existed the
+/// repeat cost 3.2 / 24 / 244 ms against the cold arm's 3.8 / 26 / 279 ms —
+/// the same work, because the directory was reused and the *copy* was remade.
+/// Now it is two `stat` calls. The directory name is a hash of the source's
+/// **path, mtime and length** (`drop_copy_dir`), which is what makes that
+/// statement true rather than hopeful: reaching the reuse check at all means the
+/// source has the same path, mtime and length as the copy's.
 ///
 /// **What it does not fix.** If Explorer is still finalising the extraction when
 /// the drop lands, the copy captures a partial file. That was a hypothesis
@@ -7472,25 +7582,11 @@ pub struct DropCopy {
 ///
 /// The name is a hash of the source's **path, mtime and length**, like
 /// `MyApp::zip_temp_for`: two drops of the same unchanged file land in the same
-/// directory and reuse the copy, and a file that changed under us gets a new one
+/// directory, so the second one **reuses** the copy rather than remaking it (see
+/// `copy_is_current`), and a file that changed under us gets a new directory
 /// rather than silently overwriting a copy something else may be reading.
 pub fn own_dropped(src: &Path) -> Result<DropCopy, String> {
-    let meta = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{} is not a file", src.display()));
-    }
-    let name = src
-        .file_name()
-        .ok_or_else(|| format!("{} has no file name", src.display()))?;
-    let dir = drop_copy_dir(src, &meta);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let file = dir.join(name);
-    // Re-owning must be idempotent, and `copy` writes through an existing
-    // destination rather than refusing it. Removing first is what makes a second
-    // drop of the same file a clean overwrite instead of leaving a stale tail.
-    let _ = std::fs::remove_file(&file);
-    std::fs::copy(src, &file).map_err(|e| format!("{}: {e}", file.display()))?;
-    Ok(DropCopy { dir, file })
+    plan_drop_copy(src)?.materialise(src)
 }
 
 /// Where a dropped file's copy goes: `%TEMP%\image-viewer\drop\<16 hex>`.
