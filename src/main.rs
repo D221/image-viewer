@@ -1417,6 +1417,15 @@ struct MyApp {
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
     zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
     zip_temp: Option<PathBuf>, // its extracted temp dir
+    /// A copy of a **dropped** file, in a directory this app owns, for as long as
+    /// that file is open.
+    ///
+    /// **The second half of the same slot as `zip_temp`**, and released with it by
+    /// `close_transients`. A drop is a hand-off rather than a reference -
+    /// Explorer extracts a zip member to a temp file and deletes it after the
+    /// drop returns - so opening one in place is opening a file with an expiry
+    /// date on it, and the 2 s poll then finds a *changed* file and blanks it.
+    drop_copy: Option<image_viewer::DropCopy>,
     /// The user's own pairing decisions for the gallery on screen: which pages take
     /// a whole turn, and how many leading pages stand alone. Loaded when a gallery
     /// is opened, and one file's entries are dropped by `invalidate_path`, because
@@ -1641,6 +1650,10 @@ impl MyApp {
             pending_advance: None,
             zip_archive,
             zip_temp,
+            // A file only ever arrives here from the command line or the file
+            // dialog, neither of which is a transient hand-off, so there is never
+            // a copy to release at start-up. `load_dropped` owns one instead.
+            drop_copy: None,
             spreads: GallerySpreads::default(),
             spreads_key: None,
             wheel_acc: 0.0,
@@ -1674,9 +1687,9 @@ impl MyApp {
     /// cannot be forgotten), `open_archive` (which builds its own gallery instead of
     /// adopting one), and the constructor.
     ///
-    /// **It reads `zip_archive` first, so it depends on `close_zip()` having run when
-    /// leaving an archive.** Every caller that can follow one does: `open_folder` and
-    /// `open_file` close before adopting, and `open_archive` closes before
+    /// **It reads `zip_archive` first, so it depends on `close_transients()` having run
+    /// when leaving an archive.** Every caller that can follow one does: `open_folder`
+    /// and `open_file` close before adopting, and `open_archive` closes before
     /// extracting. (The constructor has no archive to close.) A caller that opened a
     /// gallery without closing would key it by a temp directory that is about to be
     /// deleted, which is the exact mistake this function exists to prevent.
@@ -2749,12 +2762,52 @@ impl MyApp {
         self.adopt_gallery(g, ctx);
     }
 
-    /// Release the extracted temp dir of a previously open archive.
-    fn close_zip(&mut self) {
+    /// Release everything the app is holding **on the app's own behalf**: the
+    /// extracted temp dir of a previously open archive, and the copy of a file
+    /// that was dropped on us.
+    ///
+    /// **One slot for both, and that is the point.** They are the same kind of
+    /// thing - a file the user showed us without giving us a stable source for -
+    /// and two slots would mean two cleanup sites, and the second one is the one
+    /// that gets forgotten. One `Option` each, released together, means the
+    /// lifetime is one function and there is no path that leaves a copy behind.
+    ///
+    /// **Order inside the drop path is load-bearing and is asserted by
+    /// `a_drop_copies_its_source_after_releasing_the_previous_copy`**: a drop
+    /// calls this and *then* takes its copy, so a copy made before this call
+    /// would be deleted by the same call that opens it - a picture that never
+    /// appears, with no error anywhere.
+    fn close_transients(&mut self) {
         if let Some(t) = self.zip_temp.take() {
             let _ = std::fs::remove_dir_all(t);
         }
         self.zip_archive = None;
+        if let Some(c) = self.drop_copy.take() {
+            image_viewer::forget_drop_copy(&c);
+        }
+    }
+
+    /// Take a copy of a dropped file and return the path the app should open.
+    ///
+    /// The fallback is the original path with a notice: a failure to copy (a full
+    /// disk, a source that vanished between the drop and here) must not refuse
+    /// to show the image the user actually dropped, and the watcher will do what
+    /// it does with it.
+    fn own_drop(&mut self, src: &Path) -> PathBuf {
+        match image_viewer::own_dropped(src) {
+            Ok(c) => {
+                self.notice = Some(format!(
+                    "Dropped file copied to {} - the source may be temporary",
+                    c.dir.display()
+                ));
+                self.drop_copy = Some(c.clone());
+                c.file
+            }
+            Err(e) => {
+                self.notice = Some(format!("Could not copy the dropped file ({e})"));
+                src.to_path_buf()
+            }
+        }
     }
 
     /// Stable temp dir for an archive; reused when the archive is unchanged.
@@ -2781,7 +2834,7 @@ impl MyApp {
     /// Open a cbz/zip image archive: extract supported entries to a stable
     /// temp dir and treat it as a folder gallery.
     fn open_archive(&mut self, ctx: &Context, archive: &PathBuf) {
-        self.close_zip();
+        self.close_transients();
         let temp = Self::zip_temp_for(archive);
         match extract_zip(archive, &temp) {
             Ok((count, encrypted)) if count > 0 => {
@@ -2837,8 +2890,19 @@ impl MyApp {
         }
     }
 
-    fn open_file(&mut self, ctx: &Context, file: PathBuf) {
-        self.close_zip();
+    /// Open one file. `transient` says the caller does **not** vouch for the
+    /// source outliving the session, which is true of a drag-and-drop from
+    /// inside an archive and of nothing else.
+    ///
+    /// It is a parameter rather than a second function because the two differ in
+    /// exactly one step and a second function is where that step would be
+    /// forgotten: there is no default, so a new caller has to answer.
+    fn open_file(&mut self, ctx: &Context, file: PathBuf, transient: bool) {
+        self.close_transients();
+        // **After** `close_transients`, not before. That call releases the
+        // previous drop copy, so a copy taken above it would be removed by the
+        // very call that goes on to open it.
+        let file = if transient { self.own_drop(&file) } else { file };
         self.folder = file.parent().unwrap_or(&file).to_path_buf();
         let mut g = Gallery::from_file(file);
         if self.config.load_all_on_startup {
@@ -2852,7 +2916,7 @@ impl MyApp {
             .set_title("Select image folder")
             .pick_folder()
         {
-            self.close_zip();
+            self.close_transients();
             self.config.folder = Some(folder.to_string_lossy().to_string());
             self.config.save(&self.config_path);
             self.open_folder(ctx, folder);
@@ -2874,15 +2938,16 @@ impl MyApp {
             if is_archive_path(&file) {
                 self.open_archive(ctx, &file);
             } else {
-                self.close_zip();
-                self.open_file(ctx, file);
+                // A dialog pick is a file the user chose off their own disk: not
+                // transient, so no copy. Only a drop is.
+                self.open_file(ctx, file, false);
             }
         }
     }
 
     fn load_dropped(&mut self, ctx: &Context, path: PathBuf) {
         if path.is_dir() {
-            self.close_zip();
+            self.close_transients();
             self.open_folder(ctx, path);
             return;
         }
@@ -2896,7 +2961,13 @@ impl MyApp {
             .unwrap_or("")
             .to_lowercase();
         if image_viewer::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-            self.open_file(ctx, path);
+            // **`true`**: Explorer's extraction of a zip member is a temp file it
+            // deletes after the drop returns, and a drag out of *any* container
+            // (7-Zip, WinRAR, a shell extension) has the same shape. Opening the
+            // path in place means the 2 s poll finds a changed file - it is a
+            // different stamp, because the file is gone - and blanks the picture
+            // it is showing, which is the reported symptom.
+            self.open_file(ctx, path, true);
         }
     }
 
@@ -5482,7 +5553,7 @@ impl eframe::App for MyApp {
             self.config.last_by_folder.insert(key, value);
         }
         self.config.save(&self.config_path);
-        self.close_zip();
+        self.close_transients();
         if image_viewer::perf::enabled() {
             let report = image_viewer::perf::report();
             eprint!("{report}");
@@ -5602,7 +5673,7 @@ impl eframe::App for MyApp {
                     self.show_panels = true;
                     self.suppress_resize_redecode = true;
                 } else {
-                    self.close_zip();
+                    self.close_transients();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }

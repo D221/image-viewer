@@ -11,10 +11,10 @@ that are already in memory. One crate, no workspace, no CI.
   first failing target, and `--lib` (the in-crate `perf` tests) is a target no
   per-target command below ever runs.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
-- 26 targets, 23 of them the test files `bench`, `bench_browse`, `bench_resize`,
+- 27 targets, 24 of them the test files `bench`, `bench_browse`, `bench_resize`,
   `bench_rotate_save`, `bench_startup`, `bench_variants`, `color_profiles`,
-  `embedded_thumbs`, `filter_and_paging`, `flip_through`, `formats`, `icon`,
-  `integration`, `keybindings`, `multiframe`, `pathological`, `property`,
+  `drops`, `embedded_thumbs`, `filter_and_paging`, `flip_through`, `formats`,
+  `icon`, `integration`, `keybindings`, `multiframe`, `pathological`, `property`,
   `renderer`, `rotate_save`, `spreads`, `standard`, `thumb_cache`, `unit` — the
   other three are `--lib`, the binary's own target and doc-tests.
 - **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
@@ -191,6 +191,46 @@ that are already in memory. One crate, no workspace, no CI.
   texture (a re-export can change the dimensions) — it blanks for one decode.
   Watcher: `maybe_rescan` every 2 s, `Stamp` = mtime + len, deliberately **not**
   gated on `load_all_on_startup`, both halves skipped while an archive is open.
+- **A drag-and-drop is a hand-off, not a reference, so a dropped file is copied
+  before it is opened** (`image_viewer::own_dropped`, `tests/drops.rs`). Explorer
+  does not pass a zip member's path: it extracts the member to a transient temp
+  file, hands *that* path to the drop target, and deletes it a moment later. The
+  app used to open that path in place, and on its own 2 s poll found a file whose
+  *stamp had changed* — because it was gone, which is a different stamp — and did
+  all three of its blanking moves at once: `invalidate_path` dropped the texture,
+  `rescan` removed the file from the gallery, and the re-requested decode failed
+  into a `failed` entry that is permanent for the session. Shown for about a
+  second, then gone with no way back. **The watcher was right every time**; the
+  input was a path with an expiry date on it. Two lessons:
+  - **The two clearings are unrelated.** `check_changed` alone does not blank
+    (with `load_all_on_startup` off, a vanished file's stamp is `{None, 0}`
+    against the same `{None, 0}`, so `moved` is false) and `rescan` alone does not
+    either, since it early-returns with that setting off. It is the **default**
+    (`load_all_on_startup: true`) that makes `rescan` fire and empty the gallery.
+    Both were measured; either alone was survivable, together they were fatal.
+    Do not "fix" this by clearing `failed` more eagerly — that trades a visible
+    bug for a decode storm, and `failed` being permanent is load-bearing.
+  - **A hard link passes the property test and is still wrong**, which is the
+    sharpest version of "a test that passes on the broken code". A link survives
+    the *deletion* this is about, and shares the *file*, so any in-place write to
+    the source mutates the copy — verified both ways a writer can do it (truncate-
+    and-write, and rename-over). The app would show, and `Ctrl+S` would write,
+    bytes under a path it believes it owns. It is `std::fs::copy`, at the cost of
+    one read and one write of the dropped file on the UI thread, once per drop,
+    which is less work than the archive path's whole-volume extract. **The copy
+    directory name is a hash of path+mtime+len, so a repeated drop of an
+    unchanged file reuses one copy** instead of growing `%TEMP%` per drop, and a
+    re-exported source gets a *new* directory rather than overwriting a copy the
+    app may still hold. One slot: `close_zip` became `close_transients` and
+    releases both the archive dir and `drop_copy`, so the lifetime is one function
+    — and the copy is taken **after** that call, a position
+    `a_drop_copies_its_source_after_releasing_the_previous_copy` asserts by byte
+    offset, because the reversed order deletes the copy with the call that opens
+    it. `open_file`'s `transient` parameter has no default on purpose.
+  - **Not claimed:** a mid-write first decode. It was a hypothesis and it is not
+    what happens — the trace shows the file decoded and painted correctly at
+    frame 2 and blanked at frame 14 because it vanished. A copy taken while
+    Explorer is still writing captures a partial file; nothing here prevents that.
 - **Resize is coalesced by comparing with the previous frame**, never with a
   wall-clock timer: `needs_refine` + `ResizeTracker` in `lib.rs` return
   `Wait` / `Refine` / `Idle`. A big preview takes ~800 ms to decode, so frames
@@ -1377,6 +1417,14 @@ an edit.
   "default_true")]`, and the settings panel states the cap and the path next to
   the toggle — a cache that silently takes a quarter of a disk should not be
   enabled quietly.
+- **A dropped file's copy is under `%TEMP%`, not `%LOCALAPPDATA%`, and is not a
+  cache.** `drop_copy_dir` writes `%TEMP%\image-viewer\drop\<16 hex>`. It is not
+  `%LOCALAPPDATA%` because it is not reusable: it is the picture the app is
+  showing *right now*, released by `close_transients` on the next open and on
+  exit, and a stale copy of a file the user has moved on from is worth nothing on
+  the next launch. It is on the same root as the archive's temp dir for the same
+  reason the user's own files are not: it is a working copy, and `%TEMP%` is what
+  the platform reclaims.
 - **A member of an archive caches under its temp path.** `%TEMP%\image-viewer\
   <hash(path, mtime, size)>` changes whenever the archive does, so editing a
   `.cbz` orphans every member's cached cell. They age out with everything else;
@@ -1442,10 +1490,23 @@ an edit.
   module docs: `keybindings.rs` (a shortcut that does not exist is otherwise
   unobservable), `renderer.rs` (the probe's early exit is in a binary),
   `spreads.rs` (manga mode's `invalidate_path` wiring, that a partner's
-  arrival re-plans, and the five fix-wave scans), `unit.rs` (the glyph scan). They
-  check the *premise* against a real context or queue, not a comment — and none of
-  them verifies that a bound key actually works, because that needs a synthetic
-  keystroke.
+  arrival re-plans, and the five fix-wave scans), `unit.rs` (the glyph scan).
+  `drops.rs` is a fifth, and is the one to copy for a **lifetime** rule: its scans
+  are byte-offset comparisons inside one `fn_body` (`close_transients` before
+  `own_drop`), because presence is exactly what was true of the defect it guards.
+  They check the *premise* against a real context or queue, not a comment — and
+  none of them verifies that a bound key actually works, because that needs a
+  synthetic keystroke.
+- **A property test can pass on the broken code, and this one did.** With a hard
+  link, `a_dropped_file_survives_its_source_being_deleted` was **green** — the
+  link genuinely survives an unlink, which is what that test asserts — while the
+  feature was still wrong, because a link shares the file rather than copying it.
+  It was `a_changed_source_does_not_land_on_top_of_the_previous_copy`, asserting
+  the *other* direction (a source rewritten must not mutate a copy the app already
+  holds), that failed. **So for anything that has to be a snapshot, assert both
+  directions**: survives the source going, and unaffected by the source changing.
+  One direction is the deletion half of the problem and knows nothing of the
+  aliasing half.
 - **A source scan that checks a call's *presence* has already failed here, and the
   fix wave added the check that works.** The `shown_partner` latch had its
   assignment present, in the right function, doing the right call; what was wrong

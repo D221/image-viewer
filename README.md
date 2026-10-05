@@ -161,6 +161,14 @@ when you can see it.
 
 - Browse Folder… / Browse File… dialogs, plus drag-and-drop of a file, folder
   or archive
+- **A dropped file is copied** into `%TEMP%\image-viewer\drop\` before it is
+  opened, and the copy is deleted when you open something else or quit. This is
+  because a drag out of a zip is a *hand-off*: Explorer extracts the member to a
+  temp file, gives the viewer that path, and deletes it a moment later. Without
+  the copy the picture blanks about a second later, when the folder watcher
+  notices the file it was showing no longer exists. The status bar says where the
+  copy went. Nothing else is copied — a file opened from the command line or the
+  dialog is used where it is.
 - F11 for fullscreen (hides all chrome), `I` to toggle the panels
 - Sort by name (natural order, so `IMG_2` precedes `IMG_10`), date, size or
   random
@@ -309,7 +317,7 @@ should not quietly do that.
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` |
-| Drag & drop | Open a file, folder or archive |
+| Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
 
 ### Manga mode
 

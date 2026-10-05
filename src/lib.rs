@@ -7402,6 +7402,122 @@ pub fn is_archive_path(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A file the app now owns a copy of, and the directory that copy lives in.
+///
+/// The directory is a separate value because **it is the unit that is deleted**:
+/// the caller hands it back when the app moves on, and `remove_dir_all` is the
+/// only cleanup there is. Two copies of this struct are never live at once -
+/// `MyApp` holds one `Option` - so the ownership is a single slot, the same slot
+/// discipline the archive's temp dir already uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DropCopy {
+    pub dir: PathBuf,
+    pub file: PathBuf,
+}
+
+/// Take a copy of a file that the app cannot expect to still be there, and say
+/// where the copy is.
+///
+/// **A drag-and-drop is a hand-off, not a reference.** Explorer does not pass a
+/// path into a zip's member and leave it there: it extracts the member to a
+/// transient temp file, hands *that* path to the drop target, and deletes it a
+/// moment later. So the source of a drop is transient **by construction**, and an
+/// app that opens one in place is holding a path to a file with an expiry date on
+/// it. What that cost, measured (`tests/drops.rs` and the trace in
+/// `.superpowers/sdd/2026-10-02-manga-spread-mode/dropped-temp-file-vanishes.md`):
+/// on the app's own 2 s poll the vanished file was a *changed* file, so
+/// `invalidate_path` dropped the texture, `rescan` removed it from the gallery and
+/// the re-requested decode failed into a `failed` entry that is permanent for the
+/// session - shown for about a second, then gone with no way back.
+///
+/// Copying is the same shape the archive path already uses (`%TEMP%\image-viewer`
+/// keyed by content), for the same reason: a member of an archive and a member
+/// dragged out of one are the same kind of hand-off, and only one of them used to
+/// be handled.
+///
+/// **A real `copy`, not a hard link** - and the reason is a measurement, because
+/// the link was the obvious cheaper answer and it is wrong.
+///
+/// A hard link survives the *deletion* this function exists for: unlinking one
+/// name leaves the data reachable through the other. So it passes the property
+/// under test and still fails the thing that property is for. A link **shares the
+/// file**, so any in-place write to the source mutates the "copy" too - verified
+/// on this box, both ways a writer can do it:
+///
+/// ```text
+/// dst after in-place rewrite: [82, 69, 76, ...]   // "REPLACED, longer contents"
+/// dst after rename-over:      [82, 69, 76, ...]   // same
+/// ```
+///
+/// The app would then be showing - and `Ctrl+S` would write - bytes under a path
+/// it believes it owns, which is precisely the stale-or-aliasing class this
+/// codebase treats as worse than slow (`AGENTS.md` on the watcher's stale
+/// texture: "keeping old pixels for a re-exported file is the one outcome that
+/// looks like a bug"). A snapshot is the whole point; an alias is not a snapshot.
+///
+/// **What it costs, honestly: a read and a write of the dropped file, on the UI
+/// thread, once per drop.** Bounded by the size of the file the user just
+/// dropped - a 27 MB scan is tens of ms of sequential I/O, against the 380-415 ms
+/// its preview decode takes anyway, so it is inside the noise of a drop. It is
+/// strictly less work than the archive path, which extracts a whole volume on the
+/// same thread. A user should be told, which is why `MyApp::own_drop` puts the
+/// path in the status bar.
+///
+/// **What it does not fix.** If Explorer is still finalising the extraction when
+/// the drop lands, the copy captures a partial file. That was a hypothesis
+/// considered here and **not observed**: the trace of the real failure shows the
+/// file decoded and painted correctly at frame 2 and was blanked at frame 14
+/// because its *stamp changed when it vanished*. Mid-write is not a mechanism
+/// this fix claims to address.
+///
+/// The name is a hash of the source's **path, mtime and length**, like
+/// `MyApp::zip_temp_for`: two drops of the same unchanged file land in the same
+/// directory and reuse the copy, and a file that changed under us gets a new one
+/// rather than silently overwriting a copy something else may be reading.
+pub fn own_dropped(src: &Path) -> Result<DropCopy, String> {
+    let meta = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a file", src.display()));
+    }
+    let name = src
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", src.display()))?;
+    let dir = drop_copy_dir(src, &meta);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = dir.join(name);
+    // Re-owning must be idempotent, and `copy` writes through an existing
+    // destination rather than refusing it. Removing first is what makes a second
+    // drop of the same file a clean overwrite instead of leaving a stale tail.
+    let _ = std::fs::remove_file(&file);
+    std::fs::copy(src, &file).map_err(|e| format!("{}: {e}", file.display()))?;
+    Ok(DropCopy { dir, file })
+}
+
+/// Where a dropped file's copy goes: `%TEMP%\image-viewer\drop\<16 hex>`.
+///
+/// **Under the OS temp directory and not under `%APPDATA%`**, for the reason
+/// every cache in this app lives there: these are this machine's copies of files
+/// that may be anywhere, they are worthless elsewhere, and a re-drop overwrites
+/// rather than accumulating.
+pub fn drop_copy_dir(src: &Path, meta: &std::fs::Metadata) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    meta.modified().ok().map(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).hash(&mut h);
+    meta.len().hash(&mut h);
+    std::env::temp_dir()
+        .join("image-viewer")
+        .join("drop")
+        .join(format!("{:016x}", h.finish()))
+}
+
+/// Drop the copies this app owns. **Every failure is swallowed on purpose**:
+/// a leftover directory in `%TEMP%` is harmless, and the alternative is an error
+/// on a path that is already shutting down.
+pub fn forget_drop_copy(copy: &DropCopy) {
+    let _ = std::fs::remove_dir_all(&copy.dir);
+}
+
 /// Extract supported image entries from a zip/cbz archive into `dest`,
 /// flattening nested paths into the destination directory. Encrypted entries
 /// are skipped and counted. Returns (extracted, encrypted_skipped).
