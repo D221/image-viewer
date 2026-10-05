@@ -376,50 +376,59 @@ in `prev_anchor`'s doc comment, and the walk is the price of not having a wrong 
 
 ---
 
-## 7. 1440p photos still moiré at `Fast`, because the prefilter's threshold is
-## above the reduction they actually get
+## 7. ~~1440p photos still moiré at `Fast`~~ — fixed by `MIN_FILTER_SCALE`, and the
+##    hypothesis in this section was **wrong in an interesting way**
 
-**Reported alongside the navigation regression, measured, and deliberately not
-fixed** — it is a different defect with a different fix and the wrong one to make
-in the same commit.
+**RESOLVED.** The arithmetic below was right; the *hypothesis drawn from it* was
+not, and the way it was wrong is the part worth keeping. Landed as
+`MIN_FILTER_SCALE` in `lib.rs`; measurements in `AGENTS.md`'s resampling section
+and in `.superpowers/sdd/2026-10-02-manga-spread-mode/prefilter-threshold.md`.
 
-**The numbers.** A 2560x1440 landscape photo is above `SPREAD_ASPECT`, so it is a
-lone spread filling the whole turn and is decoded for the **whole** panel. On a
-1920-long panel that is a reduction of **2560 / 1920 = 1.333x**, and
-`prefilter_dim(2560, 1920) = min(2560, 3840) = 2560` — the source, unchanged. So
-**the pre-reduction does not fire**: the path is bit-identical to the one before
-`cb0394c`, and the lattice that commit removed is not removed for these files at
-any strength the user has. The 2.879x manga pages and the 2223x3109 pages
-everything so far has been measured on all clear the threshold comfortably; a 1440p
-photo on a 1080p-tall panel does not, which is why this went unseen.
+**The numbers, which were right.** A 2560x1440 landscape photo is above
+`SPREAD_ASPECT`, so it is a lone spread filling the whole turn and is decoded for
+the **whole** panel. On a 1920-long panel that is **2560 / 1920 = 1.333x**, and
+`prefilter_dim(2560, 1920) = min(2560, 3840) = 2560` — the source, unchanged — so
+the pre-reduction does not fire. The 2.879x manga pages clear the threshold
+comfortably; a 1440p photo on a 1080p-tall panel does not.
 
-**`Smooth` (2.0) does help these files, and it is worse on other screentone**, so
-there is no single good default and a default change is the wrong instrument. The
-three files that got *worse* under 2.0 (`12.jpg`, `21.jpg`, `44.jpg`, all reported
-as a black dot pattern appearing in grey screentone) are 2223x3109 pages at the
-manga half-panel target — the 2.879x case the prefilter already covers.
+**The hypothesis, which was wrong.** "Lower or remove the prefilter's activation
+threshold" cannot work, and the reason is arithmetic rather than taste:
+`contributions` sets `filter_scale = strength / scale` from each stage's *own*
+ratio, so the stages of a split decimation `R` satisfy **`s1 * s2 == R` to f64
+rounding** at every cap from 1.60 to 1.02. The cap redistributes the width
+between two stages; it cannot add any. Sweeping it confirms the arithmetic and
+the ceiling together: 1440p lattice residual 91.9 codes shipped → 70.0 at cap
+1.10 → and no cap goes further.
 
-**The likely real answer: lower or remove the prefilter's activation threshold.**
-`PREFILTER_FACTOR` is the number both `prefilter_dim` and the over-sized arm of
-`needs_refine` are written at, so changing it is one constant and one deliberate
-change to what the pipeline guarantees the GPU. What has to be measured before it
-is touched:
+**What the real defect was, and it is one sentence:** the low-pass width was
+**discontinuous at `PREFILTER_FACTOR`**. Above it the two-stage path lands on
+`filter_scale == 2.0` exactly; below it the single pass drops straight to `R`, so
+a 1440p photo on a 1920 panel was being filtered at 1.333. `MIN_FILTER_SCALE = 2.0`
+closes the gap and is inert everywhere above the threshold.
 
-- What the pre-reduction actually buys at **1.2–1.5x**, which is a regime nothing
-  has been probed in. `probe_square_lattice` was swept at 2.879x; a lattice at
-  1.333x lands at an output period above the output Nyquist and may need no
-  low-pass at all, in which case the threshold is right and the answer is elsewhere.
-- The **memory** claim in `prefilter_dim`'s doc is a claim about the *2x*
-  intermediate: at 1.333x the pre-reduced buffer is 1.5x the target rather than 2x,
-  so it is smaller, and at a 1.0x reduction it is the source — i.e. enabling the
-  prefilter everywhere means the 12-bit conversion can run over a
-  full-resolution buffer on exactly the images that were cheapest before.
-- Whether the foldover finding (widening moves energy between pitches) has a
-  cheaper form at low reduction ratios, where there is far less energy to move.
+**Also settled here, and it was the question most likely to change the answer:**
+*how much of the artefact is GPU-side?* **At the reported geometry, none.** On a
+1920×1080 panel a 2560×1440 source is decoded to 1920×1080 and drawn 1:1, so
+`R_gpu` is **1.0000** and the whole artefact is in `linear_resize`. That is not
+true of every panel: a 1920×1000 panel leaves `R_gpu` 1.0799, and a **2560×1080
+panel leaves `R_soft` at 1.000 with 100% of the minification on the GPU**, where
+no software change can help and egui on wgpu cannot make mipmaps. **So a 1440p
+user whose window is wider than 16:9 gets an artefact this crate cannot fix**, and
+that is worth knowing before anyone reports the fix as incomplete.
 
-**What is *not* claimed here:** that lowering the threshold fixes it, or that the
-1440p artefact is the prefilter's absence at all. It is the leading hypothesis with
-the arithmetic behind it, and the arithmetic is the only part that is established.
+**Still owed, and not fixable here:**
+
+- **The residual third.** At floor 2.0 the 1440p residual is 55.9 codes where
+  `Smooth` reaches 28.6. The moiré is reduced by about two thirds, not abolished.
+  Floor 2.5 would reach 34.1 at a step rise of 2.020 px and is deliberately not
+  taken, because 2.5 is above the two-stage path's own 2.0 and would change every
+  reduction that works today. **Going further means re-tuning `FAST_STRENGTH`,**
+  which is the axis that owns "how much low-pass" and the one that regressed
+  `12.jpg` / `21.jpg` / `44.jpg`.
+- **A wide-panel 1440p photo is GPU-bound**, per the geometry split above.
+- **`main.rs` is unreachable from every test**, so the panel-shape → artefact
+  mapping is reasoned from `preview_target` and `spread_fit` plus the real
+  geometry table, not asserted end to end.
 
 ---
 

@@ -449,6 +449,41 @@ up noticeably; leave it off if your pages are screened at several angles or you
 want the crispest line art. Edges are noticeably softer with it on — about 1.7x
 wider on a hard edge.
 
+### Moiré on 1440p photos, and what this build does about it
+
+Screened or finely-halftoned content can show a moiré lattice after being
+downscaled, because detail finer than the output can represent has to be removed
+before it lands, and a resampler that removes too little folds it into a pattern
+of its own. Two things in this build handle it.
+
+The kernel never runs narrower than the pipeline's own minimum
+(`MIN_FILTER_SCALE`, not a setting), which is what a downscaled photo needs at
+any size. Before it existed the low-pass width **jumped** at one point in the
+pipeline: above it, a two-stage resize landed on a wide enough kernel; below it,
+a single pass narrowed to whatever the reduction was — **1.333x** for a
+2560x1440 photo on a 1920-long panel. Every 1440p photo was below that point, so
+every 1440p photo was under-filtered. Measured on a 100-code test pattern at
+that size, the over-filter band (detail too fine to represent) drops from **51 to
+19 codes** and **41 to 11**, while detail the output *can* represent barely moves
+(58 → 37 at four source pixels, 99 → 97 at twenty-four).
+
+Images are also resized for the rectangle they are drawn in, so a photo is
+resampled once, at the size it will be displayed.
+
+**What is still there.** This reduces the lattice substantially; it does not
+remove it. Roughly a third of the original amplitude remains, and the remaining
+part is content sitting exactly at the output's limit, which no resampler can keep
+and not alias at the same time. `Smooth` cuts it further and costs edge sharpness,
+so it remains a per-image choice rather than a default.
+
+**And one case this cannot fix.** When the window is wider than the photo's own
+aspect ratio, the photo is drawn smaller than the texture prepared for it, and the
+**graphics card** does that last bit of shrinking — by a small amount on an
+ordinary window and by the whole factor on an ultrawide one. That step cannot be
+low-passed here, because the renderer draws with a linear sampler and no mipmaps.
+If a photo moirés badly *only* when the window is very wide, that is what you are
+looking at; making the window narrower or narrower-aspect will clear it.
+
 ### Why the grid thumbnail cache exists
 
 A grid cell is a 150-point picture of the whole image, and for most files that

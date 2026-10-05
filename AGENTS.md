@@ -1219,7 +1219,8 @@ an edit.
       **29/25/21/29 codes** at source periods 2.5/3/3.5/4 px, where a widened
       kernel leaves **4/2/5/11**. The two tie above source period ~6 px, and at
       every reduction from 1.3× to 16× the kernel is lower or equal (below 2× the
-      pre-reduction does not fire at all and the two paths are bit-identical).
+      pre-reduction does not fire at all — **and see `MIN_FILTER_SCALE` below,
+      which is why that parenthetical used to read as "nothing improved"**).
       The one cell where the box looked better — reduction 2.5, output period
       exactly 2.00 — is a **one-point notch in the box**: 49 codes at source
       period 4.9, **15** at 5.0, 50 at 5.1.
@@ -1248,6 +1249,85 @@ an edit.
       kernel's is row-parallel. Converting each row into a per-worker `u16` row
       buffer first, to cut the LUT lookups, was measured and is *slower*
       (565–707 ms), so the LUT stays in the inner loop.
+  - **`PREFILTER_FACTOR` is a memory bound and NOT a quality knob — and lowering it
+    cannot widen the low-pass, so "lower the threshold" was never going to fix
+    1440p.** `contributions` sets `filter_scale = strength / scale` from *that
+    stage's own* ratio, so splitting a decimation `R` into stages `(s1, s2)` gives
+    widths `s1` and `s2` with **`s1 * s2 == R` to f64 rounding** — measured over
+    every cap from 1.60 down to 1.02 at ten reductions. The cap can therefore only
+    move *where* the width is spent and how big the intermediate is; it can never
+    add any. Lowering the cap does reduce the artefact a little (1440p lattice
+    91.9 → 70.0 codes at cap 1.10) and cannot be pushed further for **any** cap,
+    because the width is already spent. Pinned by
+    `splitting_a_decimation_cannot_widen_the_kernel_past_the_reduction`, which
+    asserts the arithmetic rather than recomputing it from the same formula.
+  - **`MIN_FILTER_SCALE` (2.0) is the fix for 1440p, and it is a floor rather than
+    a retune because the pipeline's width was *discontinuous at its own
+    threshold*.** Wherever the prefilter fires the final pass sees `scale = 0.5`
+    and `filter_scale == 2.0` **exactly**; below the threshold there is no
+    pre-reduction, `scale = 1/R`, and the kernel drops straight to `R` — **1.333
+    for a 2560×1440 source on a 1920-long panel.** 2.0 is therefore not a chosen
+    width but *the width the pipeline already uses where it works*, which is why
+    the floor is **byte-identical at R 2.0 / 2.02 / 2.1 / 2.5 / 2.879 / 4.0 / 8.0**
+    and only bites below. Two numbers where there was one, and the split is the
+    whole fix.
+    - **The reported 1440p case is software, not GPU, at the geometry in the
+      report.** A 2560×1440 landscape photo is a lone spread filling the turn, so
+      it is decoded for the **whole** panel; on a 1920-long panel that is
+      `prefilter_dim(2560, 1920) = 2560` — the source unchanged — and the drawn
+      rect is 1920×1080, so **`R_soft` 1.3333 and `R_gpu` 1.0000: the GPU minifies
+      by nothing at all.** The artefact is entirely in `linear_resize`. Two
+      neighbouring geometries are not: a **1920×1000** panel leaves
+      `R_gpu` 1.0799 (21% of the log-ratio on the GPU) and a **2560×1080** panel
+      leaves `R_soft` at 1.000 with **100% of the minification on the GPU**, where
+      no software change can help. So "which is it" is answered per panel shape,
+      not once.
+    - Transfer function, 2560×1440 → 1920, `Fast`, 100-codes-peak-to-peak
+      sinusoid, codes surviving. Periods 1.5 / 2.5 px are inside the foldover band
+      (output Nyquist 2.67 px); 4 / 6 / 12 / 24 px are detail to keep:
+      **51 → 19, 41 → 11, 58 → 37, 84 → 67, 95 → 90, 99 → 97.** The foldover band
+      is cut 2.7× and 3.7× and the passband barely moves; `Smooth` reaches 1 / 6 /
+      15 / 49 at the first four, i.e. it buys the same at a much larger detail
+      cost.
+    - **Cost.** Lattice residual 91.9 → 55.9 codes, screentone peak 10.45 → 3.76,
+      step edge 1.536 → 1.791 output px (**1.17×**, against `Smooth`'s 1.59×), and
+      wall clock **1.05–1.16×** at the reductions it newly affects (25 rounds,
+      arms rotated, warmed, release) and **0.98–1.08× where it cannot bind.**
+    - **A partial fix, and deliberately not the wider one.** At 2.0 the residual
+      is 55.9 codes where `Smooth` reaches 28.6 — the moiré is reduced by about
+      two thirds, not abolished. Floor 2.5 gives 34.1 codes at a step rise of
+      2.020 px and is **not** taken, because 2.5 is above the two-stage path's own
+      2.0 and would change every reduction that works today. Going further belongs
+      on `FAST_STRENGTH`, the axis that owns "how much low-pass".
+  - **The pre-reduction must be handed a literal `0.0` floor, and handing it the
+    real floor is a bug that every quality assertion in the suite is blind to.**
+    It runs at exactly `PREFILTER_FACTOR`, so its own `filter_scale` is 2.0
+    already and a floor "cannot" bind — until you measure it: at R 2.02 the
+    pre-reduction's ratio is `R / PREFILTER_FACTOR` = 1.01, far under the floor,
+    so passing `floor` there **changes the output at every reduction the shipped
+    threshold covers.** Written that way and verified by mutation;
+    `the_min_filter_scale_is_a_no_op_where_the_prefilter_already_fires` and
+    `the_floor_reaches_both_final_axes_and_only_those` are the same property
+    asserted behaviourally and by scan.
+  - **Reading a process-wide global inside a probe helper is a measurement bug, and
+    it silently reported the fix as a no-op.** `DOWNSCALE_STRENGTH` is initialised
+    to `SMOOTH_STRENGTH`, so a helper that read `downscale_strength()` to mean "the
+    shipped default" was measuring **`Smooth`** — which made the *pre-fix* column
+    of the whole `MIN_FILTER_SCALE` table read as already-correct (foldover band
+    1–2 codes instead of 51) and made the floor look inert. Every helper in
+    `tests/unit.rs` now pins `MIN_FILTER_SCALE` and `cached_default_strength()`
+    rather than reading either back. **A "before" arm that is quietly the "after"
+    arm is the worst failure mode in this file**, because every assertion still
+    passes.
+  - **A 1-D sinusoid probe is right for *width* and wrong for the *artefact*, and
+    the difference is not a detail.** Measuring a lattice's amplitude at its own
+    output period is only meaningful when that period is at or below the output
+    Nyquist: at R 1.333 a source pitch of 4 px lands at 3.00 output px, which is
+    **representable**, so a large reading there is the picture's own content. The
+    defect at low reduction is **foldover** — content finer than `2R` the kernel
+    fails to reject — and `probe_sine` (new, verbatim-shaped on the existing one)
+    reads `|H|` with no lattice to confuse it. Both are kept: the lattice for the
+    artefact, the sine for the width.
   - **What this does not do.** It reduces the artefact; it cannot abolish it.
     Content at the source Nyquist cannot survive a 2.879× downscale without
     aliasing, and the artefact is a hard 1–2 px sparkle, not a low-frequency

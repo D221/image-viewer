@@ -2063,10 +2063,111 @@ pub const RESIZE_PX_FLOOR: u32 = 8;
 /// GPU is left with at most a `PREFILTER_FACTOR` minify. A texture more than that
 /// above the target it is painted at is not a sharp-but-unfiltered picture — it is
 /// one where the pre-reduction could not have fired, which at `decoded_for` above
-/// the source's own long side means **no resampling ran at all**. It is also the
-/// threshold the prefilter's activation is written at, so citing one and meaning
-/// the other is not available.
+/// the source's own long side means **no resampling ran at all**.
+///
+/// **It is NOT the factor the low-pass width is set by, and lowering it does not
+/// widen the low-pass.** That was the long-standing reading of this constant and
+/// it is the arithmetic that makes it wrong: `contributions` derives
+/// `filter_scale` from each stage's *own* ratio, so the two stages of a split
+/// decimation `R` satisfy **`s1 * s2 == R` to f64 rounding** — measured over
+/// every prefilter cap from 1.60 down to 1.02, at ten reductions. The cap can
+/// therefore only move *where* the width is spent and how large the intermediate
+/// is (its real job, the memory bound), never how much there is. The width is
+/// [`MIN_FILTER_SCALE`], and those being two numbers rather than one is the fix
+/// for the reported 1440p moiré, not a retune of this one.
 pub const PREFILTER_FACTOR: u32 = 2;
+
+/// The narrowest the **final** kernel may run, as a multiple of the output's own
+/// pixel grid.
+///
+/// **The width is a function of `R` alone, and that is what makes this a floor
+/// rather than another threshold.** `contributions` sets
+/// `filter_scale = strength / scale` from *that stage's* ratio, so splitting a
+/// decimation `R` into stages `(s1, s2)` gives widths `s1` and `s2` with
+/// `s1 * s2 == R` — so **no change to [`PREFILTER_FACTOR`] can widen the low-pass
+///**, and the reported 1440p case is not fixable by lowering the threshold at all.
+/// Lowering the cap was measured and does reduce the lattice a little (91.9 → 70.0
+/// codes at cap 1.10) while costing a second resample, and it cannot be pushed
+/// further than that for any cap, because the width is already spent.
+///
+/// So the width has to be raised where it is too narrow, and the number is not
+/// free: **it is where the two-stage path already lands.** Wherever the prefilter
+/// fires, the intermediate is `target * PREFILTER_FACTOR`, so the final pass sees
+/// `scale = target / (2*target) = 0.5` and `filter_scale == 2.0` exactly. Below
+/// the threshold there is no pre-reduction, `scale = 1/R`, and the kernel drops
+/// straight to `R` — **1.333 for a 2560x1440 source on a 1920-long panel.** The
+/// pipeline's low-pass width is therefore *discontinuous at its own threshold*,
+/// falling from 2.0 to `R`, and the reported moiré is what that discontinuity
+/// leaves behind.
+///
+/// A floor of 2.0 removes the discontinuity rather than choosing a width:
+/// **byte-identical output at every reduction where the prefilter already fires**
+/// (verified at R 2.0 / 2.02 / 2.1 / 2.5 / 2.879 / 4.0 / 8.0, the whole
+/// neighbourhood of real use, including the boundary), and it only bites below.
+/// That is why the threshold stays at 2 and this is a separate constant.
+///
+/// Measured on 2560x1440 → 1920 (R 1.333), `Fast`, transfer function of a
+/// 100-codes-peak-to-peak sinusoid, codes surviving. Source periods 1.5 and
+/// 2.5 px are inside the foldover band (output Nyquist is 2.67 px); 6, 12, 24 px
+/// are detail the low-pass must keep:
+///
+/// | source period | before | with `MIN_FILTER_SCALE` | `Smooth` (2.0) |
+/// |---|---|---|---|
+/// | 1.5 | 51 | **19** | 1 |
+/// | 2.5 | 41 | **11** | 6 |
+/// | 4.0 | 58 | **37** | 15 |
+/// | 6.0 | 84 | **67** | 49 |
+/// | 12.0 | 95 | **90** | 84 |
+/// | 24.0 | 99 | **97** | 96 |
+///
+/// The foldover band is cut 2.7x and 3.7x while the passband barely moves, and
+/// it is **not** the trade `Smooth` makes: `Smooth` doubles *every* stage and
+/// costs 58 → 15 at 4 px where the floor keeps 37.
+///
+/// **What it costs, measured.** Square-lattice residual at the lattice's own
+/// output period, 1440p on a 1920 panel: **91.9 → 55.9 codes**. Screentone peak
+/// over a full output-period scan: **10.45 → 3.76 codes**. Hard step edge 10-90%
+/// rise: **1.536 → 1.791 output px (1.17x**, against `Smooth`'s 1.59x). Wall
+/// clock, interleaved and warmed, release: R 1.333 **44.4 → 49.6 ms (1.12x)**,
+/// R 1.1 56.4 → 64.4 ms (1.14x), and within 1% at R 2.0 / 2.879 where the floor
+/// cannot bind.
+///
+/// **It is a partial fix, and honestly so.** At 2.0 the residual is 55.9 codes
+/// where `Smooth` reaches 28.6: the 1440p moiré is reduced by roughly two thirds,
+/// not abolished. The rest needs a wider floor — 2.5 gives 34.1 codes at a step
+/// rise of 2.020 px — and this constant is deliberately *not* 2.5, because **2.5
+/// is above the two-stage path's own 2.0 and would change every reduction that
+/// works today.** The floor is set to the width the pipeline already uses where it
+/// works, so the fix costs nothing elsewhere. Going further is a different
+/// decision and belongs on `FAST_STRENGTH`, the axis that owns "how much low-pass".
+///
+/// `f32`, not the `u32` above, because `contributions` compares against
+/// `strength / scale` and a float floor is in the same units without a second
+/// conversion. Read at runtime through [`min_filter_scale`] so a test can put it
+/// at `0.0` — the pre-fix behaviour — without a second build.
+pub const MIN_FILTER_SCALE: f32 = 2.0;
+
+/// The `filter_scale` floor in force, as the resampler reads it.
+///
+/// A worker reads this once per resize, so it lives in an atomic for the same
+/// reason [`downscale_strength`] does — and so a test can sweep it. **Not a
+/// user-facing setting**: the floor is not a taste knob, it is the number that
+/// makes the low-pass width continuous across [`PREFILTER_FACTOR`], and a user who
+/// wants more low-pass than that wants [`set_downscale_smoothing`].
+static MIN_FILTER_SCALE_IN_FORCE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(MIN_FILTER_SCALE.to_bits());
+
+/// Set the floor directly. [`MIN_FILTER_SCALE`] is the shipped value; this exists
+/// so a test can sweep the axis and compare against `0.0` ("off") without a
+/// second build.
+pub fn set_min_filter_scale(v: f32) {
+    MIN_FILTER_SCALE_IN_FORCE.store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The floor in force.
+pub fn min_filter_scale() -> f32 {
+    f32::from_bits(MIN_FILTER_SCALE_IN_FORCE.load(std::sync::atomic::Ordering::Relaxed))
+}
 
 /// True when the cached preview is not what the display can now show — in
 /// **either** direction — and a re-decode at `now_target` would actually be
@@ -7093,6 +7194,14 @@ static PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// `saturating_mul`, not `*`: `target` is a display dimension and the largest
 /// this codebase can be handed is `MAX_TEXTURE_DIM`, but the arithmetic should
 /// not depend on that staying true.
+/// **This is a memory bound and not a quality knob, which is worth being explicit
+/// about because it was read as a quality knob for a long time** — it is the
+/// number the reported 1440p moiré was blamed on. Measured: `contributions`
+/// derives `filter_scale` from each stage's *own* ratio, so the stages of a split
+/// decimation multiply back to the reduction exactly (`s1 * s2 == R`), and
+/// lowering this factor cannot widen the low-pass — it only changes how large the
+/// buffer the 12-bit conversion runs over is. What sets the width is
+/// [`MIN_FILTER_SCALE`].
 pub fn prefilter_dim(dim: u32, target: u32) -> u32 {
     dim.min(target.saturating_mul(PREFILTER_FACTOR)).max(1)
 }
@@ -7131,13 +7240,21 @@ pub fn prefilter_dim(dim: u32, target: u32) -> u32 {
 /// Both passes are row-parallel, which the box's vertical pass could not be: it
 /// summed a sliding window down a column accumulator, so it ran on one thread.
 /// That, not the arithmetic, is where the speedup comes from.
-fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32, strength: f32) -> Vec<u8> {
+///
+/// **`floor` is a parameter rather than a read, and `linear_resize` passes a
+/// literal `0.0` for it.** The pre-reduction runs at exactly
+/// `PREFILTER_FACTOR`, so `scale == 0.5` and `filter_scale == 2.0` already —
+/// above any floor worth having — and a floor here can therefore only widen a
+/// kernel that already meets it. Measured, not inferred: handing this stage the
+/// real floor changes the output at R 2.02 and above, i.e. at every reduction the
+/// shipped threshold already covers.
+fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32, strength: f32, floor: f32) -> Vec<u8> {
     let (to_lin, to_srgb) = lin_tables();
     let (sw, sh) = (data.width as usize, data.height as usize);
     let (pw, ph) = (pre_w as usize, pre_h as usize);
     let (kern, support) = kernel(downscale_filter());
-    let horizontal = contributions(sw as u32, pw as u32, &kern, support, strength);
-    let vertical = contributions(sh as u32, ph as u32, &kern, support, strength);
+    let horizontal = contributions(sw as u32, pw as u32, &kern, support, strength, floor);
+    let vertical = contributions(sh as u32, ph as u32, &kern, support, strength, floor);
 
     // Horizontal: source width -> pre_w, at full height.
     let mut tmp = vec![0u8; pw * sh * 4];
@@ -7226,6 +7343,12 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     // would let the two halves disagree, i.e. resize with a prefilter of one
     // width feeding a final pass of another. Read once, thread it.
     let strength = downscale_strength();
+    // **One read of the floor, one value, both axes.** The same argument and the
+    // same count-checked test as the strength above: the two axes are separate
+    // `contributions` calls, so a per-call read would let a toggle pressed
+    // between them produce a picture low-passed one way horizontally and another
+    // vertically.
+    let floor = min_filter_scale();
     let pre_w = prefilter_dim(data.width, new_w);
     let pre_h = prefilter_dim(data.height, new_h);
 
@@ -7235,7 +7358,11 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     let t0 = std::time::Instant::now();
     let (small, lw, lh): (Cow<'_, [u8]>, u32, u32) = if pre_w < data.width || pre_h < data.height {
         (
-            Cow::Owned(kernel_reduce_linear(data, pre_w, pre_h, strength)),
+            // **The literal `0.0`, and it is load-bearing** - see
+            // `kernel_reduce_linear`'s floor parameter. Passing `floor` here
+            // instead is the mistake this line is written to prevent, and
+            // `the_floor_reaches_both_final_axes_and_only_those` is the check.
+            Cow::Owned(kernel_reduce_linear(data, pre_w, pre_h, strength, 0.0)),
             pre_w,
             pre_h,
         )
@@ -7260,8 +7387,8 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     let t2 = std::time::Instant::now();
     // Separable kernel resample in 12-bit linear light with precomputed weights.
     let (kern, support) = kernel(downscale_filter());
-    let horizontal = contributions(lw, new_w, &kern, support, strength);
-    let vertical = contributions(lh, new_h, &kern, support, strength);
+    let horizontal = contributions(lw, new_w, &kern, support, strength, floor);
+    let vertical = contributions(lh, new_h, &kern, support, strength, floor);
 
     // Horizontal pass: width -> new_w.
     let mut tmp = vec![0u16; (new_w as usize) * (lh as usize) * 4];
@@ -7329,6 +7456,7 @@ fn contributions(
     kern: &impl Fn(f32) -> f32,
     support: f32,
     strength: f32,
+    floor: f32,
 ) -> Vec<Vec<(usize, f32)>> {
     let mut out = Vec::with_capacity(dst_len as usize);
     let scale = dst_len as f32 / src_len as f32;
@@ -7336,7 +7464,16 @@ fn contributions(
     // then by `strength` on top: one multiplier reaching the pre-reduction and
     // the final passes alike, rather than a per-call-site decision that could
     // disagree with itself.
-    let filter_scale = if scale < 1.0 { strength / scale } else { 1.0 };
+    //
+    // **`floor` is [`MIN_FILTER_SCALE`] on the final pass and `0.0` on the
+    // pre-reduction, and the asymmetry is the entire mechanism.** `scale` is each
+    // stage's *own* ratio and the product of a split's two stages is the
+    // reduction exactly, so the floor can only ever bind on a stage whose ratio
+    // is above `1 / MIN_FILTER_SCALE` — which, for the pre-reduction, is no stage
+    // at all, since it reduces by exactly `PREFILTER_FACTOR`. Hence `max` here
+    // and `0.0` there, and hence a no-op on every reduction the prefilter
+    // already covers.
+    let filter_scale = if scale < 1.0 { (strength / scale).max(floor) } else { 1.0 };
     let radius = support * filter_scale;
     for dst in 0..dst_len as usize {
         let center = (dst as f32 + 0.5) / scale - 0.5;
