@@ -38,3 +38,8 @@ test-images/
 
 # isolated worktrees
 .worktrees/
+
+# Session artefacts: plans, specs and per-task reports. The durable findings
+# from these are extracted into AGENTS.md and TODO.md; the files themselves are
+# per-task scratch. One slipped in before this rule existed (downscale-strength.md).
+.superpowers/
