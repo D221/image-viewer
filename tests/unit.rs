@@ -2368,7 +2368,11 @@ fn the_min_filter_scale_rejects_the_foldover_band_a_1440p_source_carries() {
         );
         let src = probe_sine(QHD_W, QHD_H, period, 50.0);
         let before = sine_amp(&resize_floor(&src, QHD_TARGET, 0.0));
-        let after = sine_amp(&resize_shipped(&src, QHD_TARGET));
+        // **The floor is opt-in, so the arm under test is 2.0 written out**, not
+        // "whatever ships". Comparing the floor against the shipped default would
+        // compare it against itself the day the default changed, and this test
+        // would pass for the wrong reason - which is how it was written before.
+        let after = sine_amp(&resize_floor(&src, QHD_TARGET, 2.0));
         assert!(
             before <= was && before > 10.0,
             "the pre-fix path left {before:.1} codes at source period {period} px, \
@@ -2381,6 +2385,59 @@ fn the_min_filter_scale_rejects_the_foldover_band_a_1440p_source_carries() {
              period {period} px (inside the foldover band, Nyquist \
              {QHD_FOLDOVER_PERIOD} px); want <= {now} (was {before:.1}). \
              MIN_FILTER_SCALE is not reaching the kernel"
+        );
+    }
+}
+
+/// **The shipped pipeline is byte-identical to having no floor at all, and that is
+/// the regression guard for a user-reported regression.**
+///
+/// `MIN_FILTER_SCALE` shipped at **2.0** and was withdrawn back to `0.0`. On a
+/// **2560x1440 display at 100% scaling** - where pages reduce by about 1.33x, so
+/// the floor forced the kernel from 1.33 to 2.0 - moire became *worse* on every
+/// file, on every filter, and `Smooth` did not help. Its benefit had been measured
+/// on a synthetic **uniform** lattice (91.9 -> 55.9 codes); real screentone
+/// disagreed. That is the third time in this project a synthetic proxy said
+/// "fixed" while a person looking at real content said worse.
+///
+/// So the property worth protecting is **not** "an armed floor rejects the foldover
+/// band" - that is an opt-in arm, and the two tests above cover it. It is that
+/// **someone who does not ask for a floor gets the pre-`b237e7a` pipeline byte for
+/// byte.** That is the state a user verified as better than `master` on every
+/// file, and the only one safe to ship while the real-content question is open.
+///
+/// **Byte-identity, not a tolerance.** A floor that merely failed to bind would
+/// pass any tolerance check, and "close enough" is not a property of a pipeline
+/// that produces pixels.
+#[test]
+fn the_shipped_resize_is_byte_identical_to_no_floor_at_all() {
+    // A spread half-panel (1350x1920 -> 1080), the 1440p geometry from the user
+    // report, and two reductions either side of `PREFILTER_FACTOR`, so the claim
+    // covers both sides of the threshold the floor was bridging.
+    for (w, h, target) in [
+        (QHD_W, QHD_H, QHD_TARGET),
+        (1350, 1920, 1080),
+        (2560, 1440, 1920),
+        (1000, 1414, 1080),
+    ] {
+        let src = probe_square_lattice(w, h, 4.0, 1.0, 0, 100);
+        let shipped = resize_shipped(&src, target);
+        let off = resize_floor(&src, target, 0.0);
+        assert_eq!(
+            (shipped.width, shipped.height),
+            (off.width, off.height),
+            "shipped and no-floor disagree on size at {w}x{h} -> {target}"
+        );
+        assert!(
+            shipped.rgba == off.rgba,
+            "the shipped resize still differs from an explicit 0.0 floor at \
+             {w}x{h} -> {target}; first differing byte at index {:?}. The shipped \
+             pipeline must be byte-identical to the pre-b237e7a path.",
+            shipped
+                .rgba
+                .iter()
+                .zip(off.rgba.iter())
+                .position(|(a, b)| a != b)
         );
     }
 }
@@ -2437,7 +2494,7 @@ fn the_min_filter_scale_is_a_no_op_where_the_prefilter_already_fires() {
         let target = ((QHD_W as f64 / r).round() as u32).max(2);
         let src = probe_square_lattice(QHD_W, QHD_H, 4.0, 1.0, 0, 100);
         let before = resize_floor(&src, target, 0.0);
-        let after = resize_shipped(&src, target);
+        let after = resize_floor(&src, target, 2.0);
         let fires = image_viewer::prefilter_dim(QHD_W, target) < QHD_W;
         // At exactly `PREFILTER_FACTOR` the prefilter does **not** fire
         // (`prefilter_dim` returns the source unchanged), but the floor is still
@@ -2461,9 +2518,9 @@ fn the_min_filter_scale_is_a_no_op_where_the_prefilter_already_fires() {
         let target = ((QHD_W as f64 / r).round() as u32).max(2);
         let src = probe_square_lattice(QHD_W, QHD_H, 4.0, 1.0, 0, 100);
         assert!(
-            resize_floor(&src, target, 0.0).rgba != resize_shipped(&src, target).rgba,
-            "at R {r:.3} (target {target}) the floor left the output unchanged, so \
-             the 1440p case it exists for is not being fixed"
+            resize_floor(&src, target, 0.0).rgba != resize_floor(&src, target, 2.0).rgba,
+            "at R {r:.3} (target {target}) an armed floor of 2.0 left the output \
+             unchanged, so the 1440p case it exists for is not being fixed"
         );
     }
 }

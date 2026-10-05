@@ -2145,7 +2145,7 @@ pub const PREFILTER_FACTOR: u32 = 2;
 /// `strength / scale` and a float floor is in the same units without a second
 /// conversion. Read at runtime through [`min_filter_scale`] so a test can put it
 /// at `0.0` — the pre-fix behaviour — without a second build.
-pub const MIN_FILTER_SCALE: f32 = 2.0;
+pub const MIN_FILTER_SCALE: f32 = 0.0;
 
 /// The `filter_scale` floor in force, as the resampler reads it.
 ///

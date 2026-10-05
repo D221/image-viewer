@@ -1261,9 +1261,30 @@ an edit.
     because the width is already spent. Pinned by
     `splitting_a_decimation_cannot_widen_the_kernel_past_the_reduction`, which
     asserts the arithmetic rather than recomputing it from the same formula.
-  - **`MIN_FILTER_SCALE` (2.0) is the fix for 1440p, and it is a floor rather than
-    a retune because the pipeline's width was *discontinuous at its own
-    threshold*.** Wherever the prefilter fires the final pass sees `scale = 0.5`
+  - **`MIN_FILTER_SCALE` ships at `0.0` — the floor is OFF, and a user report is
+    why. It was 2.0, and that was a regression.** On a **2560×1440 display at
+    100% scaling**, where pages reduce by ≈1.33× and the floor forced the kernel
+    from 1.33 to 2.0, moiré became *worse* on **every file, on every filter, and
+    `Smooth` did not help** — where the commit before it was better than `master`
+    on every file. Its benefit had been measured on a synthetic **uniform** lattice
+    (91.9 → 55.9 codes) and **real screentone disagreed**. That is the **third**
+    time here that a synthetic proxy concluded "fixed" while a person looking at
+    real content said worse (the first two were 1-D probes that structurally
+    cannot produce this artefact at all), so "measure the artefact, not a proxy"
+    is a standing rule and `0.0` is a supported arm, not a dead value.
+    `the_shipped_resize_is_byte_identical_to_no_floor_at_all` pins the shipped
+    pipeline as **byte-identical** to pre-`b237e7a` — a tolerance would pass a
+    floor that merely failed to bind.
+    **What survives is the finding, not the default:** the pipeline's width really
+    *was* discontinuous at its own threshold — wherever the pre-reduction fires the
+    final pass sees `filter_scale == 2.0` **exactly**, and below it the kernel
+    dropped straight to the raw reduction. That is real and still true; only the
+    decision to force 2.0 by default is withdrawn. Do not let the withdrawal read
+    as the discontinuity being fictional. Settling it needs the 2.0 arm measured
+    on **real screentone, per pitch**, with a metric that can resolve a coherent
+    peak — see the two metric defects already recorded above.
+  - **The floor's mechanism, armed at 2.0, is what the 1440p numbers describe —
+    and it is an opt-in arm now.** Wherever the prefilter fires the final pass sees `scale = 0.5`
     and `filter_scale == 2.0` **exactly**; below the threshold there is no
     pre-reduction, `scale = 1/R`, and the kernel drops straight to `R` — **1.333
     for a 2560×1440 source on a 1920-long panel.** 2.0 is therefore not a chosen
