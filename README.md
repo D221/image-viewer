@@ -319,7 +319,21 @@ should not quietly do that.
 | Mouse side buttons | Same as `←` / `→` |
 | Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
 
-### Manga mode
+### Manga mode (beta)
+
+> **Beta.** The pairing, the layout, the keys and full-resolution tiles on both
+> halves have been run and checked on real volumes. Two things are open, both
+> written up in `TODO.md` with their measurements:
+>
+> - **1440p-class images can still show moire.** Turning it down is a straight
+>   trade against sharpness, and no single setting is right for both photographs
+>   and grey screentone — a wider low-pass that helps one makes the other worse,
+>   because it moves energy between dot pitches rather than simply removing it.
+>   The setting is in the panel (`Smooth`); `Fast` is the default. `TODO.md` has
+>   the numbers.
+> - **Fullscreen (`F11`) has one unreproduced report** of moire appearing on
+>   every page and clearing when the mode is toggled. It may be the same
+>   threshold effect as the line above; `TODO.md` records what has been ruled out.
 
 `M` shows images as **turns** — one page, or two meeting at a seam — laid out the
 way a book is: a scan that is itself two printed pages takes a whole turn to itself,
