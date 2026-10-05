@@ -1095,10 +1095,18 @@ an edit.
       energy falls only 13.38 → 7.37 codes/px (0.55×) and at strength 3.0 it is
       still 0.39×. **So the setting reduces the artefact substantially on a clean
       lattice and only about half of it on real screentone; it does not abolish
-      either.** What is left is broadband residue, not a lattice: a 2-D spectrum
-      of the flat-tone pixels has **no peak at any output period from 1.5 to 8 px
-      at any strength** (all amplitudes ≤ 0.002 codes/px), which is what "reduced,
-      not abolished" looks like numerically.
+      either.**
+      - **~~The residue is broadband, not a lattice: a 2-D spectrum of the
+        flat-tone pixels has no peak at any output period from 1.5 to 8 px at any
+        strength (all amplitudes ≤ 0.002 codes/px).~~ RETRACTED.** The metric
+        that sentence came from divided a coherent amplitude by `sqrt(n)` and
+        could not have resolved a coherent peak at any period; see
+        `smooth_is_not_the_default_because_it_moves_energy_between_pitches` below
+        for the defect and for what replaced it. A coherent peak **does** exist,
+        and at some pitches it is **larger** under `Smooth`. Do not cite the
+        retracted line, and re-measure the spectrum with
+        `the_tone_spectrum_metric_reports_codes` in place before saying anything
+        about whether the residue is broadband.
     - **The cost is real and it is the reason this is a toggle.** A hard step
       edge's 10–90% rise at 2.880×: Fast **1.607** → Smooth **2.747** output px
       (**1.71×**). 3-source-px bars: 14.118 → 7.634 codes/px (**0.54×**). On real
@@ -1113,9 +1121,14 @@ an edit.
       the drift is larger than the effect.
     - **`FAST_STRENGTH` is 1.0**, the identity multiplier, so `Fast` is
       *exactly* the pre-existing code path and not a third flavour of it.
-      `SMOOTH_STRENGTH` is 2.0. Pinned by
+      `SMOOTH_STRENGTH` is **still 2.0** and was deliberately **not** re-tuned:
+      it is no longer the default, so the question it was chosen to answer no
+      longer decides what everyone gets, and lowering it would have been tuning a
+      setting whose per-file divergence is not a tuning failure. Pinned by
       `fast_is_exactly_the_pre_existing_kernel_width` and by the bounded cost in
-      `smooth_costs_edge_sharpness_and_the_cost_is_bounded`.
+      `smooth_costs_edge_sharpness_and_the_cost_is_bounded`. The 1.71× step-edge
+      cost quoted above is therefore still the cost of the `Smooth` **position**,
+      which is what that test measures — it is no longer a cost paid by default.
   - **A strength multiplier is not a tap-count change, and the earlier "widening
     is a no-op" note is about the other one.** `contributions` already divides
     the kernel argument by `filter_scale`, so widening only the *span* evaluates
@@ -1132,8 +1145,86 @@ an edit.
     That is the same class as the two manga-mode sites that were each correct
     alone, so `one_strength_reaches_both_halves_of_the_resize` checks the
     **count** (exactly 1) and not just presence.
-  - **`Config::smooth_downscale`, default `true`, and it invalidates the previews
-    on the same frame it flips** (the filter dropdown's `refilter`, pinned by
+  - **`Config::smooth_downscale` now defaults to `false`, and that is the fix.**
+    It shipped default-**on** (`1b5bdbe`) and was a regression on real files.
+    Judging rendered output on six 2223×3109 pages at the manga half-panel
+    target, strength 2.0 was better on `32.jpg`, better on `30.jpg`, unchanged on
+    `52.jpg`, and **worse on `12.jpg`, `21.jpg` and `44.jpg`** — all three reported
+    as a black dot pattern appearing in grey screentone. Strength 1.0 was better
+    than `master` on **every** file. **The improvement on all six comes from the
+    earlier, unconditional kernel prefilter (`cb0394c`), not from the strength
+    toggle**, which is what makes `Fast` the safe default rather than merely the
+    less interesting one.
+    - **Why the sweep that chose 2.0 concluded the opposite.** It measured a
+      **uniform synthetic square lattice**, where more strength is better at every
+      pitch it tried. Real screentone is not that, and the sweep's own last
+      section said so and then drew the wrong conclusion from it (see the metric
+      defect below).
+    - **What widening actually does: it moves energy between pitches.** In one
+      grey field carrying a dot grid, a second screen at 30° and a dither, scanning
+      output period 1.05→4.00 px in 0.05 steps, Fast → Smooth:
+      - at **1.389 px** (the grid's own pitch) 1.853 → **0.629** codes — the
+        effect the setting is for;
+      - at **3.60 px** (a longer period the same image carries) 0.295 → **0.564**
+        — widening **nearly doubles** it. 1.4 px goes 0.468 → 0.550, 3.5 px the
+        same.
+      So it is not "better low-pass, softer edges". It is a redistribution whose
+      sign depends on pitch, which is why the per-file results diverge.
+    - **The obvious explanation is wrong, and it is the one to reach for.** Not
+      multi-pitch content: delete the second screen and the dither and a **pure
+      single-pitch 0/100 lattice** at source pitch 4.0 still shows 1.25× at 4.4
+      output px and 1.53× finer. It is the filter's response meeting **foldover** —
+      the promoted component sits at a *multiple* of the pattern's own period,
+      i.e. an image of its own frequency in the output. The previous sweep only
+      ever measured at the pattern's own output pitch, where widening wins
+      monotonically. `smooth_is_not_the_default_because_it_moves_energy_between_pitches`
+      pins the finding as a **scan over pitches** (some pitch must improve, some
+      must worsen) rather than one frequency, because a pinned pitch is a number
+      that goes stale on the next kernel change and a single-pitch sweep is what
+      produced the wrong default in the first place.
+    - **Two defects found in the measurement, both of which had already produced
+      a wrong conclusion.**
+      - **`tone_spectrum_amp` divided a coherent amplitude by `sqrt(n)`.** For a
+        *coherent* pattern — the only kind it is asked about, because a dot screen
+        is coherent by construction — the least-squares fit already returns the
+        amplitude, so the extra division divided a real signal by the square root
+        of the pixel count (~700× at a 772×1080 output). Every per-pitch number
+        above was produced by it, **including "no peak at any output period from
+        1.5 to 8 px at any strength, all amplitudes ≤ 0.002 codes/px"** — the
+        sentence that said the residue was broadband and that the lattice was
+        "reduced, not abolished". A metric that cannot resolve a coherent peak
+        cannot support that. `the_tone_spectrum_metric_reports_codes` calibrates it
+        against `beat_amp`, which never had the division, and fails with the bug
+        reintroduced.
+      - **The probes answered the wrong question.** `masked_grad` over flat tone
+        and a whole-image p95−p5 both *fall* at every strength on every file, and
+        both therefore say "works" on all six — including the three that got
+        worse. A mean cannot see a trade that is defined across pitches.
+    - **Unmeasured, and recorded as such:** whether a **Gaussian** (the only
+      compactly-supported family whose transform falls monotonically to zero, so no
+      sidelobe can beat against anything, and no negative lobe to undershoot) is
+      better here. A widened Gaussian was implemented as a throwaway probe and
+      measured before the user settled the default, and the per-pitch numbers were
+      discarded when the metric defect above invalidated the metric they came
+      from. **It is the obvious next experiment and it is not done.** Note also
+      that the prefilter and the final pass are both kernel passes, so a pattern
+      can beat once against each; whether a single-pass resize beats the two-step
+      path on these files is likewise **un-measured**. Do not cite either as a
+      result.
+    - **What was ruled out, with the mechanism rather than by argument.** The
+      overshoot hypothesis — Hermite's negative lobes pulling dark detail below
+      zero in the 12-bit buffer and clamping to black — is **refuted**.
+      Instrumenting every pre-clamp weighted sum in `linear_resize` and
+      `kernel_reduce_linear` and recording the true minimum (not the clamp count,
+      which is per-resize and moves with page content): the **pre-clamp minimum is
+      0.00 at every strength 1.0–3.0**, i.e. there is no undershoot to clamp.
+      Hermite's cubic-B-spline weights are non-negative on `|x| < 1` by
+      construction, `contributions` renormalises them to sum to 1, so no weighted
+      sum of non-negative samples can go negative — the clamp can never fire from
+      the low-pass at all. The user also placed the artefact in **grey screentone,
+      not linework**, which is the opposite of what that hypothesis predicted.
+  - **The toggle invalidates the previews on the same frame it flips** (the filter
+    dropdown's `refilter`, pinned by
     `the_smooth_toggle_is_wired_and_invalidates_the_previews` — a source scan,
     since `main.rs` is unreachable from every test). Toggling `linear_resample`
     does *not*, and that asymmetry is the documented counter-example: a

@@ -746,8 +746,31 @@ fn masked_grad(d: &image_viewer::ImageData, mask: &[bool]) -> f32 {
     }
 }
 
+/// The strength a **first run** gets. Read from `Config::load` on an absent file
+/// rather than named here, so a probe that says "the default path" cannot go on
+/// measuring the other one. That is not hypothetical: the pins below were taken
+/// while the default was `Smooth` and were still being read as the default path
+/// after it moved. There is no `Config::default()` — `Config::load`'s hand-built
+/// struct *is* the default, which is why this goes through it rather than through
+/// the field.
+fn default_config() -> image_viewer::Config {
+    let tmp = tempfile::tempdir().unwrap();
+    image_viewer::Config::load(&tmp.path().join("absent.json"))
+}
+
+fn default_strength() -> f32 {
+    if default_config().smooth_downscale {
+        image_viewer::SMOOTH_STRENGTH
+    } else {
+        image_viewer::FAST_STRENGTH
+    }
+}
+
+/// The **shipped default** resize. Every probe below this line that reports on
+/// "the path" means this one, so it is defined as the default rather than as a
+/// strength constant that has to be updated in step with the config.
 fn probe_resize(src: &image_viewer::ImageData) -> image_viewer::ImageData {
-    resize_at(src, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH)
+    resize_at(src, PROBE_TARGET, default_strength())
 }
 
 /// Resize at an explicit strength and explicit target. Both the probe geometry
@@ -1259,7 +1282,69 @@ fn tone_spectrum_amp(d: &image_viewer::ImageData, mask: &[bool], p_out: f32) -> 
             ((sys * sss - syc * ssc) / det, (syc * sss - sys * ssc) / det)
         }
     };
-    ((a * a + b * b).sqrt() / n.sqrt()) as f32
+    // **No `/ sqrt(n)`.** There was one, and it was wrong: for a *coherent*
+    // pattern — which is what a dot screen is — the amplitude is `A` at every
+    // masked pixel, so the least-squares fit above already returns `A` (up to the
+    // 1/sqrt(2) of adding the two axes). Dividing that by the square root of the
+    // pixel count then reports ~0.0002 where `alias_amp` on the same image reads
+    // 10 codes, i.e. it divides a real signal by ~700 at this output size, and it
+    // cannot resolve a coherent peak at all. Every conclusion drawn from it —
+    // "no peak at any output period from 1.5 to 8 px at any strength, the residue
+    // is broadband" — was read off that divided quantity. `beat_amp`, the
+    // sibling projection, has never had this division, which is why it reports
+    // codes and this did not.
+    (a * a + b * b).sqrt() as f32
+}
+
+/// **`tone_spectrum_amp` reports codes, and not a quantity smaller by ~sqrt(n).**
+///
+/// The function carried a `/ sqrt(n)`, on the theory that it measured "mean
+/// amplitude per output pixel". For a *coherent* pattern — which is the only kind
+/// this is asked about, because a dot screen is coherent by construction — the
+/// amplitude is `A` at every masked pixel, so the least-squares fit already
+/// returns `A` and the extra division divides a real signal by the square root of
+/// the pixel count. At a 890x1244 output with an all-true mask that is a factor of
+/// 1045.
+///
+/// It is worth a test because the consequence was not cosmetic: every per-pitch
+/// number in the strength record came from it, including the claim that the
+/// surviving artefact is broadband with "no peak at any output period from 1.5 to
+/// 8 px at any strength". A metric that cannot resolve a coherent peak cannot
+/// support that claim, and the claim was load-bearing — it is what said the
+/// lattice was "reduced, not abolished".
+///
+/// Calibrated here against the sibling projection `beat_amp`, which has never had
+/// the division and has always reported codes: on the same image, at the same
+/// output period, the two must now agree to within the 1/sqrt(2) that adding the
+/// x and y axes costs, and **not** differ by three orders of magnitude. The
+/// lattice's own output pitch is probed, which is where the answer is non-zero —
+/// probing away from it is what let the bad metric look like a flat curve.
+#[test]
+fn the_tone_spectrum_metric_reports_codes() {
+    for &(p, d) in &[(4.0f32, 1.0f32), (4.0, 2.0), (6.0, 2.0)] {
+        let src = probe_square_lattice(PROBE_W, PROBE_H, p, d, 0, 100);
+        let out = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+        let p_out = p / (PROBE_W as f32 / out.width as f32);
+        let mask = vec![true; (out.width * out.height) as usize];
+        let (a, b) = (
+            tone_spectrum_amp(&out, &mask, p_out),
+            beat_amp(&out, p_out),
+        );
+        assert!(
+            a > 0.5,
+            "lattice pitch {p} dot {d} at its own output pitch {p_out:.3}: \
+             tone_spectrum_amp reported {a:.5} codes, want a real amplitude - a \
+             metric this small cannot resolve a coherent pattern"
+        );
+        // `beat_amp` fits the same two projections; the two may differ by the
+        // 1/sqrt(2) of summing sin in both axes, and by the sign convention of
+        // the two-term solve, but they are the same order of magnitude.
+        assert!(
+            a <= b.max(a) * 4.0 + 1.0 && b <= a * 4.0 + 1.0,
+            "lattice pitch {p} dot {d}: tone_spectrum_amp {a:.3} and beat_amp \
+             {b:.3} are not the same quantity"
+        );
+    }
 }
 
 /// Wall clock at the two shipped positions, on the worst-case real page.
@@ -1639,21 +1724,32 @@ fn the_smooth_toggle_is_wired_and_invalidates_the_previews() {
     );
 }
 
-/// A config written before this setting existed still loads, and gets the
-/// setting that hides the artefact.
+/// A config written before this setting existed still loads, and gets **`false`**.
 ///
 /// Both halves, because they are opposites: it must load *and* it must come up
-/// `true`. A `#[serde(default)]` with the wrong default compiles, passes every
-/// other test in the suite, and hands every existing reader a lattice.
+/// `false`. A `#[serde(default)]` with the wrong default compiles, passes every
+/// other test in the suite, and hands every existing reader a setting that is
+/// wrong for three of the six pages it was measured on.
+///
+/// **This assertion was `true` and is now `false`, and the change is the fix.**
+/// The setting shipped default-on on the strength of a *uniform synthetic
+/// lattice*, where more strength wins at every pitch. Judging rendered output on
+/// six 2223x3109 pages, strength 2.0 was better on `32.jpg` and `30.jpg`,
+/// unchanged on `52.jpg`, and worse on `12.jpg`, `21.jpg` and `44.jpg` — a black
+/// dot pattern appearing in grey screentone. `Fast` was better than `master` on
+/// all six. So the default follows the measurement that was taken on the artefact
+/// users actually have, and the previous default was chosen on a probe that
+/// cannot see the trade.
 #[test]
-fn a_config_written_before_smooth_downscale_still_loads_and_gets_smooth() {
+fn a_config_written_before_smooth_downscale_still_loads_and_stays_off() {
     let cfg: image_viewer::Config =
         serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
             .expect("an old config must load");
     assert!(
-        cfg.smooth_downscale,
-        "Smooth must default on: a config that has never heard of the setting is \
-         the majority of them, and the artefact it removes is the visible defect"
+        !cfg.smooth_downscale,
+        "an old config must come up with Smooth OFF: on real pages it is better on \
+         two files, unchanged on one and worse on three, so it cannot be what \
+         everyone gets"
     );
 
     // And the default a *missing file* gets, which is a different construction
@@ -1662,9 +1758,197 @@ fn a_config_written_before_smooth_downscale_still_loads_and_gets_smooth() {
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
     assert!(
-        fresh.smooth_downscale,
-        "a first run must also come up Smooth"
+        !fresh.smooth_downscale,
+        "a first run must also come up with Smooth OFF"
     );
+}
+
+/// **The regression guard: `Smooth` must not be the default, and the reason must
+/// not quietly stop being true.**
+///
+/// Two independent claims, because the second is the one that stops it coming
+/// back.
+///
+/// *The default.* `Config::load` on an absent file must give
+/// `smooth_downscale == false`. The evidence for that is on real pages and cannot
+/// be reproduced here — `12.jpg`, `21.jpg` and `44.jpg` are 4-6 MB scans in a
+/// gitignored build directory — so this pins the **decision**, in the one place a
+/// decision like it can be re-made by accident.
+/// `a_config_written_before_smooth_downscale_still_loads_and_stays_off` covers the
+/// two other ways the field reaches a real user.
+///
+/// *The mechanism.* The synthetic probe below is the in-tree half, and it is the
+/// part that reproduces. `probe_multi_pitch_screentone` is a **grey** field
+/// carrying a base dot grid, a second screen at 30 degrees and a stochastic
+/// dither — which is what real screentone is, and what a 0/100 test lattice is
+/// not.
+///
+/// **What widening actually does, measured, in one image.** Amplitude at an output
+/// period, Fast -> Smooth, scanning 1.05 to 4.00 output px in 0.05 steps:
+///
+/// * at **1.389 px** — the base grid's own pitch — 1.853 -> **0.629** codes, so
+///   widening removes it, which is the effect the setting was built for;
+/// * at **3.60 px** — a longer period the same image also carries — 0.295 ->
+///   **0.564** codes, so widening **nearly doubles** it.
+///   And 1.4 px goes 0.468 -> 0.550, 3.5 px the same.
+///
+/// So the setting is not a monotone improvement in the low-pass and a cost in the
+/// detail. It moves energy **between** pitches, and which pitches gain depends on
+/// the content. `smooth_low_passes_a_square_lattice_harder_than_fast` measures the
+/// winning half and passes; this one measures the losing half, and both are true.
+///
+/// **The obvious explanation is wrong, and it is worth recording because it is
+/// the one to reach for.** It is not about multi-pitch content: removing the
+/// second screen and the dither, leaving a *pure single-pitch* 0/100 lattice at
+/// source pitch 4.0, still shows a ratio of 1.25 at 4.4 output px and 1.53
+/// somewhere finer. So this is not "real tone has several screens and a single
+/// screen cannot". It is the filter's response meeting **foldover**: the promoted
+/// component is at a period that is a *multiple* of the pattern's own, i.e. an
+/// image of the pattern's own frequency in the output, and widening changes the
+/// balance between a component and its folded image. The previous sweep only ever
+/// measured at the lattice's own output pitch, where widening wins monotonically,
+/// which is why it read as a clean fix.
+///
+/// **Why the assertion is a scan and not a pinned pitch.** A pinned frequency is a
+/// number that goes stale the moment the kernel changes, and the previous
+/// single-pitch sweep is what produced the wrong default in the first place. The
+/// claim pinned here is the finding itself — in one image, some pitch improves and
+/// another gets worse — which survives a kernel change if the finding does and
+/// fails loudly if it stops being true.
+#[test]
+fn smooth_is_not_the_default_because_it_moves_energy_between_pitches() {
+    // 1. The decision, in the place it is made.
+    assert!(
+        !default_config().smooth_downscale,
+        "Smooth must default OFF: it is better on 2 of 6 real pages, unchanged on \
+         1 and worse on 3"
+    );
+
+    // 2. The mechanism, on a fixture that exists on a clean clone. The claim is
+    // **not** "pitch X gets worse" — a single pinned frequency is a number that
+    // goes stale the moment the kernel changes, and the previous single-pitch
+    // sweep is what produced the wrong default in the first place. The claim is
+    // the finding itself: in ONE image, widening the low-pass suppresses one
+    // pitch and promotes another. Scan for both.
+    let src = probe_multi_pitch_screentone(PROBE_W, PROBE_H, 4.0, 5.1, 30.0);
+    let fast = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
+    let smooth = resize_at(&src, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH);
+
+    let mut worst: Option<(f32, f32, f32, f32)> = None; // ratio, period, fast, smooth
+    let mut best: Option<(f32, f32, f32, f32)> = None;
+    for i in 0..=59 {
+        let p = 1.05 + i as f32 * 0.05;
+        let (a, b) = (
+            screentone_lattice_amplitude(&fast, p),
+            screentone_lattice_amplitude(&smooth, p),
+        );
+        // A ratio against a signal that is not there is not a measurement. At
+        // exactly 2.00 output px both projections read 0.000 for every strength,
+        // because that is the output Nyquist and the pattern is below it — the
+        // frequency content there is genuinely absent, not small.
+        if a < 0.05 {
+            continue;
+        }
+        let ratio = b / a;
+        if worst.map_or(true, |w| ratio > w.0) {
+            worst = Some((ratio, p, a, b));
+        }
+        if best.map_or(true, |w| ratio < w.0) {
+            best = Some((ratio, p, a, b));
+        }
+    }
+    let (w, bst) = (worst.expect("scan produced samples"), best.expect("and more"));
+
+    assert!(
+        bst.0 <= 0.70,
+        "at output period {:.2} px the widened low-pass should suppress the \
+         pattern (Fast {:.3} -> Smooth {:.3} codes, ratio {:.2}); it left {:.2}. \
+         The fixture no longer shows widening helping anywhere, so it is not a \
+         multi-pitch trade any more and this guard is decoration.",
+        bst.1, bst.2, bst.3, bst.0, bst.0
+    );
+    assert!(
+        w.0 >= 1.50,
+        "at output period {:.2} px the widened low-pass should PROMOTE the \
+         pattern (Fast {:.3} -> Smooth {:.3} codes, ratio {:.2}); it left {:.2}. \
+         This is the regression: the same widening that removes one pitch's beat \
+         creates another's, which is why the setting cannot be the default.",
+        w.1, w.2, w.3, w.0, w.0
+    );
+}
+
+/// Grey screentone with energy at **more than one pitch**, which is what real tone
+/// is and a 0/100 test lattice is not.
+///
+/// Three components, chosen so their beats land at different output periods:
+///
+/// * a base dot grid, the one a single-pitch probe sees,
+/// * a second screen at 30 degrees, whose period is incommensurate with the first,
+/// * a stochastic dither, so the pattern is not perfectly periodic and has some
+///   broadband content the way real tone does.
+///
+/// **Grey, not 0/100, deliberately.** The artefact is a grid *in a tone*, and a
+/// black-on-white lattice is a harder case that
+/// `smooth_low_passes_a_square_lattice_harder_than_fast` already covers. Measured
+/// rather than argued: see the guard above — the promoted pitch is not caused by
+/// the multi-pitch structure, but the grey field is the content the report is
+/// about and this is the fixture for it.
+fn probe_multi_pitch_screentone(
+    w: u32,
+    h: u32,
+    base_pitch: f32,
+    screen_pitch: f32,
+    screen_angle: f32,
+) -> image_viewer::ImageData {
+    let (sin30, cos30) = (std::f32::consts::PI / 180.0 * screen_angle).sin_cos();
+    // A tiny deterministic LCG: `f32::sin` of an index is fine but this keeps the
+    // dither reproducible across platforms without a dependency.
+    let mut seed = 0x2f6e_2b1u32;
+    let mut next = || {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as usize {
+        for x in 0..w as usize {
+            let (fx, fy) = (x as f32, y as f32);
+            // Base grid.
+            let g1 = if fx % base_pitch < base_pitch * 0.375
+                && fy % base_pitch < base_pitch * 0.375
+            {
+                1.0f32
+            } else {
+                0.0
+            };
+            // Angled screen: its own period along its own axis.
+            let u = (fx * cos30 + fy * sin30) % screen_pitch;
+            let v = (-fx * sin30 + fy * cos30) % screen_pitch;
+            let g2 = if u < screen_pitch * 0.314 && v < screen_pitch * 0.314 {
+                1.0f32
+            } else {
+                0.0
+            };
+            // Stochastic dither, +/- 6 codes.
+            let d = (next() - 0.5) * 12.0;
+            let v = (150.0 - 46.0 * g1 - 34.0 * g2 + d).round().clamp(0.0, 255.0) as u8;
+            let o = (y * w as usize + x) * 4;
+            rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
+        }
+    }
+    image_viewer::ImageData {
+        width: w,
+        height: h,
+        rgba,
+        load_time: std::time::Duration::ZERO,
+    }
+}
+
+/// Amplitude of a 2-D pattern at output period `p_out`, in codes, by least squares
+/// over the whole output. The same projection as `beat_amp` — this is the number
+/// the guard above is decided on, so it is a named function rather than an
+/// inline copy.
+fn screentone_lattice_amplitude(d: &image_viewer::ImageData, p_out: f32) -> f32 {
+    beat_amp(d, p_out)
 }
 
 #[test]

@@ -412,7 +412,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Load all images in folder | on | Build the queue from the whole folder on startup |
 | Linear-light downsampling | on | Resample in linear light instead of gamma space — noticeably cleaner on line art |
 | Downscale filter | Hermite | Hermite / Catrom / Lanczos3, applied live |
-| Smooth | **on** | Low-passes a downscaled page harder, so fine detail cannot fold back on itself into a dark grid. Costs a little edge sharpness — turn it off for crisper line art |
+| Smooth | off | Low-passes a downscaled page harder than the minimum, which hides a dot grid on some pages and costs edge sharpness. **Off by default** — it depends on the page. See the note below |
 | Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
 | Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB. See the note below |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
@@ -425,12 +425,21 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 The downscale filter, **Smooth** and sort mode re-decode immediately; the
 linear-light toggle applies to newly decoded images (see the known caveat below).
 
-**Smooth does not abolish the grid, it reduces it.** A page scanned at
-~2600 px carries tone finer than a 1080-px panel can show, and that detail has to
-go *somewhere*; what a wider low-pass changes is whether it lands as a
-pattern you can see. On a clean dot pattern the residue drops to near nothing;
-on real screentone roughly half of it goes and the rest is a faint texture
-rather than a grid. If you want the crispest possible line art, switch it off.
+**Smooth is off by default because it depends on the page, not because it does
+not work.** It does work, and on some pages it works well — but a wider low-pass
+does not simply remove detail, it *moves* it. On a grey tone carrying a dot
+grid, widening kills the grid's own beat and at the same time strengthens a
+longer-period beat that was nearly invisible, so one grid can disappear and
+another appear. Measured on six 2223x3109 pages at the manga half-panel target:
+better on two, unchanged on one, and worse on three, where the report was a black
+dot pattern in grey screentone that was not there before.
+
+What you get on `master` is already better than before on every page, and that
+comes from the linear-light kernel prefilter rather than from this toggle. Turn
+`Smooth` on for a page whose grid is a single even dot pattern and it will clean
+up noticeably; leave it off if your pages are screened at several angles or you
+want the crispest line art. Edges are noticeably softer with it on — about 1.7x
+wider on a hard edge.
 
 ### Why the grid thumbnail cache exists
 

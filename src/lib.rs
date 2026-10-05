@@ -198,15 +198,36 @@ pub struct Config {
     /// never measured on photographic edges, and removing a shipped setting is
     /// a worse change than adding one.
     ///
-    /// **On by default**, and `#[serde(default = "default_true")]` for the same
-    /// reason `manga_rtl` carries it: an old config has to load *and* land on
-    /// the setting that hides the artefact.
+    /// **Off by default, and that is the measured answer rather than a shrug.**
+    /// It shipped default-**on** and was a regression on real files. On six
+    /// 2223x3109 pages at the manga half-panel target, judging rendered output:
+    /// strength 2.0 was better on `32.jpg`, better on `30.jpg`, unchanged on
+    /// `52.jpg`, and **worse on `12.jpg`, `21.jpg` and `44.jpg`** - all three
+    /// reported as a black dot pattern appearing in grey screentone. Strength
+    /// 1.0, which is bit-identical to the path before the strength axis existed,
+    /// was better than `master` on **every** file.
+    ///
+    /// **Why the sweep that chose 2.0 concluded the opposite.** It measured a
+    /// uniform synthetic square lattice, where more strength is better at *every*
+    /// pitch. That is a real result and the lattice guards rest on it. Real
+    /// screentone is not that: it is a base dot grid plus at least one second
+    /// screen at an angle, often with stochastic variation over the top, so it
+    /// carries energy at several pitches at once, and widening a low-pass can
+    /// suppress one component's beat while reinforcing another's. A single-pitch
+    /// probe cannot see a trade that is defined across pitches, which is exactly
+    /// how it read as a monotone win. The trade looks inherent, so this stays a
+    /// setting instead of becoming the default: a page that wants it can have it.
+    ///
+    /// **What the improvement on every file actually came from:** the earlier,
+    /// unconditional kernel prefilter (`cb0394c`), not this field. `Fast` is
+    /// already better than `master` everywhere, so nothing here is load-bearing
+    /// for the common case.
     ///
     /// Unlike `linear_resample`, this one **does** invalidate the previews on
     /// the same frame it flips (the filter dropdown's `refilter`). A decode-time
     /// setting that leaves the cached previews alone reads as a broken toggle:
     /// the box moves, the picture does not change.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub smooth_downscale: bool,
 
     /// Hold-to-browse: arrow keys advance only as fast as images decode.
@@ -341,7 +362,7 @@ impl Config {
             sort: SortMode::Name,
             linear_resample: true,
             downscale_filter: DownscaleFilter::Hermite,
-            smooth_downscale: true,
+            smooth_downscale: false,
             block_while_loading: false,
             wheel_navigation: false,
             loop_back: true,
@@ -7125,12 +7146,12 @@ fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8> {
     // would let the two halves disagree, i.e. resize with a prefilter of one
     // width feeding a final pass of another. Read once, thread it.
     let strength = downscale_strength();
+    let pre_w = prefilter_dim(data.width, new_w);
+    let pre_h = prefilter_dim(data.height, new_h);
 
     // Pass 1: reduce to at most 2x the target, in linear light, then convert
     // *that* to 12-bit linear. The conversion is the expensive part, so it must
     // not run over the full-resolution source.
-    let pre_w = prefilter_dim(data.width, new_w);
-    let pre_h = prefilter_dim(data.height, new_h);
     let t0 = std::time::Instant::now();
     let (small, lw, lh): (Cow<'_, [u8]>, u32, u32) = if pre_w < data.width || pre_h < data.height {
         (

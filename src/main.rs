@@ -6111,7 +6111,7 @@ impl eframe::App for MyApp {
                 if ui
                     .checkbox(
                         &mut self.config.smooth_downscale,
-                        "Smooth: keep fine detail from forming a grid",
+                        "Smooth: soften the downscale to hide a dot grid",
                     )
                     .changed()
                 {
@@ -6128,17 +6128,22 @@ impl eframe::App for MyApp {
                     // documented counter-example of what happens without it.
                     refilter = true;
                 }
-                // **Says "noticeably softer", not "a little softer", because the
-                // measured cost is a 1.71x wider step edge** - that is the
-                // trade being offered and a reader deciding between these two
-                // boxes is entitled to know its size. Overstating the benefit
-                // would be the same defect as hiding the cost.
+                // **Says the cost is real, and says it is not a clear win.** The
+                // label used to claim Smooth keeps a grid from forming, which is
+                // only half of what it does: on pages whose greys are screened at
+                // more than one pitch it can bring a grid *out* instead. It is
+                // off by default for exactly that reason, so this text is what a
+                // reader has to go on when they turn it on, and promising a
+                // one-sided win here would be the same defect as hiding the cost.
+                // The 1.71x figure is the measured step-edge softening and is
+                // still true; it is quoted so the trade's size is on the screen.
                 ui.small(
-                    "A downscaled page's fine detail folds back on itself into a \
-                     grid of dark and light. Smooth low-passes harder to stop it; \
-                     it does not remove it entirely, and edges come out \
-                     noticeably softer. Fast keeps the picture crisper and the \
-                     grid visible.",
+                    "Off by default. A downscaled page's fine detail can fold back \
+                     on itself into a grid of dark and light. Smooth low-passes \
+                     harder: it hides that grid on a page screened at a single \
+                     pitch, and can bring one out on a page whose tones use more \
+                     than one, and edges come out noticeably softer. Fast is \
+                     crisper.",
                 );
                 if ui
                     .checkbox(
