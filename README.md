@@ -324,6 +324,23 @@ should not quietly do that.
 | Mouse side buttons | Same as `←` / `→` |
 | Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
 
+### User commands (beta)
+
+> **Beta.** `Ctrl+1`..`Ctrl+9` runs an external program against the picture on
+> screen, configured in Settings → User commands. `mspaint.exe` with args
+> `{file}` opens the current picture in Paint. Empty args passes the file;
+> no quotes needed (there is no shell — quotes would arrive as literal `"`
+> characters). Spawns are detached, never waited on, and rate-limited to one
+> a second; chords fire on physical presses only, so holding one cannot
+> spawn a storm. One thing is open, written up in `TODO.md` §8:
+>
+> - **A hard freeze opening Paint was reported twice and is parked.**
+>   Spawning itself is exonerated (a `cmd.exe` command runs exactly once, and
+>   the same file double-clicked in Explorer opens fine), and every freeze
+>   came from a build predating the repeat and cooldown guards — but it was
+>   never confirmed fixed on a current build, so the feature stays beta
+>   until it is.
+
 ### Manga mode (beta)
 
 > **Beta.** The pairing, the layout, the keys and full-resolution tiles on both
