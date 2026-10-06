@@ -4435,21 +4435,52 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
     );
 }
 
-/// Adopting a preview must not clobber an absolute zoom in fit-window mode:
-/// `sync_shown` snapping `view.fit` on every arrival compounded per visit
-/// into a shrinking spiral (ratios decaying visit by visit with the window
-/// following) while every reset correctly computed 1.0. Mode off keeps the
-/// shipped per-image fit.
+/// Adopting a preview follows the view modes: fit-window owns the zoom
+/// absolutely (its arrival reset), 1:1 pins it below, fit-view fits it here
+/// — anything else leaves the zoom alone, so photos open at 100% instead of
+/// maximized and an absolute zoom survives navigation. (An unconditional snap
+/// here once compounded per visit into a shrinking spiral while every reset
+/// correctly computed 1.0.)
 #[test]
-fn adoption_does_not_reset_fit_in_fit_window_mode() {
+fn adoption_follows_the_view_modes() {
     let src = include_str!("../src/main.rs");
     let at = src
         .find("fn sync_shown(&mut self")
         .expect("sync_shown must exist");
     let body = &src[at..(at + 2500).min(src.len())];
     assert!(
-        body.contains("!self.config.fit_window_mode") && body.contains("self.view.fit = true"),
-        "the adoption fit-snap must stand down while the mode owns the zoom"
+        body.contains("self.config.fit_mode") && body.contains("self.view.fit = true"),
+        "adoption must fit only in fit-view mode, never unconditionally"
+    );
+}
+
+/// The three view modes exclude each other, arrivals in 1:1 pin the first
+/// preset, and both toggles exist with notices. `T` clearing its siblings
+/// is covered by the sticky scan; this covers the other two directions.
+#[test]
+fn view_modes_are_exclusive_and_arrivals_pin_one_to_one() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn toggle_fit_mode(&mut self)")
+            && src.contains("fn toggle_one_mode(&mut self"),
+        "both toggles must exist"
+    );
+    for (arm, cleared) in [
+        ("self.config.fit_mode = !self.config.fit_mode", "self.config.one_mode = false"),
+        ("self.config.one_mode = !self.config.one_mode", "self.config.fit_mode = false"),
+    ] {
+        let at = src.find(arm).expect("toggle arm must exist");
+        let body = &src[at..(at + 1200).min(src.len())];
+        assert!(
+            body.contains(cleared),
+            "a mode switched on must switch its sibling off"
+        );
+    }
+    let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
+    let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
+    assert!(
+        goto.contains("self.config.one_mode") && goto.contains("zoom_preset(&self.config.zoom_presets, 0)"),
+        "arrivals in 1:1 mode must reset to the first preset"
     );
 }
 

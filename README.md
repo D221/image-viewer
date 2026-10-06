@@ -300,10 +300,10 @@ should not quietly do that.
 | `Enter` | In the grid: open the selected image |
 | `Home` / `End` | First / last image (in the grid: first / last cell) |
 | `G` | Toggle the gallery grid |
-| `F` | Fit to window |
+| `F` | Toggle fit-view mode (every image fitted; mutually exclusive with `T` and `1`) |
 | `Shift+F` | Fill window (crop overflow, single image only) |
-| `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
-| `2`–`4` | Zoom presets 2–4 (2×, 4×, 8× by default) |
+| `1` | Toggle 1:1 mode (arrivals pinned at preset 1, window stable; `2`–`4` stay one-shot) |
+| `2`–`4` | Zoom presets 2–4 (2×, 4×, 8× by default; one-shot, temporary in 1:1 mode) |
 | `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor). On fits now, arrivals refit, zooms re-hug |
 | `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
 | `K` | Pause / resume the animation |
@@ -475,7 +475,9 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Slideshow | off, every 3 s | Start/stop button plus pace (1–60 s). Advances until toggled off, or stops at the end with looping off |
 | Esc closes the app | on | Esc in crop mode drops the frame first; with this off Esc never quits |
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
-| Zoom keys 1-4 | 1×, 2×, 4×, 8× | Fixed zoom ratios as source-pixel multiples |
+| Zoom keys 1-4 | 1× toggles 1:1 mode, 2×-8× one-shot jumps (all configurable) |
+| Fit view | off | Sticky fit-to-window (`F`); mutually exclusive with `T` and `1`. Photos open at 100% with everything off |
+| 1:1 mode | off | Arrivals pinned at preset 1, window stable (`1`); same exclusion |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
 | Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |

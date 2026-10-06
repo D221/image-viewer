@@ -229,7 +229,7 @@ const BARE_LETTERS: &[(&str, &str)] = &[
         "right-to-left page order - view only, a bool in config.json",
     ),
     ("E", "reveal the containing folder in Explorer - read-only"),
-    ("F", "fit the image to the window - view only"),
+    ("F", "toggle fit-view mode - view only"),
     ("G", "toggle the gallery grid - view only"),
     ("I", "toggle the side and bottom panels - view only"),
     ("K", "pause/resume the animation - view only"),
