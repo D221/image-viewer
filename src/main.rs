@@ -1526,6 +1526,12 @@ struct MyApp {
     exif_info: Option<String>,
     exif_loading: bool,
     show_panels: bool,
+    /// Left (EXIF) and right (settings) panes individually. `show_panels`
+    /// (`I`) is the master: a pane paints only when both its flag and the
+    /// master are on. Toggled by `L` and `P`, view-only like every other
+    /// bare letter. Session state, like the master — a restart re-shows both.
+    show_left: bool,
+    show_right: bool,
     next_scan: Instant, // periodic folder rescan (watcher)
     /// When an external process was last spawned (user command, Explorer).
     /// Rate-limits spawns so a repeating chord can never fork-bomb the
@@ -1812,6 +1818,8 @@ impl MyApp {
             exif_info: None,
             exif_loading: false,
             show_panels: true,
+            show_left: true,
+            show_right: true,
             next_scan: Instant::now() + RESCAN_INTERVAL,
             last_external_spawn: None,
             checker: Some(make_checker_texture(ctx)),
@@ -2537,8 +2545,12 @@ impl MyApp {
                 // Hidden panel: nobody can read the result, and the read is a
                 // whole-file `fs::read` on a worker a decode is waiting for. The
                 // panel asks for its own data when it is drawn, so this being
-                // false costs nothing but the work it saves.
-                wants_exif: image_viewer::wants_exif(self.show_panels, self.exif_loading),
+                // false costs nothing but the work it saves. Effective
+                // visibility: the master *and* the left pane.
+                wants_exif: image_viewer::wants_exif(
+                    self.show_panels && self.show_left,
+                    self.exif_loading,
+                ),
                 wants_full: self.full_due.is_none()
                     && self.needs_full(&ImgKey {
                         path: cur.clone(),
@@ -6170,7 +6182,7 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, explore, reload, wall, save_rot, save_screen, crop_key) = ctx.input(|i| {
+        let (del, explore, reload, wall, save_rot, save_screen, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
                 i.key_pressed(egui::Key::E),
@@ -6186,6 +6198,10 @@ impl eframe::App for MyApp {
                 // unaffected: the chord interception is on the press *with*
                 // a modifier, and this is the press without one.
                 i.key_pressed(egui::Key::C) && !i.modifiers.any(),
+                // Bare `L` / `P` hide one side pane each. View-only like the
+                // rest of this tuple, so `BARE_LETTERS` covers them.
+                i.key_pressed(egui::Key::L) && !i.modifiers.any(),
+                i.key_pressed(egui::Key::P) && !i.modifiers.any(),
             )
         });
         // Mouse side buttons: back = previous image, forward = next image.
@@ -6297,6 +6313,17 @@ impl eframe::App for MyApp {
             if toggle {
                 self.suppress_resize_redecode = true;
                 self.show_panels = !self.show_panels;
+            }
+            // Individual panes. `suppress_resize_redecode` like the master:
+            // removing a side pane grows the central panel, which must not
+            // read as image growth and re-decode.
+            if pane_left {
+                self.suppress_resize_redecode = true;
+                self.show_left = !self.show_left;
+            }
+            if pane_right {
+                self.suppress_resize_redecode = true;
+                self.show_right = !self.show_right;
             }
             if grid {
                 self.toggle_gallery();
@@ -6513,6 +6540,14 @@ impl eframe::App for MyApp {
                         self.suppress_resize_redecode = true;
                         self.show_panels = !self.show_panels;
                     }
+                    if ui.button("Left (L)").clicked() {
+                        self.suppress_resize_redecode = true;
+                        self.show_left = !self.show_left;
+                    }
+                    if ui.button("Right (P)").clicked() {
+                        self.suppress_resize_redecode = true;
+                        self.show_right = !self.show_right;
+                    }
                     if ui.button("Delete (Del)").clicked() {
                         self.delete_current(ctx);
                     }
@@ -6542,18 +6577,23 @@ impl eframe::App for MyApp {
             });
         }
 
-        if self.show_panels {
+        if self.show_panels && self.show_left {
             egui::Panel::left("exif").show(ui, |ui| {
                 ui.heading("EXIF");
                 // The panel is the only thing that shows this, so it is also the
-                // only thing that should ask for it. Asking here rather than
+                // only thing that should ask for it. The gate is the *effective*
+                // visibility — master and left flag — so hiding the pane stops
+                // the read the same way `I` does. Asking here rather than
                 // trusting the plan is what makes leaving fullscreen work: the
                 // frame the panel comes back on is the frame the read starts, so
                 // there is no "Loading EXIF…" with nothing behind it. `push`
                 // dedups against queued and running work, and it is not in the
                 // queue's `wanted` set — which is fine, because a rebuild that
                 // drops it is followed by this same line on the next frame.
-                if image_viewer::wants_exif(self.show_panels, self.exif_loading) {
+                if image_viewer::wants_exif(
+                    self.show_panels && self.show_left,
+                    self.exif_loading,
+                ) {
                     if let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) {
                         self.loader.push(Job {
                             // EXIF describes the file, so it is read once and not
@@ -6596,6 +6636,7 @@ impl eframe::App for MyApp {
 
             let mut resort = false;
             let mut refilter = false;
+            if self.show_panels && self.show_right {
             egui::Panel::right("settings").show(ui, |ui| {
                 ui.heading("Settings");
                 // The panel long outgrew the window height (renderer, resample,
@@ -7093,6 +7134,7 @@ impl eframe::App for MyApp {
                 ui.small(format!("Build {}", env!("IV_BUILD_ID")));
                 });
             });
+            }
             if resort {
                 self.notice = Some(format!(
                     "Sorted by {:?}{}",

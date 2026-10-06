@@ -304,6 +304,7 @@ should not quietly do that.
 | `Shift+F` | Fill window (crop overflow, single image only) |
 | `1` | 100% (1 image pixel = 1 screen pixel) |
 | `I` | Toggle the side and bottom panels |
+| `L` / `P` | Toggle the left (EXIF) / right (settings) pane alone |
 | `/` | Focus the filter box |
 | `F11` | Fullscreen |
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |

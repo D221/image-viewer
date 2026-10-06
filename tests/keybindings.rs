@@ -232,12 +232,14 @@ const BARE_LETTERS: &[(&str, &str)] = &[
     ("F", "fit the image to the window - view only"),
     ("G", "toggle the gallery grid - view only"),
     ("I", "toggle the side and bottom panels - view only"),
+    ("L", "toggle the left (EXIF) pane - view only"),
     ("M", "manga mode - view only, a bool in config.json"),
     (
         "O",
         "lead-lone offset - writes only to spreads.json under %LOCALAPPDATA%, a file \
          this app owns, so it cannot touch a user's images",
     ),
+    ("P", "toggle the right (settings) pane - view only"),
     ("R", "rescan the folder - read-only"),
     (
         "W",
