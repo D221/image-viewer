@@ -4778,7 +4778,10 @@ impl MyApp {
         } else {
             self.view.offset
         };
-        scale = scale.clamp(fit_scale, max_scale);
+        // Free zoom-out: the floor is effectively zero rather than the fit
+        // scale, so the picture can shrink below the window. Centering below
+        // fit comes from the pan bounds, not from snapping back.
+        scale = scale.clamp(1e-4, max_scale);
 
         // --- input: zoom (wheel / pinch), pan (drag), shortcuts ---
         let hover = resp.hover_pos();
@@ -4867,7 +4870,8 @@ impl MyApp {
             self.fit_wrap_pending = true;
             self.fit_iters = 6;
         }
-        let target_scale = target_scale.clamp(fit_scale, max_scale);
+        // Free zoom-out, input side: matches the floor above.
+        let target_scale = target_scale.clamp(1e-4, max_scale);
         if (target_scale - scale).abs() > f32::EPSILON {
             // Zooming in: the visible content gets sharper. Time it from the
             // input, not from when the tiles happen to finish.
@@ -4991,7 +4995,10 @@ impl MyApp {
         offset.x = offset.x.clamp(off_lo[0], off_hi[0]);
         offset.y = offset.y.clamp(off_lo[1], off_hi[1]);
 
-        let at_fit = scale <= fit_scale * 1.0001;
+        // Fit mode is explicit only (F key, fit-window shrink, turns): never
+        // re-engaged by proximity, which used to forget the zoom on the next
+        // frame and read as a rubberband blocking zoom-out.
+        let at_fit = false;
         if at_fit {
             offset = Vec2::ZERO;
         }
