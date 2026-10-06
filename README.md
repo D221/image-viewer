@@ -302,7 +302,10 @@ should not quietly do that.
 | `G` | Toggle the gallery grid |
 | `F` | Fit to window |
 | `Shift+F` | Fill window (crop overflow, single image only) |
-| `1` | 100% (1 image pixel = 1 screen pixel) |
+| `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
+| `2`–`4` | Zoom presets 2–4 (2×, 4×, 8× by default) |
+| `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
+| `K` | Pause / resume the animation |
 | `I` | Toggle the side and bottom panels |
 | `L` / `P` | Toggle the left (EXIF) / right (settings) pane alone |
 | `/` | Focus the filter box |
@@ -311,8 +314,8 @@ should not quietly do that.
 | `C` | Toggle crop mode |
 | `Del` | Move to the Recycle Bin (never a hard delete) |
 | `E` `W` `R` | Explore folder, wallpaper, reload folder |
-| `M` | Toggle **manga mode** — show images as turns of one or two pages |
-| `D` | Toggle **right-to-left** pages (only while manga mode is on) |
+| `M` | Toggle **double page mode** — show images as turns of one or two pages |
+| `D` | Toggle **right-to-left** pages (only while double page mode is on) |
 | `O` / `Shift+O` | One fewer / one more page opening alone at the front of the gallery |
 | `X` | Toggle the current page between single and double (takes a whole turn to itself) |
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
@@ -471,7 +474,10 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Slideshow | off, every 3 s | Start/stop button plus pace (1–60 s). Advances until toggled off, or stops at the end with looping off |
 | Esc closes the app | on | Esc in crop mode drops the frame first; with this off Esc never quits |
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
+| Zoom keys 1-4 | 1×, 2×, 4×, 8× | Fixed zoom ratios as source-pixel multiples |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
+| Always on top | off | Keep the window above all others. Applies on restart |
+| Hide title bar | off | No title bar or borders (move with Win+arrows). Applies on restart |
 | Keys | defaults | Rebind the five navigation keys (`next`, `prev`, `next_alt`, `page_next`, `page_prev`) to any of ArrowRight/ArrowLeft/Space/PageDown/PageUp. Meanings never change, so manga direction still holds |
 | User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
 

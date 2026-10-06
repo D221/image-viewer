@@ -473,6 +473,21 @@ request — do not ask them to re-test; the one experiment below can wait.
 
 ---
 
+## 9. Fit window to image (immersive `I`)
+
+With the panels off, shrink the window to the picture instead of leaving a
+black hole around it — the immersive mode to `I`'s chrome toggle. Requested,
+not started.
+
+What is *known*: `fit_scale` and the panel geometry already exist, and
+`suppress_resize_redecode` is the mechanism that stops a layout change from
+reading as image growth. What is *undecided*: whether the window follows
+every image (a dancing window while flipping) or only on toggle, and minimum
+window sizes. Do not build it as a resize per navigation without answering
+that first.
+
+---
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several

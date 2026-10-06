@@ -372,9 +372,19 @@ fn main() -> eframe::Result<()> {
     // config each time, so a restart keeps the folder, sort mode and settings
     // but loses the in-memory preview cache and has to decode again.
     loop {
+        // Window chrome from config: always-on-top and title-bar-less are
+        // creation-time properties (egui 0.36 has builder calls but no live
+        // commands for them), so like the worker count they apply on restart.
+        let mut viewport = egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0]);
+        if config.always_on_top {
+            viewport = viewport.with_always_on_top();
+        }
+        if config.hide_title_bar {
+            viewport = viewport.with_decorations(false);
+        }
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1280.0, 800.0])
+            viewport: viewport
                 // The window icon, set at creation rather than afterwards.
                 //
                 // This is the whole fix, and it took four attempts to find the
@@ -1379,6 +1389,10 @@ struct AnimView {
     tex: TextureHandle,
     start: Instant,
     last_index: usize,
+    /// Paused on this frame (`,` / `.` / `K`). `None` while playing, in
+    /// which case the clock rules. Set, not derived, so stepping twice never
+    /// re-asks the clock for a frame it just left.
+    paused: Option<usize>,
 }
 
 struct Tile {
@@ -3003,6 +3017,7 @@ impl MyApp {
                         tex,
                         start: Instant::now(),
                         last_index: usize::MAX,
+                        paused: None,
                     });
                 }
             }
@@ -3640,6 +3655,47 @@ impl MyApp {
         true
     }
 
+    /// Step the on-screen animation one frame (`,` back, `.` forward,
+    /// YouTube-style) and pause on it. Wraps at both ends — animations loop,
+    /// so stepping never gets stuck. Without an animation on screen this is
+    /// nothing, which is also what the grid does with it.
+    fn step_animation(&mut self, forward: bool) {
+        let shown_path = self.shown.as_ref().map(|k| k.path.clone());
+        let Some(av) = self
+            .anim
+            .as_mut()
+            .filter(|a| Some(&a.path) == shown_path.as_ref())
+        else {
+            return;
+        };
+        let n = av.anim.frames.len();
+        let cur = av
+            .paused
+            .unwrap_or_else(|| anim_frame_state(&av.anim, av.start.elapsed()).0);
+        av.paused = Some(image_viewer::step_frame(n, cur.min(n.saturating_sub(1)), forward));
+    }
+
+    /// Pause or resume the on-screen animation (`K`). Resuming rewinds the
+    /// clock to the held frame's start, so playback continues mid-loop
+    /// instead of restarting.
+    fn toggle_animation_play(&mut self) {
+        let now = Instant::now();
+        let shown_path = self.shown.as_ref().map(|k| k.path.clone());
+        let Some(av) = self
+            .anim
+            .as_mut()
+            .filter(|a| Some(&a.path) == shown_path.as_ref())
+        else {
+            return;
+        };
+        if let Some(held) = av.paused.take() {
+            av.start = now - image_viewer::anim_frame_start(&av.anim, held);
+        } else {
+            let idx = anim_frame_state(&av.anim, av.start.elapsed()).0;
+            av.paused = Some(idx);
+        }
+    }
+
     /// Print the file on screen through its registered handler
     /// ([`image_viewer::print_file`], the OS `print` verb — usually the
     /// Photos print view). The *file*, not the view: crops and turns are not
@@ -4194,6 +4250,16 @@ impl MyApp {
             }
             if let Some(anim) = &pv.anim {
                 s += &format!(" - anim {} frames", anim.frames.len());
+                // Paused frame, so stepping shows where it landed. Read off
+                // the player, not the preview: the preview never pauses.
+                if let Some(held) = self
+                    .anim
+                    .as_ref()
+                    .filter(|a| a.path == shown_key.path)
+                    .and_then(|a| a.paused)
+                {
+                    s += &format!(" (paused {}/{})", held + 1, anim.frames.len());
+                }
             } else {
                 match &self.full {
                     Some(f) if self.shown.as_ref().is_some_and(|k| f.path == k.path) => {
@@ -4406,20 +4472,36 @@ impl MyApp {
             )
         };
         let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown.path) {
-            // Advance to the current frame and repaint at its boundary.
-            let (idx, next_in) = anim_frame_state(&av.anim, av.start.elapsed());
-            if idx != av.last_index {
-                let f = &av.anim.frames[idx];
-                av.tex.set(
-                    ColorImage::from_rgba_unmultiplied(
-                        [f.width as usize, f.height as usize],
-                        &f.rgba,
-                    ),
-                    TextureOptions::LINEAR,
-                );
-                av.last_index = idx;
+            // Paused: hold the chosen frame and schedule nothing. Playing:
+            // advance to the current frame and repaint at its boundary.
+            if let Some(held) = av.paused {
+                if held != av.last_index {
+                    if let Some(f) = av.anim.frames.get(held) {
+                        av.tex.set(
+                            ColorImage::from_rgba_unmultiplied(
+                                [f.width as usize, f.height as usize],
+                                &f.rgba,
+                            ),
+                            TextureOptions::LINEAR,
+                        );
+                        av.last_index = held;
+                    }
+                }
+            } else {
+                let (idx, next_in) = anim_frame_state(&av.anim, av.start.elapsed());
+                if idx != av.last_index {
+                    let f = &av.anim.frames[idx];
+                    av.tex.set(
+                        ColorImage::from_rgba_unmultiplied(
+                            [f.width as usize, f.height as usize],
+                            &f.rgba,
+                        ),
+                        TextureOptions::LINEAR,
+                    );
+                    av.last_index = idx;
+                }
+                ctx.request_repaint_after(next_in);
             }
-            ctx.request_repaint_after(next_in);
             (av.tex.id(), av.anim.frames[0].width as f32)
         } else {
             (tex_id, tex_w)
@@ -4510,13 +4592,23 @@ impl MyApp {
 
         // --- input: zoom (wheel / pinch), pan (drag), shortcuts ---
         let hover = resp.hover_pos();
-        let (scroll, pinch, key_fit, key_fill, key_100) = ui.input(|i| {
+        // Fixed zoom presets on `1`–`4`, each a configurable source-pixel
+        // ratio (`1` keeps the shipped meaning: 100%). Read as one option so
+        // the dispatch below has a single branch rather than four.
+        let (scroll, pinch, key_fit, key_fill, preset) = ui.input(|i| {
             (
                 i.smooth_scroll_delta.y,
                 i.zoom_delta(),
                 i.key_pressed(egui::Key::F) && !i.modifiers.shift,
                 i.key_pressed(egui::Key::F) && i.modifiers.shift,
-                i.key_pressed(egui::Key::Num1),
+                [
+                    egui::Key::Num1,
+                    egui::Key::Num2,
+                    egui::Key::Num3,
+                    egui::Key::Num4,
+                ]
+                .iter()
+                .position(|k| i.key_pressed(*k)),
             )
         });
 
@@ -4551,8 +4643,10 @@ impl MyApp {
         }
         let mut target_scale = scale * factor;
         let anchor = hover.unwrap_or(panel.center());
-        if key_100 {
-            target_scale = 1.0 / ppp; // 1 source pixel = 1 physical pixel
+        if let Some(i) = preset {
+            // Absolute ratio, not a multiplier: 1.0 is one source pixel per
+            // physical pixel, whatever the fit is.
+            target_scale = image_viewer::zoom_preset(&self.config.zoom_presets, i) / ppp;
         }
         if key_fit || resp.double_clicked() {
             target_scale = fit_scale;
@@ -6285,6 +6379,17 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::X) && !i.modifiers.any(),
             )
         });
+        // Animation frame stepping (`,` back, `.` forward, YouTube-style) and
+        // play/pause (`K`). All bare and all view-only — stepping pauses onto
+        // a frame rather than writing anything — so `K` joins `BARE_LETTERS`
+        // (`bound_bare` only scans A–Z, which is why `,`/`.` need no entry).
+        let (anim_back, anim_fwd, anim_toggle) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Comma) && !i.modifiers.any(),
+                i.key_pressed(egui::Key::Period) && !i.modifiers.any(),
+                i.key_pressed(egui::Key::K) && !i.modifiers.any(),
+            )
+        });
         // User commands (Tier 1 #2): Ctrl+1..9 runs the nth entry in
         // `Config::user_commands`. Read as one `Option<usize>` so the dispatch
         // below has a single branch rather than nine.
@@ -6431,6 +6536,15 @@ impl eframe::App for MyApp {
             }
             if shape_key {
                 self.toggle_cursor_shape(ctx);
+            }
+            // Animation stepping pauses onto the stepped frame; `K` resumes.
+            // No-ops without an animation on screen, grid included.
+            if anim_back {
+                self.step_animation(false);
+            } else if anim_fwd {
+                self.step_animation(true);
+            } else if anim_toggle {
+                self.toggle_animation_play();
             }
             if lead_down {
                 self.nudge_lead_lone(-1, ctx);
@@ -6933,6 +7047,22 @@ impl eframe::App for MyApp {
                 {
                     self.config.save(&self.config_path);
                 }
+                // Fixed zoom ratios on `1`–`4`, as source-pixel multiples
+                // (`1` is 100%). `zoom_preset` clamps on read, so anything
+                // typed here stays sane.
+                ui.horizontal(|ui| {
+                    ui.label("Zoom keys 1-4:");
+                    let mut changed = false;
+                    for (n, z) in self.config.zoom_presets.iter_mut().enumerate() {
+                        ui.label(format!("{}:", n + 1));
+                        changed |= ui
+                            .add(egui::DragValue::new(z).range(0.1..=32.0).speed(0.1))
+                            .changed();
+                    }
+                    if changed {
+                        self.config.save(&self.config_path);
+                    }
+                });
                 if ui
                     .checkbox(
                         &mut self.config.wheel_navigation,
@@ -6987,6 +7117,21 @@ impl eframe::App for MyApp {
                     }.into());
                 }
                 ui.small("On: a second launch exits instead of fighting over the archive temp dir. Applies on restart.");
+                // Window chrome: creation-time properties with no live command
+                // in egui 0.36, so both apply on restart like the worker count.
+                if ui
+                    .checkbox(&mut self.config.always_on_top, "Always on top")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                }
+                if ui
+                    .checkbox(&mut self.config.hide_title_bar, "Hide title bar")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                }
+                ui.small("Both apply on restart. Without a title bar there is no drag handle — Win+arrows still move the window.");
                 ui.add_space(6.0);
                 // ---- keys ---------------------------------------------------
                 //

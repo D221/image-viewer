@@ -4286,12 +4286,80 @@ fn user_command_with_no_args_gets_the_file() {
 /// Slideshow pacing: due once the interval has passed, never early, and a
 /// zero interval floors at one second rather than strobing every frame.
 #[test]
-fn slideshow_advances_only_when_due() {    let now = std::time::Instant::now();
+fn slideshow_advances_only_when_due() {
+    let now = std::time::Instant::now();
     let ago = now - std::time::Duration::from_secs(10);
     assert!(image_viewer::slideshow_due(ago, now, 3));
     assert!(!image_viewer::slideshow_due(now, now, 3));
     assert!(image_viewer::slideshow_due(ago, now, 0));
     assert!(!image_viewer::slideshow_due(now, now, 0));
+}
+
+/// Frame stepping wraps at both ends and never divides by zero; resume
+/// offsets sum the same floored delays the paint clock uses; presets clamp
+/// to the sane range.
+#[test]
+fn stepping_wraps_and_presets_clamp() {
+    assert_eq!(image_viewer::step_frame(5, 4, true), 0);
+    assert_eq!(image_viewer::step_frame(5, 0, false), 4);
+    assert_eq!(image_viewer::step_frame(5, 2, true), 3);
+    assert_eq!(image_viewer::step_frame(0, 0, true), 0);
+    assert_eq!(image_viewer::step_frame(0, 7, false), 0);
+
+    let anim = image_viewer::Animation {
+        frames: Vec::new(),
+        delays: vec![
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(0),
+            std::time::Duration::from_millis(50),
+        ],
+    };
+    // 100 + floored-20 + 0 before frame 2: the middle delay floors like
+    // `total_duration` floors it, or resume disagrees with paint.
+    assert_eq!(
+        image_viewer::anim_frame_start(&anim, 2),
+        std::time::Duration::from_millis(120)
+    );
+    assert_eq!(
+        image_viewer::anim_frame_start(&anim, 99),
+        std::time::Duration::from_millis(170)
+    );
+
+    assert_eq!(image_viewer::zoom_preset(&[1.0, 2.0, 4.0, 8.0], 0), 1.0);
+    assert_eq!(image_viewer::zoom_preset(&[1.0, 2.0, 4.0, 8.0], 9), 8.0);
+    assert_eq!(image_viewer::zoom_preset(&[0.0, -3.0, 100.0, 2.0], 0), 0.1);
+    assert_eq!(image_viewer::zoom_preset(&[0.0, -3.0, 100.0, 2.0], 2), 32.0);
+}
+
+/// Animation stepping and window chrome must be **wired**: `,`/`.`/`K` reach
+/// the frame methods, `1`–`4` reach the presets, and both window flags reach
+/// the viewport builder. `main.rs` is unreachable from every test, so these
+/// are source scans - the established pattern here.
+#[test]
+fn the_animation_keys_presets_and_chrome_are_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.step_animation(false)")
+            && src.contains("self.step_animation(true)")
+            && src.contains("self.toggle_animation_play()"),
+        "`,`/`.`/`K` must reach the animation frame methods"
+    );
+    assert!(
+        src.contains("egui::Key::Comma") && src.contains("egui::Key::Period"),
+        "stepping must be bound to comma and period"
+    );
+    assert!(
+        src.contains("zoom_preset(&self.config.zoom_presets"),
+        "`1`–`4` must read the configured presets"
+    );
+    assert!(
+        src.contains("with_always_on_top()") && src.contains("with_decorations(false)"),
+        "both window flags must reach the viewport builder"
+    );
+    assert!(
+        src.contains("self.config.always_on_top") && src.contains("self.config.hide_title_bar"),
+        "both window flags must be offered in Settings"
+    );
 }
 
 /// Slideshow must be **wired**: a toggle plus pace in Settings, a tick that

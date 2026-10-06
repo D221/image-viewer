@@ -368,6 +368,27 @@ pub struct Config {
     /// and 0 would mean "advance every frame". `default_slideshow_secs`.
     #[serde(default = "default_slideshow_secs")]
     pub slideshow_secs: u32,
+
+    /// Zoom ratios on keys `1`–`4`, as source-pixel ratios (1.0 is 100%).
+    /// Read through [`zoom_preset`], which clamps.
+    #[serde(default = "default_zoom_presets")]
+    pub zoom_presets: [f32; 4],
+
+    /// Keep the window above all others. Applied when the window is created,
+    /// so this takes effect on restart like the worker count.
+    #[serde(default)]
+    pub always_on_top: bool,
+
+    /// Hide the title bar and borders. Applied when the window is created,
+    /// so this takes effect on restart. Without a drag handle the window is
+    /// moved with Win+arrows instead — toggle back to drag it.
+    #[serde(default)]
+    pub hide_title_bar: bool,
+}
+
+/// `1` keeps the shipped meaning (100%), then doubling to 8×.
+fn default_zoom_presets() -> [f32; 4] {
+    [1.0, 2.0, 4.0, 8.0]
 }
 
 /// Three seconds: JPEGView's middle preset, and slow enough to actually see
@@ -524,6 +545,9 @@ impl Config {
             keys: std::collections::HashMap::new(),
             user_commands: Vec::new(),
             slideshow_secs: default_slideshow_secs(),
+            zoom_presets: default_zoom_presets(),
+            always_on_top: false,
+            hide_title_bar: false,
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {
@@ -5815,6 +5839,46 @@ impl Animation {
             .sum();
         Duration::from_millis(ms)
     }
+}
+
+/// One frame step for a paused animation (`,` / `.`, YouTube-style):
+/// the frame after/before `idx`, wrapping at both ends. Animations loop,
+/// so stepping never gets stuck. Zero frames (unreachable in practice —
+/// an animation with no frames is never built) stays 0 rather than
+/// dividing by zero.
+pub fn step_frame(n: usize, idx: usize, forward: bool) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    if forward {
+        (idx + 1) % n
+    } else {
+        (idx + n.saturating_sub(1)) % n
+    }
+}
+
+/// When frame `idx` starts, from loop origin: the floored delays before it.
+///
+/// Resuming a paused animation rewinds `start` by this, so playback
+/// continues mid-loop instead of restarting — the same flooring
+/// `total_duration` uses, or the resume point and the paint clock disagree
+/// about which frame is on screen.
+pub fn anim_frame_start(anim: &Animation, idx: usize) -> Duration {
+    let ms: u64 = anim
+        .delays
+        .iter()
+        .take(idx.min(anim.delays.len()))
+        .map(|d| d.as_millis().max(20) as u64)
+        .sum();
+    Duration::from_millis(ms)
+}
+
+/// A zoom preset (keys `1`–`4`) as a source-pixel ratio: 1.0 is 100%.
+/// Clamped to the sane range so a hand-edited config cannot park a key at
+/// 0× (a divide-by-zero downstream) or 1000×. The draw path clamps again
+/// against the fit scale, so this is config hygiene, not layout.
+pub fn zoom_preset(presets: &[f32; 4], i: usize) -> f32 {
+    presets[i.min(3)].clamp(0.1, 32.0)
 }
 
 /// Decode an animation into composited frames, capped at the limits above.
