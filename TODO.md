@@ -432,6 +432,47 @@ that is worth knowing before anyone reports the fix as incomplete.
 
 ---
 
+## 8. UserCmd `mspaint.exe` freeze — parked, one open question
+
+Ctrl+1 with program `mspaint.exe` (empty args, later `{file}`) froze the whole
+box hard enough to need a reset. Twice. Investigation parked at the reporter's
+request — do not ask them to re-test; the one experiment below can wait.
+
+### Known, verified
+
+- The original freeze mechanism was real and is fixed twice over: the chord
+  went through `key_pressed`, which fires on OS key-repeat, so a held Ctrl+1
+  spawned one Paint per frame. Now the chord takes only `repeat: false`
+  events (traced winit → egui-winit → egui core marking) and every spawn site
+  shares a 1/s `SPAWN_COOLDOWN`. Both would have to fail at once to storm.
+- The spawn path itself is exonerated by the reporter's own test: `cmd.exe`
+  `/c echo hi` via the chord spawns exactly once. Chord, expansion and spawn
+  all behaved.
+- Paint × that file is exonerated too: double-clicking the same file in
+  Explorer opens it in Paint with no freeze.
+
+### Unverified, and it is the whole ball game
+
+- **Whether any freeze was ever observed on a fixed build.** Every freeze
+  report came from `39d7cf3`-dirty binaries, and that dirty tree evolved
+  through the session: the UserCmd UI (with the `key_pressed` chord, no
+  cooldown) landed well before the repeat filter and the cooldown did. A
+  binary built in between has the UI and neither fix — and freezes exactly
+  as reported. The reporter never confirmed running `790f8c5` (clean tree,
+  Build line without `-dirty`, "Empty args just passes `{file}`." hint
+  present). So the remaining freeze, if it reproduces there, is a *different*
+  bug from the repeat storm, and there is currently no evidence either way.
+- If it does reproduce on `790f8c5` with a tap (not a hold), the difference
+  between the working `cmd` case and the freezing `mspaint` case is only the
+  target program plus the file argument — suspects then are the file itself
+  (size/format: check before anything else), where it lives (a hanging
+  network mount stalls the opener's thread), or AV hooking process creation,
+  in that order. Do not add guards blind; reproduce first, and note that a
+  single Paint open is what Explorer does on double-click, so a freeze there
+  is a system/file problem no viewer code can fix.
+
+---
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several
