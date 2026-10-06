@@ -4412,8 +4412,12 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
     let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
     let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
     assert!(
-        goto.contains("self.fit_window_key") && goto.contains("self.fit_window_pending = true"),
+        goto.contains("self.fit_window_key") && goto.contains("self.fit_arrive_pending = true"),
         "arrivals must refit through the cursor key, so toggles and rescans do not"
+    );
+    assert!(
+        src.contains("self.fit_arrive_pending") && src.contains("self.shown == self.cur"),
+        "arrival fits must wait until the new image is displayed, or every fit reads one image behind"
     );
     assert!(
         src.contains("self.fit_wrap_pending = true"),

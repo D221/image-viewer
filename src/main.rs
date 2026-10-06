@@ -1558,6 +1558,12 @@ struct MyApp {
     /// Cursor the window was last fitted to: the mode refits on arrival, not
     /// on every `goto` (toggles and rescans re-`goto` the same image).
     fit_window_key: Option<ImgKey>,
+    /// Arrival fit armed by `goto` (mode only): unlike an explicit `T`,
+    /// which fits whatever is on screen, this must wait until the new
+    /// image is actually displayed — central paints `shown`, which lags
+    /// `cur` for a decode, and fitting early sizes the window for the
+    /// picture just left (every status line then reads one image behind).
+    fit_arrive_pending: bool,
     /// Size iterations left: the window is re-measured and re-sent until it
     /// matches (or this runs out), because panels move after the measure —
     /// notices, wraps, late EXIF widths — and one shot lands wherever they
@@ -1868,6 +1874,7 @@ impl MyApp {
             fit_window_pending: false,
             fit_wrap_pending: false,
             fit_window_key: None,
+            fit_arrive_pending: false,
             fit_iters: 0,
             pending_pos: None,
             fit_debug: None,
@@ -2083,7 +2090,7 @@ impl MyApp {
         // slideshow advances, which would dance the window every interval.
         if self.config.fit_window_mode && !self.slideshow && self.cur != self.fit_window_key {
             self.fit_window_key = self.cur.clone();
-            self.fit_window_pending = true;
+            self.fit_arrive_pending = true;
             self.fit_iters = 6;
         }
         self.schedule();
@@ -4699,9 +4706,17 @@ impl MyApp {
         // panels move after the measure (notices, wraps, late widths), so
         // one shot lands wherever they leave it. Bounded, and each pass only
         // sends when the window is actually off target. Placed before `scale`
-        // is read so a reset draws what the window was sized for.
-        if (self.fit_window_pending || self.fit_wrap_pending) && self.fit_iters > 0 {
+        // is read so a reset draws what the window was sized for. Arrival
+        // fits wait for adoption (`shown` still displays the previous image
+        // until its preview lands — fitting then sizes the window for the
+        // picture just left); an explicit `T` fits whatever is on screen by
+        // definition. Waiting burns no iterations.
+        if (self.fit_window_pending || self.fit_arrive_pending || self.fit_wrap_pending)
+            && self.fit_iters > 0
+            && (!self.fit_arrive_pending || self.fit_window_pending || self.shown == self.cur)
+        {
             self.fit_iters -= 1;
+            self.fit_arrive_pending = false;
             if !ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                 // Twin of `clamp_px` below: the content's source footprint,
                 // so the two cannot disagree about how big the picture is.
