@@ -1564,6 +1564,10 @@ struct MyApp {
     /// after the resize settles, or it anchors a window that then resizes out
     /// from under it. `(want_size, frames_left)`.
     pending_pos: Option<((f32, f32), u8)>,
+    /// Last fit-window computation, for the status readout while the mode is
+    /// on: ratio, drawn, panel, inner, ppp. Debugging bars means comparing
+    /// these four numbers, so they are shown rather than logged.
+    fit_debug: Option<(f32, f32, f32, f32, f32, f32, f32)>,
     /// Slideshow running (advance every `Config::slideshow_secs`). Session
     /// state — always off on launch — with the last advance time so the
     /// first step waits a full interval rather than firing at once.
@@ -1862,6 +1866,7 @@ impl MyApp {
             fit_window_key: None,
             fit_iters: 0,
             pending_pos: None,
+            fit_debug: None,
             slideshow: false,
             slideshow_last: Instant::now(),
             next_scan: Instant::now() + RESCAN_INTERVAL,
@@ -4333,6 +4338,11 @@ impl MyApp {
         }
         if self.config.fit_window_mode {
             s += " - fit-window";
+            // Live fit numbers: ratio, drawn, panel, window. When the window
+            // disagrees with the picture these say which half is wrong.
+            if let Some((r, dw, dh, pw, ph, iw, ih)) = self.fit_debug {
+                s += &format!(" r{r:.2} {dw:.0}x{dh:.0}/{pw:.0}x{ph:.0} win{iw:.0}x{ih:.0}");
+            }
         }
         if let Some(e) = &self.error {
             s += &format!(" — {e}");
@@ -4714,6 +4724,15 @@ impl MyApp {
                         (panel.width(), panel.height()),
                         Some(work),
                     );
+                    self.fit_debug = Some((
+                        ratio,
+                        natural.x * ratio,
+                        natural.y * ratio,
+                        panel.width(),
+                        panel.height(),
+                        inner.x,
+                        inner.y,
+                    ));
                     if (inner.x - nw).abs() > 2.0 || (inner.y - nh).abs() > 2.0 {
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
                         // Position still goes through `pending_pos` (below):
