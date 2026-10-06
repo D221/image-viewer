@@ -5979,26 +5979,6 @@ pub fn fit_window_size(
     (out.0.max(200.0), out.1.max(120.0))
 }
 
-/// Where a resized window goes: centered on the old window, clamped to the
-/// monitor — JPEGView's `GetWindowRectMatchingImageSize` rule, minus its
-/// startup special case (a fresh launch keeps its default position).
-/// Everything points, so no unit can disagree.
-pub fn fit_window_placement(
-    new: (f32, f32),
-    old_pos: (f32, f32),
-    old_size: (f32, f32),
-    monitor: (f32, f32),
-) -> (f32, f32) {
-    let x = old_pos.0 + (old_size.0 - new.0) / 2.0;
-    let y = old_pos.1 + (old_size.1 - new.1) / 2.0;
-    // `new` already fits the monitor (see `fit_window_size`), so the upper
-    // bounds below cannot go negative — the `max` is belt and braces.
-    (
-        x.clamp(0.0, (monitor.0 - new.0).max(0.0)),
-        y.clamp(0.0, (monitor.1 - new.1).max(0.0)),
-    )
-}
-
 /// Decode an animation into composited frames, capped at the limits above.
 ///
 /// Dispatch is on [`AnimatedFormat`], not on the extension, and the `image` crate

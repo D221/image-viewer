@@ -4368,29 +4368,8 @@ fn fit_zoom_is_unity_until_it_must_shrink() {
     assert_eq!(image_viewer::fit_zoom((0.0, 0.0), (0.0, 0.0), (1920.0, 1080.0)), 1.0);
 }
 
-/// Placement centers on the old window and stays on the monitor.
-#[test]
-fn fit_window_centers_and_clamps_to_monitor() {
-    // 800x600 window at (100, 100) shrinking to 400x300: centered.
-    assert_eq!(
-        image_viewer::fit_window_placement((400.0, 300.0), (100.0, 100.0), (800.0, 600.0), (1920.0, 1080.0)),
-        (300.0, 250.0)
-    );
-    // Near the bottom-right corner: clamped on-screen, not centered off it.
-    assert_eq!(
-        image_viewer::fit_window_placement(
-            (400.0, 300.0),
-            (1600.0, 900.0),
-            (800.0, 600.0),
-            (1920.0, 1080.0)
-        ),
-        (1520.0, 780.0)
-    );
-}
-
-/// Fit window must be **wired**: `T` arms a flag central consumes where the
-/// drawn size lives, sending a live resize — not a restart, not a guess at
-/// the chrome.
+/// Placement is monitor-centering inline in the position phase (one
+/// formula, no helper worth a name) — covered by the wiring scan below.
 #[test]
 fn the_fit_window_key_is_wired_to_a_live_resize() {
     let src = include_str!("../src/main.rs");
@@ -4441,8 +4420,9 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
         "user zooms in the mode must re-hug the new size"
     );
     assert!(
-        src.contains("ViewportCommand::OuterPosition(") && src.contains("fit_window_placement("),
-        "resizes must center on the old window"
+        src.contains("ViewportCommand::OuterPosition(")
+            && src.contains("((m.x - want.0) / 2.0"),
+        "resizes must center on the monitor"
     );
 }
 

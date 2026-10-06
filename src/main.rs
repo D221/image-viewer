@@ -1555,6 +1555,11 @@ struct MyApp {
     /// Cursor the window was last fitted to: the mode refits on arrival, not
     /// on every `goto` (toggles and rescans re-`goto` the same image).
     fit_window_key: Option<ImgKey>,
+    /// Size iterations left: the window is re-measured and re-sent until it
+    /// matches (or this runs out), because panels move after the measure —
+    /// notices, wraps, late EXIF widths — and one shot lands wherever they
+    /// leave it. Bounded, so this always terminates.
+    fit_iters: u8,
     /// Window size a centering command is waiting on: the position must land
     /// after the resize settles, or it anchors a window that then resizes out
     /// from under it. `(want_size, frames_left)`.
@@ -1855,6 +1860,7 @@ impl MyApp {
             fit_window_pending: false,
             fit_wrap_pending: false,
             fit_window_key: None,
+            fit_iters: 0,
             pending_pos: None,
             slideshow: false,
             slideshow_last: Instant::now(),
@@ -2057,6 +2063,7 @@ impl MyApp {
         if self.config.fit_window_mode && !self.slideshow && self.cur != self.fit_window_key {
             self.fit_window_key = self.cur.clone();
             self.fit_window_pending = true;
+            self.fit_iters = 6;
         }
         self.schedule();
     }
@@ -3694,6 +3701,7 @@ impl MyApp {
         self.config.save(&self.config_path);
         if self.config.fit_window_mode {
             self.fit_window_pending = true;
+            self.fit_iters = 6;
             self.notice = Some("Fit window: on".into());
         } else {
             self.notice = Some("Fit window: off".into());
@@ -4349,30 +4357,21 @@ impl MyApp {
         // Second phase of fit-window centering (see the consumption below):
         // place once the inner size matches what was asked, retry a few
         // frames while the resize is in flight, then place with whatever is
-        // known rather than never. Old window if known, else the monitor —
-        // a missing outer rect must degrade to screen-centering, not to
-        // silently dropping the position the way the immediate send did.
+        // known rather than never. Always the monitor center — old-window
+        // centering drifted in practice. Without monitor info there is
+        // nothing to center on, so that case clears silently.
         if let Some((want, tries)) = self.pending_pos {
             let settled = ui
                 .input(|i| i.viewport().inner_rect.map(|r| r.size()))
                 .is_some_and(|s| (s.x - want.0).abs() < 3.0 && (s.y - want.1).abs() < 3.0);
             if settled || tries == 0 {
                 self.pending_pos = None;
-                let outer = ui.input(|i| i.viewport().outer_rect);
-                let mon = ui.input(|i| i.viewport().monitor_size);
-                let pos = match (outer, mon) {
-                    (Some(o), Some(m)) => Some(image_viewer::fit_window_placement(
-                        want,
-                        (o.min.x, o.min.y),
-                        (o.size().x, o.size().y),
-                        (m.x, m.y),
-                    )),
-                    (None, Some(m)) => Some(((m.x - want.0) / 2.0, (m.y - want.1) / 2.0)),
-                    _ => None,
-                };
-                if let Some((nx, ny)) = pos {
+                if let Some(m) = ui.input(|i| i.viewport().monitor_size) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
-                        egui::Pos2::new(nx.max(0.0), ny.max(0.0)),
+                        egui::Pos2::new(
+                            ((m.x - want.0) / 2.0).max(0.0),
+                            ((m.y - want.1) / 2.0).max(0.0),
+                        ),
                     ));
                 }
             } else {
@@ -4661,13 +4660,15 @@ impl MyApp {
 
         // Fit window to image: reset (`T`, arrivals in the mode) sets
         // 100%-if-fits and sizes the window; wrap (user zooms in the mode)
-        // keeps the zoom and only re-hugs. Both center the window on the old
-        // one, JPEGView's rule. Placed before `scale` is read so a reset
-        // draws what the window was sized for on the same frame.
-        if self.fit_window_pending || self.fit_wrap_pending {
-            let reset = self.fit_window_pending;
-            self.fit_window_pending = false;
-            self.fit_wrap_pending = false;
+        // keeps the zoom and only re-hugs. Every resize centers on the
+        // monitor, always — old-window centering was asked for and dropped:
+        // polite in theory, drifting in practice. Iterated to convergence:
+        // panels move after the measure (notices, wraps, late widths), so
+        // one shot lands wherever they leave it. Bounded, and each pass only
+        // sends when the window is actually off target. Placed before `scale`
+        // is read so a reset draws what the window was sized for.
+        if (self.fit_window_pending || self.fit_wrap_pending) && self.fit_iters > 0 {
+            self.fit_iters -= 1;
             if !ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                 // Twin of `clamp_px` below: the content's source footprint,
                 // so the two cannot disagree about how big the picture is.
@@ -4693,7 +4694,9 @@ impl MyApp {
                         .input(|i| i.viewport().monitor_size)
                         .map(|m| (m.x, m.y))
                         .unwrap_or((inner.x, inner.y));
-                    let ratio = if reset {
+                    let mut ratio = if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
+                    if self.fit_window_pending {
+                        self.fit_window_pending = false;
                         let zoom = image_viewer::fit_zoom((natural.x, natural.y), chrome, work);
                         if zoom >= 1.0 {
                             self.view.fit = false;
@@ -4702,24 +4705,23 @@ impl MyApp {
                             self.view.fit = true;
                         }
                         self.view.offset = Vec2::ZERO;
-                        zoom
-                    } else if self.view.fit {
-                        fit_scale * ppp
-                    } else {
-                        self.view.scale * ppp
-                    };
+                        ratio = zoom;
+                    }
+                    self.fit_wrap_pending = false;
                     let (nw, nh) = image_viewer::fit_window_size(
                         (natural.x * ratio, natural.y * ratio),
                         (inner.x, inner.y),
                         (panel.width(), panel.height()),
                         Some(work),
                     );
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
-                    // Centering waits: the position must land after the resize
-                    // settles, or it anchors a window that then resizes out
-                    // from under it (which is why re-pressing never fixed the
-                    // position, only the size). Placed at the top of central.
-                    self.pending_pos = Some(((nw, nh), 10));
+                    if (inner.x - nw).abs() > 2.0 || (inner.y - nh).abs() > 2.0 {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
+                        // Position still goes through `pending_pos` (below):
+                        // it must land after this resize settles.
+                        self.pending_pos = Some(((nw, nh), 10));
+                    } else {
+                        self.fit_iters = 0;
+                    }
                 }
             }
         }
@@ -4821,6 +4823,7 @@ impl MyApp {
                 || resp.double_clicked())
         {
             self.fit_wrap_pending = true;
+            self.fit_iters = 6;
         }
         let target_scale = target_scale.clamp(fit_scale, max_scale);
         if (target_scale - scale).abs() > f32::EPSILON {
