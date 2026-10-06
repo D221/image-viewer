@@ -37,6 +37,11 @@ fn main() {
         }
     }
 
+    // `print_file` calls ShellExecuteW (the `print` verb), which lives in
+    // Shell32 — not in the default link set, so without this the crate
+    // compiles and then fails at link time with LNK2019.
+    println!("cargo:rustc-link-lib=shell32");
+
     // Build fingerprint, shown at the bottom of Settings: short git hash plus
     // dirty flag, so a binary copied to Downloads as `image-viewer(3).exe`
     // can be told apart from the current checkout. Stale copies have already

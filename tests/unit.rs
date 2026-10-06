@@ -4318,8 +4318,7 @@ fn the_slideshow_is_wired_to_a_tick_and_a_stop() {
 /// A fresh config closes on Esc (the shipped behaviour), and Esc in crop
 /// mode drops the frame before anything behind it runs.
 #[test]
-fn esc_defaults_to_closing_and_crop_comes_first() {
-    let dir = tempfile::tempdir().unwrap();
+fn esc_defaults_to_closing_and_crop_comes_first() {    let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("no-such-config.json");
     assert!(
         image_viewer::Config::load(&missing).esc_closes_app,
@@ -4341,6 +4340,44 @@ fn esc_defaults_to_closing_and_crop_comes_first() {
     assert!(
         arm.contains("self.config.esc_closes_app"),
         "quitting on Esc must consult the toggle"
+    );
+}
+
+/// Printing goes through the OS `print` verb on the file on screen: a
+/// physical Ctrl+P only (repeat-filtered like every spawn chord), through
+/// the spawn guard, and the handler gets the file — crops and turns are not
+/// applied, because a path carries no pixels.
+#[test]
+fn printing_is_wired_to_ctrl_p() {
+    let lib = include_str!("../src/lib.rs");
+    assert!(
+        lib.contains("fn print_file(") && lib.contains("ShellExecuteW"),
+        "printing must go through the native print verb"
+    );
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn print_current(&mut self"),
+        "there must be a print action"
+    );
+    let at = src
+        .find("let print_key = ctx.input")
+        .expect("the print chord must exist");
+    let arm = &src[at..(at + 900).min(src.len())];
+    assert!(
+        arm.contains("repeat: false"),
+        "the print chord must filter key-repeat, or a hold opens a dialog per frame"
+    );
+    assert!(
+        !arm.contains("key_pressed"),
+        "the print chord must not read through key_pressed, which fires on repeats"
+    );
+    let body_at = src
+        .find("fn print_current(&mut self)")
+        .expect("the print action must exist");
+    let body = &src[body_at..(body_at + 1500).min(src.len())];
+    assert!(
+        body.contains("spawn_guard("),
+        "printing must go through the spawn guard like every external action"
     );
 }
 

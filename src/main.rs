@@ -3640,6 +3640,38 @@ impl MyApp {
         true
     }
 
+    /// Print the file on screen through its registered handler
+    /// ([`image_viewer::print_file`], the OS `print` verb — usually the
+    /// Photos print view). The *file*, not the view: crops and turns are not
+    /// applied, because the handler receives a path rather than pixels.
+    /// Through `spawn_guard` like every external action, so a repeating
+    /// chord is one dialog a second rather than one per frame.
+    fn print_current(&mut self) {
+        let Some(path) = self
+            .shown
+            .as_ref()
+            .map(|k| k.path.clone())
+            .or_else(|| self.cur.as_ref().map(|k| k.path.clone()))
+        else {
+            self.notice = Some("No image is open".into());
+            return;
+        };
+        if !self.spawn_guard("Print") {
+            return;
+        }
+        match image_viewer::print_file(&path) {
+            Ok(()) => {
+                self.notice = Some(
+                    format!(
+                        "Sent {} to print",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
+                );
+            }
+            Err(e) => self.error = Some(format!("Print failed: {e}")),
+        }
+    }
+
     /// Run the nth user command (Ctrl+1..9, Tier 1 #2) against the file on
     /// screen: `{file}`, `{dir}` and `{name}` expand in the program and args
     /// ([`image_viewer::expand_user_command`], tested), then the process is
@@ -3649,8 +3681,7 @@ impl MyApp {
     /// second rather than one per frame. A missing entry
     /// is a notice rather than an error: pressing Ctrl+3 with two commands is
     /// a mistyped chord, not a failure.
-    fn run_user_command(&mut self, n: usize) {
-        let Some(cmd) = self.config.user_commands.get(n).cloned() else {
+    fn run_user_command(&mut self, n: usize) {        let Some(cmd) = self.config.user_commands.get(n).cloned() else {
             self.notice = Some(format!("No user command {}", n + 1));
             return;
         };
@@ -6299,6 +6330,25 @@ impl eframe::App for MyApp {
             }
             None
         });
+        // Print (Ctrl+P): the OS `print` verb on the file on screen.
+        // Physical presses only, the same fork-bomb discipline as user
+        // commands — a held chord must not open a dialog per frame. Bare `P`
+        // is untouched (right pane), so this chord and that key coexist.
+        let print_key = ctx.input(|i| {
+            i.modifiers.ctrl
+                && !i.modifiers.alt
+                && i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: k,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        } if *k == egui::Key::P
+                    )
+                })
+        });
         // `typing` is true when the search box owns the keyboard. All of this is
         // global single-key handling, so it must stand down or typing "g" into
         // the filter would toggle the grid and "r" would reload the folder.
@@ -6407,6 +6457,8 @@ impl eframe::App for MyApp {
                 self.toggle_crop_mode(ctx);
             } else if wall {
                 self.set_wallpaper();
+            } else if print_key {
+                self.print_current();
             }
             if let Some(n) = user_cmd {
                 self.run_user_command(n);
@@ -6630,6 +6682,9 @@ impl eframe::App for MyApp {
                     }
                     if ui.button("Wallpaper (W)").clicked() {
                         self.set_wallpaper();
+                    }
+                    if ui.button("Print… (Ctrl+P)").clicked() {
+                        self.print_current();
                     }
                     ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
                 });

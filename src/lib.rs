@@ -590,6 +590,14 @@ extern "system" {
         name: *const u16,
     ) -> usize;
     fn GetLastError() -> u32;
+    fn ShellExecuteW(
+        hwnd: usize,
+        operation: *const u16,
+        file: *const u16,
+        parameters: *const u16,
+        directory: *const u16,
+        show: i32,
+    ) -> isize;
 }
 
 const ERROR_ALREADY_EXISTS: u32 = 183;
@@ -626,6 +634,28 @@ pub fn claim_single_instance(name: &str) -> bool {
         }
         HELD_INSTANCE_MUTEXES.lock().unwrap().push(m);
         true
+    }
+}
+
+/// Print `path` through the handler Windows registered for it (the Photos
+/// print view for an image): the `print` verb, no program of our own.
+///
+/// A return of 32 or less is the documented failure: out of memory, file not
+/// found, no association, and the rest of the `SE_ERR_` table. There is no
+/// handle to wait on — the handler owns the dialog from here.
+pub fn print_file(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    let verb: Vec<u16> = "print\0".encode_utf16().collect();
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SW_SHOWNORMAL: the handler decides the window, we only ask normally.
+    let rc = unsafe { ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+    if rc > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the print verb failed for {} (code {rc})", path.display()),
+        ))
     }
 }
 
