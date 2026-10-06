@@ -254,6 +254,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub loop_back: bool,
 
+    /// Esc on a bare image viewer closes the app. On by default (the shipped
+    /// behaviour); off means Esc stops at leaving crop mode / grid /
+    /// fullscreen and never quits. The filter box keeps its own Esc
+    /// (clear, then defocus) either way.
+    #[serde(default = "default_true")]
+    pub esc_closes_app: bool,
+
     /// Which wgpu backend to render with, and the last probe result.
     #[serde(default)]
     pub renderer: RendererPref,
@@ -504,6 +511,7 @@ impl Config {
             block_while_loading: false,
             wheel_navigation: false,
             loop_back: true,
+            esc_closes_app: true,
             renderer: RendererPref::default(),
             convert_wide_gamut: false,
             crop_aspect: CropAspect::default(),

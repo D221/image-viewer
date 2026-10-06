@@ -4286,8 +4286,7 @@ fn user_command_with_no_args_gets_the_file() {
 /// Slideshow pacing: due once the interval has passed, never early, and a
 /// zero interval floors at one second rather than strobing every frame.
 #[test]
-fn slideshow_advances_only_when_due() {
-    let now = std::time::Instant::now();
+fn slideshow_advances_only_when_due() {    let now = std::time::Instant::now();
     let ago = now - std::time::Duration::from_secs(10);
     assert!(image_viewer::slideshow_due(ago, now, 3));
     assert!(!image_viewer::slideshow_due(now, now, 3));
@@ -4313,6 +4312,35 @@ fn the_slideshow_is_wired_to_a_tick_and_a_stop() {
     assert!(
         src.contains("fn step(&mut self, ctx: &Context, forward: bool) -> bool"),
         "step must report whether it moved, so the end can stop the show"
+    );
+}
+
+/// A fresh config closes on Esc (the shipped behaviour), and Esc in crop
+/// mode drops the frame before anything behind it runs.
+#[test]
+fn esc_defaults_to_closing_and_crop_comes_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such-config.json");
+    assert!(
+        image_viewer::Config::load(&missing).esc_closes_app,
+        "a fresh config must keep the shipped Esc-closes behaviour"
+    );
+    let src = include_str!("../src/main.rs");
+    let at = src
+        .find("if esc {")
+        .expect("the Esc chain must exist");
+    let arm = &src[at..(at + 2600).min(src.len())];
+    let crop = arm.find("self.crop_mode").expect("no crop branch in Esc");
+    let close = arm
+        .find("ViewportCommand::Close")
+        .expect("no app-close in Esc");
+    assert!(
+        crop < close,
+        "Esc must drop the crop frame before it can reach quitting"
+    );
+    assert!(
+        arm.contains("self.config.esc_closes_app"),
+        "quitting on Esc must consult the toggle"
     );
 }
 

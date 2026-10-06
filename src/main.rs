@@ -6130,6 +6130,12 @@ impl eframe::App for MyApp {
                 }
             } else if self.gallery_view {
                 self.gallery_view = false; // close the grid first
+            } else if self.crop_mode {
+                // In crop mode Esc drops the frame instead of doing anything
+                // behind it: losing a framed crop to a quit is the data-loss
+                // shape bare-letter discipline exists to prevent, and leaving
+                // fullscreen under a crop would strand the frame on a new size.
+                self.toggle_crop_mode(ctx);
             } else {
                 let in_fullscreen = ctx
                     .input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -6137,9 +6143,11 @@ impl eframe::App for MyApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     self.show_panels = true;
                     self.suppress_resize_redecode = true;
-                } else {
+                } else if self.config.esc_closes_app {
                     self.close_transients();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    self.notice = Some("Esc close is off (Settings)".into());
                 }
             }
         }
@@ -6888,6 +6896,13 @@ impl eframe::App for MyApp {
                     self.gallery.loop_back = self.config.loop_back;
                     self.config.save(&self.config_path);
                 }
+                if ui
+                    .checkbox(&mut self.config.esc_closes_app, "Esc closes the app")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                }
+                ui.small("Off: Esc still leaves crop mode, the grid and fullscreen, but never quits.");
                 ui.horizontal(|ui| {
                     ui.label("Worker threads (0 = auto):");
                     if ui
