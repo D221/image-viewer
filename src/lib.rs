@@ -176,6 +176,16 @@ pub struct Config {
     #[serde(default)]
     pub sort: SortMode,
 
+    /// Reverse each sort order (Z→A, oldest/smallest first). Off by default,
+    /// which is exactly the shipped behaviour — turning it on reverses
+    /// whichever order `sort` produced.
+    ///
+    /// `#[serde(default)]` for the reason every added field here carries it: a
+    /// config written before this key existed still has to load, and it must
+    /// keep the orders its reader already has.
+    #[serde(default)]
+    pub sort_descending: bool,
+
     /// Resize previews in linear light with a CatmullRom filter (better
     /// edges/moiré on lineart) instead of fast gamma-space Triangle.
     #[serde(default = "default_true")]
@@ -278,6 +288,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub thumbnail_cache: bool,
 
+    /// Only allow one instance of the viewer to run. When on (the default),
+    /// a second launch tries to raise the first and exits; when off, multiple
+    /// windows can open (each with its own archive temp dir, which is why the
+    /// archive watcher disables its watcher rather than try to coordinate them).
+    #[serde(default = "default_true")]
+    pub single_instance: bool,
+
     /// Last viewed image per folder, so reopening a folder resumes there.
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
@@ -313,6 +330,104 @@ pub struct Config {
     /// left-to-right one.
     #[serde(default = "default_true")]
     pub manga_rtl: bool,
+
+    /// Worker threads for the decode pool. `0` means auto: available
+    /// parallelism clamped to 2..=4, which is the shipped behaviour.
+    /// Anything else is honoured, clamped to 1..=8.
+    ///
+    /// `#[serde(default)]` for the reason every added field here carries it: a
+    /// config written before this key existed still has to load, and it must
+    /// come up on auto rather than on a fixed count.
+    #[serde(default)]
+    pub workers: usize,
+
+    /// Rebindable keys: action id → key name (egui `Key` variant name, e.g.
+    /// `"ArrowRight"`, `"Space"`, `"PageDown"`). Absent means the shipped
+    /// default. Only navigation and chord actions are rebindable — the bare
+    /// letters in `BARE_LETTERS` stay fixed, because they are the view-only
+    /// safe list `tests/keybindings.rs` pins.
+    #[serde(default)]
+    pub keys: std::collections::HashMap<String, String>,
+
+    /// User commands: external programs run against the current file
+    /// (`{file}`, `{dir}`, `{name}` expand in program and args).
+    /// Triggered by Ctrl+1..9 in list order.
+    #[serde(default)]
+    pub user_commands: Vec<UserCommand>,
+}
+
+/// One external program entry for "Open with…" style scripting.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserCommand {
+    /// Shown in Settings and in the notice on run.
+    #[serde(default)]
+    pub name: String,
+    /// Program to run; `{file}` etc. expand here too.
+    #[serde(default)]
+    pub program: String,
+    /// Arguments; each entry expands `{file}`, `{dir}`, `{name}`.
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// Rebindable action ids and their shipped defaults (key names as
+/// `egui::Key` variant names). Navigation only — bare letters stay fixed.
+pub const REBINDABLE_ACTIONS: &[(&str, &str)] = &[
+    ("next", "ArrowRight"),
+    ("prev", "ArrowLeft"),
+    ("next_alt", "Space"),
+    ("page_next", "PageDown"),
+    ("page_prev", "PageUp"),
+];
+
+/// Shipped key name for `action`, or `""` when unknown.
+pub fn default_key(action: &str) -> &'static str {
+    REBINDABLE_ACTIONS
+        .iter()
+        .find(|(id, _)| *id == action)
+        .map(|(_, k)| *k)
+        .unwrap_or("")
+}
+
+/// Effective key name for `action`: the user's override when present and
+/// non-empty, else the shipped default.
+pub fn resolve_key(keys: &std::collections::HashMap<String, String>, action: &str) -> String {
+    match keys.get(action).map(|s| s.trim()) {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => default_key(action).to_owned(),
+    }
+}
+
+/// Expand `{file}`, `{dir}` and `{name}` in `template` against `file`.
+/// Unknown placeholders are left alone rather than deleted, so a literal
+/// `{x}` in a program path survives instead of silently vanishing.
+pub fn expand_template(template: &str, file: &std::path::Path) -> String {
+    let s = template.replace("{file}", &file.to_string_lossy().into_owned());
+    let dir = file
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let s = s.replace("{dir}", &dir);
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    s.replace("{name}", &name)
+}
+
+/// Expand a [`UserCommand`] against `file`: program plus one arg per entry.
+///
+/// Empty args default to the file itself — nearly every "open with" command
+/// just wants the picture, and a bare `mspaint.exe` opening a blank canvas
+/// is never what was meant. A command that truly wants no arguments is
+/// vanishingly rare, and extra argv entries are ignored by almost everything.
+pub fn expand_user_command(cmd: &UserCommand, file: &std::path::Path) -> (String, Vec<String>) {
+    let args = if cmd.args.is_empty() {
+        vec![file.to_string_lossy().into_owned()]
+    } else {
+        cmd.args.iter().map(|a| expand_template(a, file)).collect()
+    };
+    (expand_template(&cmd.program, file), args)
 }
 
 fn default_true() -> bool {
@@ -360,6 +475,7 @@ impl Config {
             load_all_on_startup: true,
             folder: None,
             sort: SortMode::Name,
+            sort_descending: false,
             linear_resample: true,
             downscale_filter: DownscaleFilter::Hermite,
             smooth_downscale: false,
@@ -370,9 +486,13 @@ impl Config {
             convert_wide_gamut: false,
             crop_aspect: CropAspect::default(),
             thumbnail_cache: true,
+            single_instance: true,
             last_by_folder: std::collections::HashMap::new(),
             manga_mode: false,
             manga_rtl: true,
+            workers: 0,
+            keys: std::collections::HashMap::new(),
+            user_commands: Vec::new(),
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {
@@ -425,6 +545,56 @@ impl Config {
         } else {
             PathBuf::from("config.json")
         }
+    }
+}
+
+// Single-instance guard: a named kernel mutex. The name is session-local
+// (`Local\`, which any user can always create — `Global\` needs a privilege
+// a normal login does not have) and stable across runs so a second launch
+// finds the first one.
+extern "system" {
+    fn CreateMutexW(
+        attr: *const std::ffi::c_void,
+        initially_owned: i32,
+        name: *const u16,
+    ) -> usize;
+    fn GetLastError() -> u32;
+}
+
+const ERROR_ALREADY_EXISTS: u32 = 183;
+
+/// Handles this process created and still holds, so the mutex outlives the
+/// call that claimed it. A handle dropped here would still leak (never
+/// closed), which also holds it — but an explicit store says so instead of
+/// relying on a leak nobody can see.
+static HELD_INSTANCE_MUTEXES: std::sync::LazyLock<std::sync::Mutex<Vec<usize>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Claim the single-instance mutex `name`.
+///
+/// Returns `true` when this launch may proceed: created fresh (and now held
+/// for the life of the process), or the mutex could not be created at all —
+/// a guard that refuses to start the app is worse than no guard, which is
+/// exactly what shipped once: `\\.\`-prefixed names are device paths, not
+/// object names, so creation failed on *every* launch and the `m == 0`
+/// branch read it as "already running". Returns `false` only when the mutex
+/// already exists, i.e. another instance holds it.
+pub fn claim_single_instance(name: &str) -> bool {
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let m = CreateMutexW(std::ptr::null(), 1, wide.as_ptr());
+        if m == 0 {
+            eprintln!(
+                "note: could not create the single-instance mutex ({}); starting anyway",
+                std::io::Error::last_os_error()
+            );
+            return true;
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return false;
+        }
+        HELD_INSTANCE_MUTEXES.lock().unwrap().push(m);
+        true
     }
 }
 
@@ -866,6 +1036,22 @@ pub fn fit_scale_no_upscale(natural: (f32, f32), area: (f32, f32)) -> f32 {
         return 1.0;
     }
     (area.0 / w).min(area.1 / h).min(1.0)
+}
+
+/// Scale factor that makes an image **cover** an `area`, keeping the aspect
+/// ratio and cropping the overflow rather than letterboxing.
+///
+/// The sibling of [`fit_scale_no_upscale`] with the comparison flipped: the
+/// larger ratio wins, and upscale is allowed (a smaller image covering a
+/// larger area is upscaled — that is what "fill" means). Same units, same
+/// degenerate-input guard, same `(1e-4, 8.0)` clamp the single-image view
+/// fits itself at.
+pub fn fill_scale(natural: (f32, f32), area: (f32, f32)) -> f32 {
+    let (w, h) = (natural.0.max(1.0), natural.1.max(1.0));
+    if w <= 0.0 || h <= 0.0 || area.0 <= 0.0 || area.1 <= 0.0 {
+        return 1.0;
+    }
+    (area.0 / w).max(area.1 / h).clamp(1e-4, 8.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1338,6 +1524,17 @@ fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
 /// Scan and sort with the given mode. Date sorts newest-first, Size
 /// largest-first, Random shuffles once per call.
 pub fn scan_folder_sorted(folder: &Path, mode: SortMode) -> Vec<PathBuf> {
+    scan_folder_sorted_dir(folder, mode, false)
+}
+
+/// Gallery order with an explicit direction.
+///
+/// `descending == false` is exactly [`scan_folder_sorted`]: Name natural,
+/// Date newest-first, Size largest-first, Random shuffled. `true` reverses
+/// whichever of those the mode produced — including Random, where the reverse
+/// of a shuffle is still a shuffle. A reversal rather than per-mode
+/// ascending/descending semantics, so no shipped order changes meaning.
+pub fn scan_folder_sorted_dir(folder: &Path, mode: SortMode, descending: bool) -> Vec<PathBuf> {
     let mut files = scan_folder(folder);
     match mode {
         SortMode::Name => {}
@@ -1355,6 +1552,9 @@ pub fn scan_folder_sorted(folder: &Path, mode: SortMode) -> Vec<PathBuf> {
             });
         }
         SortMode::Random => shuffle(&mut files),
+    }
+    if descending {
+        files.reverse();
     }
     files
 }
@@ -1497,6 +1697,19 @@ pub struct QueueState {
 }
 
 /// Priority queue served by a small pool of worker threads.
+/// How many worker threads the decode pool gets.
+///
+/// `preferred == 0` is auto: the shipped behaviour of available parallelism
+/// clamped to 2..=4. Anything else is the user's explicit choice, clamped to
+/// 1..=8 so a typo cannot spawn 64 threads or zero the pool.
+pub fn resolve_worker_count(available: usize, preferred: usize) -> usize {
+    if preferred == 0 {
+        available.clamp(2, 4)
+    } else {
+        preferred.clamp(1, 8)
+    }
+}
+
 pub struct Loader {
     shared: Arc<(Mutex<QueueState>, Condvar)>,
 }
@@ -3021,10 +3234,12 @@ fn lossless_raster(bytes: &[u8]) -> Option<image::ImageFormat> {
 /// the path written.
 ///
 /// **The original is never touched.** This writes `photo_rotated.jpg` next to
-/// `photo.jpg`, or `photo_rotated2.jpg` and onwards if that exists, so the edit
-/// is reversible and re-rotating accumulates instead of compounding. There is no
-/// undo for an in-place write, and a wrong transform is exactly the kind of
-/// mistake you notice after closing the app.
+/// `photo.jpg` (`photo_cropped.jpg` for a crop, `photo_copy.jpg` when neither
+/// was asked for — the name says what the file is), or `photo_rotated2.jpg`
+/// and onwards if that exists, so the edit is reversible and re-rotating
+/// accumulates instead of compounding. There is no undo for an in-place
+/// write, and a wrong transform is exactly the kind of mistake you notice
+/// after closing the app.
 ///
 /// JPEG goes through `tjTransform`, which operates on the DCT coefficients, so
 /// the result is the same compressed data rearranged — no second generation,
@@ -3163,9 +3378,133 @@ pub fn save_transformed(
         return Err(SaveError::Lossy(format_name(&bytes).to_owned()));
     }
 
-    let dest = unique_dest_named(src, if crop.is_some() { "cropped" } else { "rotated" });
+    // Named for what the file *is*, from the resolved values rather than the
+    // caller's: a no-op crop was already resolved to `None` above for exactly
+    // this reason, and the same holds for the transform — `display_xform`
+    // composes the EXIF tag with the user's turns, so Identity here means
+    // nothing turned, whatever was asked for. An unedited save is a copy.
+    let infix = if crop.is_some() {
+        "cropped"
+    } else if xform != Xform::Identity {
+        "rotated"
+    } else {
+        "copy"
+    };
+    let dest = unique_dest_named(src, infix);
     std::fs::write(&dest, &out).map_err(SaveError::Write)?;
     Ok(dest)
+}
+
+/// What a screen-size save produced, including whether it is lossless.
+pub struct ScaledSave {
+    /// `photo_screen.jpg` beside the original, numbered when taken.
+    pub dest: PathBuf,
+    /// Output dimensions: the transformed picture scaled to fit `max_long`.
+    pub width: u32,
+    pub height: u32,
+    /// PNG, BMP and TIFF only. A JPEG screen save decodes and re-encodes at
+    /// quality 85, which is a generation of compression — the caller must
+    /// name that in its notice rather than calling it lossless.
+    pub lossless: bool,
+}
+
+/// As [`save_transformed`], but downscaled to fit `max_long` px on the long
+/// side instead of kept full-res — the "save what is on screen" to Ctrl+S's
+/// "save the file". Same crop and turn, same naming rule apart from the
+/// `_screen` infix, same refusals.
+///
+/// JPEG cannot be lossless here: there is no DCT-domain downscale to an
+/// arbitrary size, so it decodes, downscales and re-encodes. That is the
+/// behaviour the user asked for by asking for screen size rather than a bug,
+/// and `lossless == false` is how the caller knows to say "re-encoded".
+/// WebP, GIF, HEIC and JXL are still refused outright: a screen-size save of
+/// those would be a *quiet* second generation, which is what the refusal is
+/// for. Never upscales: a picture smaller than the display is written as-is.
+pub fn save_transformed_scaled(
+    src: &Path,
+    user: Xform,
+    crop: Option<Crop>,
+    max_long: u32,
+) -> Result<ScaledSave, SaveError> {
+    let bytes = std::fs::read(src).map_err(SaveError::Read)?;
+    let is_jpeg = is_jpeg_bytes(&bytes);
+    let (fmt, lossless) = if is_jpeg {
+        (image::ImageFormat::Jpeg, false)
+    } else if let Some(fmt) = lossless_raster(&bytes) {
+        (fmt, true)
+    } else {
+        return Err(SaveError::Lossy(format_name(&bytes).to_owned()));
+    };
+    // `image`'s JPEG decoder does not apply EXIF orientation, so these are
+    // stored pixels and `display_xform` is the same composition the lossless
+    // path uses — the crop below is in display space either way.
+    let exif_tag = if is_jpeg { exif_orientation(src) } else { 0 };
+    let xform = display_xform(exif_tag, user);
+    let img = image::load_from_memory(&bytes).map_err(|e| SaveError::Decode(format!("{e}")))?;
+    let (w, h) = (img.width(), img.height());
+    let rgba = img.to_rgba8();
+    let crop = match crop {
+        Some(c) if !c.is_full(w, h) => Some(
+            c.clamped_to(w, h)
+                .ok_or_else(|| SaveError::Decode("crop fell outside the image".into()))?,
+        ),
+        _ => None,
+    };
+    let (cw, ch, cropped) = match crop {
+        Some(c) => c
+            .apply_rgba(w, h, &rgba.into_raw())
+            .ok_or_else(|| SaveError::Decode("crop fell outside the image".into()))?,
+        None => (w, h, rgba.into_raw()),
+    };
+    let (ow, oh, px) = xform
+        .apply_rgba(cw, ch, &cropped)
+        .ok_or_else(|| SaveError::Decode("buffer did not match its dimensions".into()))?;
+    let scaled = downscale_image(
+        &ImageData {
+            width: ow,
+            height: oh,
+            rgba: px,
+            load_time: std::time::Duration::ZERO,
+        },
+        max_long.max(1),
+    );
+    let (sw, sh) = (scaled.width, scaled.height);
+    let mut buf = Vec::new();
+    if fmt == image::ImageFormat::Jpeg {
+        // The de-facto viewer default (JPEGView's JPEGSaveQuality); stated
+        // here rather than tuned here, because this path is lossy by
+        // construction and the number only moves artefacts around.
+        // JPEG has no alpha: drop it the same way every 32→24-bit save path
+        // here does, rather than asking the encoder to guess.
+        let rgb: Vec<u8> = scaled
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect();
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
+        enc.encode(&rgb, sw, sh, image::ExtendedColorType::Rgb8)
+            .map_err(|e| SaveError::Decode(format!("re-encoding failed: {e}")))?;
+    } else {
+        let out_img = image::RgbaImage::from_raw(sw, sh, scaled.rgba)
+            .ok_or_else(|| SaveError::Decode("downscaled buffer was malformed".into()))?;
+        image::DynamicImage::ImageRgba8(out_img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), fmt)
+            .map_err(|e| SaveError::Decode(format!("re-encoding failed: {e}")))?;
+    }
+    // EXIF orientation is baked into the pixels now, so carry the tag reset
+    // the lossless path does — for JPEG only, where a tag may exist.
+    if is_jpeg {
+        neutralize_exif_orientation(&mut buf);
+    }
+    let dest = unique_dest_named(src, "screen");
+    std::fs::write(&dest, &buf).map_err(SaveError::Write)?;
+    Ok(ScaledSave {
+        dest,
+        width: sw,
+        height: sh,
+        lossless,
+    })
 }
 
 /// `photo.jpg` -> `photo_rotated.jpg`, or `photo_rotated2.jpg`, `...3` and so on
@@ -4286,6 +4625,114 @@ pub fn exif_orientation(path: &Path) -> u16 {
         .ok()
         .and_then(|exif| exif.get(nom_exif::ExifTag::Orientation).and_then(|v| v.as_u16()))
         .unwrap_or(0)
+}
+
+/// First JPEG COM segment in `bytes`, as text.
+///
+/// Walks markers from SOI and stops at SOS — scan data follows it, so anything
+/// shaped like a marker past it is pixels, not segments — at EOI, or at the
+/// first malformed length. Every read is bounds-checked: this parses untrusted
+/// input, so a truncated file is `None`, never a panic on a worker.
+pub fn jpeg_comment(bytes: &[u8]) -> Option<String> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        // Skip fill bytes: any number of 0xFF is one marker prefix.
+        while i < bytes.len() && bytes[i] == 0xFF {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        let marker = bytes[i];
+        i += 1;
+        match marker {
+            // Standalone markers carry no length.
+            0xD8 | 0xD9 | 0x01 | 0xD0..=0xD7 => {
+                if marker == 0xD9 {
+                    return None;
+                }
+            }
+            // Start of scan: pixel data follows, so no segment past here.
+            0xDA => return None,
+            _ => {
+                if i + 2 > bytes.len() {
+                    return None;
+                }
+                let len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+                if len < 2 || i + len > bytes.len() {
+                    return None;
+                }
+                if marker == 0xFE {
+                    if let Some(text) = clean_comment_text(&bytes[i + 2..i + len]) {
+                        return Some(text);
+                    }
+                }
+                i += len;
+            }
+        }
+    }
+    None
+}
+
+/// EXIF UserComment payload: an 8-byte charset code (`ASCII\0\0\0`,
+/// `UNICODE\0`, …) followed by the text. Unknown codes are read as bytes —
+/// most writers put ASCII there whatever the code says — and a payload that
+/// is empty after cleaning is no comment, not an empty line.
+pub fn decode_user_comment(payload: &[u8]) -> Option<String> {
+    if payload.len() < 8 {
+        return clean_comment_text(payload);
+    }
+    let (code, text) = payload.split_at(8);
+    if code == b"UNICODE\0" {
+        let units: Vec<u16> = text
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let s: String = char::decode_utf16(units.iter().copied())
+            .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect();
+        clean_comment_text(s.as_bytes())
+    } else {
+        clean_comment_text(text)
+    }
+}
+
+/// Comment for the metadata panel: ImageDescription first, else UserComment.
+/// One line — a comment that is empty after cleaning is absent, not blank.
+pub fn exif_comment(exif: &nom_exif::Exif) -> Option<String> {
+    if let Some(s) = exif
+        .get(nom_exif::ExifTag::ImageDescription)
+        .and_then(|v| v.as_str())
+        .and_then(|s| clean_comment_text(s.as_bytes()))
+    {
+        return Some(s);
+    }
+    exif
+        .get(nom_exif::ExifTag::UserComment)
+        .and_then(|v| v.as_undefined())
+        .and_then(decode_user_comment)
+}
+
+/// Text out of a comment payload: UTF-8 where it is valid, Latin-1 mapped
+/// where it is not (a camera writing Latin-1 is ordinary, and lossy mojibake
+/// beats dropping the line), trimmed of NULs and whitespace.
+fn clean_comment_text(bytes: &[u8]) -> Option<String> {
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+    };
+    let s = s.trim_matches(['\0', ' ', '\t', '\r', '\n']).to_owned();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 // ---------------------------------------------------------------------------

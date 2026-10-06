@@ -25,6 +25,7 @@ mod fileassoc;
 use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 use nom_exif::{read_exif, ExifTag};
 use std::collections::{HashMap, HashSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
@@ -32,10 +33,10 @@ use std::time::{Duration, Instant};
 
 use image_viewer::perf;
 use image_viewer::{
-    buffer_has_alpha, extract_zip, fit_scale_no_upscale, forget_thumbnail, grid_cols,
+    buffer_has_alpha, extract_zip, fill_scale, fit_scale_no_upscale, forget_thumbnail, grid_cols,
     is_archive_path, last_anchor, load_grid_thumbnail, load_image_full, load_page_preview_full,
     load_spread_overrides, nav_is_forward, protected_preview_keys, save_spread_overrides,
-    scan_folder_sorted, set_downscale_filter, set_downscale_smoothing, set_linear_resample,
+    scan_folder_sorted_dir, set_downscale_filter, set_downscale_smoothing, set_linear_resample,
     set_thumbnail_cache,
     spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
     DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
@@ -102,6 +103,13 @@ const NAV_BUTTONS: &[(egui::PointerButton, NavInput)] = &[
 /// **Forward wins when both fired.** A frame with an arrow-left and space held is
 /// two things at once, and "forwards" is what the old `next || ...` chain answered,
 /// so this is parity rather than a new rule.
+///
+/// Rebindable keys (Tier 1 #1) layer on top without moving the rule: `NAV_KEYS`
+/// stays the shipped default table that `tests/keybindings.rs` pins, and
+/// `NAV_KEY_OVERRIDES` (action id → key name, from `Config::keys`) replaces the
+/// key a rebindable action is read from. The *meanings* never change, so a
+/// rebound key still names itself as a `NavInput` and still asks `nav_is_forward`
+/// — there is still exactly one function that knows which way forwards is.
 fn nav_direction(
     key_active: impl Fn(egui::Key) -> bool,
     button_active: impl Fn(egui::PointerButton) -> bool,
@@ -119,8 +127,8 @@ fn nav_direction(
             backward = true;
         }
     };
-    for (key, meaning) in NAV_KEYS {
-        note(key_active(*key), *meaning);
+    for (key, meaning) in effective_nav_keys() {
+        note(key_active(key), meaning);
     }
     for (button, meaning) in NAV_BUTTONS {
         note(button_active(*button), *meaning);
@@ -132,6 +140,83 @@ fn nav_direction(
     } else {
         None
     }
+}
+
+/// Rebindable navigation actions and the `NavInput` each one means.
+/// The key is replaceable; the meaning is not.
+const NAV_REBINDABLE: &[(&str, NavInput)] = &[
+    ("next", NavInput::Right),
+    ("prev", NavInput::Left),
+    ("next_alt", NavInput::Next),
+    ("page_next", NavInput::Next),
+    ("page_prev", NavInput::Previous),
+];
+
+/// Key names the settings dropdown offers. Deliberately the five shipped
+/// navigation keys and nothing else: any action can take any of them (swapping
+/// the arrows is the point), and a navigation action bound to `F` or `Delete`
+/// would collide with a bare letter or the one accepted exception.
+const KEY_NAME_OPTIONS: &[&str] = &["ArrowRight", "ArrowLeft", "Space", "PageDown", "PageUp"];
+
+/// Parse a key name from `Config::keys` into an `egui::Key`.
+///
+/// Match arms name the key (`egui::Key::Delete`) but never read the input
+/// (`i.key_pressed(..)`), so `tests/keybindings.rs::only_delete_reaches_the_recycle_bin`
+/// — which counts *reads* — still sees exactly one.
+fn parse_key_name(name: &str) -> Option<egui::Key> {
+    match name.trim() {
+        "ArrowRight" => Some(egui::Key::ArrowRight),
+        "ArrowLeft" => Some(egui::Key::ArrowLeft),
+        "ArrowUp" => Some(egui::Key::ArrowUp),
+        "ArrowDown" => Some(egui::Key::ArrowDown),
+        "Space" => Some(egui::Key::Space),
+        "PageDown" => Some(egui::Key::PageDown),
+        "PageUp" => Some(egui::Key::PageUp),
+        "Home" => Some(egui::Key::Home),
+        "End" => Some(egui::Key::End),
+        _ => None,
+    }
+}
+
+/// User overrides for rebindable navigation actions, mirroring
+/// `Config::keys`. A process global like the resample and thumbnail-cache
+/// flags, for the same reason: `nav_direction` is called from the input
+/// closures and takes only predicates, so the table it reads has to live
+/// somewhere it can reach without changing every caller's shape.
+static NAV_KEY_OVERRIDES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn set_nav_overrides(keys: &std::collections::HashMap<String, String>) {
+    *NAV_KEY_OVERRIDES.lock().unwrap() = keys.clone();
+}
+
+/// The navigation table with user overrides applied: same rows as
+/// `NAV_KEYS`, keys replaced where the user rebound the action. The two
+/// tables are zipped positionally — `NAV_REBINDABLE` must stay in
+/// `NAV_KEYS` order — and the `debug_assert` below is what notices a drift
+/// instead of silently mis-meaning a key. An override that does not parse
+/// is ignored rather than unbinding the action: a typo must leave the
+/// shipped key working, not leave the action with no key at all.
+fn effective_nav_keys() -> Vec<(egui::Key, NavInput)> {
+    let overrides = NAV_KEY_OVERRIDES.lock().unwrap();
+    NAV_KEYS
+        .iter()
+        .zip(NAV_REBINDABLE.iter())
+        .map(|((default_key, default_meaning), (action, meaning))| {
+            debug_assert_eq!(
+                *default_meaning, *meaning,
+                "NAV_REBINDABLE drifted out of NAV_KEYS order"
+            );
+            let key = overrides
+                .get(*action)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .and_then(parse_key_name)
+                .unwrap_or(*default_key);
+            (key, *default_meaning)
+        })
+        .collect()
 }
 
 /// How many images on each side of the current one get their preview preloaded.
@@ -158,6 +243,13 @@ const TILES_PER_FRAME: usize = 8;
 const MAX_TILES: usize = 64;
 /// Wait this long on an image before starting its full-res decode.
 const FULL_DWELL: Duration = Duration::from_millis(120);
+/// Minimum time between two external process spawns (user commands,
+/// Explorer). The second layer under the repeat-ignoring chords: a held
+/// Ctrl+1 once spawned one Paint per frame until the machine needed a hard
+/// reset, and a rate limit bounds the damage to one window a second if any
+/// spawn path ever fires repeatedly again. Legitimate use never notices —
+/// nobody runs two external programs within a second on purpose.
+const SPAWN_COOLDOWN: Duration = Duration::from_secs(1);
 /// Poll the folder for new/deleted files this often (watcher).
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 /// Highest zoom, in screen points per source pixel.
@@ -165,6 +257,22 @@ const MAX_SCALE: f32 = 32.0;
 
 // Job priorities (lower runs first) live in the library, next to `plan_jobs`,
 // so the planner and its priorities cannot drift apart.
+
+// Single-instance guard: `Config::single_instance` plus the mutex claim in
+// `image_viewer::claim_single_instance` (tested there). The name is
+// session-local: `Global\` needs a privilege a normal login does not have,
+// and a `\\.\` device-path prefix is not an object name at all — creation
+// failed on every launch and read as "already running".
+const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\image-viewer-single-instance-v1";
+
+/// Returns `true` when this launch is the single allowed instance
+/// (mutex created fresh). Returns `false` when a second instance
+/// is already running — in which case this process should exit
+/// rather than open another window (two instances fighting over an
+/// archive's shared temp dir is one of the bugs this gate prevents).
+fn hold_single_instance() -> bool {
+    image_viewer::claim_single_instance(SINGLE_INSTANCE_MUTEX_NAME)
+}
 
 fn main() -> eframe::Result<()> {
     // CLI: `--register` / `--unregister` manage file associations and exit;
@@ -246,6 +354,13 @@ fn main() -> eframe::Result<()> {
 
     let config_path = image_viewer::Config::default_path();
     let mut config = image_viewer::Config::load(&config_path);
+    // Single-instance gate: a second launch exits rather than fighting
+    // with the first over the shared archive temp dir (and making the
+    // watcher's already-wrong "file vanished" notifications fatal).
+    if config.single_instance && !hold_single_instance() {
+        eprintln!("Another image-viewer instance is already running — exiting.");
+        std::process::exit(0);
+    }
     let (mut backend, probed) = resolve_renderer(&config.renderer);
     if let Some(p) = probed {
         // Remember the answer so the next launch does not probe again.
@@ -889,11 +1004,15 @@ enum Msg {
 
 /// Start the worker pool for this app: real decoding, real panic capture, and
 /// a repaint request when something arrives.
-fn new_loader(ctx: &Context, tx: Sender<Msg>) -> image_viewer::Loader {
-    let workers = std::thread::available_parallelism()
+fn new_loader(
+    ctx: &Context,
+    tx: Sender<Msg>,
+    preferred_workers: usize,
+) -> image_viewer::Loader {
+    let available = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(2)
-        .clamp(2, 4);
+        .unwrap_or(2);
+    let workers = image_viewer::resolve_worker_count(available, preferred_workers);
     let wake_ctx = ctx.clone();
     image_viewer::Loader::spawn(
         workers,
@@ -1041,6 +1160,25 @@ fn extract_exif(path: &Path) -> Option<String> {
     }
     if let Some(entry) = exif.get(ExifTag::DateTimeOriginal) {
         info.push(format!("Date: {}", entry));
+    }
+
+    // Free-text comments: EXIF description/UserComment first, then a JPEG COM
+    // segment when it says something the EXIF text does not already say.
+    // The COM read is bounded to the first 256 KiB — a COM lives in the header
+    // when one exists — so this is not a second whole-file read on the worker.
+    let exif_text = image_viewer::exif_comment(&exif);
+    if let Some(c) = &exif_text {
+        info.push(format!("Comment: {c}"));
+    }
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let mut head = Vec::new();
+        if f.by_ref().take(262144).read_to_end(&mut head).is_ok() {
+            if let Some(c) = image_viewer::jpeg_comment(&head) {
+                if Some(&c) != exif_text.as_ref() {
+                    info.push(format!("Comment: {c}"));
+                }
+            }
+        }
     }
 
     // Photo settings, joined on one line like a camera EXIF summary.
@@ -1389,6 +1527,10 @@ struct MyApp {
     exif_loading: bool,
     show_panels: bool,
     next_scan: Instant, // periodic folder rescan (watcher)
+    /// When an external process was last spawned (user command, Explorer).
+    /// Rate-limits spawns so a repeating chord can never fork-bomb the
+    /// machine again — see `SPAWN_COOLDOWN`.
+    last_external_spawn: Option<Instant>,
     checker: Option<TextureHandle>, // transparency backdrop
     display_dim: Option<(u32, u32)>, // central panel size in physical px
     suppress_resize_redecode: bool, // panel toggle must not re-decode
@@ -1613,7 +1755,8 @@ impl MyApp {
             // Sort per config (natural name order by default) and pick what to show.
             // The rule itself lives in `image_viewer::startup_index` so it can be
             // tested; see its doc comment for the bug it fixes.
-            let files = scan_folder_sorted(&folder, config.sort);
+            let files =
+                scan_folder_sorted_dir(&folder, config.sort, config.sort_descending);
             gallery.index = image_viewer::startup_index(
                 &files,
                 named_file.as_deref(),
@@ -1627,6 +1770,7 @@ impl MyApp {
         set_downscale_smoothing(config.smooth_downscale);
         image_viewer::set_wide_gamut_conversion(config.convert_wide_gamut);
         set_thumbnail_cache(config.thumbnail_cache);
+        set_nav_overrides(&config.keys);
 
         if !config_path.exists() {
             config.save(&config_path);
@@ -1636,7 +1780,7 @@ impl MyApp {
         // `tx` is cloned rather than moved: the loader owns one sender and the
         // drop copy owns another, because a drop copy cannot go through the
         // loader's queue (see `drop_tx`).
-        let loader = new_loader(ctx, tx.clone());
+        let loader = new_loader(ctx, tx.clone(), config.workers);
 
         // Taken before `gallery` is moved into the struct below.
         let all_files = gallery.files.clone();
@@ -1669,6 +1813,7 @@ impl MyApp {
             exif_loading: false,
             show_panels: true,
             next_scan: Instant::now() + RESCAN_INTERVAL,
+            last_external_spawn: None,
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
             resize: image_viewer::ResizeTracker::new(),
@@ -3294,7 +3439,8 @@ impl MyApp {
             return;
         }
         self.lat.t_scan = Some(Instant::now());
-        let mut files = scan_folder_sorted(&self.folder, self.config.sort);
+        let mut files =
+            scan_folder_sorted_dir(&self.folder, self.config.sort, self.config.sort_descending);
         // Random must not reshuffle on every poll: keep the user's order,
         // append new files, drop vanished ones (manual reload reshuffles).
         if self.config.sort == SortMode::Random && !force && !self.all_files.is_empty() {
@@ -3439,7 +3585,11 @@ impl MyApp {
     /// Show the current file's folder in the system's default file browser
     /// (respects folder associations, e.g. Directory Opus instead of Explorer).
     fn explore_current(&mut self) {
-        if let Some(p) = self.gallery.current() {
+        let cur = self.gallery.current().map(|p| p.to_path_buf());
+        if let Some(p) = cur {
+            if !self.spawn_guard("Explore") {
+                return;
+            }
             let folder = p
                 .parent()
                 .map(|d| d.to_path_buf())
@@ -3447,6 +3597,91 @@ impl MyApp {
             if let Err(e) = open::that_detached(&folder) {
                 self.error = Some(format!("Open folder failed: {e}"));
             }
+        }
+    }
+
+    /// True when an external spawn is allowed now; records it. False — with a
+    /// notice naming what was held — when the last spawn was less than
+    /// `SPAWN_COOLDOWN` ago. Global across all spawn sites on purpose: per
+    /// command would let cycling Ctrl+1..9 evade it.
+    fn spawn_guard(&mut self, what: &str) -> bool {
+        if self
+            .last_external_spawn
+            .is_some_and(|t| t.elapsed() < SPAWN_COOLDOWN)
+        {
+            self.notice = Some(format!("{what} ignored — ran a moment ago"));
+            return false;
+        }
+        self.last_external_spawn = Some(Instant::now());
+        true
+    }
+
+    /// Run the nth user command (Ctrl+1..9, Tier 1 #2) against the file on
+    /// screen: `{file}`, `{dir}` and `{name}` expand in the program and args
+    /// ([`image_viewer::expand_user_command`], tested), then the process is
+    /// spawned detached — the viewer never waits on it and never reads its
+    /// output, so a slow editor cannot stall the paint thread. Spawns go
+    /// through `spawn_guard`, so even a repeating chord is one window a
+    /// second rather than one per frame. A missing entry
+    /// is a notice rather than an error: pressing Ctrl+3 with two commands is
+    /// a mistyped chord, not a failure.
+    fn run_user_command(&mut self, n: usize) {
+        let Some(cmd) = self.config.user_commands.get(n).cloned() else {
+            self.notice = Some(format!("No user command {}", n + 1));
+            return;
+        };
+        let Some(path) = self
+            .shown
+            .as_ref()
+            .map(|k| k.path.clone())
+            .or_else(|| self.cur.as_ref().map(|k| k.path.clone()))
+        else {
+            self.notice = Some("No image is open".into());
+            return;
+        };
+        if cmd.program.trim().is_empty() {
+            self.error = Some(format!("User command '{}' has no program", cmd.name));
+            return;
+        }
+        if !self.spawn_guard("User command") {
+            return;
+        }
+        let (prog, args) = image_viewer::expand_user_command(&cmd, &path);
+        match std::process::Command::new(&prog)
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => {
+                self.notice = Some(format!(
+                    "Ran {}",
+                    if cmd.name.trim().is_empty() {
+                        prog
+                    } else {
+                        cmd.name
+                    }
+                ));
+            }
+            Err(e) => self.error = Some(format!("Could not run '{}': {e}", cmd.name)),
+        }
+    }
+
+    /// Copy the current file's path as text (Ctrl+Shift+C).
+    ///
+    /// Shares `Event::Copy` with the image copy: egui-winit's
+    /// `is_copy_command` is `modifiers.command && key == C` with no shift
+    /// exclusion, and it returns before pushing the key — so Ctrl+Shift+C
+    /// arrives as the same event as Ctrl+C, and the arm reads the shift
+    /// state to tell them apart. Text goes through `ctx.copy_text`, and a
+    /// notice names what went, so a Shift held by accident reads as what it
+    /// did rather than as a failed image copy.
+    fn copy_path_to_clipboard(&mut self, ctx: &Context) {
+        if let Some(p) = self.gallery.current() {
+            let s = p.to_string_lossy().into_owned();
+            ctx.copy_text(s.clone());
+            self.notice = Some(format!("Copied path: {s}"));
         }
     }
 
@@ -3500,8 +3735,7 @@ impl MyApp {
     fn save_transformed_copy(&mut self) {
         let Some(cur) = self.cur.clone() else {
             return;
-        };
-        let p = cur.path.clone();
+        };let p = cur.path.clone();
         if self.anim.as_ref().is_some_and(|a| a.path == p) {
             self.error = Some("Cannot save a transformed animation: it has many frames".into());
             return;
@@ -3534,6 +3768,55 @@ impl MyApp {
                     format!("Saved {name}")
                 } else {
                     format!("Saved {name} ({} , lossless)", edit.label())
+                });
+            }
+            Err(e) => self.error = Some(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Write the same edit `save_transformed_copy` would, downscaled to the
+    /// measured display size (Ctrl+Shift+S) instead of full-res.
+    ///
+    /// Same guards — animations and document pages are refused for the same
+    /// reasons — and the notice names "re-encoded" for JPEG, because a
+    /// screen-size JPEG is a decode and a fresh encode, not moved
+    /// coefficients. With no measured panel yet there is no screen size to
+    /// save at, so that is an error rather than a guess.
+    fn save_scaled_copy(&mut self) {
+        let Some(cur) = self.cur.clone() else {
+            return;
+        };
+        let p = cur.path.clone();
+        if self.anim.as_ref().is_some_and(|a| a.path == p) {
+            self.error = Some("Cannot save a transformed animation: it has many frames".into());
+            return;
+        }
+        if cur.page > 0 {
+            self.error = Some(format!(
+                "Cannot save a single page of a multi-page document ({}/{}). \
+                 Saving works on the whole file.",
+                cur.page + 1,
+                self.gallery.pages_in_current()
+            ));
+            return;
+        }
+        let Some((dw, dh)) = self.display_dim else {
+            self.error = Some("No display size measured yet — try again in a moment".into());
+            return;
+        };
+        let edit = self.edits.get(&p);
+        match image_viewer::save_transformed_scaled(&p, edit.xform, edit.crop, dw.max(dh)) {
+            Ok(out) => {
+                let name = out
+                    .dest
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                self.notice = Some(if out.lossless {
+                    format!("Saved {name} ({}x{}, lossless)", out.width, out.height)
+                } else {
+                    format!("Saved {name} ({}x{}, re-encoded)", out.width, out.height)
                 });
             }
             Err(e) => self.error = Some(format!("Save failed: {e}")),
@@ -4169,11 +4452,12 @@ impl MyApp {
 
         // --- input: zoom (wheel / pinch), pan (drag), shortcuts ---
         let hover = resp.hover_pos();
-        let (scroll, pinch, key_fit, key_100) = ui.input(|i| {
+        let (scroll, pinch, key_fit, key_fill, key_100) = ui.input(|i| {
             (
                 i.smooth_scroll_delta.y,
                 i.zoom_delta(),
-                i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::F) && !i.modifiers.shift,
+                i.key_pressed(egui::Key::F) && i.modifiers.shift,
                 i.key_pressed(egui::Key::Num1),
             )
         });
@@ -4214,6 +4498,13 @@ impl MyApp {
         }
         if key_fit || resp.double_clicked() {
             target_scale = fit_scale;
+        }
+        if key_fill && pages.is_empty() {
+            // Single-image only: a turn's layout (`spread_fit`, pan bounds,
+            // seam) assumes the fit scale, so filling there is a layout change,
+            // not a zoom. Here it is just a larger target on the same clamp.
+            target_scale =
+                fill_scale((display_px.x, display_px.y), (panel.width(), panel.height()));
         }
         let target_scale = target_scale.clamp(fit_scale, max_scale);
         if (target_scale - scale).abs() > f32::EPSILON {
@@ -5873,14 +6164,24 @@ impl eframe::App for MyApp {
         // text field handles the same event first, and copying a whole
         // full-res image because you were renaming a filter is not a thing
         // anyone asked for.
-        let clip_img = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-        let (del, explore, reload, wall, save_rot, crop_key) = ctx.input(|i| {
+        let (clip_img, clip_shift) = ctx.input(|i| {
+            (
+                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                i.modifiers.shift,
+            )
+        });
+        let (del, explore, reload, wall, save_rot, save_screen, crop_key) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Delete),
                 i.key_pressed(egui::Key::E),
                 i.key_pressed(egui::Key::R),
                 i.key_pressed(egui::Key::W) && !i.modifiers.any(),
-                i.key_pressed(egui::Key::S) && i.modifiers.ctrl,
+                // NOTE: `shift == false` rather than `!shift` on purpose —
+                // `tests/keybindings.rs::bound_bare` treats any `&& !i.modifiers`
+                // in the same comma-chunk as a bare press, so `!i.modifiers.shift`
+                // here would read Ctrl+S as bare S and fail `no_unexpected_bare`.
+                i.key_pressed(egui::Key::S) && i.modifiers.ctrl && i.modifiers.shift == false,
+                i.key_pressed(egui::Key::S) && i.modifiers.ctrl && i.modifiers.shift,
                 // Bare `C` is still a real key event, so crop mode is
                 // unaffected: the chord interception is on the press *with*
                 // a modifier, and this is the press without one.
@@ -5913,6 +6214,51 @@ impl eframe::App for MyApp {
                     && !i.modifiers.alt,
                 i.key_pressed(egui::Key::X) && !i.modifiers.any(),
             )
+        });
+        // User commands (Tier 1 #2): Ctrl+1..9 runs the nth entry in
+        // `Config::user_commands`. Read as one `Option<usize>` so the dispatch
+        // below has a single branch rather than nine.
+        //
+        // Physical presses only (`repeat: false`): `key_pressed` also fires
+        // for OS key-repeat, and a repeat spawns one process per frame — a
+        // held Ctrl+1 opened hundreds of Paint windows and froze the machine.
+        // Spawning is the one dispatch that must be edge-triggered, so this
+        // reads the raw events like the `Event::Copy` chord above instead of
+        // `key_pressed`.
+        let user_cmd = ctx.input(|i| {
+            if !i.modifiers.ctrl || i.modifiers.alt {
+                return None;
+            }
+            for (n, key) in [
+                egui::Key::Num1,
+                egui::Key::Num2,
+                egui::Key::Num3,
+                egui::Key::Num4,
+                egui::Key::Num5,
+                egui::Key::Num6,
+                egui::Key::Num7,
+                egui::Key::Num8,
+                egui::Key::Num9,
+            ]
+            .iter()
+            .enumerate()
+            {
+                let fresh = i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: k,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        } if *k == *key
+                    )
+                });
+                if fresh {
+                    return Some(n);
+                }
+            }
+            None
         });
         // `typing` is true when the search box owns the keyboard. All of this is
         // global single-key handling, so it must stand down or typing "g" into
@@ -5980,13 +6326,22 @@ impl eframe::App for MyApp {
             } else if reload {
                 self.rescan(ctx, true);
             } else if clip_img {
-                self.copy_image_to_clipboard();
+                if clip_shift {
+                    self.copy_path_to_clipboard(ctx);
+                } else {
+                    self.copy_image_to_clipboard();
+                }
             } else if save_rot {
                 self.save_transformed_copy();
+            } else if save_screen {
+                self.save_scaled_copy();
             } else if crop_key {
                 self.toggle_crop_mode(ctx);
             } else if wall {
                 self.set_wallpaper();
+            }
+            if let Some(n) = user_cmd {
+                self.run_user_command(n);
             }
         }
 
@@ -6243,6 +6598,10 @@ impl eframe::App for MyApp {
             let mut refilter = false;
             egui::Panel::right("settings").show(ui, |ui| {
                 ui.heading("Settings");
+                // The panel long outgrew the window height (renderer, resample,
+                // cache, keys, user commands, manga, sort, associations), so
+                // the content scrolls instead of running off the bottom.
+                egui::ScrollArea::vertical().show(ui, |ui| {
 
                 // ---- renderer ------------------------------------------------
                 // Deliberately the first row: it is the only setting that can
@@ -6436,6 +6795,148 @@ impl eframe::App for MyApp {
                     self.gallery.loop_back = self.config.loop_back;
                     self.config.save(&self.config_path);
                 }
+                ui.horizontal(|ui| {
+                    ui.label("Worker threads (0 = auto):");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.config.workers)
+                                .range(0..=8),
+                        )
+                        .changed()
+                    {
+                        // The pool is built once at startup, so this takes
+                        // effect on restart rather than rebuilding it live.
+                        self.config.save(&self.config_path);
+                    }
+                });
+                ui.small("0 picks 2-4 from your CPU. Applies on restart.");
+                if ui
+                    .checkbox(&mut self.config.single_instance, "Allow only one window")
+                    .changed()
+                {
+                    // Takes effect on next launch: the running process already
+                    // holds the mutex, so flipping this cannot open or close one.
+                    self.config.save(&self.config_path);
+                    self.notice = Some(if self.config.single_instance {
+                        "Single-instance on — takes effect on restart"
+                    } else {
+                        "Single-instance off — multiple windows allowed"
+                    }.into());
+                }
+                ui.small("On: a second launch exits instead of fighting over the archive temp dir. Applies on restart.");
+                ui.add_space(6.0);
+                // ---- keys ---------------------------------------------------
+                //
+                // Rebindable navigation keys (Tier 1 #1). The dropdown offers the
+                // five shipped navigation keys, so any action can take any of
+                // them; the *meanings* are fixed in `NAV_REBINDABLE`, which is
+                // why a rebound key still asks `nav_is_forward` and cannot
+                // become a second opinion about direction. Bare letters are not
+                // here on purpose: they are the view-only safe list
+                // `tests/keybindings.rs` pins.
+                ui.label("Keys:");
+                let mut keys_changed = false;
+                for (action, _meaning) in NAV_REBINDABLE {
+                    let current = image_viewer::resolve_key(&self.config.keys, action);
+                    let mut selected = current.clone();
+                    ui.horizontal(|ui| {
+                        ui.label(*action);
+                        egui::ComboBox::from_id_salt(("nav_key", *action))
+                            .selected_text(selected.clone())
+                            .show_ui(ui, |ui| {
+                                for name in KEY_NAME_OPTIONS {
+                                    ui.selectable_value(
+                                        &mut selected,
+                                        (*name).to_owned(),
+                                        *name,
+                                    );
+                                }
+                            });
+                    });
+                    if selected != current {
+                        if selected == image_viewer::default_key(action) {
+                            self.config.keys.remove(*action);
+                        } else {
+                            self.config.keys.insert((*action).to_owned(), selected);
+                        }
+                        keys_changed = true;
+                    }
+                }
+                if keys_changed {
+                    set_nav_overrides(&self.config.keys);
+                    self.config.save(&self.config_path);
+                    self.notice = Some("Keys updated".into());
+                }
+                ui.small("Bare letters (C, D, E, F, G, I, M, O, R, W, X) are fixed.");
+                if ui.button("Reset keys").clicked() {
+                    self.config.keys.clear();
+                    set_nav_overrides(&self.config.keys);
+                    self.config.save(&self.config_path);
+                    self.notice = Some("Keys reset to defaults".into());
+                }
+                ui.add_space(6.0);
+                // ---- user commands ------------------------------------------
+                //
+                // External programs run against the current file (Tier 1 #2):
+                // Ctrl+1..9 in list order. `{file}`, `{dir}` and `{name}`
+                // expand in the program and in every arg, so
+                // `mspaint.exe "{file}"` opens the picture on screen in Paint.
+                // Spawned detached — the viewer never waits — so this is an
+                // "open with", not scripting with results.
+                ui.label("User commands (Ctrl+1..9):");
+                let mut cmds_changed = false;
+                let mut remove_at: Option<usize> = None;
+                for (n, cmd) in self.config.user_commands.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{}:", n + 1));
+                        if ui.text_edit_singleline(&mut cmd.name).changed() {
+                            cmds_changed = true;
+                        }
+                        if ui.small_button("x").clicked() {
+                            remove_at = Some(n);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("program");
+                        if ui.text_edit_singleline(&mut cmd.program).changed() {
+                            cmds_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("args");
+                        let mut joined = cmd.args.join(" ");
+                        if ui.text_edit_singleline(&mut joined).changed() {
+                            // Space-separated; quote nothing. Args with real
+                            // spaces in them need their program to take one
+                            // `{file}` and split it itself — documented below.
+                            cmd.args = joined
+                                .split_whitespace()
+                                .map(|s| s.to_owned())
+                                .collect();
+                            cmds_changed = true;
+                        }
+                    });
+                }
+                if let Some(n) = remove_at {
+                    self.config.user_commands.remove(n);
+                    cmds_changed = true;
+                }
+                if ui.button("Add command").clicked() {
+                    self.config.user_commands.push(image_viewer::UserCommand {
+                        name: String::new(),
+                        program: String::new(),
+                        args: Vec::new(),
+                    });
+                    cmds_changed = true;
+                }
+                if cmds_changed {
+                    // Saved on edit, not per frame: the flag above is only set
+                    // by a field that reported `changed()`. Empty rows are
+                    // kept, not pruned: pruning while typing deletes the row
+                    // being typed in.
+                    self.config.save(&self.config_path);
+                }
+                ui.small("One arg per space. {file} {dir} {name} expand. Empty args just passes {file}.");
                 ui.add_space(6.0);
                 // ---- manga mode -------------------------------------------
                 //
@@ -6537,6 +7038,13 @@ impl eframe::App for MyApp {
                     self.config.save(&self.config_path);
                     resort = true;
                 }
+                if ui
+                    .checkbox(&mut self.config.sort_descending, "Descending sort order")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                    resort = true;
+                }
                 ui.add_space(6.0);
                 ui.heading("File associations");
                 let registered = fileassoc::is_registered();
@@ -6569,8 +7077,21 @@ impl eframe::App for MyApp {
                 }
                 ui.small("Registers in the user registry (no admin). To make it the default, right-click an image > Open with > Choose another app > Image Viewer > Always.");
                 ui.label(format!("Config: {}", self.config_path.display()));
+                // Which checkout this binary came from, so a copy sitting in
+                // Downloads can be told apart from the current build.
+                ui.small(format!("Build {}", env!("IV_BUILD_ID")));
+                });
             });
             if resort {
+                self.notice = Some(format!(
+                    "Sorted by {:?}{}",
+                    self.config.sort,
+                    if self.config.sort_descending {
+                        ", descending"
+                    } else {
+                        ""
+                    }
+                ));
                 self.rescan(ctx, true);
             }
             if refilter {

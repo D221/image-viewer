@@ -36,4 +36,32 @@ fn main() {
             println!("cargo:rustc-link-arg=/NODEFAULTLIB:LIBCMT");
         }
     }
+
+    // Build fingerprint, shown at the bottom of Settings: short git hash plus
+    // dirty flag, so a binary copied to Downloads as `image-viewer(3).exe`
+    // can be told apart from the current checkout. Stale copies have already
+    // caused two ghost-bug reports (a missing chord, a fixed freeze), and
+    // "which build is this" should be answerable on screen, not by faith.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/index");
+    let hash = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into());
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    println!(
+        "cargo:rustc-env=IV_BUILD_ID={}{}",
+        hash,
+        if dirty { "-dirty" } else { "" }
+    );
 }

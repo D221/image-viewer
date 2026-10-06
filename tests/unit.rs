@@ -3897,3 +3897,504 @@ fn test_gallery_scroll_offset_lands_the_selected_row_in_view() {
          view; got {rows:?}"
     );
 }
+
+/// Worker-count override (Tier 1 #12): 0 means auto, anything else is clamped.
+#[test]
+fn worker_count_override_is_honoured_and_auto_stays_put() {
+    // Auto (0) keeps the shipped behaviour: available parallelism clamped to 2..=4.
+    assert_eq!(image_viewer::resolve_worker_count(8, 0), 4);
+    assert_eq!(image_viewer::resolve_worker_count(2, 0), 2);
+    assert_eq!(image_viewer::resolve_worker_count(1, 0), 2);
+    // An explicit preference is honoured, clamped to a sane 1..=8.
+    assert_eq!(image_viewer::resolve_worker_count(8, 1), 1);
+    assert_eq!(image_viewer::resolve_worker_count(8, 6), 6);
+    assert_eq!(image_viewer::resolve_worker_count(8, 64), 8);
+}
+
+/// An old config without the workers key must still load, and come up on auto.
+#[test]
+fn a_config_written_before_workers_still_loads_and_stays_auto() {
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert_eq!(
+        cfg.workers, 0,
+        "an old config must come up on auto (0), not on a fixed count"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
+    assert_eq!(fresh.workers, 0, "a first run must also come up on auto");
+}
+
+/// The worker-count setting must be **wired**, and `main.rs` is unreachable from
+/// every test, so this is a source scan - the established pattern here.
+#[test]
+fn the_worker_count_setting_is_wired_to_pool_startup() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("resolve_worker_count("),
+        "pool startup must go through resolve_worker_count, not compute the clamp inline"
+    );
+    assert!(
+        src.contains("config.workers"),
+        "pool startup must read the setting"
+    );
+    assert!(
+        src.contains("&mut self.config.workers"),
+        "the settings panel must have a control bound to it"
+    );
+}
+
+/// Fill-with-crop fit (Tier 1 #10): scale so the image covers the area,
+/// cropping rather than letterboxing. The larger ratio wins, unlike
+/// `fit_scale_no_upscale` where the smaller wins and upscale is refused.
+#[test]
+fn fill_scale_covers_the_area() {
+    // Wide image in a square area: height binds.
+    let s = image_viewer::fill_scale((200.0, 100.0), (100.0, 100.0));
+    assert!((s - 1.0).abs() < 1e-6, "height must bind: got {s}");
+    // Tall image in a wide area: width binds.
+    let s = image_viewer::fill_scale((100.0, 200.0), (200.0, 100.0));
+    assert!((s - 2.0).abs() < 1e-6, "width must bind: got {s}");
+    // Small image fills by upscaling (that is what crops instead of borders).
+    let s = image_viewer::fill_scale((50.0, 50.0), (100.0, 100.0));
+    assert!((s - 2.0).abs() < 1e-6, "fill may upscale: got {s}");
+}
+
+/// Fill-with-crop must be **wired**, and `main.rs` is unreachable from every
+/// test, so this is a source scan - the established pattern here.
+#[test]
+fn the_fill_key_is_wired_to_a_fill_scale() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fill_scale("),
+        "the fill key must size from fill_scale, not from fit_scale"
+    );
+    assert!(
+        src.contains("modifiers.shift"),
+        "fill must sit on Shift+F so bare F keeps meaning fit"
+    );
+}
+
+/// Sort direction (Tier 1 #7): `descending` reverses each mode`s shipped order,
+/// and off is exactly today`s behaviour - no existing order changes.
+#[test]
+fn sort_descending_reverses_each_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.jpg"), vec![0u8; 10]).ok();
+    std::fs::write(tmp.path().join("b.jpg"), vec![0u8; 4000]).ok();
+    std::fs::write(tmp.path().join("c.jpg"), vec![0u8; 500]).ok();
+
+    // Name: ascending is natural, descending its exact reverse.
+    let asc = image_viewer::scan_folder_sorted_dir(
+        tmp.path(),
+        image_viewer::SortMode::Name,
+        false,
+    );
+    let desc = image_viewer::scan_folder_sorted_dir(
+        tmp.path(),
+        image_viewer::SortMode::Name,
+        true,
+    );
+    let names = |fs: &[std::path::PathBuf]| {
+        fs.iter()
+            .map(|p| p.file_name().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&asc).iter().map(|s| s.to_str().unwrap()).collect::<Vec<_>>(),
+        ["a.jpg", "b.jpg", "c.jpg"]
+    );
+    let mut rev = asc.clone();
+    rev.reverse();
+    assert_eq!(desc, rev, "descending Name must be ascending reversed");
+
+    // Size: shipped order is largest-first; descending puts smallest first.
+    let desc =
+        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Size, true);
+    assert_eq!(desc[0].file_name().unwrap(), "a.jpg");
+    let asc =
+        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Size, false);
+    let mut rev = asc.clone();
+    rev.reverse();
+    assert_eq!(desc, rev, "descending Size must be ascending reversed");
+
+    // Date: order depends on mtime granularity, but descending must still be
+    // the exact reverse of whatever ascending produced.
+    let asc =
+        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Date, false);
+    let desc =
+        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Date, true);
+    let mut rev = asc.clone();
+    rev.reverse();
+    assert_eq!(desc, rev, "descending Date must be ascending reversed");
+}
+
+/// An old config without the key must still load, and keep today`s orders.
+#[test]
+fn a_config_written_before_sort_descending_still_loads_and_stays_off() {
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert!(
+        !cfg.sort_descending,
+        "an old config must keep the shipped orders"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
+    assert!(!fresh.sort_descending, "a first run must also keep them");
+}
+
+/// The sort-direction setting must be **wired**, and `main.rs` is unreachable
+/// from every test, so this is a source scan - the established pattern here.
+#[test]
+fn the_sort_direction_setting_is_wired_to_rescan() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("scan_folder_sorted_dir("),
+        "folder scans must go through the directed sort, not the old wrapper"
+    );
+    assert!(
+        src.contains("&mut self.config.sort_descending"),
+        "the settings panel must have a control bound to it"
+    );
+}
+
+/// Copy-path (Tier 1 #4): Ctrl+Shift+C arrives as `Event::Copy` - egui-winit`s
+/// `is_copy_command` is `modifiers.command && key == C` with no shift
+/// exclusion, and it returns before pushing the Key event - so the shift state
+/// must disambiguate path from pixels inside the Copy arm.
+#[test]
+fn shift_copy_puts_the_path_on_the_clipboard() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("copy_path_to_clipboard"),
+        "there must be a path-copy action distinct from copy_image_to_clipboard"
+    );
+    // The call site, not the definition: the arm around it must branch on the
+    // shift state, since both chords arrive as the same event.
+    let call = src
+        .find("self.copy_path_to_clipboard(ctx)")
+        .expect("the Copy arm must call it");
+    let arm = src[..call]
+        .rfind("clip_img")
+        .expect("the call must sit in the Copy arm");
+    assert!(
+        src[arm..call].contains("clip_shift"),
+        "the Copy arm must read the shift state to tell Ctrl+Shift+C apart \
+         from Ctrl+C (both arrive as Event::Copy)"
+    );
+}
+
+/// JPEG comments (Tier 1 #8): a COM segment in the header must be found.
+#[test]
+fn jpeg_comment_finds_the_com_segment() {
+    // SOI + COM("hello") + EOI.
+    let jpg = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00, 0x07, b'h', b'e', b'l', b'l', b'o', 0xFF, 0xD9];
+    assert_eq!(
+        image_viewer::jpeg_comment(&jpg).as_deref(),
+        Some("hello"),
+        "the COM payload must come back as text"
+    );
+    // No COM at all.
+    let bare = vec![0xFF, 0xD8, 0xFF, 0xD9];
+    assert_eq!(image_viewer::jpeg_comment(&bare), None);
+    // Truncated mid-length must not panic and must not invent a comment.
+    let cut = vec![0xFF, 0xD8, 0xFF, 0xFE, 0x00];
+    assert_eq!(image_viewer::jpeg_comment(&cut), None);
+    // Not a JPEG at all.
+    assert_eq!(image_viewer::jpeg_comment(b"definitely not jpeg"), None);
+}
+
+/// EXIF text comments end to end: description wins over UserComment, read
+/// from a real file so the tag lookup is exercised and not just the helpers.
+///
+/// `test-images/` is gitignored, so this skips when absent — the same pattern
+/// as `test_gps_decode`. Where it runs, it runs for real.
+#[test]
+fn exif_comment_reads_description_from_a_real_file() {
+    let path = std::path::Path::new("test-images/color-p3-anon.jpg");
+    if !path.exists() {
+        return;
+    }
+    let exif = nom_exif::read_exif(path).expect("fixture must parse");
+    assert_eq!(
+        image_viewer::exif_comment(&exif).as_deref(),
+        Some("Screenshot"),
+        "ImageDescription must come back as text"
+    );
+    // The file also carries an 18-byte UserComment; description still wins,
+    // and the payload itself must decode to something non-empty.
+    let payload = exif
+        .get(nom_exif::ExifTag::UserComment)
+        .and_then(|v| v.as_undefined())
+        .expect("fixture carries a UserComment");
+    assert_eq!(payload.len(), 18);
+    assert!(
+        image_viewer::decode_user_comment(payload).is_some(),
+        "the real UserComment payload must decode"
+    );
+
+    // Synthetic payloads without a file: ASCII prefix + text, and an
+    // all-NUL body is no comment rather than an empty line.
+    assert_eq!(
+        image_viewer::decode_user_comment(b"ASCII\0\0\0hello").as_deref(),
+        Some("hello")
+    );
+    assert_eq!(image_viewer::decode_user_comment(b"ASCII\0\0\0\0\0\0"), None);
+}
+
+/// The comment lines must reach the panel, and `main.rs` is unreachable from
+/// every test, so this is a source scan - the established pattern here.
+#[test]
+fn the_comment_lines_are_wired_into_extract_exif() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("image_viewer::exif_comment("),
+        "extract_exif must show the EXIF description/UserComment"
+    );
+    assert!(
+        src.contains("image_viewer::jpeg_comment("),
+        "extract_exif must also show a JPEG COM segment"
+    );
+}
+
+/// Screen-size save must be **wired**, and `main.rs` is unreachable from every
+/// test, so this is a source scan - the established pattern here.
+#[test]
+fn the_screen_save_key_is_wired_to_a_scaled_save() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("save_transformed_scaled("),
+        "Ctrl+Shift+S must go through the scaled save, not the full-res one"
+    );
+    assert!(
+        src.contains("save_scaled_copy()"),
+        "there must be a screen-size save action"
+    );
+}
+
+/// Toasts (Tier 1 #11): a resort must say what order it produced. Notices are
+/// status-line toasts; the sort change was the state change that stayed silent.
+#[test]
+fn resort_names_the_order_it_produced() {
+    let src = include_str!("../src/main.rs");
+    let at = src
+        .find("if resort {")
+        .expect("the settings panel must have a resort arm");
+    let arm = &src[at..(at + 600).min(src.len())];
+    assert!(
+        arm.contains("self.notice = Some("),
+        "resorting must leave a notice naming the order, or a flipped folder \
+         reads as nothing happening"
+    );
+    assert!(
+        arm.contains("self.config.sort"),
+        "the notice must read the sort the rescan is about to apply"
+    );
+}
+
+/// Single-instance toggle must be **wired**, and `main.rs` is unreachable from
+/// every test, so this is a source scan - the established pattern here.
+#[test]
+fn the_single_instance_toggle_is_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.config.single_instance"),
+        "settings panel must offer the single-instance toggle"
+    );
+    assert!(
+        src.contains("hold_single_instance()"),
+        "startup must gate on the single-instance mutex"
+    );
+}
+
+/// The mutex itself, claimed twice in one process: the first claim wins and
+/// the second loses, which is the whole semantic the gate relies on.
+#[test]
+fn second_claim_of_the_same_name_loses() {
+    let name = format!(
+        "Local\\image-viewer-claim-test-{}",
+        std::process::id()
+    );
+    assert!(
+        image_viewer::claim_single_instance(&name),
+        "first claim of a fresh name must win"
+    );
+    assert!(
+        !image_viewer::claim_single_instance(&name),
+        "second claim of a held name must lose"
+    );
+}
+
+/// The startup brick: a `\\.\`-prefixed device path is not an object name,
+/// so creation fails on every launch — and that failure used to read as
+/// "already running". A guard that refuses to start the app is worse than no
+/// guard, so an uncreatable name starts anyway.
+#[test]
+fn an_uncreatable_mutex_name_does_not_block_startup() {
+    assert!(
+        image_viewer::claim_single_instance("\\\\.\\Global\\image-viewer-instance"),
+        "a mutex that cannot be created must fail open, not exit the app"
+    );
+}
+
+/// Rebindable keys (Tier 1 #1): overrides win, blanks fall back, unknown
+/// actions resolve to "" rather than a guessed key.
+#[test]
+fn key_overrides_win_and_blanks_fall_back() {
+    let mut keys = std::collections::HashMap::new();
+    assert_eq!(image_viewer::resolve_key(&keys, "next"), "ArrowRight");
+    keys.insert("next".into(), "PageDown".into());
+    assert_eq!(image_viewer::resolve_key(&keys, "next"), "PageDown");
+    keys.insert("next".into(), "   ".into());
+    assert_eq!(image_viewer::resolve_key(&keys, "next"), "ArrowRight");
+    assert_eq!(image_viewer::resolve_key(&keys, "nope"), "");
+}
+
+/// UserCmd expansion (Tier 1 #2): {file}/{dir}/{name} expand, unknowns stay.
+#[test]
+fn user_command_templates_expand_against_the_current_file() {
+    let cmd = image_viewer::UserCommand {
+        name: "x".into(),
+        program: "{dir}/tool.exe".into(),
+        args: vec!["{file}".into(), "{name}".into(), "{x}".into()],
+    };
+    let file = std::path::Path::new("C:/pics/a.jpg");
+    let (prog, args) = image_viewer::expand_user_command(&cmd, file);
+    assert_eq!(prog, "C:/pics/tool.exe");
+    assert_eq!(args[0], "C:/pics/a.jpg");
+    assert_eq!(args[1], "a.jpg");
+    assert_eq!(args[2], "{x}", "unknown placeholders must survive");
+}
+
+/// Empty args default to the file: "open with" nearly always means the
+/// picture on screen, not a blank window.
+#[test]
+fn user_command_with_no_args_gets_the_file() {
+    let cmd = image_viewer::UserCommand {
+        name: "paint".into(),
+        program: "mspaint.exe".into(),
+        args: Vec::new(),
+    };
+    let file = std::path::Path::new("C:/pics/a.jpg");
+    let (prog, args) = image_viewer::expand_user_command(&cmd, file);
+    assert_eq!(prog, "mspaint.exe");
+    assert_eq!(args, vec!["C:/pics/a.jpg"]);
+}
+
+/// The settings panel must scroll: it long outgrew the window height, and
+/// `main.rs` is unreachable from every test, so this is a source scan - the
+/// established pattern here.
+#[test]
+fn the_settings_panel_scrolls() {
+    let src = include_str!("../src/main.rs");
+    let at = src
+        .find("Panel::right(\"settings\")")
+        .expect("the settings panel must exist");
+    let arm = &src[at..(at + 800).min(src.len())];
+    assert!(
+        arm.contains("ScrollArea::vertical()"),
+        "settings content must sit in a vertical ScrollArea, or it runs off \
+         the bottom of short windows"
+    );
+}
+
+/// Rebindable keys must be **wired**, and `main.rs` is unreachable from every
+/// test, so these are source scans - the established pattern here.
+#[test]
+fn the_rebindable_keys_are_wired_to_the_direction_rule() {    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("set_nav_overrides(&self.config.keys)"),
+        "startup and the settings panel must push Config::keys into the nav table"
+    );
+    assert!(
+        src.contains("fn effective_nav_keys()"),
+        "overrides must be applied in one place the direction rule reads"
+    );
+    // The rule still owns every direction: the override table carries keys,
+    // and the meanings stay NavInputs asked of nav_is_forward.
+    assert!(
+        src.contains("NAV_REBINDABLE"),
+        "there must be one action->meaning table for rebindable keys"
+    );
+}
+
+/// User commands must be **wired**: a chord, a runner, and the expansion.
+#[test]
+fn the_user_commands_are_wired_to_ctrl_digits() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn run_user_command(&mut self"),
+        "there must be a user-command runner"
+    );
+    assert!(
+        src.contains("expand_user_command(&cmd, &path)"),
+        "the runner must expand {{file}}/{{dir}}/{{name}}, not spawn raw config text"
+    );
+    assert!(
+        src.contains("egui::Key::Num1"),
+        "Ctrl+1..9 must trigger the commands"
+    );
+}
+
+/// Spawning must be edge-triggered: `key_pressed` also fires for OS
+/// key-repeat, and a repeat spawns one process per frame — a held Ctrl+1
+/// opened hundreds of Paint windows and froze the machine. The chord must
+/// therefore read raw events with `repeat: false`, never `key_pressed`.
+#[test]
+fn the_user_command_chord_ignores_key_repeat() {
+    let src = include_str!("../src/main.rs");
+    let at = src
+        .find("let user_cmd = ctx.input")
+        .expect("the user-command chord must exist");
+    let arm = &src[at..(at + 1600).min(src.len())];
+    assert!(
+        arm.contains("repeat: false"),
+        "the chord must filter OS key-repeat, or holding Ctrl+1 fork-bombs"
+    );
+    assert!(
+        !arm.contains("key_pressed"),
+        "the chord must not read through key_pressed, which fires on repeats"
+    );
+}
+
+/// Guardrails around spawning: a global cooldown consulted by every site
+/// that starts an external process, so no repeating chord — this one or a
+/// future one — can fork-bomb the machine again. `main.rs` is unreachable
+/// from every test, so this is a source scan, the established pattern.
+#[test]
+fn external_spawns_are_rate_limited() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("const SPAWN_COOLDOWN: Duration"),
+        "there must be one cooldown every spawn site shares"
+    );
+    for (sig, what) in [
+        ("fn run_user_command(&mut self", "user commands"),
+        ("fn explore_current(&mut self", "Explorer"),
+    ] {
+        let at = src
+            .find(sig)
+            .unwrap_or_else(|| panic!("{what} handler is gone; update this test to match"));
+        let body = &src[at..(at + 2500).min(src.len())];
+        assert!(
+            body.contains("spawn_guard("),
+            "{what} must go through spawn_guard, or a repeating chord can \
+             spawn one process per frame again"
+        );
+    }
+}
+
+/// The binary identifies its own build in Settings, so a copy in Downloads
+/// can be told apart from the current checkout. Stale copies already caused
+/// two ghost reports (a chord that "did nothing", a freeze that was fixed).
+#[test]
+fn the_settings_panel_shows_the_build_id() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("env!(\"IV_BUILD_ID\")"),
+        "Settings must show the build fingerprint, or stale binaries are \
+         undebuggable"
+    );
+}

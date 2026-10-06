@@ -301,6 +301,7 @@ should not quietly do that.
 | `Home` / `End` | First / last image (in the grid: first / last cell) |
 | `G` | Toggle the gallery grid |
 | `F` | Fit to window |
+| `Shift+F` | Fill window (crop overflow, single image only) |
 | `1` | 100% (1 image pixel = 1 screen pixel) |
 | `I` | Toggle the side and bottom panels |
 | `/` | Focus the filter box |
@@ -314,7 +315,11 @@ should not quietly do that.
 | `O` / `Shift+O` | One fewer / one more page opening alone at the front of the gallery |
 | `X` | Toggle the current page between single and double (takes a whole turn to itself) |
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
-| `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document) |
+| `Ctrl+Shift+C` | Copy the current file's path as text |
+| `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
+| `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
+| `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
+| Arrow keys / `Space` / `PgDn` / `PgUp` | Rebindable in Settings → Keys (bare letters stay fixed) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` |
 | Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
@@ -443,6 +448,11 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Manga mode | off | Show images as turns of one or two pages rather than one at a time. `M`. See the note below |
 | Right-to-left pages | **on** | A turn opens on the right, so `←` reads forwards. `D`. On by default because it is only read while manga mode is |
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
+| Descending sort | off | Reverse the sort order (Z→A, oldest/smallest first) |
+| Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
+| Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
+| Keys | defaults | Rebind the five navigation keys (`next`, `prev`, `next_alt`, `page_next`, `page_prev`) to any of ArrowRight/ArrowLeft/Space/PageDown/PageUp. Meanings never change, so manga direction still holds |
+| User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
 
 The downscale filter, **Smooth** and sort mode re-decode immediately; the
 linear-light toggle applies to newly decoded images (see the known caveat below).
@@ -456,7 +466,7 @@ another appear. Measured on six 2223x3109 pages at the manga half-panel target:
 better on two, unchanged on one, and worse on three, where the report was a black
 dot pattern in grey screentone that was not there before.
 
-What you get on `master` is already better than before on every page, and that
+What you get on `main` is already better than before on every page, and that
 comes from the linear-light kernel prefilter rather than from this toggle. Turn
 `Smooth` on for a page whose grid is a single even dot pattern and it will clean
 up noticeably; leave it off if your pages are screened at several angles or you

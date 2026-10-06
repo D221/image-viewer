@@ -202,6 +202,19 @@ fn the_new_file_lands_beside_the_original_with_a_readable_name() {
     assert_eq!(dest.file_name().unwrap(), "holiday snap_rotated.jpg");
 }
 
+/// The name says what the file *is*: no turn and no crop is a copy, not a
+/// rotation. Ctrl+S with nothing edited used to write `photo_rotated.jpg`.
+#[test]
+fn an_unedited_save_is_named_copy_not_rotated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write_jpeg(tmp.path(), "photo.jpg", &quadrants(64, 48), 0);
+    let dest = save_transformed(&p, Xform::Identity, None).unwrap();
+    assert_eq!(dest.file_name().unwrap(), "photo_copy.jpg");
+    // And it is still the same picture.
+    let got = image_viewer::load_image(&dest, 64).unwrap();
+    assert_same_pixels(&got, &quadrants(64, 48), "unedited save");
+}
+
 #[test]
 fn a_lossy_format_is_refused_rather_than_silently_re_encoded() {
     // WebP, GIF, HEIC and JXL would all need a second generation of compression.
@@ -971,7 +984,7 @@ fn a_crop_that_keeps_everything_is_not_a_crop() {
     let dest = save_transformed(&p, Xform::Identity, Some(full)).unwrap();
     assert_eq!(
         dest.file_name().unwrap().to_string_lossy(),
-        "whole_rotated.jpg",
+        "whole_copy.jpg",
         "a no-op crop must not change the name"
     );
     let got = load_image(&dest, 4096).unwrap();
@@ -1638,4 +1651,65 @@ fn naming_never_overwrites_and_keeps_the_extension() {
     let p = tmp.path().join(".hidden");
     std::fs::write(&p, b"x").unwrap();
     assert!(unique_dest(&p).file_name().is_some());
+}
+
+/// Screen-size save (Tier 1 #6): the same crop and turn as Ctrl+S, but the
+/// pixels are downscaled to the display size instead of kept full-res.
+#[test]
+fn screen_size_save_fits_the_display_and_says_re_encoded() {
+    use image_viewer::save_transformed_scaled;
+    let tmp = tempfile::tempdir().unwrap();
+    let p = write_jpeg(tmp.path(), "photo.jpg", &quadrants(256, 192), 0);
+    let out = save_transformed_scaled(&p, Xform::Rot90, None, 100).unwrap();
+    assert_eq!(
+        out.dest.file_name().unwrap(),
+        "photo_screen.jpg",
+        "screen saves are named, not numbered beside rotated ones"
+    );
+    // 256x192 turned is 192x256; long side 256 must fit in 100.
+    assert!(
+        out.width.max(out.height) <= 100,
+        "long side must fit the display: {}x{}",
+        out.width,
+        out.height
+    );
+    assert!(
+        !out.lossless,
+        "a JPEG screen save is a re-encode, and must say so"
+    );
+    // And it must still be the turned picture, not the stored one.
+    assert_eq!((out.width, out.height), (75, 100));
+}
+
+/// PNG has no lossy step, so its screen save stays lossless.
+#[test]
+fn screen_size_save_of_png_stays_lossless() {
+    use image_viewer::save_transformed_scaled;
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("a.png");
+    let mut buf = Vec::new();
+    quadrants(200, 100)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+    std::fs::write(&p, &buf).unwrap();
+    let out = save_transformed_scaled(&p, Xform::Identity, None, 100).unwrap();
+    assert!(out.lossless);
+    assert_eq!((out.width, out.height), (100, 50));
+}
+
+/// Formats the lossless path refuses stay refused at screen size too.
+#[test]
+fn screen_size_save_refuses_a_lossy_only_format() {
+    use image_viewer::save_transformed_scaled;
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("a.gif");
+    let mut buf = Vec::new();
+    quadrants(48, 32)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Gif)
+        .unwrap();
+    std::fs::write(&p, &buf).unwrap();
+    match save_transformed_scaled(&p, Xform::Identity, None, 100) {
+        Err(e) => assert!(e.to_string().contains("lossy")),
+        Ok(d) => panic!("gif was re-encoded to {:?}", d.dest),
+    }
 }
