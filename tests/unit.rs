@@ -4398,3 +4398,20 @@ fn the_settings_panel_shows_the_build_id() {
          undebuggable"
     );
 }
+
+/// Beta features wear a red marker in the panel, next to the label — the
+/// same marker for both, matching the README's beta sections.
+#[test]
+fn beta_features_are_marked_beta_in_red() {
+    let src = include_str!("../src/main.rs");
+    for label in ["Double page mode (M)", "User commands (Ctrl+1..9):"] {
+        let at = src
+            .find(label)
+            .unwrap_or_else(|| panic!("{label} is gone from the settings panel"));
+        let arm = &src[at..(at + 400).min(src.len())];
+        assert!(
+            arm.contains("(beta)") && arm.contains("warn_fg_color"),
+            "{label} must be followed by a red (beta) marker"
+        );
+    }
+}

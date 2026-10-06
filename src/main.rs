@@ -6883,7 +6883,10 @@ impl eframe::App for MyApp {
                 // `mspaint.exe "{file}"` opens the picture on screen in Paint.
                 // Spawned detached — the viewer never waits — so this is an
                 // "open with", not scripting with results.
-                ui.label("User commands (Ctrl+1..9):");
+                ui.horizontal(|ui| {
+                    ui.label("User commands (Ctrl+1..9):");
+                    ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
+                });
                 let mut cmds_changed = false;
                 let mut remove_at: Option<usize> = None;
                 for (n, cmd) in self.config.user_commands.iter_mut().enumerate() {
@@ -6948,10 +6951,18 @@ impl eframe::App for MyApp {
                 // `toggle_manga_mode` and `toggle_manga_rtl`. With the mode off the
                 // second box is a setting for nothing, so it says so rather than
                 // sitting there looking live.
-                if ui
-                    .checkbox(&mut self.config.manga_mode, "Double page mode (M)")
-                    .changed()
-                {
+                //
+                // Both beta features carry a red marker, the same one: this is
+                // the promise that the rough edges are known and written down
+                // (README's beta sections), not that the setting is dangerous.
+                let mut mode_changed = false;
+                ui.horizontal(|ui| {
+                    mode_changed = ui
+                        .checkbox(&mut self.config.manga_mode, "Double page mode (M)")
+                        .changed();
+                    ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
+                });
+                if mode_changed {
                     self.config.save(&self.config_path);
                     self.goto(ctx);
                 }
