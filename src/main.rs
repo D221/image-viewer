@@ -3692,9 +3692,13 @@ impl MyApp {
         true
     }
 
-    /// Fit window to image as a mode (`T`): on fits now, off leaves the
-    /// window where it is — JPEGView's toggle shape. While on, arrivals refit
-    /// (see `goto`) and user zooms re-hug the new size (see `central`).
+    /// Fit window to image as a mode (`T`): every press fits now *and*
+    /// toggles persistence — JPEGView's exact shape (`AdjustWindowToImage`
+    /// runs unconditionally; only the sticky flag flips conditionally).
+    /// Splitting those two (fit-only-when-turning-on) stranded the view the
+    /// moment the mode and the key disagreed about what `T` means.
+    /// While on, arrivals refit (see `goto`) and user zooms re-hug the new
+    /// size (see `central`).
     /// Grid only: fitting the window to a grid of cells is a different
     /// feature, so this says so instead of doing something surprising.
     fn fit_window_to_image(&mut self) {
@@ -3704,13 +3708,16 @@ impl MyApp {
         }
         self.config.fit_window_mode = !self.config.fit_window_mode;
         self.config.save(&self.config_path);
-        if self.config.fit_window_mode {
-            self.fit_window_pending = true;
-            self.fit_iters = 6;
-            self.notice = Some("Fit window: on".into());
-        } else {
-            self.notice = Some("Fit window: off".into());
-        }
+        self.fit_window_pending = true;
+        self.fit_iters = 6;
+        self.notice = Some(
+            if self.config.fit_window_mode {
+                "Fit window: on"
+            } else {
+                "Fit window: off"
+            }
+            .into(),
+        );
     }
 
     /// Step the on-screen animation one frame (`,` back, `.` forward,
