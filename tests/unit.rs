@@ -4434,4 +4434,10 @@ fn side_panes_hide_individually_and_gate_their_reads() {
             && src.contains("self.show_right = !self.show_right"),
         "L and P must each flip their own flag"
     );
+    // Each press must say what it did: with the master off a toggle changes
+    // nothing visible, and without the notice a working key reads as dead.
+    assert!(
+        src.contains("\"Left pane hidden\"") && src.contains("\"Right pane hidden\""),
+        "both pane toggles must leave a notice naming the outcome"
+    );
 }

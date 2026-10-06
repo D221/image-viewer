@@ -6316,14 +6316,32 @@ impl eframe::App for MyApp {
             }
             // Individual panes. `suppress_resize_redecode` like the master:
             // removing a side pane grows the central panel, which must not
-            // read as image growth and re-decode.
+            // read as image growth and re-decode. Each press names what it
+            // did: with the master off a toggle changes nothing on screen,
+            // and silence then reads as a dead key.
             if pane_left {
                 self.suppress_resize_redecode = true;
                 self.show_left = !self.show_left;
+                self.notice = Some(
+                    if self.show_left {
+                        "Left pane shown"
+                    } else {
+                        "Left pane hidden"
+                    }
+                    .into(),
+                );
             }
             if pane_right {
                 self.suppress_resize_redecode = true;
                 self.show_right = !self.show_right;
+                self.notice = Some(
+                    if self.show_right {
+                        "Right pane shown"
+                    } else {
+                        "Right pane hidden"
+                    }
+                    .into(),
+                );
             }
             if grid {
                 self.toggle_gallery();
