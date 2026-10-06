@@ -488,6 +488,24 @@ that first.
 
 ---
 
+## 10. Pixel-art mode: no filtering when zoomed
+
+Zooming into sprites smears them: every texture here uploads
+`TextureOptions::LINEAR`, so past 100% the GPU blends neighbouring pixels.
+A pixel-art mode would sample `NEAREST` instead — crisp squares, no blur.
+
+What is *known*: `TextureHandle::set` takes options per upload, so the
+mechanism is one flag at the three upload sites (preview, tiles, animation
+frames) rather than a pipeline change. What is *undecided* (needs a human):
+toggle or automatic — auto-detecting ("source under N px *and* zoomed past
+100%") would also catch small photos and thumbnails, where nearest looks
+broken rather than crisp, so the heuristic needs a shape that excludes them
+or it has to be a per-image/per-session switch. What is *unverified*: that
+flipping options on a live texture is free of a re-upload hitch on the
+esoteric backends (GL is the shipped path; DX12/Vulkan unmeasured).
+
+---
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several
