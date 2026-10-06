@@ -4440,4 +4440,19 @@ fn side_panes_hide_individually_and_gate_their_reads() {
         src.contains("\"Left pane hidden\"") && src.contains("\"Right pane hidden\""),
         "both pane toggles must leave a notice naming the outcome"
     );
+    // Position, not presence: the master `if` used to wrap *both* side panes,
+    // so gating the left one on its flag hid the right one too — and every
+    // presence check above passed on that code. The left `if` must close
+    // (a `}` at its own indent) before the right panel is shown.
+    let left_at = src
+        .find("if self.show_panels && self.show_left {")
+        .expect("the left pane gate must exist");
+    let right_at = src[left_at..]
+        .find("Panel::right(\"settings\")")
+        .map(|i| left_at + i)
+        .expect("the right panel must exist");
+    assert!(
+        src[left_at..right_at].lines().any(|l| l == "        }"),
+        "the left gate must close before the right panel, or L hides both"
+    );
 }

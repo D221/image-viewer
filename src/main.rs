@@ -6651,6 +6651,7 @@ impl eframe::App for MyApp {
                     }
                 }
             });
+        }
 
             let mut resort = false;
             let mut refilter = false;
@@ -7176,7 +7177,6 @@ impl eframe::App for MyApp {
                 self.reset_display();
                 self.goto(ctx);
             }
-        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::BLACK))
