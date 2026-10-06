@@ -1550,6 +1550,12 @@ struct MyApp {
     /// frame, where the drawn size is known. A flag rather than doing it in
     /// the dispatch, because the dispatch cannot see the laid-out content.
     fit_window_pending: bool,
+    /// Follow-up wrap for the sticky mode: re-hug the current zoom without
+    /// touching it. Separate from the reset above, which also sets the view.
+    fit_wrap_pending: bool,
+    /// Cursor the window was last fitted to: the mode refits on arrival, not
+    /// on every `goto` (toggles and rescans re-`goto` the same image).
+    fit_window_key: Option<ImgKey>,
     /// Slideshow running (advance every `Config::slideshow_secs`). Session
     /// state — always off on launch — with the last advance time so the
     /// first step waits a full interval rather than firing at once.
@@ -1844,6 +1850,8 @@ impl MyApp {
             show_left: true,
             show_right: true,
             fit_window_pending: false,
+            fit_wrap_pending: false,
+            fit_window_key: None,
             slideshow: false,
             slideshow_last: Instant::now(),
             next_scan: Instant::now() + RESCAN_INTERVAL,
@@ -2037,6 +2045,14 @@ impl MyApp {
                 _ => format!("Image Viewer - {name}"),
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
+        // Sticky fit-window mode: a newly arrived image gets the 100%-or-fit
+        // treatment like an explicit `T`. Keyed on the cursor, so toggles and
+        // rescans re-`goto`ing the same image do not refit; skipped while a
+        // slideshow advances, which would dance the window every interval.
+        if self.config.fit_window_mode && !self.slideshow && self.cur != self.fit_window_key {
+            self.fit_window_key = self.cur.clone();
+            self.fit_window_pending = true;
         }
         self.schedule();
     }
@@ -3660,16 +3676,24 @@ impl MyApp {
         true
     }
 
-    /// Shrink the window to hug the picture (`T`): arms a flag `central`
-    /// consumes on its next frame, where the drawn size is known. Grid only:
-    /// fitting the window to a grid of cells is a different feature, so this
-    /// says so instead of doing something surprising.
+    /// Fit window to image as a mode (`T`): on fits now, off leaves the
+    /// window where it is — JPEGView's toggle shape. While on, arrivals refit
+    /// (see `goto`) and user zooms re-hug the new size (see `central`).
+    /// Grid only: fitting the window to a grid of cells is a different
+    /// feature, so this says so instead of doing something surprising.
     fn fit_window_to_image(&mut self) {
         if self.gallery_view {
             self.notice = Some("Close the grid first".into());
             return;
         }
-        self.fit_window_pending = true;
+        self.config.fit_window_mode = !self.config.fit_window_mode;
+        self.config.save(&self.config_path);
+        if self.config.fit_window_mode {
+            self.fit_window_pending = true;
+            self.notice = Some("Fit window: on".into());
+        } else {
+            self.notice = Some("Fit window: off".into());
+        }
     }
 
     /// Step the on-screen animation one frame (`,` back, `.` forward,
@@ -4295,6 +4319,9 @@ impl MyApp {
         if self.slideshow {
             s += &format!(" - slideshow {}s", self.config.slideshow_secs);
         }
+        if self.config.fit_window_mode {
+            s += " - fit-window";
+        }
         if let Some(e) = &self.error {
             s += &format!(" — {e}");
         } else if let Some(n) = &self.notice {
@@ -4595,14 +4622,15 @@ impl MyApp {
         };
         let max_scale = MAX_SCALE.max(fit_scale);
 
-        // Fit window to image (`T`): 100% when the picture fits the monitor
-        // with its chrome, shrinking the *view* only as far as needed when
-        // it does not — then the window around that. Every press starts from
-        // this rule rather than the current zoom, so repeats cannot ratchet
-        // the window down. Placed before `scale` is read so the same frame
-        // draws what the window was sized for.
-        if self.fit_window_pending {
+        // Fit window to image: reset (`T`, arrivals in the mode) sets
+        // 100%-if-fits and sizes the window; wrap (user zooms in the mode)
+        // keeps the zoom and only re-hugs. Both center the window on the old
+        // one, JPEGView's rule. Placed before `scale` is read so a reset
+        // draws what the window was sized for on the same frame.
+        if self.fit_window_pending || self.fit_wrap_pending {
+            let reset = self.fit_window_pending;
             self.fit_window_pending = false;
+            self.fit_wrap_pending = false;
             if !ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                 // Twin of `clamp_px` below: the content's source footprint,
                 // so the two cannot disagree about how big the picture is.
@@ -4623,26 +4651,47 @@ impl MyApp {
                         (inner.y - panel.height()).max(0.0),
                     );
                     // No monitor info: fall back to the window itself, which
-                    // turns this into fit-view — harmless, never wrong-sized.
+                    // turns a reset into fit-view — harmless, never wrong-sized.
                     let work = ui
                         .input(|i| i.viewport().monitor_size)
                         .map(|m| (m.x, m.y))
                         .unwrap_or((inner.x, inner.y));
-                    let zoom = image_viewer::fit_zoom((natural.x, natural.y), chrome, work);
-                    if zoom >= 1.0 {
-                        self.view.fit = false;
-                        self.view.scale = 1.0 / ppp;
+                    let ratio = if reset {
+                        let zoom = image_viewer::fit_zoom((natural.x, natural.y), chrome, work);
+                        if zoom >= 1.0 {
+                            self.view.fit = false;
+                            self.view.scale = 1.0 / ppp;
+                        } else {
+                            self.view.fit = true;
+                        }
+                        self.view.offset = Vec2::ZERO;
+                        zoom
+                    } else if self.view.fit {
+                        fit_scale * ppp
                     } else {
-                        self.view.fit = true;
-                    }
-                    self.view.offset = Vec2::ZERO;
+                        self.view.scale * ppp
+                    };
                     let (nw, nh) = image_viewer::fit_window_size(
-                        (natural.x * zoom, natural.y * zoom),
+                        (natural.x * ratio, natural.y * ratio),
                         (inner.x, inner.y),
                         (panel.width(), panel.height()),
                         Some(work),
                     );
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
+                    if let (Some(outer), Some(mon)) = (
+                        ui.input(|i| i.viewport().outer_rect),
+                        ui.input(|i| i.viewport().monitor_size),
+                    ) {
+                        let (nx, ny) = image_viewer::fit_window_placement(
+                            (nw, nh),
+                            (outer.min.x, outer.min.y),
+                            (outer.size().x, outer.size().y),
+                            (mon.x, mon.y),
+                        );
+                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                            egui::Pos2::new(nx, ny),
+                        ));
+                    }
                 }
             }
         }
@@ -4726,6 +4775,24 @@ impl MyApp {
             // not a zoom. Here it is just a larger target on the same clamp.
             target_scale =
                 fill_scale((display_px.x, display_px.y), (panel.width(), panel.height()));
+        }
+        // Sticky fit-window mode follows user zooms: re-hug the new drawn
+        // size next frame. Input-driven, never layout-driven — a window
+        // resize changing the fit scale must not retrigger it, which is the
+        // feedback loop this placement exists to prevent. Wheel-flips are
+        // image switches, not zooms, so the wheel only counts in zoom mode.
+        if self.config.fit_window_mode
+            && !self.slideshow
+            && !self.gallery_view
+            && !self.view.fit
+            && ((!wheel_nav_active && scroll != 0.0)
+                || pinch != 1.0
+                || preset.is_some()
+                || key_fit
+                || key_fill
+                || resp.double_clicked())
+        {
+            self.fit_wrap_pending = true;
         }
         let target_scale = target_scale.clamp(fit_scale, max_scale);
         if (target_scale - scale).abs() > f32::EPSILON {

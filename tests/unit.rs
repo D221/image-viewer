@@ -4368,6 +4368,26 @@ fn fit_zoom_is_unity_until_it_must_shrink() {
     assert_eq!(image_viewer::fit_zoom((0.0, 0.0), (0.0, 0.0), (1920.0, 1080.0)), 1.0);
 }
 
+/// Placement centers on the old window and stays on the monitor.
+#[test]
+fn fit_window_centers_and_clamps_to_monitor() {
+    // 800x600 window at (100, 100) shrinking to 400x300: centered.
+    assert_eq!(
+        image_viewer::fit_window_placement((400.0, 300.0), (100.0, 100.0), (800.0, 600.0), (1920.0, 1080.0)),
+        (300.0, 250.0)
+    );
+    // Near the bottom-right corner: clamped on-screen, not centered off it.
+    assert_eq!(
+        image_viewer::fit_window_placement(
+            (400.0, 300.0),
+            (1600.0, 900.0),
+            (800.0, 600.0),
+            (1920.0, 1080.0)
+        ),
+        (1520.0, 780.0)
+    );
+}
+
 /// Fit window must be **wired**: `T` arms a flag central consumes where the
 /// drawn size lives, sending a live resize — not a restart, not a guess at
 /// the chrome.
@@ -4398,6 +4418,32 @@ fn the_fit_window_key_is_wired_to_a_live_resize() {
         .map(|i| zoom_at + i)
         .expect("the view scale read must follow");
     let _ = scale_at;
+}
+
+/// Sticky mode: `T` toggles persistence (not a one-shot), arrivals refit via
+/// the cursor key, user zooms re-hug without touching the zoom, and every
+/// resize centers on the old window.
+#[test]
+fn the_fit_window_mode_is_sticky_centered_and_follows() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.config.fit_window_mode = !self.config.fit_window_mode"),
+        "`T` must toggle the mode, not fire once"
+    );
+    let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
+    let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
+    assert!(
+        goto.contains("self.fit_window_key") && goto.contains("self.fit_window_pending = true"),
+        "arrivals must refit through the cursor key, so toggles and rescans do not"
+    );
+    assert!(
+        src.contains("self.fit_wrap_pending = true"),
+        "user zooms in the mode must re-hug the new size"
+    );
+    assert!(
+        src.contains("ViewportCommand::OuterPosition(") && src.contains("fit_window_placement("),
+        "resizes must center on the old window"
+    );
 }
 
 /// Animation stepping and window chrome must be **wired**: `,`/`.`/`K` reach

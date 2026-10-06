@@ -384,6 +384,13 @@ pub struct Config {
     /// window is moved with Win+arrows instead — toggle back to drag it.
     #[serde(default)]
     pub hide_title_bar: bool,
+
+    /// Fit window to image as a mode (`T`): while on, every newly shown
+    /// image gets the 100%-or-fit treatment and the window follows user
+    /// zooms, centered each time. JPEGView's sticky rule, including its
+    /// toggle shape (on fits now, off leaves the window where it is).
+    #[serde(default)]
+    pub fit_window_mode: bool,
 }
 
 /// `1` keeps the shipped meaning (100%), then doubling to 8×.
@@ -548,6 +555,7 @@ impl Config {
             zoom_presets: default_zoom_presets(),
             always_on_top: false,
             hide_title_bar: false,
+            fit_window_mode: false,
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {
@@ -5969,6 +5977,26 @@ pub fn fit_window_size(
         out.1 = out.1.min(m.1);
     }
     (out.0.max(200.0), out.1.max(120.0))
+}
+
+/// Where a resized window goes: centered on the old window, clamped to the
+/// monitor — JPEGView's `GetWindowRectMatchingImageSize` rule, minus its
+/// startup special case (a fresh launch keeps its default position).
+/// Everything points, so no unit can disagree.
+pub fn fit_window_placement(
+    new: (f32, f32),
+    old_pos: (f32, f32),
+    old_size: (f32, f32),
+    monitor: (f32, f32),
+) -> (f32, f32) {
+    let x = old_pos.0 + (old_size.0 - new.0) / 2.0;
+    let y = old_pos.1 + (old_size.1 - new.1) / 2.0;
+    // `new` already fits the monitor (see `fit_window_size`), so the upper
+    // bounds below cannot go negative — the `max` is belt and braces.
+    (
+        x.clamp(0.0, (monitor.0 - new.0).max(0.0)),
+        y.clamp(0.0, (monitor.1 - new.1).max(0.0)),
+    )
 }
 
 /// Decode an animation into composited frames, capped at the limits above.

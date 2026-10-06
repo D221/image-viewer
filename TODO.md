@@ -473,20 +473,15 @@ request — do not ask them to re-test; the one experiment below can wait.
 
 ---
 
-## 9. Fit window to image (immersive `I`)
+## 9. Fit window to image (immersive `I`) — shipped as sticky `T`
 
-With the panels off, shrink the window to the picture instead of leaving a
-black hole around it — the immersive mode to `I`'s chrome toggle. Requested,
-not started.
-
-What is *known*: `fit_scale` and the panel geometry already exist, and
-`suppress_resize_redecode` is the mechanism that stops a layout change from
-reading as image growth. The explicit form shipped as `T`
-(`fit_window_size`, chrome measured not assumed, clamped to the monitor) —
-what is still open here is only the *automatic* half. What is *undecided*:
-whether the window follows every image (a dancing window while flipping) or
-only on toggle, and minimum window sizes. Do not build it as a resize per
-navigation without answering that first.
+Shipped: `T` toggles a persisted mode. On fits now at 100%-or-fit, arrivals
+refit through the cursor key (toggles and rescans do not), user zooms re-hug
+without touching the zoom, and every resize centers on the old window —
+JPEGView's rules, minus its startup force-center. Skipped in grid,
+fullscreen, and mid-slideshow. The decisions above answer the open questions:
+the window follows images (arrival-keyed, so no dance without movement),
+minimum 200×120, monitor-clamped. Nothing further filed.
 
 ---
 
