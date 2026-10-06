@@ -4362,6 +4362,26 @@ fn the_animation_keys_presets_and_chrome_are_wired() {
     );
 }
 
+/// Window chrome applies live: decorations go through the viewport command
+/// and always-on-top through Win32 (`set_topmost`), not through a restart.
+#[test]
+fn window_chrome_applies_live() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("ViewportCommand::Decorations("),
+        "hiding the title bar must send a live viewport command"
+    );
+    assert!(
+        src.contains("set_topmost(self.config.always_on_top)"),
+        "always-on-top must apply straight away, not on restart"
+    );
+    let lib = include_str!("../src/lib.rs");
+    assert!(
+        lib.contains("fn set_topmost(") && lib.contains("SetWindowPos"),
+        "always-on-top must reach Win32 directly"
+    );
+}
+
 /// Slideshow must be **wired**: a toggle plus pace in Settings, a tick that
 /// wakes the frame loop and steps, and an end that stops rather than wraps
 /// silently when looping is off. `main.rs` is unreachable from every test,

@@ -476,8 +476,8 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
 | Zoom keys 1-4 | 1×, 2×, 4×, 8× | Fixed zoom ratios as source-pixel multiples |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
-| Always on top | off | Keep the window above all others. Applies on restart |
-| Hide title bar | off | No title bar or borders (move with Win+arrows). Applies on restart |
+| Always on top | off | Keep the window above all others (applies live, kept on restart) |
+| Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |
 | Keys | defaults | Rebind the five navigation keys (`next`, `prev`, `next_alt`, `page_next`, `page_prev`) to any of ArrowRight/ArrowLeft/Space/PageDown/PageUp. Meanings never change, so manga direction still holds |
 | User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
 

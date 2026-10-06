@@ -374,14 +374,14 @@ pub struct Config {
     #[serde(default = "default_zoom_presets")]
     pub zoom_presets: [f32; 4],
 
-    /// Keep the window above all others. Applied when the window is created,
-    /// so this takes effect on restart like the worker count.
+    /// Keep the window above all others. Applied live; the launch loop
+    /// reads the same flag, so a restart keeps it.
     #[serde(default)]
     pub always_on_top: bool,
 
-    /// Hide the title bar and borders. Applied when the window is created,
-    /// so this takes effect on restart. Without a drag handle the window is
-    /// moved with Win+arrows instead — toggle back to drag it.
+    /// Hide the title bar and borders. Applied live; the launch loop reads
+    /// the same flag, so a restart keeps it. Without a drag handle the
+    /// window is moved with Win+arrows instead — toggle back to drag it.
     #[serde(default)]
     pub hide_title_bar: bool,
 }
@@ -622,6 +622,53 @@ extern "system" {
         directory: *const u16,
         show: i32,
     ) -> isize;
+    fn EnumWindows(callback: Option<unsafe extern "system" fn(isize, isize) -> i32>, param: isize) -> i32;
+    fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+    fn GetCurrentProcessId() -> u32;
+    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+}
+
+/// Callback for [`set_topmost`]: stash the first top-level window owned by
+/// our process and stop enumerating (return 0). One window is all eframe
+/// makes here; no visibility filtering, because filtering on the wrong
+/// predicate would skip the very window this exists to find.
+unsafe extern "system" fn find_own_window(hwnd: isize, out: isize) -> i32 {
+    let mut pid: u32 = 0;
+    GetWindowThreadProcessId(hwnd, &mut pid);
+    if pid == GetCurrentProcessId() {
+        *(out as *mut isize) = hwnd;
+        0
+    } else {
+        1
+    }
+}
+
+/// Keep our window above all others, live (egui 0.36 has a builder for this
+/// but no viewport command, so this goes straight to Win32 instead of
+/// waiting for a restart). Finds the window by owning PID rather than title:
+/// the title names the current file and changes constantly. Returns whether
+/// it took effect.
+pub fn set_topmost(on: bool) -> bool {
+    const HWND_TOPMOST: isize = -1;
+    const HWND_NOTOPMOST: isize = -2;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOSIZE: u32 = 0x0001;
+    unsafe {
+        let mut found: isize = 0;
+        EnumWindows(Some(find_own_window), &mut found as *mut isize as isize);
+        if found == 0 {
+            return false;
+        }
+        SetWindowPos(
+            found,
+            if on { HWND_TOPMOST } else { HWND_NOTOPMOST },
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE,
+        ) != 0
+    }
 }
 
 const ERROR_ALREADY_EXISTS: u32 = 183;

@@ -41,6 +41,8 @@ fn main() {
     // Shell32 — not in the default link set, so without this the crate
     // compiles and then fails at link time with LNK2019.
     println!("cargo:rustc-link-lib=shell32");
+    // `set_topmost` calls EnumWindows/SetWindowPos (User32), same story.
+    println!("cargo:rustc-link-lib=user32");
 
     // Build fingerprint, shown at the bottom of Settings: short git hash plus
     // dirty flag, so a binary copied to Downloads as `image-viewer(3).exe`

@@ -372,9 +372,9 @@ fn main() -> eframe::Result<()> {
     // config each time, so a restart keeps the folder, sort mode and settings
     // but loses the in-memory preview cache and has to decode again.
     loop {
-        // Window chrome from config: always-on-top and title-bar-less are
-        // creation-time properties (egui 0.36 has builder calls but no live
-        // commands for them), so like the worker count they apply on restart.
+        // Window chrome from config at creation; the checkboxes apply the
+        // same flags live, so this only matters for what a fresh launch
+        // looks like.
         let mut viewport = egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0]);
         if config.always_on_top {
@@ -7117,21 +7117,30 @@ impl eframe::App for MyApp {
                     }.into());
                 }
                 ui.small("On: a second launch exits instead of fighting over the archive temp dir. Applies on restart.");
-                // Window chrome: creation-time properties with no live command
-                // in egui 0.36, so both apply on restart like the worker count.
+                // Window chrome, applied live: decorations have a viewport
+                // command, and always-on-top goes straight to Win32
+                // (`set_topmost`) because egui 0.36 only offers a builder for
+                // it. The launch loop reads the same flags, so a restart
+                // keeps whatever is set here.
                 if ui
                     .checkbox(&mut self.config.always_on_top, "Always on top")
                     .changed()
                 {
                     self.config.save(&self.config_path);
+                    if !image_viewer::set_topmost(self.config.always_on_top) {
+                        self.error = Some("Could not change window order".into());
+                    }
                 }
                 if ui
                     .checkbox(&mut self.config.hide_title_bar, "Hide title bar")
                     .changed()
                 {
                     self.config.save(&self.config_path);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(
+                        !self.config.hide_title_bar,
+                    ));
                 }
-                ui.small("Both apply on restart. Without a title bar there is no drag handle — Win+arrows still move the window.");
+                ui.small("Without a title bar there is no drag handle — Win+arrows still move the window.");
                 ui.add_space(6.0);
                 // ---- keys ---------------------------------------------------
                 //
