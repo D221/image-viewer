@@ -4283,6 +4283,39 @@ fn user_command_with_no_args_gets_the_file() {
     assert_eq!(args, vec!["C:/pics/a.jpg"]);
 }
 
+/// Slideshow pacing: due once the interval has passed, never early, and a
+/// zero interval floors at one second rather than strobing every frame.
+#[test]
+fn slideshow_advances_only_when_due() {
+    let now = std::time::Instant::now();
+    let ago = now - std::time::Duration::from_secs(10);
+    assert!(image_viewer::slideshow_due(ago, now, 3));
+    assert!(!image_viewer::slideshow_due(now, now, 3));
+    assert!(image_viewer::slideshow_due(ago, now, 0));
+    assert!(!image_viewer::slideshow_due(now, now, 0));
+}
+
+/// Slideshow must be **wired**: a toggle plus pace in Settings, a tick that
+/// wakes the frame loop and steps, and an end that stops rather than wraps
+/// silently when looping is off. `main.rs` is unreachable from every test,
+/// so this is a source scan - the established pattern here.
+#[test]
+fn the_slideshow_is_wired_to_a_tick_and_a_stop() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("Start slideshow") && src.contains("slideshow_secs"),
+        "Settings must offer the toggle and the pace"
+    );
+    assert!(
+        src.contains("slideshow_due(") && src.contains("request_repaint_after("),
+        "the tick must check the clock and keep waking the loop"
+    );
+    assert!(
+        src.contains("fn step(&mut self, ctx: &Context, forward: bool) -> bool"),
+        "step must report whether it moved, so the end can stop the show"
+    );
+}
+
 /// The settings panel must scroll: it long outgrew the window height, and
 /// `main.rs` is unreachable from every test, so this is a source scan - the
 /// established pattern here.

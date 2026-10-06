@@ -348,12 +348,25 @@ pub struct Config {
     /// safe list `tests/keybindings.rs` pins.
     #[serde(default)]
     pub keys: std::collections::HashMap<String, String>,
-
     /// User commands: external programs run against the current file
     /// (`{file}`, `{dir}`, `{name}` expand in program and args).
     /// Triggered by Ctrl+1..9 in list order.
     #[serde(default)]
     pub user_commands: Vec<UserCommand>,
+
+    /// Seconds per image while the slideshow runs. The show itself is session
+    /// state (off on launch); only the pace persists.
+    ///
+    /// `#[serde(default)]` is not enough here — the default must be 3, not 0,
+    /// and 0 would mean "advance every frame". `default_slideshow_secs`.
+    #[serde(default = "default_slideshow_secs")]
+    pub slideshow_secs: u32,
+}
+
+/// Three seconds: JPEGView's middle preset, and slow enough to actually see
+/// the picture.
+fn default_slideshow_secs() -> u32 {
+    3
 }
 
 /// One external program entry for "Open with…" style scripting.
@@ -430,6 +443,15 @@ pub fn expand_user_command(cmd: &UserCommand, file: &std::path::Path) -> (String
     (expand_template(&cmd.program, file), args)
 }
 
+/// Slideshow pacing: true once `secs` have passed since `last`.
+///
+/// `secs` floors at 1 — a zero interval would advance every frame, which is
+/// a strobe, not a slideshow. Saturating, so a clock jump backwards reads as
+/// "not yet" rather than panicking.
+pub fn slideshow_due(last: std::time::Instant, now: std::time::Instant, secs: u32) -> bool {
+    now.saturating_duration_since(last) >= std::time::Duration::from_secs(secs.max(1) as u64)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -493,6 +515,7 @@ impl Config {
             workers: 0,
             keys: std::collections::HashMap::new(),
             user_commands: Vec::new(),
+            slideshow_secs: default_slideshow_secs(),
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {

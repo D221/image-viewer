@@ -467,6 +467,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Right-to-left pages | **on** | A turn opens on the right, so `←` reads forwards. `D`. On by default because it is only read while manga mode is |
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
 | Descending sort | off | Reverse the sort order (Z→A, oldest/smallest first) |
+| Slideshow | off, every 3 s | Start/stop button plus pace (1–60 s). Advances until toggled off, or stops at the end with looping off |
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
 | Keys | defaults | Rebind the five navigation keys (`next`, `prev`, `next_alt`, `page_next`, `page_prev`) to any of ArrowRight/ArrowLeft/Space/PageDown/PageUp. Meanings never change, so manga direction still holds |

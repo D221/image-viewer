@@ -776,7 +776,6 @@ fn every_navigation_input_in_the_binary_asks_the_direction_rule() {
     let src = code_only(&source());
 
     for literal in [
-        "step(ctx, true)",
         "step(ctx, false)",
         "step(&ctx, true)",
         "step(&ctx, false)",
@@ -790,6 +789,31 @@ fn every_navigation_input_in_the_binary_asks_the_direction_rule() {
              and silently goes the wrong way."
         );
     }
+
+    // The one exception is the slideshow tick: it is not a navigation input
+    // at all — no key, no side to preserve — so forwards is the only thing
+    // it can mean, the same argument the wheel comment below makes. It must
+    // be the *only* literal-direction call in the binary, and it must live
+    // in the slideshow block rather than near any input. (`if self.slideshow`
+    // alone is not a unique anchor — the status line and the settings button
+    // read the same flag — so this anchors on the pacing call.)
+    let tick_at = src
+        .find("slideshow_due(")
+        .expect("the slideshow tick is gone; update this test to match");
+    let tick = &src[tick_at..(tick_at + 500).min(src.len())];
+    assert!(
+        tick.contains("self.step(ctx, true)"),
+        "the literal-direction step is no longer in the slideshow tick"
+    );
+    let total = src.matches("step(ctx, true)").count();
+    assert_eq!(
+        total, 1,
+        "expected exactly one literal-direction step (the slideshow tick):\n{}",
+        src.lines()
+            .filter(|l| l.contains("step(ctx, true)"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 
     // `ui` must read the direction rather than decide it.
     let ui = fn_body(&src, "fn ui(&mut self, ui: &mut egui::Ui");

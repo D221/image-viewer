@@ -1532,6 +1532,11 @@ struct MyApp {
     /// bare letter. Session state, like the master — a restart re-shows both.
     show_left: bool,
     show_right: bool,
+    /// Slideshow running (advance every `Config::slideshow_secs`). Session
+    /// state — always off on launch — with the last advance time so the
+    /// first step waits a full interval rather than firing at once.
+    slideshow: bool,
+    slideshow_last: Instant,
     next_scan: Instant, // periodic folder rescan (watcher)
     /// When an external process was last spawned (user command, Explorer).
     /// Rate-limits spawns so a repeating chord can never fork-bomb the
@@ -1820,6 +1825,8 @@ impl MyApp {
             show_panels: true,
             show_left: true,
             show_right: true,
+            slideshow: false,
+            slideshow_last: Instant::now(),
             next_scan: Instant::now() + RESCAN_INTERVAL,
             last_external_spawn: None,
             checker: Some(make_checker_texture(ctx)),
@@ -2148,10 +2155,14 @@ impl MyApp {
         self.gallery.learn_pages(&partner.path);
     }
 
-    fn step(&mut self, ctx: &Context, forward: bool) {
+    /// Step one image (or turn) forwards or back. Returns whether to keep
+    /// going: false only at the end of the gallery with looping off, which is
+    /// what stops a slideshow. A throttled step returns true — the image is
+    /// still coming, so waiting is right and stopping is wrong.
+    fn step(&mut self, ctx: &Context, forward: bool) -> bool {
         // "Wait for load" mode: throttle stepping to decode completion.
         if self.config.block_while_loading && self.waiting_load {
-            return;
+            return true;
         }
         // Manga mode moves a whole turn, which is one or two pages; single-image
         // mode moves one page. With looping off, stepping at either end goes
@@ -2172,6 +2183,7 @@ impl MyApp {
         if moved {
             self.goto(ctx);
         }
+        moved
     }
 
     /// The [`PageCtx`] the pairing is asked through: the gallery plus the
@@ -4165,6 +4177,9 @@ impl MyApp {
                     }
                 }
             }
+        }
+        if self.slideshow {
+            s += &format!(" - slideshow {}s", self.config.slideshow_secs);
         }
         if let Some(e) = &self.error {
             s += &format!(" — {e}");
@@ -6388,6 +6403,24 @@ impl eframe::App for MyApp {
             if let Some(n) = user_cmd {
                 self.run_user_command(n);
             }
+            // Slideshow: advance on the interval, stop at the end when looping
+            // is off. The repaint keeps the clock running: a static image
+            // paints nothing on its own, and without a wake-up the due check
+            // below would never run until something else moved.
+            if self.slideshow {
+                ctx.request_repaint_after(Duration::from_millis(250));
+                if image_viewer::slideshow_due(
+                    self.slideshow_last,
+                    Instant::now(),
+                    self.config.slideshow_secs,
+                ) {
+                    self.slideshow_last = Instant::now();
+                    if !self.step(ctx, true) {
+                        self.slideshow = false;
+                        self.notice = Some("Slideshow finished".into());
+                    }
+                }
+            }
         }
 
         // Drag-and-drop: files or folders
@@ -7116,6 +7149,33 @@ impl eframe::App for MyApp {
                     self.config.save(&self.config_path);
                     resort = true;
                 }
+                // Slideshow: one picture per interval until toggled off, or
+                // until the end with looping off. The pace persists; running
+                // does not survive a restart.
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if self.slideshow {
+                            "Stop slideshow"
+                        } else {
+                            "Start slideshow"
+                        })
+                        .clicked()
+                    {
+                        self.slideshow = !self.slideshow;
+                        self.slideshow_last = Instant::now();
+                    }
+                    ui.label("every");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.config.slideshow_secs)
+                                .range(1..=60),
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
+                    ui.label("s");
+                });
                 ui.add_space(6.0);
                 ui.heading("File associations");
                 let registered = fileassoc::is_registered();
