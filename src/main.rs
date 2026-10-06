@@ -4744,12 +4744,8 @@ impl MyApp {
                     Vec2::new(w, h)
                 } / ppp;
                 if let Some(inner) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size())) {
-                    let chrome = (
-                        (inner.x - panel.width()).max(0.0),
-                        (inner.y - panel.height()).max(0.0),
-                    );
                     // No monitor info: fall back to the window itself, which
-                    // turns a reset into fit-view — harmless, never wrong-sized.
+                    // only affects the clamp — the zoom above never shrinks.
                     let work = ui
                         .input(|i| i.viewport().monitor_size)
                         .map(|m| (m.x, m.y))
@@ -4757,15 +4753,15 @@ impl MyApp {
                     let mut ratio = if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
                     if self.fit_window_pending {
                         self.fit_window_pending = false;
-                        let zoom = image_viewer::fit_zoom((natural.x, natural.y), chrome, work);
-                        if zoom >= 1.0 {
-                            self.view.fit = false;
-                            self.view.scale = 1.0 / ppp;
-                        } else {
-                            self.view.fit = true;
-                        }
+                        // Always absolute: T mode shows 100% and hugs the
+                        // window to it (clamped to the monitor below), never
+                        // a shrink-to-fit — the shrink rule could not tell
+                        // "bigger than the screen" from "bigger than the
+                        // window", so it shrank to the window instead.
+                        self.view.fit = false;
+                        self.view.scale = 1.0 / ppp;
                         self.view.offset = Vec2::ZERO;
-                        ratio = zoom;
+                        ratio = 1.0;
                     }
                     // `wrap` clears only here, on convergence: it doubles as the
                     // settle flag, so clearing it up front would run the loop

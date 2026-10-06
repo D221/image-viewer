@@ -5936,25 +5936,6 @@ pub fn zoom_preset(presets: &[f32; 4], i: usize) -> f32 {
     presets[i.min(3)].clamp(0.1, 32.0)
 }
 
-/// Zoom for "fit window to image": 100% when the picture fits the working
-/// area with its chrome, shrinking only as far as needed when it does not —
-/// the JPEGView rule (`m_dZoom = 1`, reduced only to fit). Every press starts
-/// from this rule rather than from the current zoom, so repeated presses
-/// cannot ratchet the window down.
-///
-/// `natural` is the content at 100% in points, `chrome` what the window
-/// keeps around it, `work` the monitor. All clamps floor at 1 px so nothing
-/// here can divide by zero.
-pub fn fit_zoom(natural: (f32, f32), chrome: (f32, f32), work: (f32, f32)) -> f32 {
-    let avail = (
-        (work.0 - chrome.0).max(1.0),
-        (work.1 - chrome.1).max(1.0),
-    );
-    (avail.0 / natural.0.max(1.0))
-        .min(avail.1 / natural.1.max(1.0))
-        .min(1.0)
-}
-
 /// Window size hugging `content` (the picture as drawn, in points): the gap
 /// between the window's inner size and the central area is the side panels
 /// and bars, which keep whatever they have — so adding the same gap back
