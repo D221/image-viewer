@@ -3032,7 +3032,15 @@ impl MyApp {
         // comparison cannot, because the two have the same path.
         if self.previews.contains_key(&cur) && self.shown.as_ref() != Some(&cur) {
             self.shown = Some(cur.clone());
-            self.view.fit = true;
+            // Fit-window mode owns the zoom (its arrival reset sets 100%-or-fit
+            // once the new image displays), so adopting must not snap back to
+            // fit here: that clobber compounded per visit into the shrinking
+            // spiral — ratios decaying visit by visit with the window
+            // following — while every reset correctly computed 1.0. Mode off
+            // keeps the shipped per-image fit.
+            if !self.config.fit_window_mode {
+                self.view.fit = true;
+            }
         }
         // **Outside the gate on purpose, and this is the assertion that keeps it
         // outside** (`tests/spreads.rs`,

@@ -4438,6 +4438,24 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
     );
 }
 
+/// Adopting a preview must not clobber an absolute zoom in fit-window mode:
+/// `sync_shown` snapping `view.fit` on every arrival compounded per visit
+/// into a shrinking spiral (ratios decaying visit by visit with the window
+/// following) while every reset correctly computed 1.0. Mode off keeps the
+/// shipped per-image fit.
+#[test]
+fn adoption_does_not_reset_fit_in_fit_window_mode() {
+    let src = include_str!("../src/main.rs");
+    let at = src
+        .find("fn sync_shown(&mut self")
+        .expect("sync_shown must exist");
+    let body = &src[at..(at + 2500).min(src.len())];
+    assert!(
+        body.contains("!self.config.fit_window_mode") && body.contains("self.view.fit = true"),
+        "the adoption fit-snap must stand down while the mode owns the zoom"
+    );
+}
+
 /// Panning belongs to its picture: arriving at a new image zeroes the
 /// offset, or the old drag shifts the new picture (black one side, clipped
 /// the other) with a perfectly innocent zoom readout. Keyed on the cursor,
