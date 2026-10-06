@@ -1546,10 +1546,13 @@ struct MyApp {
     /// bare letter. Session state, like the master — a restart re-shows both.
     show_left: bool,
     show_right: bool,
+    /// Cursor whose pan the view holds: see the reset in `goto`.
+    pan_key: Option<ImgKey>,
     /// Fit-window-to-image armed (`T`): consumed by `central` on its next
     /// frame, where the drawn size is known. A flag rather than doing it in
     /// the dispatch, because the dispatch cannot see the laid-out content.
-    fit_window_pending: bool,    /// Follow-up wrap for the sticky mode: re-hug the current zoom without
+    fit_window_pending: bool,
+    /// Follow-up wrap for the sticky mode: re-hug the current zoom without
     /// touching it. Separate from the reset above, which also sets the view.
     fit_wrap_pending: bool,
     /// Cursor the window was last fitted to: the mode refits on arrival, not
@@ -1861,6 +1864,7 @@ impl MyApp {
             show_panels: true,
             show_left: true,
             show_right: true,
+            pan_key: None,
             fit_window_pending: false,
             fit_wrap_pending: false,
             fit_window_key: None,
@@ -2024,6 +2028,18 @@ impl MyApp {
                 path: p.to_path_buf(),
                 page: self.gallery.current_page(),
             });
+        // Panning belongs to the picture it panned: a carried-over offset
+        // shifts the new image by the old one's drag — black on one side,
+        // clipped on the other — and no zoom readout looks wrong while it
+        // does, because the scale was never the problem. Zooming merely
+        // recomputes the offset around the cursor, which is why any zoom
+        // seemed to "fix" the bars while the scale stayed "bad". Keyed on
+        // the cursor (not every goto: toggles and rescans must not steal
+        // the pan).
+        if self.cur != self.pan_key {
+            self.pan_key = self.cur.clone();
+            self.view.offset = Vec2::ZERO;
+        }
         // Preloading hit rate: the new image already had a preview, so the
         // first pixel is free. If this counter stays low, the preload window
         // is aimed wrong.

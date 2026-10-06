@@ -4426,6 +4426,21 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
     );
 }
 
+/// Panning belongs to its picture: arriving at a new image zeroes the
+/// offset, or the old drag shifts the new picture (black one side, clipped
+/// the other) with a perfectly innocent zoom readout. Keyed on the cursor,
+/// so toggles and rescans re-`goto`ing the same image keep the pan.
+#[test]
+fn arriving_resets_the_pan_but_stays_do_not() {
+    let src = include_str!("../src/main.rs");
+    let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
+    let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
+    assert!(
+        goto.contains("self.pan_key") && goto.contains("self.view.offset = Vec2::ZERO"),
+        "goto must zero the pan when the cursor changed"
+    );
+}
+
 /// Fit-window follow-through: pinned panel widths in the mode (auto-sizing
 /// panels move the measured chrome after the fact, which is how the window
 /// landed bigger than the content), two-phase centering (position after the
