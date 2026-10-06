@@ -4397,6 +4397,14 @@ fn the_fit_window_key_is_wired_to_a_live_resize() {
         .map(|i| zoom_at + i)
         .expect("the view scale read must follow");
     let _ = scale_at;
+    // Converge on the symptom (drawn vs panel), and re-arm while it
+    // disagrees: a one-shot loop that clears its flags up front runs once
+    // no matter what `fit_iters` allows, which is how the bars survived a
+    // "bounded iteration" that never iterated.
+    assert!(
+        src.contains("(drawn.0 - panel.width()).abs()"),
+        "convergence must compare drawn against panel, not window against target"
+    );
 }
 
 /// Sticky mode: `T` toggles persistence (not a one-shot), arrivals refit via

@@ -4702,15 +4702,19 @@ impl MyApp {
         // 100%-if-fits and sizes the window; wrap (user zooms in the mode)
         // keeps the zoom and only re-hugs. Every resize centers on the
         // monitor, always — old-window centering was asked for and dropped:
-        // polite in theory, drifting in practice. Iterated to convergence:
-        // panels move after the measure (notices, wraps, late widths), so
-        // one shot lands wherever they leave it. Bounded, and each pass only
-        // sends when the window is actually off target. Placed before `scale`
-        // is read so a reset draws what the window was sized for. Arrival
-        // fits wait for adoption (`shown` still displays the previous image
-        // until its preview lands — fitting then sizes the window for the
-        // picture just left); an explicit `T` fits whatever is on screen by
-        // definition. Waiting burns no iterations.
+        // polite in theory, drifting in practice. Converges on the symptom
+        // itself: while the drawn picture and the panel disagree, re-measure
+        // and re-send (panels move after the measure — notices, wraps, late
+        // widths — so one shot lands wherever they leave it). `wrap` doubles
+        // as the settle flag: cleared only on convergence, so the loop
+        // actually repeats instead of running once and stranding `fit_iters`.
+        // Bounded by `fit_iters`, and each pass only sends when off target.
+        // Placed before `scale` is read so a reset draws what the window was
+        // sized for on the same frame. Arrival fits wait for adoption
+        // (`shown` still displays the previous image until its preview lands
+        // — fitting then sizes the window for the picture just left); an
+        // explicit `T` fits whatever is on screen by definition. Waiting
+        // burns no iterations.
         if (self.fit_window_pending || self.fit_arrive_pending || self.fit_wrap_pending)
             && self.fit_iters > 0
             && (!self.fit_arrive_pending || self.fit_window_pending || self.shown == self.cur)
@@ -4755,28 +4759,39 @@ impl MyApp {
                         self.view.offset = Vec2::ZERO;
                         ratio = zoom;
                     }
-                    self.fit_wrap_pending = false;
+                    // `wrap` clears only here, on convergence: it doubles as the
+                    // settle flag, so clearing it up front would run the loop
+                    // exactly once no matter what `fit_iters` allows.
+                    let drawn = (natural.x * ratio, natural.y * ratio);
                     let (nw, nh) = image_viewer::fit_window_size(
-                        (natural.x * ratio, natural.y * ratio),
+                        drawn,
                         (inner.x, inner.y),
                         (panel.width(), panel.height()),
                         Some(work),
                     );
                     self.fit_debug = Some((
                         ratio,
-                        natural.x * ratio,
-                        natural.y * ratio,
+                        drawn.0,
+                        drawn.1,
                         panel.width(),
                         panel.height(),
                         inner.x,
                         inner.y,
                     ));
-                    if (inner.x - nw).abs() > 2.0 || (inner.y - nh).abs() > 2.0 {
+                    // Converge on the symptom (drawn vs panel), not the proxy
+                    // (window vs target): a window can match its target while
+                    // the picture still disagrees with the panel, and that
+                    // disagreement is the bars.
+                    if (drawn.0 - panel.width()).abs() > 2.0
+                        || (drawn.1 - panel.height()).abs() > 2.0
+                    {
                         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
                         // Position still goes through `pending_pos` (below):
                         // it must land after this resize settles.
                         self.pending_pos = Some(((nw, nh), 10));
+                        self.fit_wrap_pending = true;
                     } else {
+                        self.fit_wrap_pending = false;
                         self.fit_iters = 0;
                     }
                 }
