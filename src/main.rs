@@ -4728,6 +4728,11 @@ impl MyApp {
             && (!self.fit_arrive_pending || self.fit_window_pending || self.shown == self.cur)
         {
             self.fit_iters -= 1;
+            // Arrival carries the reset too (it just waits longer to run):
+            // both arms mean "this picture starts at 100%", only the timing
+            // differs. Forgetting the arrival half is how zoomed-out views
+            // survived navigation.
+            let reset = self.fit_window_pending || self.fit_arrive_pending;
             self.fit_arrive_pending = false;
             if !ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
                 // Twin of `clamp_px` below: the content's source footprint,
@@ -4751,7 +4756,7 @@ impl MyApp {
                         .map(|m| (m.x, m.y))
                         .unwrap_or((inner.x, inner.y));
                     let mut ratio = if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
-                    if self.fit_window_pending {
+                    if reset {
                         self.fit_window_pending = false;
                         // Always absolute: T mode shows 100% and hugs the
                         // window to it (clamped to the monitor below), never

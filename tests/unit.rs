@@ -4417,6 +4417,10 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
         "arrivals must refit through the cursor key, so toggles and rescans do not"
     );
     assert!(
+        src.contains("let reset = self.fit_window_pending || self.fit_arrive_pending"),
+        "arrival must carry the 100% reset too, or a zoomed-out view survives navigation"
+    );
+    assert!(
         src.contains("self.fit_arrive_pending") && src.contains("self.shown == self.cur"),
         "arrival fits must wait until the new image is displayed, or every fit reads one image behind"
     );
