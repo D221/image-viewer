@@ -4595,6 +4595,58 @@ impl MyApp {
         };
         let max_scale = MAX_SCALE.max(fit_scale);
 
+        // Fit window to image (`T`): 100% when the picture fits the monitor
+        // with its chrome, shrinking the *view* only as far as needed when
+        // it does not — then the window around that. Every press starts from
+        // this rule rather than the current zoom, so repeats cannot ratchet
+        // the window down. Placed before `scale` is read so the same frame
+        // draws what the window was sized for.
+        if self.fit_window_pending {
+            self.fit_window_pending = false;
+            if !ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+                // Twin of `clamp_px` below: the content's source footprint,
+                // so the two cannot disagree about how big the picture is.
+                let natural = if pages.is_empty() {
+                    display_px
+                } else {
+                    let mut w = 0.0;
+                    let mut h: f32 = 0.0;
+                    for &(pw, ph) in &spread_dims {
+                        w += pw;
+                        h = h.max(ph);
+                    }
+                    Vec2::new(w, h)
+                } / ppp;
+                if let Some(inner) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size())) {
+                    let chrome = (
+                        (inner.x - panel.width()).max(0.0),
+                        (inner.y - panel.height()).max(0.0),
+                    );
+                    // No monitor info: fall back to the window itself, which
+                    // turns this into fit-view — harmless, never wrong-sized.
+                    let work = ui
+                        .input(|i| i.viewport().monitor_size)
+                        .map(|m| (m.x, m.y))
+                        .unwrap_or((inner.x, inner.y));
+                    let zoom = image_viewer::fit_zoom((natural.x, natural.y), chrome, work);
+                    if zoom >= 1.0 {
+                        self.view.fit = false;
+                        self.view.scale = 1.0 / ppp;
+                    } else {
+                        self.view.fit = true;
+                    }
+                    self.view.offset = Vec2::ZERO;
+                    let (nw, nh) = image_viewer::fit_window_size(
+                        (natural.x * zoom, natural.y * zoom),
+                        (inner.x, inner.y),
+                        (panel.width(), panel.height()),
+                        Some(work),
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
+                }
+            }
+        }
+
         let mut scale = if self.view.fit {
             fit_scale
         } else {
@@ -4762,26 +4814,6 @@ impl MyApp {
             }
             Vec2::new(w, h)
         };
-        // Fit window to image: the drawn content (`clamp_px`, source px, at
-        // the current scale) plus the chrome the window already has. The
-        // chrome is measured, not assumed: inner size minus the central area
-        // is whatever the side panes and bars take right now, including none
-        // with everything hidden. One shot — the flag is consumed here, where
-        // the laid-out size lives, because the dispatch cannot see it.
-        if self.fit_window_pending {
-            self.fit_window_pending = false;
-            let drawn = clamp_px * scale;
-            if let Some(inner) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size())) {
-                let monitor = ui.input(|i| i.viewport().monitor_size);
-                let (nw, nh) = image_viewer::fit_window_size(
-                    (drawn.x, drawn.y),
-                    (inner.x, inner.y),
-                    (panel.width(), panel.height()),
-                    monitor.map(|m| (m.x, m.y)),
-                );
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
-            }
-        }
         // Keep the image from being lost off-screen, bounded by **the content's own
         // edges** against the panel's - not by a range symmetric about the panel's
         // centre, which is right only when the content is centred there.

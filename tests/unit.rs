@@ -4333,8 +4333,7 @@ fn stepping_wraps_and_presets_clamp() {
 
 /// Fit window keeps the chrome it measures and clamps to the monitor.
 #[test]
-fn fit_window_hugs_content_and_clamps() {
-    // 800x600 window, 700x500 central: 100x100 of chrome, kept.
+fn fit_window_hugs_content_and_clamps() {    // 800x600 window, 700x500 central: 100x100 of chrome, kept.
     assert_eq!(
         image_viewer::fit_window_size((400.0, 300.0), (800.0, 600.0), (700.0, 500.0), None),
         (500.0, 400.0)
@@ -4356,6 +4355,19 @@ fn fit_window_hugs_content_and_clamps() {
     );
 }
 
+/// Fit-window zoom: 100% when it fits with chrome, shrinking only as far as
+/// needed — every press starts from this rule, so repeats cannot ratchet.
+#[test]
+fn fit_zoom_is_unity_until_it_must_shrink() {
+    // 400x300 content, 100x100 chrome, 1920x1080 screen: fits at 100%.
+    assert_eq!(image_viewer::fit_zoom((400.0, 300.0), (100.0, 100.0), (1920.0, 1080.0)), 1.0);
+    // 4000x3000 does not fit: shrink to the binding axis (height here).
+    let z = image_viewer::fit_zoom((4000.0, 3000.0), (100.0, 100.0), (1920.0, 1080.0));
+    assert!((z - 980.0 / 3000.0).abs() < 1e-6, "shrink to fit, got {z}");
+    // Degenerate inputs floor instead of dividing by zero.
+    assert_eq!(image_viewer::fit_zoom((0.0, 0.0), (0.0, 0.0), (1920.0, 1080.0)), 1.0);
+}
+
 /// Fit window must be **wired**: `T` arms a flag central consumes where the
 /// drawn size lives, sending a live resize — not a restart, not a guess at
 /// the chrome.
@@ -4374,6 +4386,18 @@ fn the_fit_window_key_is_wired_to_a_live_resize() {
         src.contains("fit_window_size("),
         "the resize must go through the chrome-measuring helper"
     );
+    assert!(
+        src.contains("fit_zoom(") && src.contains("self.view.fit = "),
+        "`T` must reset the zoom (100%-if-fits) rather than wrapping the current one"
+    );
+    // Same frame: the reset must land before `scale` is read from the view,
+    // or the window is sized for a zoom the picture draws a frame later.
+    let zoom_at = src.find("fit_zoom(").expect("fit_zoom call must exist");
+    let scale_at = src[zoom_at..]
+        .find("let mut scale = if self.view.fit")
+        .map(|i| zoom_at + i)
+        .expect("the view scale read must follow");
+    let _ = scale_at;
 }
 
 /// Animation stepping and window chrome must be **wired**: `,`/`.`/`K` reach
