@@ -1546,6 +1546,10 @@ struct MyApp {
     /// bare letter. Session state, like the master — a restart re-shows both.
     show_left: bool,
     show_right: bool,
+    /// Fit-window-to-image armed (`T`): consumed by `central` on its next
+    /// frame, where the drawn size is known. A flag rather than doing it in
+    /// the dispatch, because the dispatch cannot see the laid-out content.
+    fit_window_pending: bool,
     /// Slideshow running (advance every `Config::slideshow_secs`). Session
     /// state — always off on launch — with the last advance time so the
     /// first step waits a full interval rather than firing at once.
@@ -1839,6 +1843,7 @@ impl MyApp {
             show_panels: true,
             show_left: true,
             show_right: true,
+            fit_window_pending: false,
             slideshow: false,
             slideshow_last: Instant::now(),
             next_scan: Instant::now() + RESCAN_INTERVAL,
@@ -3655,6 +3660,18 @@ impl MyApp {
         true
     }
 
+    /// Shrink the window to hug the picture (`T`): arms a flag `central`
+    /// consumes on its next frame, where the drawn size is known. Grid only:
+    /// fitting the window to a grid of cells is a different feature, so this
+    /// says so instead of doing something surprising.
+    fn fit_window_to_image(&mut self) {
+        if self.gallery_view {
+            self.notice = Some("Close the grid first".into());
+            return;
+        }
+        self.fit_window_pending = true;
+    }
+
     /// Step the on-screen animation one frame (`,` back, `.` forward,
     /// YouTube-style) and pause on it. Wraps at both ends — animations loop,
     /// so stepping never gets stuck. Without an animation on screen this is
@@ -4745,6 +4762,26 @@ impl MyApp {
             }
             Vec2::new(w, h)
         };
+        // Fit window to image: the drawn content (`clamp_px`, source px, at
+        // the current scale) plus the chrome the window already has. The
+        // chrome is measured, not assumed: inner size minus the central area
+        // is whatever the side panes and bars take right now, including none
+        // with everything hidden. One shot — the flag is consumed here, where
+        // the laid-out size lives, because the dispatch cannot see it.
+        if self.fit_window_pending {
+            self.fit_window_pending = false;
+            let drawn = clamp_px * scale;
+            if let Some(inner) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size())) {
+                let monitor = ui.input(|i| i.viewport().monitor_size);
+                let (nw, nh) = image_viewer::fit_window_size(
+                    (drawn.x, drawn.y),
+                    (inner.x, inner.y),
+                    (panel.width(), panel.height()),
+                    monitor.map(|m| (m.x, m.y)),
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
+            }
+        }
         // Keep the image from being lost off-screen, bounded by **the content's own
         // edges** against the panel's - not by a range symmetric about the panel's
         // centre, which is right only when the content is centred there.
@@ -6390,6 +6427,9 @@ impl eframe::App for MyApp {
                 i.key_pressed(egui::Key::K) && !i.modifiers.any(),
             )
         });
+        // Fit window to image (`T`): shrink the window to hug the picture as
+        // drawn. Bare and view-only, so it joins `BARE_LETTERS` with the rest.
+        let fit_win = ctx.input(|i| i.key_pressed(egui::Key::T) && !i.modifiers.any());
         // User commands (Tier 1 #2): Ctrl+1..9 runs the nth entry in
         // `Config::user_commands`. Read as one `Option<usize>` so the dispatch
         // below has a single branch rather than nine.
@@ -6545,6 +6585,9 @@ impl eframe::App for MyApp {
                 self.step_animation(true);
             } else if anim_toggle {
                 self.toggle_animation_play();
+            }
+            if fit_win {
+                self.fit_window_to_image();
             }
             if lead_down {
                 self.nudge_lead_lone(-1, ctx);
@@ -6772,6 +6815,9 @@ impl eframe::App for MyApp {
                     if ui.button("Right (P)").clicked() {
                         self.suppress_resize_redecode = true;
                         self.show_right = !self.show_right;
+                    }
+                    if ui.button("Fit window (T)").clicked() {
+                        self.fit_window_to_image();
                     }
                     if ui.button("Delete (Del)").clicked() {
                         self.delete_current(ctx);

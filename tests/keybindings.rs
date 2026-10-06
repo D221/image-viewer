@@ -242,6 +242,7 @@ const BARE_LETTERS: &[(&str, &str)] = &[
     ),
     ("P", "toggle the right (settings) pane - view only"),
     ("R", "rescan the folder - read-only"),
+    ("T", "fit the window to the picture - view only"),
     (
         "W",
         "set as desktop wallpaper - writes, but to the OS, never to your photos",

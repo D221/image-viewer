@@ -5928,6 +5928,30 @@ pub fn zoom_preset(presets: &[f32; 4], i: usize) -> f32 {
     presets[i.min(3)].clamp(0.1, 32.0)
 }
 
+/// Window size hugging `content` (the picture as drawn, in points): the gap
+/// between the window's inner size and the central area is the side panels
+/// and bars, which keep whatever they have — so adding the same gap back
+/// wraps the picture with the chrome unchanged. Clamped to the monitor (an
+/// 8× spread is bigger than any screen) and floored (degenerate content
+/// must not collapse the window into something ungrabbable).
+pub fn fit_window_size(
+    content: (f32, f32),
+    inner: (f32, f32),
+    central: (f32, f32),
+    monitor: Option<(f32, f32)>,
+) -> (f32, f32) {
+    let chrome = (
+        (inner.0 - central.0).max(0.0),
+        (inner.1 - central.1).max(0.0),
+    );
+    let mut out = (content.0 + chrome.0, content.1 + chrome.1);
+    if let Some(m) = monitor {
+        out.0 = out.0.min(m.0);
+        out.1 = out.1.min(m.1);
+    }
+    (out.0.max(200.0), out.1.max(120.0))
+}
+
 /// Decode an animation into composited frames, capped at the limits above.
 ///
 /// Dispatch is on [`AnimatedFormat`], not on the extension, and the `image` crate

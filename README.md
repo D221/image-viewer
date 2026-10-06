@@ -304,6 +304,7 @@ should not quietly do that.
 | `Shift+F` | Fill window (crop overflow, single image only) |
 | `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
 | `2`–`4` | Zoom presets 2–4 (2×, 4×, 8× by default) |
+| `T` | Fit the window to the picture as drawn |
 | `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
 | `K` | Pause / resume the animation |
 | `I` | Toggle the side and bottom panels |

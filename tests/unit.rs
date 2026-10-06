@@ -4331,6 +4331,51 @@ fn stepping_wraps_and_presets_clamp() {
     assert_eq!(image_viewer::zoom_preset(&[0.0, -3.0, 100.0, 2.0], 2), 32.0);
 }
 
+/// Fit window keeps the chrome it measures and clamps to the monitor.
+#[test]
+fn fit_window_hugs_content_and_clamps() {
+    // 800x600 window, 700x500 central: 100x100 of chrome, kept.
+    assert_eq!(
+        image_viewer::fit_window_size((400.0, 300.0), (800.0, 600.0), (700.0, 500.0), None),
+        (500.0, 400.0)
+    );
+    // An 8x spread is bigger than any screen: clamped.
+    assert_eq!(
+        image_viewer::fit_window_size(
+            (6000.0, 4000.0),
+            (800.0, 600.0),
+            (700.0, 500.0),
+            Some((1920.0, 1080.0))
+        ),
+        (1920.0, 1080.0)
+    );
+    // Degenerate content never collapses the window.
+    assert_eq!(
+        image_viewer::fit_window_size((0.0, 0.0), (800.0, 600.0), (800.0, 600.0), None),
+        (200.0, 120.0)
+    );
+}
+
+/// Fit window must be **wired**: `T` arms a flag central consumes where the
+/// drawn size lives, sending a live resize — not a restart, not a guess at
+/// the chrome.
+#[test]
+fn the_fit_window_key_is_wired_to_a_live_resize() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.fit_window_to_image()"),
+        "`T` must arm the fit"
+    );
+    assert!(
+        src.contains("ViewportCommand::InnerSize("),
+        "central must send a live resize with the drawn size"
+    );
+    assert!(
+        src.contains("fit_window_size("),
+        "the resize must go through the chrome-measuring helper"
+    );
+}
+
 /// Animation stepping and window chrome must be **wired**: `,`/`.`/`K` reach
 /// the frame methods, `1`–`4` reach the presets, and both window flags reach
 /// the viewport builder. `main.rs` is unreachable from every test, so these

@@ -481,10 +481,12 @@ not started.
 
 What is *known*: `fit_scale` and the panel geometry already exist, and
 `suppress_resize_redecode` is the mechanism that stops a layout change from
-reading as image growth. What is *undecided*: whether the window follows
-every image (a dancing window while flipping) or only on toggle, and minimum
-window sizes. Do not build it as a resize per navigation without answering
-that first.
+reading as image growth. The explicit form shipped as `T`
+(`fit_window_size`, chrome measured not assumed, clamped to the monitor) —
+what is still open here is only the *automatic* half. What is *undecided*:
+whether the window follows every image (a dancing window while flipping) or
+only on toggle, and minimum window sizes. Do not build it as a resize per
+navigation without answering that first.
 
 ---
 
