@@ -393,17 +393,11 @@ pub struct Config {
     pub fit_window_mode: bool,
 
     /// Fit-view as a sticky mode (`F`): every image fitted to the window.
-    /// Mutually exclusive with the modes either side of it — turning one on
-    /// switches the others off. Off by default: with no mode on, photos open
-    /// at 100% in a stable window instead of maximized.
+    /// Mutually exclusive with fit-window mode — turning one on switches
+    /// the other off. Off by default: with no mode on, photos open at 100%
+    /// in a stable window instead of maximized.
     #[serde(default)]
     pub fit_mode: bool,
-
-    /// 1:1 as a sticky mode (`1`): arrivals reset to absolute 100% in a
-    /// stable window. `2`–`4` stay one-shot jumps (a temporary excursion —
-    /// the next arrival is 1.0 again). Same mutual exclusion as `F`.
-    #[serde(default)]
-    pub one_mode: bool,
 }
 
 /// `1` keeps the shipped meaning (100%), then doubling to 8×.
@@ -570,7 +564,6 @@ impl Config {
             hide_title_bar: false,
             fit_window_mode: false,
             fit_mode: false,
-            one_mode: false,
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {

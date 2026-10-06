@@ -2093,14 +2093,6 @@ impl MyApp {
             self.fit_arrive_pending = true;
             self.fit_iters = 6;
         }
-        // 1:1 mode: arrivals reset to the first preset in a stable window
-        // (no hug — that half belongs to `T`). Skipped under fit-window,
-        // which owns arrivals when both flags somehow agree.
-        else if self.config.one_mode {
-            self.view.fit = false;
-            self.view.scale =
-                image_viewer::zoom_preset(&self.config.zoom_presets, 0) / ctx.pixels_per_point();
-        }
         self.schedule();
     }
 
@@ -3733,15 +3725,13 @@ impl MyApp {
     }
 
     /// Fit-view as a mode (`F`): every image fitted to the window.
-    /// Mutually exclusive with the other two view modes — turning one on
-    /// switches the others off, since "fit", "100%" and "hug" cannot all
-    /// hold at once. On applies now; off leaves the zoom where it is,
+    /// Mutually exclusive with fit-window mode — turning one on switches
+    /// the other off. On applies now; off leaves the zoom where it is,
     /// absolute from here.
     fn toggle_fit_mode(&mut self) {
         self.config.fit_mode = !self.config.fit_mode;
         if self.config.fit_mode {
             self.config.fit_window_mode = false;
-            self.config.one_mode = false;
             self.view.fit = true;
         } else {
             self.view.fit = false;
@@ -3752,29 +3742,6 @@ impl MyApp {
                 "Fit view: on"
             } else {
                 "Fit view: off"
-            }
-            .into(),
-        );
-    }
-
-    /// 1:1 as a mode (`1`): arrivals pinned at absolute 100%, window stable.
-    /// Same mutual exclusion. On jumps to 100% now (which is also what the
-    /// old one-shot preset did); off leaves it there.
-    fn toggle_one_mode(&mut self, ctx: &Context) {
-        self.config.one_mode = !self.config.one_mode;
-        if self.config.one_mode {
-            self.config.fit_window_mode = false;
-            self.config.fit_mode = false;
-            self.view.fit = false;
-            self.view.scale = image_viewer::zoom_preset(&self.config.zoom_presets, 0)
-                / ctx.pixels_per_point();
-        }
-        self.config.save(&self.config_path);
-        self.notice = Some(
-            if self.config.one_mode {
-                "1:1 mode: on"
-            } else {
-                "1:1 mode: off"
             }
             .into(),
         );
@@ -3797,7 +3764,6 @@ impl MyApp {
         self.config.fit_window_mode = !self.config.fit_window_mode;
         if self.config.fit_window_mode {
             self.config.fit_mode = false;
-            self.config.one_mode = false;
         }
         self.config.save(&self.config_path);
         self.fit_window_pending = true;
@@ -4446,9 +4412,6 @@ impl MyApp {
         if self.config.fit_mode {
             s += " - fit-view";
         }
-        if self.config.one_mode {
-            s += " - 1:1";
-        }
         if let Some(e) = &self.error {
             s += &format!(" — {e}");
         } else if let Some(n) = &self.notice {
@@ -4948,15 +4911,22 @@ impl MyApp {
         // (filter box) like the ui() dispatch does — typing "1" must not
         // toggle anything.
         if !ctx.egui_wants_keyboard_input() {
-            if preset == Some(0) {
-                self.toggle_one_mode(&ctx);
-            } else if let Some(i) = preset {
+            if let Some(i) = preset {
                 // Absolute ratio, not a multiplier: 1.0 is one source pixel per
                 // physical pixel, whatever the fit is.
                 target_scale = image_viewer::zoom_preset(&self.config.zoom_presets, i) / ppp;
             }
             if key_fit {
                 self.toggle_fit_mode();
+                // Applies immediately, same frame: on fits this image now,
+                // off drops to absolute — neither waits for the next
+                // arrival to make the mode visible.
+                target_scale = if self.config.fit_mode {
+                    fit_scale
+                } else {
+                    self.view.scale = 1.0 / ppp;
+                    1.0 / ppp
+                };
             }
         }
         if resp.double_clicked() {
@@ -5911,10 +5881,10 @@ impl MyApp {
             f(&mut self.edits, &p.path);
         }
         // An explicit turn/mirror keeps the current zoom contract: only the
-        // legacy no-mode state refits, the way it always has. Absolute modes
-        // (`T`, 1:1) and fit-view already answer "how big", so a turn must
-        // not second-guess them.
-        if !self.config.fit_window_mode && !self.config.one_mode {
+        // legacy no-mode state refits, the way it always has. Fit-window and
+        // fit-view already answer "how big", so a turn must not second-guess
+        // them.
+        if !self.config.fit_window_mode {
             self.view.fit = true;
         }
         self.view.offset = Vec2::ZERO;

@@ -4458,29 +4458,21 @@ fn adoption_follows_the_view_modes() {
 /// preset, and both toggles exist with notices. `T` clearing its siblings
 /// is covered by the sticky scan; this covers the other two directions.
 #[test]
-fn view_modes_are_exclusive_and_arrivals_pin_one_to_one() {
+/// The two view modes exclude each other: turning fit-view on disables
+/// fit-window, and vice versa.
+#[test]
+fn view_modes_are_exclusive() {
     let src = include_str!("../src/main.rs");
     assert!(
         src.contains("fn toggle_fit_mode(&mut self)")
-            && src.contains("fn toggle_one_mode(&mut self"),
-        "both toggles must exist"
+            && src.contains("fn toggle_fit_mode(&mut self"),
+        "toggle_fit_mode must exist"
     );
-    for (arm, cleared) in [
-        ("self.config.fit_mode = !self.config.fit_mode", "self.config.one_mode = false"),
-        ("self.config.one_mode = !self.config.one_mode", "self.config.fit_mode = false"),
-    ] {
-        let at = src.find(arm).expect("toggle arm must exist");
-        let body = &src[at..(at + 1200).min(src.len())];
-        assert!(
-            body.contains(cleared),
-            "a mode switched on must switch its sibling off"
-        );
-    }
-    let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
-    let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
+    let at = src.find("self.config.fit_mode = !self.config.fit_mode").expect("toggle arm must exist");
+    let body = &src[at..(at + 1200).min(src.len())];
     assert!(
-        goto.contains("self.config.one_mode") && goto.contains("zoom_preset(&self.config.zoom_presets, 0)"),
-        "arrivals in 1:1 mode must reset to the first preset"
+        body.contains("self.config.fit_window_mode = false"),
+        "fit-view switched on must switch fit-window off"
     );
 }
 
