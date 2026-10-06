@@ -891,7 +891,7 @@ fn home_and_end_reach_a_turn_rather_than_a_file() {
     );
 }
 
-/// The settings panel offers both manga settings, and `M`/`D` are named on them.
+/// The settings panel offers both double-page settings, and `M`/`D` are named on them.
 ///
 /// The keyboard is how a reader finds a feature nobody documents, and a setting that
 /// exists only as a key is a setting a user who has lost the key cannot get back.
@@ -909,7 +909,7 @@ fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live()
     let src = code_only(&source());
 
     for (label, field) in [
-        ("Manga mode (M)", "manga_mode"),
+        ("Double page mode (M)", "manga_mode"),
         ("Right-to-left pages (D)", "manga_rtl"),
     ] {
         assert!(

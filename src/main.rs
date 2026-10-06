@@ -6949,7 +6949,7 @@ impl eframe::App for MyApp {
                 // second box is a setting for nothing, so it says so rather than
                 // sitting there looking live.
                 if ui
-                    .checkbox(&mut self.config.manga_mode, "Manga mode (M)")
+                    .checkbox(&mut self.config.manga_mode, "Double page mode (M)")
                     .changed()
                 {
                     self.config.save(&self.config_path);
@@ -6963,7 +6963,7 @@ impl eframe::App for MyApp {
                     ctx.request_repaint();
                 }
                 if !self.config.manga_mode {
-                    ui.small("Both are for manga mode, which is off.");
+                    ui.small("Both are for double page mode, which is off.");
                 } else {
                     ui.small("A turn opens on the right, so Left reads forwards. \
                               Right-to-left off makes it match Left-to-right.");
