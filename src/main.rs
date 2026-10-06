@@ -1549,13 +1549,16 @@ struct MyApp {
     /// Fit-window-to-image armed (`T`): consumed by `central` on its next
     /// frame, where the drawn size is known. A flag rather than doing it in
     /// the dispatch, because the dispatch cannot see the laid-out content.
-    fit_window_pending: bool,
-    /// Follow-up wrap for the sticky mode: re-hug the current zoom without
+    fit_window_pending: bool,    /// Follow-up wrap for the sticky mode: re-hug the current zoom without
     /// touching it. Separate from the reset above, which also sets the view.
     fit_wrap_pending: bool,
     /// Cursor the window was last fitted to: the mode refits on arrival, not
     /// on every `goto` (toggles and rescans re-`goto` the same image).
     fit_window_key: Option<ImgKey>,
+    /// Window size a centering command is waiting on: the position must land
+    /// after the resize settles, or it anchors a window that then resizes out
+    /// from under it. `(want_size, frames_left)`.
+    pending_pos: Option<((f32, f32), u8)>,
     /// Slideshow running (advance every `Config::slideshow_secs`). Session
     /// state — always off on launch — with the last advance time so the
     /// first step waits a full interval rather than firing at once.
@@ -1852,6 +1855,7 @@ impl MyApp {
             fit_window_pending: false,
             fit_wrap_pending: false,
             fit_window_key: None,
+            pending_pos: None,
             slideshow: false,
             slideshow_last: Instant::now(),
             next_scan: Instant::now() + RESCAN_INTERVAL,
@@ -4342,6 +4346,39 @@ impl MyApp {
             (panel.width() * ppp).round() as u32,
             (panel.height() * ppp).round() as u32,
         );
+        // Second phase of fit-window centering (see the consumption below):
+        // place once the inner size matches what was asked, retry a few
+        // frames while the resize is in flight, then place with whatever is
+        // known rather than never. Old window if known, else the monitor —
+        // a missing outer rect must degrade to screen-centering, not to
+        // silently dropping the position the way the immediate send did.
+        if let Some((want, tries)) = self.pending_pos {
+            let settled = ui
+                .input(|i| i.viewport().inner_rect.map(|r| r.size()))
+                .is_some_and(|s| (s.x - want.0).abs() < 3.0 && (s.y - want.1).abs() < 3.0);
+            if settled || tries == 0 {
+                self.pending_pos = None;
+                let outer = ui.input(|i| i.viewport().outer_rect);
+                let mon = ui.input(|i| i.viewport().monitor_size);
+                let pos = match (outer, mon) {
+                    (Some(o), Some(m)) => Some(image_viewer::fit_window_placement(
+                        want,
+                        (o.min.x, o.min.y),
+                        (o.size().x, o.size().y),
+                        (m.x, m.y),
+                    )),
+                    (None, Some(m)) => Some(((m.x - want.0) / 2.0, (m.y - want.1) / 2.0)),
+                    _ => None,
+                };
+                if let Some((nx, ny)) = pos {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                        egui::Pos2::new(nx.max(0.0), ny.max(0.0)),
+                    ));
+                }
+            } else {
+                self.pending_pos = Some((want, tries - 1));
+            }
+        }
         // **The half panel in manga mode**, and both halves of the change hang off the
         // same number. `preview_target` takes the *long* side, so halving the width is
         // what makes `display_dim`, `schedule`'s `target_dim` and the resize refine ask
@@ -4678,20 +4715,11 @@ impl MyApp {
                         Some(work),
                     );
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
-                    if let (Some(outer), Some(mon)) = (
-                        ui.input(|i| i.viewport().outer_rect),
-                        ui.input(|i| i.viewport().monitor_size),
-                    ) {
-                        let (nx, ny) = image_viewer::fit_window_placement(
-                            (nw, nh),
-                            (outer.min.x, outer.min.y),
-                            (outer.size().x, outer.size().y),
-                            (mon.x, mon.y),
-                        );
-                        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
-                            egui::Pos2::new(nx, ny),
-                        ));
-                    }
+                    // Centering waits: the position must land after the resize
+                    // settles, or it anchors a window that then resizes out
+                    // from under it (which is why re-pressing never fixed the
+                    // position, only the size). Placed at the top of central.
+                    self.pending_pos = Some(((nw, nh), 10));
                 }
             }
         }
@@ -6915,7 +6943,11 @@ impl eframe::App for MyApp {
                         self.suppress_resize_redecode = true;
                         self.show_right = !self.show_right;
                     }
-                    if ui.button("Fit window (T)").clicked() {
+                    if ui
+                        .selectable_label(self.config.fit_window_mode, "Fit window (T)")
+                        .on_hover_text("Shrink the window to the picture; follows images and zooms while on")
+                        .clicked()
+                    {
                         self.fit_window_to_image();
                     }
                     if ui.button("Delete (Del)").clicked() {
@@ -6951,7 +6983,15 @@ impl eframe::App for MyApp {
         }
 
         if self.show_panels && self.show_left {
-            egui::Panel::left("exif").show(ui, |ui| {
+            // Pinned while fit-window mode is on: the window math measures
+            // chrome as inner-minus-central, and auto-sizing panels move that
+            // number after the measure (stale EXIF text, scrollbar flips), so
+            // the window lands bigger than the content with bars to prove it.
+            let mut pane = egui::Panel::left("exif");
+            if self.config.fit_window_mode {
+                pane = pane.exact_size(240.0);
+            }
+            pane.show(ui, |ui| {
                 ui.heading("EXIF");
                 // The panel is the only thing that shows this, so it is also the
                 // only thing that should ask for it. The gate is the *effective*
@@ -7011,7 +7051,11 @@ impl eframe::App for MyApp {
             let mut resort = false;
             let mut refilter = false;
             if self.show_panels && self.show_right {
-            egui::Panel::right("settings").show(ui, |ui| {
+            let mut pane = egui::Panel::right("settings");
+            if self.config.fit_window_mode {
+                pane = pane.exact_size(300.0);
+            }
+            pane.show(ui, |ui| {
                 ui.heading("Settings");
                 // The panel long outgrew the window height (renderer, resample,
                 // cache, keys, user commands, manga, sort, associations), so

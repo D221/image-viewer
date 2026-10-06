@@ -4446,6 +4446,28 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
     );
 }
 
+/// Fit-window follow-through: pinned panel widths in the mode (auto-sizing
+/// panels move the measured chrome after the fact, which is how the window
+/// landed bigger than the content), two-phase centering (position after the
+/// resize settles, with a monitor fallback), and a button that shows the
+/// mode like Crop does.
+#[test]
+fn fit_window_pins_chrome_places_late_and_shows_state() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("exact_size("),
+        "side panes must pin their width in the mode, or chrome drifts post-measure"
+    );
+    assert!(
+        src.contains("pending_pos"),
+        "centering must wait for the resize to settle, not race it"
+    );
+    assert!(
+        src.contains(".selectable_label(self.config.fit_window_mode, \"Fit window (T)\")"),
+        "the mode needs a button with a visible state like Crop"
+    );
+}
+
 /// Animation stepping and window chrome must be **wired**: `,`/`.`/`K` reach
 /// the frame methods, `1`–`4` reach the presets, and both window flags reach
 /// the viewport builder. `main.rs` is unreachable from every test, so these
