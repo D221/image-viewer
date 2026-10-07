@@ -7136,6 +7136,16 @@ impl eframe::App for MyApp {
         // the whole dispatch down, or typing "g" toggles the grid and a
         // capture press of Delete recycles a photo.
         if !typing && self.capturing.is_none() {
+            // The alt-next key resumes a paused animation instead of stepping:
+            // `,`/`.` pause onto a frame, and this is the handiest way back
+            // to motion (YouTube parity with the stepping keys). Only the
+            // paused case reroutes — playing animations and stills step on.
+            // Computed up front so the step branch below can stand down for it.
+            let unpause = !self.gallery_view
+                && action_pressed(ctx, &kb, "next_alt")
+                && self.anim.as_ref().is_some_and(|a| {
+                    Some(&a.path) == self.shown.as_ref().map(|k| &k.path) && a.paused.is_some()
+                });
             if self.gallery_view {
                 // Grid: arrows move the highlight, PageUp/PageDown move a page,
                 // Home/End jump to the ends, Enter opens it. Clamped, so walking
@@ -7159,12 +7169,21 @@ impl eframe::App for MyApp {
                 } else if enter {
                     self.pick_grid_selection(ctx);
                 }
-            } else if let Some(dir) = step_dir {
+            } else if let Some(dir) = step_dir.filter(|_| !unpause) {
                 self.step(ctx, dir);
             } else if first {
                 self.goto_edge(false, ctx);
             } else if last {
                 self.goto_edge(true, ctx);
+            }
+            // The alt-next key resumes a paused animation instead of stepping:
+            // `,`/`.` pause onto a frame, and this is the handiest way back
+            // to motion (YouTube parity with the stepping keys). Only the
+            // paused case reroutes — playing animations and stills step on.
+            // Placed after the step branch so it never runs together with it
+            // (the branch above already stood down for it).
+            if unpause {
+                self.toggle_animation_play();
             }
             if toggle {
                 self.suppress_resize_redecode = true;

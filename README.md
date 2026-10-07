@@ -307,6 +307,7 @@ should not quietly do that.
 | `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor). On fits now, arrivals refit, zooms re-hug |
 | `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
 | `K` | Pause / resume the animation |
+| `Space` | Next image — resumes instead, while an animation is paused |
 | `I` | Toggle the side and bottom panels |
 | `L` / `P` | Toggle the left (EXIF) / right (settings) pane alone |
 | `/` | Focus the filter box |

@@ -4674,6 +4674,24 @@ fn the_animation_keys_presets_and_chrome_are_wired() {
     );
 }
 
+/// The alt-next key resumes a paused animation instead of stepping: the
+/// step branch stands down for it, and it only reroutes the paused case —
+/// playing animations and stills step on as before.
+#[test]
+fn space_resumes_a_paused_animation() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("step_dir.filter(|_| !unpause)"),
+        "the step branch must stand down when the key means resume"
+    );
+    let at = src.find("let unpause =").expect("the unpause flag must exist");
+    let arm = &src[at..(at + 700).min(src.len())];
+    assert!(
+        arm.contains("\"next_alt\"") && arm.contains("paused.is_some()"),
+        "only the alt-next chord on a paused animation reroutes"
+    );
+}
+
 /// Window chrome applies live: decorations go through the viewport command
 /// and always-on-top through Win32 (`set_topmost`), not through a restart.
 #[test]
