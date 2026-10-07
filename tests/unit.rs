@@ -4314,6 +4314,16 @@ fn capture_and_labels_are_wired() {
         src.contains("fn action_button_text("),
         "buttons must go through the live-label helper"
     );
+    // Capture waits for a non-modifier key (a bare Ctrl press must not
+    // commit as "Ctrl+?") and refuses names the matcher cannot parse.
+    assert!(
+        src.contains("is_modifier_key(*key)"),
+        "capture must skip modifier keypresses, not commit them"
+    );
+    assert!(
+        src.contains("is not a bindable key"),
+        "an unparseable capture must say so instead of storing a dead chord"
+    );
 }
 
 /// UserCmd expansion (Tier 1 #2): {file}/{dir}/{name} expand, unknowns stay.

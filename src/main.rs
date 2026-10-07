@@ -263,10 +263,31 @@ fn parse_key_full(name: &str) -> Option<egui::Key> {
     }
 }
 
+/// Modifier keys never become bindings on their own: capture waits for the
+/// real key, whose event already carries the held modifiers.
+fn is_modifier_key(key: egui::Key) -> bool {
+    matches!(
+        key,
+        egui::Key::ShiftLeft
+            | egui::Key::ShiftRight
+            | egui::Key::ControlLeft
+            | egui::Key::ControlRight
+            | egui::Key::AltLeft
+            | egui::Key::AltRight
+            | egui::Key::SuperLeft
+            | egui::Key::SuperRight
+    )
+}
+
 /// Reverse of `parse_key_full`: the name capture stores and Settings
 /// shows. Must cover exactly the same keys — the totality scan in
 /// `tests/keybindings.rs` checks both directions against `KEY_NAMES`.
 fn key_name(key: egui::Key) -> &'static str {
+    if is_modifier_key(key) {
+        // Unreachable through the capture filter, which skips modifiers —
+        // belt and braces so a modifier can never become a stored name.
+        return "?";
+    }
     match key {
         egui::Key::A => "A",
         egui::Key::B => "B",
@@ -7901,6 +7922,11 @@ impl eframe::App for MyApp {
                 // owns the typing/grid/fullscreen/quit chain, which is
                 // structural rather than a binding).
                 if let Some(action) = self.capturing.clone() {
+                    // Fresh non-modifier presses only: the modifier keys
+                    // themselves also arrive as Key events, and committing the
+                    // first event would turn "hold Ctrl, press G" into
+                    // "Ctrl+?" — the capture waits for the real key, whose
+                    // event already carries the held modifiers.
                     let pressed: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
                         i.events
                             .iter()
@@ -7911,7 +7937,7 @@ impl eframe::App for MyApp {
                                     repeat: false,
                                     modifiers,
                                     ..
-                                } => Some((*key, *modifiers)),
+                                } if !is_modifier_key(*key) => Some((*key, *modifiers)),
                                 _ => None,
                             })
                             .collect()
@@ -7933,7 +7959,12 @@ impl eframe::App for MyApp {
                         }
                         raw.push_str(key_name(*key));
                         match image_viewer::canonical_chord(&raw) {
-                            Some(chord) => {
+                            Some(chord)
+                                if image_viewer::split_chord(&chord)
+                                    .is_some_and(|(_, _, _, name)| {
+                                        parse_key_full(&name).is_some()
+                                    }) =>
+                            {
                                 let clash = image_viewer::KEY_ACTIONS.iter().find(|(id, _, _)| {
                                     *id != action
                                         && image_viewer::resolve_binding(&self.config.keybindings, id)
@@ -7955,7 +7986,10 @@ impl eframe::App for MyApp {
                                 }
                                 self.capturing = None;
                             }
-                            None => {
+                            _ => {
+                                self.notice = Some(format!(
+                                    "{raw} is not a bindable key"
+                                ));
                                 self.capturing = None;
                             }
                         }
