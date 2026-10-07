@@ -348,13 +348,10 @@ pub struct Config {
     #[serde(default)]
     pub workers: usize,
 
-    /// Rebindable keys: action id → key name (egui `Key` variant name, e.g.
-    /// `"ArrowRight"`, `"Space"`, `"PageDown"`). Absent means the shipped
-    /// default. Only navigation and chord actions are rebindable — the bare
-    /// letters in `BARE_LETTERS` stay fixed, because they are the view-only
-    /// safe list `tests/keybindings.rs` pins.
+    /// Full key bindings: action id → chord (`"Ctrl+Shift+S"`, `"Space"`).
+    /// Absent (or blank) means the shipped default from [`KEY_ACTIONS`].
     #[serde(default)]
-    pub keys: std::collections::HashMap<String, String>,
+    pub keybindings: std::collections::HashMap<String, String>,
     /// User commands: external programs run against the current file
     /// (`{file}`, `{dir}`, `{name}` expand in program and args).
     /// Triggered by Ctrl+1..9 in list order.
@@ -425,32 +422,135 @@ pub struct UserCommand {
     pub args: Vec<String>,
 }
 
-/// Rebindable action ids and their shipped defaults (key names as
-/// `egui::Key` variant names). Navigation only — bare letters stay fixed.
-pub const REBINDABLE_ACTIONS: &[(&str, &str)] = &[
-    ("next", "ArrowRight"),
-    ("prev", "ArrowLeft"),
-    ("next_alt", "Space"),
-    ("page_next", "PageDown"),
-    ("page_prev", "PageUp"),
+/// Every rebindable action: id, shipped chord, and the Settings label.
+/// Chords spell modifiers `Ctrl`/`Shift`/`Alt` joined by `+` with an egui
+/// `Key` variant name last (`"Ctrl+Shift+S"`, `"Space"`, `"Delete"`).
+/// Matching is exact (see `chord_matches` in the binary): a bare letter
+/// never fires with a modifier held, and a chord never fires with extra
+/// ones — so adding modifiers is always safe, never ambiguous.
+///
+/// Deliberately NOT here: `Esc` (typing/grid/fullscreen/quit chain — a
+/// structural dispatch, not a binding) and mouse buttons (a different input
+/// shape; still hardcoded). `Copy`/`Copy path` keep their toolkit chords
+/// (`Ctrl+C` arrives as an event, never as a key) with these as alternatives.
+pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
+    ("next", "ArrowRight", "Next image"),
+    ("prev", "ArrowLeft", "Previous image"),
+    ("next_alt", "Space", "Next image (alt)"),
+    ("page_next", "PageDown", "Next image (page)"),
+    ("page_prev", "PageUp", "Previous image (page)"),
+    ("first", "Home", "First image"),
+    ("last", "End", "Last image"),
+    ("grid", "G", "Toggle gallery grid"),
+    ("panels", "I", "Toggle all panels"),
+    ("pane_left", "L", "Toggle left pane"),
+    ("pane_right", "P", "Toggle right pane"),
+    ("fit", "F", "Fit view mode"),
+    ("fill", "Shift+F", "Fill window"),
+    ("preset_1", "1", "Zoom preset 1"),
+    ("preset_2", "2", "Zoom preset 2"),
+    ("preset_3", "3", "Zoom preset 3"),
+    ("preset_4", "4", "Zoom preset 4"),
+    ("anim_back", "Comma", "Animation one frame back"),
+    ("anim_fwd", "Period", "Animation one frame forward"),
+    ("anim_toggle", "K", "Pause/resume animation"),
+    ("manga", "M", "Double page mode"),
+    ("rtl", "D", "Right-to-left pages"),
+    ("lead_down", "O", "Lead-lone offset down"),
+    ("lead_up", "Shift+O", "Lead-lone offset up"),
+    ("shape", "X", "Toggle single/double page"),
+    ("del", "Delete", "Delete to Recycle Bin"),
+    ("explore", "E", "Reveal in Explorer"),
+    ("reload", "R", "Reload folder"),
+    ("wall", "W", "Set as wallpaper"),
+    ("save", "Ctrl+S", "Save transformed copy"),
+    ("save_screen", "Ctrl+Shift+S", "Save screen-size copy"),
+    ("crop", "C", "Crop mode"),
+    ("copy", "Ctrl+C", "Copy image (alt chord)"),
+    ("copy_path", "Ctrl+Shift+C", "Copy path (alt chord)"),
+    ("print", "Ctrl+P", "Print"),
+    ("user_1", "Ctrl+1", "User command 1"),
+    ("user_2", "Ctrl+2", "User command 2"),
+    ("user_3", "Ctrl+3", "User command 3"),
+    ("user_4", "Ctrl+4", "User command 4"),
+    ("user_5", "Ctrl+5", "User command 5"),
+    ("user_6", "Ctrl+6", "User command 6"),
+    ("user_7", "Ctrl+7", "User command 7"),
+    ("user_8", "Ctrl+8", "User command 8"),
+    ("user_9", "Ctrl+9", "User command 9"),
+    ("grid_up", "ArrowUp", "Grid: up"),
+    ("grid_down", "ArrowDown", "Grid: down"),
+    ("grid_left", "ArrowLeft", "Grid: left"),
+    ("grid_right", "ArrowRight", "Grid: right"),
+    ("grid_page_up", "PageUp", "Grid: page up"),
+    ("grid_page_down", "PageDown", "Grid: page down"),
+    ("grid_open", "Enter", "Grid: open"),
+    ("fullscreen", "F11", "Fullscreen"),
+    ("focus_search", "Slash", "Focus filter box"),
+    ("fit_window", "T", "Fit window mode"),
 ];
-
-/// Shipped key name for `action`, or `""` when unknown.
-pub fn default_key(action: &str) -> &'static str {
-    REBINDABLE_ACTIONS
+/// Shipped chord for `action`, or `""` when unknown.
+pub fn default_binding(action: &str) -> &'static str {
+    KEY_ACTIONS
         .iter()
-        .find(|(id, _)| *id == action)
-        .map(|(_, k)| *k)
+        .find(|(id, _, _)| *id == action)
+        .map(|(_, chord, _)| *chord)
         .unwrap_or("")
 }
 
-/// Effective key name for `action`: the user's override when present and
-/// non-empty, else the shipped default.
-pub fn resolve_key(keys: &std::collections::HashMap<String, String>, action: &str) -> String {
-    match keys.get(action).map(|s| s.trim()) {
+/// Effective chord for `action`: the user's override when present and
+/// non-blank, else the shipped default. A blank override unbinds nothing —
+/// it falls back, so a typo leaves the shipped chord working rather than
+/// deleting the action.
+pub fn resolve_binding(bindings: &std::collections::HashMap<String, String>, action: &str) -> String {
+    match bindings.get(action).map(|s| s.trim()) {
         Some(s) if !s.is_empty() => s.to_owned(),
-        _ => default_key(action).to_owned(),
+        _ => default_binding(action).to_owned(),
     }
+}
+
+/// Canonicalize a chord for storing: modifiers sorted Ctrl/Shift/Alt, case
+/// normalized on the key (`"shift+ctrl+s"` and `"Ctrl+Shift+S"` are the same
+/// binding). Returns `None` when the chord names no key at all.
+pub fn canonical_chord(raw: &str) -> Option<String> {
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut key: Option<String> = None;
+    for part in raw.split('+') {
+        let p = part.trim();
+        if p.eq_ignore_ascii_case("ctrl") || p.eq_ignore_ascii_case("control") {
+            ctrl = true;
+        } else if p.eq_ignore_ascii_case("shift") {
+            shift = true;
+        } else if p.eq_ignore_ascii_case("alt") {
+            alt = true;
+        } else if !p.is_empty() {
+            key = Some(p.to_owned());
+        }
+    }
+    let key = key?;
+    // Single letters normalize to uppercase (`s` means `S`); longer names
+    // are case-sensitive and must match the egui variant spelling exactly
+    // (`Space`, not `space`) — normalizing those would invent spellings the
+    // matcher does not know.
+    let key = if key.len() == 1 {
+        key.to_ascii_uppercase()
+    } else {
+        key
+    };
+    let mut out = String::new();
+    if ctrl {
+        out.push_str("Ctrl+");
+    }
+    if shift {
+        out.push_str("Shift+");
+    }
+    if alt {
+        out.push_str("Alt+");
+    }
+    out.push_str(&key);
+    Some(out)
 }
 
 /// Expand `{file}`, `{dir}` and `{name}` in `template` against `file`.
@@ -647,7 +747,7 @@ impl Config {
             manga_mode: false,
             manga_rtl: true,
             workers: 0,
-            keys: std::collections::HashMap::new(),
+            keybindings: std::collections::HashMap::new(),
             user_commands: Vec::new(),
             slideshow_secs: default_slideshow_secs(),
             zoom_presets: default_zoom_presets(),

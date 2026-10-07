@@ -1826,7 +1826,7 @@ impl MyApp {
         set_downscale_smoothing(config.smooth_downscale);
         image_viewer::set_wide_gamut_conversion(config.convert_wide_gamut);
         set_thumbnail_cache(config.thumbnail_cache);
-        set_nav_overrides(&config.keys);
+        set_nav_overrides(&config.keybindings);
 
         if !config_path.exists() {
             config.save(&config_path);
@@ -7586,7 +7586,7 @@ impl eframe::App for MyApp {
                 ui.label("Keys:");
                 let mut keys_changed = false;
                 for (action, _meaning) in NAV_REBINDABLE {
-                    let current = image_viewer::resolve_key(&self.config.keys, action);
+                    let current = image_viewer::resolve_binding(&self.config.keybindings, action);
                     let mut selected = current.clone();
                     ui.horizontal(|ui| {
                         ui.label(*action);
@@ -7603,23 +7603,23 @@ impl eframe::App for MyApp {
                             });
                     });
                     if selected != current {
-                        if selected == image_viewer::default_key(action) {
-                            self.config.keys.remove(*action);
+                        if selected == image_viewer::default_binding(action) {
+                            self.config.keybindings.remove(*action);
                         } else {
-                            self.config.keys.insert((*action).to_owned(), selected);
+                            self.config.keybindings.insert((*action).to_owned(), selected);
                         }
                         keys_changed = true;
                     }
                 }
                 if keys_changed {
-                    set_nav_overrides(&self.config.keys);
+                    set_nav_overrides(&self.config.keybindings);
                     self.config.save(&self.config_path);
                     self.notice = Some("Keys updated".into());
                 }
                 ui.small("Bare letters (C, D, E, F, G, I, M, O, R, W, X) are fixed.");
                 if ui.button("Reset keys").clicked() {
-                    self.config.keys.clear();
-                    set_nav_overrides(&self.config.keys);
+                    self.config.keybindings.clear();
+                    set_nav_overrides(&self.config.keybindings);
                     self.config.save(&self.config_path);
                     self.notice = Some("Keys reset to defaults".into());
                 }

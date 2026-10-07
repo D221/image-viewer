@@ -4239,17 +4239,24 @@ fn an_uncreatable_mutex_name_does_not_block_startup() {
     );
 }
 
-/// Rebindable keys (Tier 1 #1): overrides win, blanks fall back, unknown
-/// actions resolve to "" rather than a guessed key.
+/// Rebindable keys (new system): overrides win, blanks fall back, unknown
+/// actions resolve to "" rather than a guessed chord. Canonicalization
+/// makes modifier order and case irrelevant.
 #[test]
 fn key_overrides_win_and_blanks_fall_back() {
     let mut keys = std::collections::HashMap::new();
-    assert_eq!(image_viewer::resolve_key(&keys, "next"), "ArrowRight");
+    assert_eq!(image_viewer::resolve_binding(&keys, "next"), "ArrowRight");
     keys.insert("next".into(), "PageDown".into());
-    assert_eq!(image_viewer::resolve_key(&keys, "next"), "PageDown");
+    assert_eq!(image_viewer::resolve_binding(&keys, "next"), "PageDown");
     keys.insert("next".into(), "   ".into());
-    assert_eq!(image_viewer::resolve_key(&keys, "next"), "ArrowRight");
-    assert_eq!(image_viewer::resolve_key(&keys, "nope"), "");
+    assert_eq!(image_viewer::resolve_binding(&keys, "next"), "ArrowRight");
+    assert_eq!(image_viewer::resolve_binding(&keys, "nope"), "");
+    assert_eq!(
+        image_viewer::canonical_chord("shift+ctrl+s"),
+        Some("Ctrl+Shift+S".into())
+    );
+    assert_eq!(image_viewer::canonical_chord("Space"), Some("Space".into()));
+    assert_eq!(image_viewer::canonical_chord("Ctrl++"), None);
 }
 
 /// UserCmd expansion (Tier 1 #2): {file}/{dir}/{name} expand, unknowns stay.
