@@ -2638,6 +2638,19 @@ impl MyApp {
         // nowhere in both. Returning without `goto` matters: it avoids resetting
         // the full-res dwell timer and re-planning the queue for an image that did
         // not change.
+        //
+        // **Right arrow on an archive in the folder listing enters it, rather than
+        // moving past it.** This check is before the move, so we enter the archive
+        // we're standing on. Only applies when NOT inside an archive (zip_archive
+        // is None) because inside an archive the forward edge is handled by
+        // `archive_edge` above.
+        if forward
+            && self.zip_archive.is_none()
+            && self.gallery.current().map(|p| is_archive_path(p)).unwrap_or(false)
+        {
+            return self.enter_archive_if_present(ctx);
+        }
+
         let moved = if self.config.manga_mode {
             if forward {
                 self.turn_forward()
@@ -3822,6 +3835,9 @@ impl MyApp {
         // press with nowhere to land.
         if forward && self.gallery.next() {
             self.goto(ctx);
+            // After moving to the next entry in the parent, enter it if it's
+            // an archive. This mirrors what `step` does after `goto`.
+            self.enter_archive_if_present(ctx);
         }
         true
     }
@@ -6531,7 +6547,12 @@ impl MyApp {
         self.gallery_view = !self.gallery_view;
         if self.gallery_view {
             // Start the highlight on the image currently shown.
-            self.grid_sel = self.gallery.index.min(self.gallery.len().saturating_sub(1));
+            // When inside an archive, start at the "go back" cell (index 0).
+            self.grid_sel = if self.zip_archive.is_some() {
+                0
+            } else {
+                self.gallery.index.min(self.gallery.len().saturating_sub(1))
+            };
             // Always re-focus on open, even if the selection index happens to
             // be the same: the offset is per-folder state.
             self.grid_sel_scrolled = usize::MAX;
@@ -6552,19 +6573,26 @@ impl MyApp {
     /// cursor to a turn anchor, and the reader arrives somewhere they did not pick.
     ///
     /// The grid is otherwise untouched, deliberately: one cell per file, page 1 only,
-    /// as it has always been.
+    /// as it has always been. When inside an archive, index 0 is the "go back" cell
+    /// and is handled separately.
     fn pick_grid_selection(&mut self, ctx: &Context) {
         if self.gallery.is_empty() {
             return;
         }
-        self.gallery.goto_index(self.grid_sel.min(self.gallery.len() - 1));
-        self.gallery_view = false;
-        self.goto(ctx);
-        // A click or Enter on an archive's cell is the request to open it — the
-        // grid has no other meaning for that cell, since there is nothing to
-        // display. Same rule as the arrow, for the same reason: opening is asked
-        // for here, not in the funnel every arrival passes through.
-        self.enter_archive_if_present(ctx);
+        if self.zip_archive.is_some() && self.grid_sel == 0 {
+            // "Go back" cell pressed
+            self.leave_archive(ctx, false);
+        } else {
+            let file_idx = self.grid_sel.saturating_sub(if self.zip_archive.is_some() { 1 } else { 0 });
+            self.gallery.goto_index(file_idx.min(self.gallery.len().saturating_sub(1)));
+            self.gallery_view = false;
+            self.goto(ctx);
+            // A click or Enter on an archive's cell is the request to open it — the
+            // grid has no other meaning for that cell, since there is nothing to
+            // display. Same rule as the arrow, for the same reason: opening is asked
+            // for here, not in the funnel every arrival passes through.
+            self.enter_archive_if_present(ctx);
+        }
     }
 
     /// Gallery grid view (G): scrollable thumbnails of every image in the
@@ -6582,7 +6610,8 @@ impl MyApp {
         // row_h, so the pitch is not row_h.
         let pitch = row_h as f32 + ui.spacing().item_spacing.y;
         self.grid_page_rows = ((panel.height() / pitch).floor() as usize).max(1);
-        let total = self.gallery.files.len();
+        let extra = if self.zip_archive.is_some() { 1 } else { 0 };
+        let total = self.gallery.files.len() + extra;
         let total_rows = (total + cols - 1) / cols;
         let clock = self.clock;
         let sel = self.grid_sel;
@@ -6595,9 +6624,11 @@ impl MyApp {
             thumbs,
             thumb_tries,
             loader,
+            zip_archive,
             ..
         } = self;
-        let files = &gallery.files;
+        // When inside an archive, index 0 is the "go back" cell.
+        let in_archive = zip_archive.is_some();
         // auto_shrink([false, true]) is what makes the scrollbar appear: with
         // [false, false] the ScrollArea demands the full width and there is no
         // room left for the bar, so a long folder had no visible way to show
@@ -6627,19 +6658,77 @@ impl MyApp {
                     ui.horizontal(|ui| {
                         for col in 0..cols {
                             let idx = row * cols + col;
-                            let Some(path) = files.get(idx) else {
-                                continue;
+                            let is_back_cell = in_archive && idx == 0;
+                            let resp = if is_back_cell {
+                                // "Go back" cell: draw an arrow up and the folder name
+                                let folder_name = self
+                                    .folder
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| self.folder.to_string_lossy().into_owned());
+                                let name = format!("^ {}", folder_name);
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(GRID_CELL, GRID_CELL + GRID_LABEL_H),
+                                    egui::Sense::click(),
+                                );
+                                let fill = if idx == sel {
+                                    egui::Color32::from_rgb(28, 58, 118)
+                                } else {
+                                    egui::Color32::from_rgb(38, 38, 38)
+                                };
+                                let stroke = if idx == sel {
+                                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 255))
+                                } else {
+                                    egui::Stroke::NONE
+                                };
+                                if ui.is_rect_visible(rect) {
+                                    ui.painter().rect(rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
+                                }
+                                let inner = rect.shrink(4.0);
+                                let mut child = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(inner)
+                                        .layout(egui::Layout::top_down(egui::Align::Center)),
+                                );
+                                let img_area = egui::Rect::from_min_size(
+                                    egui::Pos2::new(inner.min.x, inner.min.y),
+                                    egui::vec2(inner.width(), GRID_CELL),
+                                );
+                                child.allocate_exact_size(img_area.size(), egui::Sense::hover());
+                                child.painter().text(
+                                    img_area.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "^",
+                                    egui::FontId::proportional(24.0),
+                                    ui.visuals().text_color(),
+                                );
+                                child.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&name)
+                                            .small()
+                                            .color(egui::Color32::from_gray(200)),
+                                    )
+                                    .truncate(),
+                                );
+                                resp
+                            } else {
+                                // Adjust index for the "go back" cell offset
+                                let file_idx = idx - if in_archive { 1 } else { 0 };
+                                let Some(path) = gallery.files.get(file_idx) else {
+                                    continue;
+                                };
+                                let resp = grid_cell(
+                                    ui,
+                                    path,
+                                    GRID_CELL,
+                                    idx == sel,
+                                    clock,
+                                    thumbs,
+                                    thumb_tries,
+                                    loader,
+                                );
+                                resp
                             };
-                            let resp = grid_cell(
-                                ui,
-                                path,
-                                GRID_CELL,
-                                idx == sel,
-                                clock,
-                                thumbs,
-                                thumb_tries,
-                                loader,
-                            );
                             if resp.clicked() && clicked.is_none() {
                                 clicked = Some(idx);
                             }
@@ -6649,8 +6738,15 @@ impl MyApp {
             });
 
         if let Some(i) = clicked {
-            self.grid_sel = i;
-            self.pick_grid_selection(ctx);
+            if zip_archive.is_some() && i == 0 {
+                // Clicked the "go back" cell
+                self.leave_archive(ctx, false);
+            } else {
+                // Adjust index for the "go back" cell offset
+                let file_idx = i.saturating_sub(if zip_archive.is_some() { 1 } else { 0 });
+                self.grid_sel = file_idx;
+                self.pick_grid_selection(ctx);
+            }
         }
     }
 
@@ -7617,7 +7713,8 @@ impl eframe::App for MyApp {
                 // off an edge stops instead of jumping to the far end.
                 let cols = self.grid_cols.max(1);
                 let page = self.grid_page_rows.max(1) * cols;
-                let last_idx = self.gallery.len().saturating_sub(1);
+                let extra = if self.zip_archive.is_some() { 1 } else { 0 };
+                let last_idx = self.gallery.len().saturating_sub(1) + extra;
                 let sel = &mut self.grid_sel;
                 if page_down {
                     *sel = (*sel + page).min(last_idx);
