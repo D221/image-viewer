@@ -2138,8 +2138,12 @@ impl MyApp {
             // Sort per config (natural name order by default) and pick what to show.
             // The rule itself lives in `image_viewer::startup_index` so it can be
             // tested; see its doc comment for the bug it fixes.
-            let files =
-                scan_folder_sorted_dir(&folder, config.sort, config.sort_descending);
+            let files = Self::sorted_scan(
+                &folder,
+                config.sort,
+                config.sort_descending,
+                config.recursive_folders && zip_archive.is_none(),
+            );
             gallery.index = image_viewer::startup_index(
                 &files,
                 named_file.as_deref(),
@@ -3442,7 +3446,11 @@ impl MyApp {
         self.folder = folder.clone();
         let mut g = Gallery::new(&folder);
         if self.config.load_all_on_startup {
-            g.load_all_from_folder(&folder);
+            Self::load_folder_into(
+                &folder,
+                self.config.recursive_folders && self.zip_archive.is_none(),
+                &mut g,
+            );
         }
         self.adopt_gallery(g, ctx);
     }
@@ -3632,7 +3640,11 @@ impl MyApp {
         self.folder = file.parent().unwrap_or(&file).to_path_buf();
         let mut g = Gallery::from_file(file);
         if self.config.load_all_on_startup {
-            g.load_all_from_folder(&self.folder);
+            Self::load_folder_into(
+                &self.folder,
+                self.config.recursive_folders && self.zip_archive.is_none(),
+                &mut g,
+            );
         }
         self.adopt_gallery(g, ctx);
     }
@@ -3870,6 +3882,50 @@ impl MyApp {
         }
     }
 
+/// One sorted folder listing for the whole app: flat or recursive. Every
+    /// gallery build that faces the filesystem goes through here (startup
+    /// takes this function directly, since `self` does not exist yet), so a
+    /// new scan flavor cannot land in one place and miss the others.
+    fn sorted_scan(
+        folder: &Path,
+        sort: image_viewer::SortMode,
+        descending: bool,
+        recursive: bool,
+    ) -> Vec<PathBuf> {
+        if recursive {
+            image_viewer::scan_folder_sorted_recursive(folder, sort, descending)
+        } else {
+            scan_folder_sorted_dir(folder, sort, descending)
+        }
+    }
+
+    /// The folder listing this gallery browses: flat or recursive per
+    /// config, never archives (their temp dir is already flat). The one
+    /// funnel for every rebuild, so the flag cannot be forgotten at one
+    /// site — startup, rescan, opens and the toggle all read this.
+    fn scan_current(&self) -> Vec<PathBuf> {
+        Self::sorted_scan(
+            &self.folder,
+            self.config.sort,
+            self.config.sort_descending,
+            self.config.recursive_folders && self.zip_archive.is_none(),
+        )
+    }
+
+    /// Install the whole folder (or tree) into a gallery, keeping the current
+    /// image selected. The pair of funnels: [`Self::sorted_scan`] is the
+    /// sorted-list half, this the position-preserving half, and the flag is
+    /// decided in one place each. Not a `&self` method: the Settings panel
+    /// loads into `self.gallery`, so a receiver would borrow the field it
+    /// mutates.
+    fn load_folder_into(folder: &Path, recursive: bool, g: &mut Gallery) {
+        if recursive {
+            g.load_all_from_folder_recursive(folder);
+        } else {
+            g.load_all_from_folder(folder);
+        }
+    }
+
     /// Re-scan the current folder and merge the result, keeping the user's
     /// position. `force` bypasses the load_all setting (manual reload key).
     fn rescan(&mut self, ctx: &Context, force: bool) {
@@ -3880,8 +3936,7 @@ impl MyApp {
             return;
         }
         self.lat.t_scan = Some(Instant::now());
-        let mut files =
-            scan_folder_sorted_dir(&self.folder, self.config.sort, self.config.sort_descending);
+        let mut files = self.scan_current();
         // Random must not reshuffle on every poll: keep the user's order,
         // append new files, drop vanished ones (manual reload reshuffles).
         if self.config.sort == SortMode::Random && !force && !self.all_files.is_empty() {
@@ -7765,10 +7820,28 @@ impl eframe::App for MyApp {
                 {
                     self.config.save(&self.config_path);
                     if self.config.load_all_on_startup {
-                        self.gallery.load_all_from_folder(&self.folder);
+                        Self::load_folder_into(
+                            &self.folder,
+                            self.config.recursive_folders && self.zip_archive.is_none(),
+                            &mut self.gallery,
+                        );
                     }
                     self.goto(ctx);
                 }
+                if ui
+                    .checkbox(
+                        &mut self.config.recursive_folders,
+                        "Include subfolders",
+                    )
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                    // New files, possibly a new position: rescan rather than
+                    // patching the list in place (`set_files` re-`goto`s when
+                    // the cursor moved, so no explicit one here).
+                    self.rescan(ctx, true);
+                }
+                ui.small("One gallery over the whole tree. The 2 s watcher walks it every poll, so this costs a walk per level.");
                 ui.add_space(6.0);
                 if ui
                     .checkbox(

@@ -483,6 +483,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Zoom keys 1-4 | 1× toggles 1:1 mode, 2×-8× one-shot jumps (all configurable) |
 | Fit view | off | Sticky fit-to-window (`F`); mutually exclusive with `T`. Photos open at 100% with everything off |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
+| Include subfolders | off | One gallery over the whole tree (sorts apply globally); the 2 s watcher walks it every poll |
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
 | Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |
 | Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords show red `also:` markers instead of refusing. `Esc` and mouse buttons are not rebindable |

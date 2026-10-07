@@ -4328,6 +4328,34 @@ fn capture_and_labels_are_wired() {
     );
 }
 
+/// Recursive browsing must be **wired**: one funnel for every rebuild and a
+/// recursive variant where position is preserved.
+#[test]
+fn recursive_browsing_is_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn sorted_scan(") && src.contains("fn load_folder_into("),
+        "every rebuild needs a funnel for each half (sorted list, position-preserving load)"
+    );
+    // The flag is *decided* twice, not once per call site: a `recursive_folders`
+    // read anywhere else is a gallery that misses the tree.
+    assert_eq!(
+        src.matches("config.recursive_folders && ").count(),
+        5,
+        "exactly the five read sites: startup scan, open_folder, open_file, scan_current \
+         (rescan) and the settings reload. A sixth means a rebuild was added without \
+         asking whether it sees the tree."
+    );
+    assert!(
+        src.contains("fn scan_current(&self)") && src.contains("self.scan_current()"),
+        "rescan must go through the same funnel as the opens"
+    );
+    assert!(
+        src.contains("load_all_from_folder_recursive("),
+        "the position-preserving funnel must have a recursive arm"
+    );
+}
+
 /// UserCmd expansion (Tier 1 #2): {file}/{dir}/{name} expand, unknowns stay.
 #[test]
 fn user_command_templates_expand_against_the_current_file() {
@@ -4577,6 +4605,69 @@ fn fit_window_hugs_content_and_clamps() {    // 800x600 window, 700x500 central:
         image_viewer::fit_window_size((0.0, 0.0), (800.0, 600.0), (800.0, 600.0), None),
         (200.0, 120.0)
     );
+}
+
+/// Recursive scan: the whole tree in pre-order, natural within each level,
+/// symlinks skipped, non-images ignored, position preserved like the flat
+/// loader.
+#[test]
+fn recursive_scan_walks_the_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (rel, bytes) in [
+        ("c.jpg", &b"1"[..]),
+        ("a/10.jpg", &b"2"[..]),
+        ("a/2.jpg", &b"3"[..]),
+        ("a/deep/b.png", &b"4"[..]),
+        ("notes.txt", &b"nope"[..]),
+    ] {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    }
+    let flat: Vec<String> = image_viewer::scan_folder(root)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(flat, vec!["c.jpg"], "flat scan must not descend");
+    let walked: Vec<String> = image_viewer::scan_folder_recursive(root)
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    assert_eq!(
+        walked,
+        vec!["a/2.jpg", "a/10.jpg", "a/deep/b.png", "c.jpg"],
+        "pre-order, natural within each level, txt ignored"
+    );
+
+    // Position-preserving load over the recursive walk.
+    let mut g = image_viewer::Gallery::empty();
+    g.load_all_from_folder_recursive(root);
+    assert_eq!(g.len(), 4);
+    assert_eq!(
+        g.current().unwrap().file_name().unwrap().to_string_lossy(),
+        "2.jpg",
+        "empty gallery starts at the first file"
+    );
+
+    // A symlink loop must not hang the walk: skipped, not followed. Link
+    // creation needs privileges this box may not grant, so a failed link
+    // skips rather than fails.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::symlink_dir;
+        let link = root.join("a/loop");
+        if symlink_dir(root, &link).is_ok() {
+            let walked = image_viewer::scan_folder_recursive(root);
+            assert_eq!(walked.len(), 4, "the loop link must not add files");
+            let _ = std::fs::remove_dir(&link);
+        }
+    }
 }
 
 /// T mode is always absolute: the shrink helper is deleted, so there is no

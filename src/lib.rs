@@ -254,6 +254,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub loop_back: bool,
 
+    /// Browse subfolders as one gallery: every navigation, sort mode and the
+    /// grid see the whole tree. Off by default — a tree walk on every 2 s
+    /// watcher poll costs a directory walk per level, where a flat scan
+    /// costs one, so this is opt-in rather than a slowdown everyone pays.
+    #[serde(default)]
+    pub recursive_folders: bool,
+
     /// Esc on a bare image viewer closes the app. On by default (the shipped
     /// behaviour); off means Esc stops at leaving crop mode / grid /
     /// fullscreen and never quits. The filter box keeps its own Esc
@@ -781,6 +788,7 @@ impl Config {
             block_while_loading: false,
             wheel_navigation: false,
             loop_back: true,
+            recursive_folders: false,
             esc_closes_app: true,
             renderer: RendererPref::default(),
             convert_wide_gamut: false,
@@ -1062,6 +1070,62 @@ pub fn scan_folder(folder: &Path) -> Vec<PathBuf> {
         let an = a.file_name().unwrap_or_default().to_string_lossy();
         let bn = b.file_name().unwrap_or_default().to_string_lossy();
         natural_cmp(&an, &bn)
+    });
+    files
+}
+
+/// Walk the whole subtree for images, pre-order (each folder's files in
+/// natural order, then its subfolders in natural order).
+///
+/// Symlinked files and directories are skipped, not followed: following a
+/// directory link can cycle back into its own parents and walk forever, and
+/// a linked *file* would show one picture under two paths. `DirEntry::
+/// file_type` is the symlink-aware query (unlike `Path::is_file`, which
+/// follows links), and it comes free with the listing.
+pub fn scan_folder_recursive(folder: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by(|a, b| {
+            natural_cmp(
+                &a.file_name().to_string_lossy(),
+                &b.file_name().to_string_lossy(),
+            )
+        });
+        for entry in entries {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            let p = entry.path();
+            if ft.is_file() {
+                let ext = p
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+                    out.push(p);
+                }
+            } else if ft.is_dir() {
+                walk(&p, out);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(folder, &mut files);
+    // Full paths, so folders group; forward slashes so `\` never sorts
+    // before or after a digit differently than `/` would.
+    files.sort_by(|a, b| {
+        natural_cmp(
+            &a.to_string_lossy().replace('\\', "/"),
+            &b.to_string_lossy().replace('\\', "/"),
+        )
     });
     files
 }
@@ -1923,6 +1987,25 @@ pub fn scan_folder_sorted(folder: &Path, mode: SortMode) -> Vec<PathBuf> {
 /// ascending/descending semantics, so no shipped order changes meaning.
 pub fn scan_folder_sorted_dir(folder: &Path, mode: SortMode, descending: bool) -> Vec<PathBuf> {
     let mut files = scan_folder(folder);
+    apply_sort_order(&mut files, mode, descending);
+    files
+}
+
+/// Same, over the whole subtree. Name order compares full relative paths
+/// naturally, so each folder's files group together in natural order.
+pub fn scan_folder_sorted_recursive(
+    folder: &Path,
+    mode: SortMode,
+    descending: bool,
+) -> Vec<PathBuf> {
+    let mut files = scan_folder_recursive(folder);
+    apply_sort_order(&mut files, mode, descending);
+    files
+}
+
+/// The sort half of both scans above, so recursive and flat can never
+/// disagree about what an order means.
+fn apply_sort_order(files: &mut [PathBuf], mode: SortMode, descending: bool) {
     match mode {
         SortMode::Name => {}
         SortMode::Date => {
@@ -1938,12 +2021,11 @@ pub fn scan_folder_sorted_dir(folder: &Path, mode: SortMode, descending: bool) -
                 std::fs::metadata(p).map(|m| std::cmp::Reverse(m.len())).ok()
             });
         }
-        SortMode::Random => shuffle(&mut files),
+        SortMode::Random => shuffle(files),
     }
     if descending {
         files.reverse();
     }
-    files
 }
 
 /// Tiny xorshift shuffle (avoids a `rand` dependency).
@@ -10191,16 +10273,27 @@ impl Gallery {
     }
 
     /// Load all images from the folder, preserving the current image's position.
-/// Sorts with the natural (Explorer-like) name order.
-pub fn load_all_from_folder(&mut self, folder: &Path) {
+    /// Sorts with the natural (Explorer-like) name order.
+    pub fn load_all_from_folder(&mut self, folder: &Path) {
+        self.load_all_from(&scan_folder(folder));
+    }
+
+    /// Load all images from the folder tree, preserving the current image's
+    /// position. Same contract as [`Self::load_all_from_folder`], over the
+    /// recursive walk instead of one level.
+    pub fn load_all_from_folder_recursive(&mut self, folder: &Path) {
+        self.load_all_from(&scan_folder_recursive(folder));
+    }
+
+    /// Install a scanned list, keeping the current image selected when it is
+    /// still in it. Both loaders above are this with different scans, so a
+    /// position that survives in one survives in the other.
+    fn load_all_from(&mut self, new_files: &[PathBuf]) {
         // Remember current image path
         let current_path = match self.current() {
             Some(p) => p.to_path_buf(),
             None => PathBuf::new(),
         };
-
-        // Scan and sort naturally (scan_folder already does)
-        let new_files = scan_folder(folder);
 
         // Find position of current image in sorted list
         let mut new_index = 0;
@@ -10213,7 +10306,7 @@ pub fn load_all_from_folder(&mut self, folder: &Path) {
             }
         }
 
-        self.files = new_files;
+        self.files = new_files.to_vec();
         self.index = new_index;
         // The list these counts described is gone.
         self.forget_pages();
