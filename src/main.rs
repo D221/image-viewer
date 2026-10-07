@@ -104,14 +104,15 @@ const NAV_BUTTONS: &[(egui::PointerButton, NavInput)] = &[
 /// two things at once, and "forwards" is what the old `next || ...` chain answered,
 /// so this is parity rather than a new rule.
 ///
-/// Rebindable keys (Tier 1 #1) layer on top without moving the rule: `NAV_KEYS`
+/// Rebindable keys layer on top without moving the rule: `NAV_KEYS`
 /// stays the shipped default table that `tests/keybindings.rs` pins, and
-/// `NAV_KEY_OVERRIDES` (action id → key name, from `Config::keys`) replaces the
-/// key a rebindable action is read from. The *meanings* never change, so a
-/// rebound key still names itself as a `NavInput` and still asks `nav_is_forward`
-/// — there is still exactly one function that knows which way forwards is.
+/// the effective table (action id → chord, from `Config::keybindings`)
+/// replaces the key a rebindable action is read from. The *meanings* never
+/// change, so a rebound key still names itself as a `NavInput` and still
+/// asks `nav_is_forward` — there is still exactly one function that knows
+/// which way forwards is.
 fn nav_direction(
-    key_active: impl Fn(egui::Key) -> bool,
+    key_active: impl Fn(egui::Key, bool, bool, bool) -> bool,
     button_active: impl Fn(egui::PointerButton) -> bool,
     rtl: bool,
 ) -> Option<bool> {
@@ -127,8 +128,8 @@ fn nav_direction(
             backward = true;
         }
     };
-    for (key, meaning) in effective_nav_keys() {
-        note(key_active(key), meaning);
+    for (b, meaning) in effective_nav_keys() {
+        note(key_active(b.key, b.ctrl, b.shift, b.alt), meaning);
     }
     for (button, meaning) in NAV_BUTTONS {
         note(button_active(*button), *meaning);
@@ -293,6 +294,7 @@ fn parse_key_full(name: &str) -> Option<egui::Key> {
 /// exact on both (`resolve_action_pressed`): a bare letter never fires with
 /// a modifier held, and a chord never fires with extra ones.
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 struct ResolvedBinding {
     key: egui::Key,
     ctrl: bool,
@@ -345,45 +347,51 @@ fn action_pressed(
     })
 }
 
-/// User overrides for rebindable navigation actions, mirroring
-/// `Config::keys`. A process global like the resample and thumbnail-cache
+/// Effective navigation table: same meanings as `NAV_KEYS`, keys (and any
+/// modifiers) replaced where the user rebound the action, read from the full
+/// keybindings map. A process global like the resample and thumbnail-cache
 /// flags, for the same reason: `nav_direction` is called from the input
 /// closures and takes only predicates, so the table it reads has to live
 /// somewhere it can reach without changing every caller's shape.
-static NAV_KEY_OVERRIDES: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static NAV_TABLE: std::sync::LazyLock<
+    std::sync::Mutex<Vec<(ResolvedBinding, NavInput)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
-fn set_nav_overrides(keys: &std::collections::HashMap<String, String>) {
-    *NAV_KEY_OVERRIDES.lock().unwrap() = keys.clone();
+/// Rebuild the navigation table from the keybindings map. `resolve_action`
+/// falls back to the shipped chord internally, so an unparseable override
+/// keeps the default key rather than unbinding navigation.
+fn set_nav_overrides(bindings: &std::collections::HashMap<String, String>) {
+    let mut table = Vec::new();
+    for (action, meaning) in NAV_REBINDABLE {
+        if let Some(b) = resolve_action(bindings, action) {
+            table.push((b, *meaning));
+        }
+    }
+    *NAV_TABLE.lock().unwrap() = table;
 }
 
-/// The navigation table with user overrides applied: same rows as
-/// `NAV_KEYS`, keys replaced where the user rebound the action. The two
-/// tables are zipped positionally — `NAV_REBINDABLE` must stay in
-/// `NAV_KEYS` order — and the `debug_assert` below is what notices a drift
-/// instead of silently mis-meaning a key. An override that does not parse
-/// is ignored rather than unbinding the action: a typo must leave the
-/// shipped key working, not leave the action with no key at all.
-fn effective_nav_keys() -> Vec<(egui::Key, NavInput)> {
-    let overrides = NAV_KEY_OVERRIDES.lock().unwrap();
-    NAV_KEYS
-        .iter()
-        .zip(NAV_REBINDABLE.iter())
-        .map(|((default_key, default_meaning), (action, meaning))| {
-            debug_assert_eq!(
-                *default_meaning, *meaning,
-                "NAV_REBINDABLE drifted out of NAV_KEYS order"
-            );
-            let key = overrides
-                .get(*action)
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .and_then(parse_key_name)
-                .unwrap_or(*default_key);
-            (key, *default_meaning)
-        })
-        .collect()
+/// The navigation table with user overrides applied: the global when set,
+/// else the shipped `NAV_KEYS` with no modifiers (startup always sets it,
+/// so the fallback is belt and braces for contexts without a config).
+fn effective_nav_keys() -> Vec<(ResolvedBinding, NavInput)> {
+    let table = NAV_TABLE.lock().unwrap();
+    if table.is_empty() {
+        return NAV_KEYS
+            .iter()
+            .map(|(key, meaning)| {
+                (
+                    ResolvedBinding {
+                        key: *key,
+                        ctrl: false,
+                        shift: false,
+                        alt: false,
+                    },
+                    *meaning,
+                )
+            })
+            .collect();
+    }
+    table.clone()
 }
 
 /// How many images on each side of the current one get their preview preloaded.
@@ -2935,7 +2943,12 @@ impl MyApp {
                                 // app has.
                                 let held = ctx.input(|i| {
                                     nav_direction(
-                                        |key| i.key_down(key),
+                                        |key, c, s, a| {
+                                            i.key_down(key)
+                                                && i.modifiers.ctrl == c
+                                                && i.modifiers.shift == s
+                                                && i.modifiers.alt == a
+                                        },
                                         |_| false,
                                         self.config.manga_rtl,
                                     )
@@ -6359,7 +6372,16 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
         // sense to the press that queued it.
         if let Some(dir) = self.pending_advance.take() {
             let still_held = ctx.input(|i| {
-                nav_direction(|key| i.key_down(key), |_| false, self.config.manga_rtl) == Some(dir)
+                nav_direction(
+                    |key, c, s, a| {
+                        i.key_down(key)
+                            && i.modifiers.ctrl == c
+                            && i.modifiers.shift == s
+                            && i.modifiers.alt == a
+                    },
+                    |_| false,
+                    self.config.manga_rtl,
+                ) == Some(dir)
             });
             if still_held {
                 self.step(ctx, dir);
@@ -6750,7 +6772,12 @@ impl eframe::App for MyApp {
         let rtl = self.config.manga_rtl;
         let nav = ctx.input(|i| {
             nav_direction(
-                |key| i.key_pressed(key),
+                |key, c, s, a| {
+                    i.key_pressed(key)
+                        && i.modifiers.ctrl == c
+                        && i.modifiers.shift == s
+                        && i.modifiers.alt == a
+                },
                 |button| i.pointer.button_clicked(button),
                 rtl,
             )
