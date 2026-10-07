@@ -4257,6 +4257,11 @@ fn key_overrides_win_and_blanks_fall_back() {
     );
     assert_eq!(image_viewer::canonical_chord("Space"), Some("Space".into()));
     assert_eq!(image_viewer::canonical_chord("Ctrl++"), None);
+    assert_eq!(
+        image_viewer::split_chord("Alt+shift+Delete"),
+        Some((false, true, true, "Delete".into()))
+    );
+    assert_eq!(image_viewer::split_chord("Ctrl"), None);
 }
 
 /// UserCmd expansion (Tier 1 #2): {file}/{dir}/{name} expand, unknowns stay.

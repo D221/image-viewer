@@ -513,6 +513,31 @@ pub fn resolve_binding(bindings: &std::collections::HashMap<String, String>, act
 /// normalized on the key (`"shift+ctrl+s"` and `"Ctrl+Shift+S"` are the same
 /// binding). Returns `None` when the chord names no key at all.
 pub fn canonical_chord(raw: &str) -> Option<String> {
+    let (ctrl, shift, alt, key) = split_chord(raw)?;
+    let mut out = String::new();
+    if ctrl {
+        out.push_str("Ctrl+");
+    }
+    if shift {
+        out.push_str("Shift+");
+    }
+    if alt {
+        out.push_str("Alt+");
+    }
+    out.push_str(&key);
+    Some(out)
+}
+
+/// Split a chord into (ctrl, shift, alt, key name): the pure string half of
+/// binding matching. The binary maps the name to `egui::Key` (including the
+/// `"1"`→`Num1` digit mapping, which lives there because only the binary
+/// knows the key type).
+///
+/// Single letters normalize to uppercase (`s` means `S`); longer names are
+/// case-sensitive and must match the variant spelling exactly (`Space`, not
+/// `space`) — normalizing those would invent spellings the matcher does not
+/// know. Returns `None` when no key is named.
+pub fn split_chord(raw: &str) -> Option<(bool, bool, bool, String)> {
     let mut ctrl = false;
     let mut shift = false;
     let mut alt = false;
@@ -530,27 +555,16 @@ pub fn canonical_chord(raw: &str) -> Option<String> {
         }
     }
     let key = key?;
-    // Single letters normalize to uppercase (`s` means `S`); longer names
-    // are case-sensitive and must match the egui variant spelling exactly
-    // (`Space`, not `space`) — normalizing those would invent spellings the
-    // matcher does not know.
-    let key = if key.len() == 1 {
-        key.to_ascii_uppercase()
-    } else {
-        key
-    };
-    let mut out = String::new();
-    if ctrl {
-        out.push_str("Ctrl+");
-    }
-    if shift {
-        out.push_str("Shift+");
-    }
-    if alt {
-        out.push_str("Alt+");
-    }
-    out.push_str(&key);
-    Some(out)
+    Some((
+        ctrl,
+        shift,
+        alt,
+        if key.len() == 1 {
+            key.to_ascii_uppercase()
+        } else {
+            key
+        },
+    ))
 }
 
 /// Expand `{file}`, `{dir}` and `{name}` in `template` against `file`.
