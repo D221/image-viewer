@@ -1967,23 +1967,6 @@ struct MyApp {
     /// reader was inside the archive is reflected, and the cursor lands on the
     /// archive by name rather than on whatever now occupies that slot.
     archive_parent: Option<(PathBuf, PathBuf)>,
-    /// The archive the cursor was *put* on by [`Self::leave_archive`], consumed by
-    /// the next [`Self::goto`].
-    ///
-    /// **The one-shot that stops going back from re-entering.** Returning puts
-    /// the cursor on the archive so the reader can open it again with `→`, and
-    /// `goto` — which every way into the app passes through — enters an archive
-    /// the cursor is on. `adopt_gallery` ends in a `goto`, so without this the
-    /// act of leaving re-entered the archive and `←` did nothing at all.
-    ///
-    /// **An identity, not a flag.** It holds the *path* rather than a bool, for
-    /// the same reason `pending_drop` does: the value is set at one event and
-    /// read at another, and a bool would let one archive's arrival be swallowed
-    /// by another's exit. Comparing the path means only that archive's own
-    /// return is exempt — the next arrow onto any other archive enters it.
-    ///
-    /// Not a latch: `goto` takes it, so it holds for exactly one arrival.
-    just_left: Option<PathBuf>,
     /// A copy of a **dropped** file, in a directory this app owns, for as long as
     /// that file is open.
     ///
@@ -2274,7 +2257,6 @@ impl MyApp {
             zip_archive,
             zip_temp,
             archive_parent: None,
-            just_left: None,
             // A file only ever arrives here from the command line or the file
             // dialog, neither of which is a transient hand-off, so there is never
             // a copy to release at start-up. `load_dropped` owns one instead.
@@ -2350,37 +2332,23 @@ impl MyApp {
 
     /// Point the app at `gallery.current()` and (re)plan all background work.
     ///
-    /// **An archive is entered here, not decoded here.** `goto` is the funnel
-    /// every way into the app passes through — `step`, the grid pick, `Del`'s
-    /// reschedule, resume, the filter — so the one branch below covers all of
-    /// them. A `.cbz` in the gallery has no image bytes, so the alternative is a
-    /// decode job that sniffs, fails, and writes a `failed` entry that is
-    /// permanent for the session: the archive would be a cell that can never
-    /// load, with no error the reader can act on.
+    /// **An archive is positioned on here, never opened and never decoded.**
+    /// Both halves were once in this one branch and both were wrong:
     ///
-    /// It is the *cursor* that enters, not the keypress. `leave_archive` puts
-    /// the cursor back on the archive without calling `goto` — `adopt_gallery`
-    /// has already planned for that position — which is what stops coming back
-    /// out immediately.
+    ///  * *Entered* — `goto` is where opening a folder ends, so entering here
+    ///    made "Browse folder" open whichever archive happened to sort first, an
+    ///    action nobody asked for. It is also the funnel for a rescan, a filter
+    ///    change and a resume.
+    ///  * *Decoded* — a `.cbz` has no image bytes, so the alternative would be a
+    ///    decode job that sniffs, fails, and writes a `failed` entry permanent for
+    ///    the session: an archive that can never load, with no error to act on.
+    ///    `plan_jobs` refuses archives for that reason.
+    ///
+    /// So opening one is [`Self::enter_archive_if_present`], asked by the arrow
+    /// and grid paths — the places where a person asked for something. Arriving
+    /// here on an archive is the same as arriving on any other file: the cursor
+    /// is on it, the panel draws a placeholder for it, and nothing is decoded.
     fn goto(&mut self, ctx: &Context) {
-        // Ahead of everything else here, including the latency mark below: this
-        // hands the whole app over to another gallery, and nothing that follows
-        // should be planning for the archive.
-        if let Some(cur) = self.gallery.current().map(|p| p.to_path_buf()) {
-            // The cursor being *put* here by `leave_archive` is a position, not a
-            // navigation, so it falls **through** rather than returning: the rest
-            // of `goto` still has to run — it is what sets `self.cur` and plans
-            // the queue. Planning for an archive is a no-op, because
-            // `plan_jobs` refuses archives and there is no preview to adopt, so
-            // the previous image stays painted, which is the same answer a drop in
-            // flight gives.
-            //
-            // Taken, not read: the exemption is for exactly this arrival.
-            if is_archive_path(&cur) && self.just_left.take() != Some(cur.clone()) {
-                self.open_archive(ctx, &cur);
-                return;
-            }
-        }
         // A goto that follows a keypress is navigation; a fresh open/click is a
         // selection. They are reported separately because the preloaded case
         // (0 ms) is the common one for navigation.
@@ -2683,6 +2651,17 @@ impl MyApp {
         };
         if moved {
             self.goto(ctx);
+            // Landing on an archive by arrowing is the request to open it, and
+            // this is where that request is made. `goto` deliberately does not:
+            // it is also where opening a folder ends, and entering there opened
+            // whichever archive sorted first without anyone asking.
+            //
+            // **After** the `goto`, so the panel has already planned for the
+            // archive and `open_archive` replaces that plan wholesale rather
+            // than leaving a stale one behind.
+            if self.enter_archive_if_present(ctx) {
+                return true;
+            }
         }
         moved
     }
@@ -3716,7 +3695,17 @@ impl MyApp {
                 } else {
                     format!("Archive: {count} images")
                 };
-                self.notice = Some(n);
+                // **Says how to get out**, because `←` working and nobody
+                // knowing it is the same as it not working: the only way out of
+                // an archive was the arrow the reader has no reason to try,
+                // while Esc — the key every archive tool uses for "back" — closed
+                // the app. A status line that names the exit is the cheapest fix
+                // there is and it is not a substitute for Esc leaving, which is
+                // handled in its own arm.
+                self.notice = Some(format!(
+                    "{n} — press Left or Esc to go back to {}",
+                    file_name_of(&archive)
+                ));
             }
             Ok((_, skipped)) => {
                 let msg = if skipped > 0 {
@@ -3743,6 +3732,29 @@ impl MyApp {
                 self.gallery.at_back(),
                 true,
             )
+    }
+
+    /// Enter the archive the cursor has just landed on, if it is one.
+    ///
+    /// **Called from the places where a person asked for something**, not from
+    /// `goto`. `goto` used to enter, and `goto` is also where opening a folder
+    /// ends — so a folder whose first entry is a `.cbz` opened that cbz, and
+    /// "Browse folder" opened something nobody chose. Now arriving at an archive
+    /// *positions* the cursor on it, and opening it takes an arrow or a grid
+    /// pick: the same distinction as an image, where opening a folder selects
+    /// its first image rather than opening it.
+    ///
+    /// Returns whether it opened one, so the caller can report the press as a
+    /// navigation rather than a no-op.
+    fn enter_archive_if_present(&mut self, ctx: &Context) -> bool {
+        let Some(cur) = self.gallery.current().map(|p| p.to_path_buf()) else {
+            return false;
+        };
+        if !is_archive_path(&cur) {
+            return false;
+        }
+        self.open_archive(ctx, &cur);
+        true
     }
 
     /// Leave the open archive for the folder it was entered from, with the
@@ -3785,13 +3797,13 @@ impl MyApp {
         {
             g.index = i;
         }
-        // Arm the one-shot *before* the adopt, because `adopt_gallery` ends in a
-        // `goto` and the cursor is about to be on an archive. Without this the
-        // act of leaving re-enters the archive.
-        self.just_left = Some(archive.clone());
         self.adopt_gallery(g, ctx);
+        // **Says how to get out**, because `←` working and nobody
+        // knowing it is the same as it not working. The status line that names
+        // the exit is the cheapest fix there is, and it is not a substitute for
+        // Esc leaving, which is handled in its own arm.
         self.notice = Some(format!(
-            "Back in {} — press right to open {}",
+            "Back in {} — press Left or Esc to go back to {}",
             folder
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -5376,6 +5388,37 @@ impl MyApp {
         let resp = ui.allocate_rect(panel, egui::Sense::click_and_drag());
         let painter = ui.painter_at(panel);
 
+        // **Standing on an archive (not inside one) draws a placeholder.**
+        // Previously the previous image stayed painted while the status line named
+        // a zip, and that mismatch is what made this feel broken. The cursor is
+        // on an archive iff `self.cur` is an archive and `self.zip_archive` is
+        // None (inside an archive, zip_archive is Some and the gallery *is* the
+        // archive's pages).
+        let cursor_on_archive = self
+            .cur
+            .as_ref()
+            .is_some_and(|k| is_archive_path(&k.path))
+            && self.zip_archive.is_none();
+        if cursor_on_archive {
+            let cur_path = self.cur.as_ref().unwrap().path.clone();
+            let name = cur_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| cur_path.to_string_lossy().into_owned());
+            let n = image_viewer::archive_image_count(&cur_path)
+                .map(|c| format!("{c} images"))
+                .unwrap_or_else(|| "unreadable container".to_string());
+            let msg = format!("{name}\n{n}\npress right to open");
+            painter.text(
+                panel.center(),
+                egui::Align2::CENTER_CENTER,
+                msg,
+                egui::FontId::proportional(14.0),
+                ui.visuals().text_color(),
+            );
+            return;
+        }
+
         let Some(shown) = self.shown.clone() else {
             let msg = if let Some(e) = &self.error {
                 e.clone()
@@ -6517,6 +6560,11 @@ impl MyApp {
         self.gallery.goto_index(self.grid_sel.min(self.gallery.len() - 1));
         self.gallery_view = false;
         self.goto(ctx);
+        // A click or Enter on an archive's cell is the request to open it — the
+        // grid has no other meaning for that cell, since there is nothing to
+        // display. Same rule as the arrow, for the same reason: opening is asked
+        // for here, not in the funnel every arrival passes through.
+        self.enter_archive_if_present(ctx);
     }
 
     /// Gallery grid view (G): scrollable thumbnails of every image in the
@@ -7389,6 +7437,22 @@ impl eframe::App for MyApp {
                 // shape bare-letter discipline exists to prevent, and leaving
                 // fullscreen under a crop would strand the frame on a new size.
                 self.toggle_crop_mode(ctx);
+            } else if self.zip_archive.is_some() {
+                // **Above fullscreen and above the quit**, and that ordering is the
+                // point. Esc is "go back one level", and inside an archive there
+                // is a level to go back to: without this arm Esc fell straight
+                // through to the quit branch, so a reader three pages into a
+                // volume who pressed Esc to get out closed the app instead.
+                //
+                // A behaviour change to `esc_closes_app`, and the right one: the
+                // setting decides whether Esc quits *the viewer*, and inside an
+                // archive Esc is answering "leave the archive" — the same
+                // relationship crop mode and the grid already have above it.
+                // One level down and Esc quits exactly as before.
+                if !self.leave_archive(ctx, false) {
+                    self.notice =
+                        Some("No folder to go back to (archive opened directly)".into());
+                }
             } else {
                 let in_fullscreen = ctx
                     .input(|i| i.viewport().fullscreen.unwrap_or(false));

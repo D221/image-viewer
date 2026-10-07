@@ -4430,68 +4430,47 @@ fn both_ends_of_an_archive_step_out_of_it() {
     assert!(empty.at_front(), "an empty listing is trivially at its front");
 }
 
-/// Leaving an archive must not re-enter it, and `step` must consult both edges.
-///
-/// Two separate defects, one symptom. `leave_archive` adopts a gallery whose
-/// cursor sits on the archive — and `adopt_gallery` ends in `goto`, which
-/// *enters* an archive on the cursor — so going back re-entered the archive and
-/// `←` did nothing at all. And `step` only asked about the front edge, so `→`
-/// at the last page fell through to `next()`'s own wrap.
+/// Leaving an archive must not re-enter it. The original defect was:
+/// `leave_archive` adopted a gallery whose cursor sat on the archive, and
+/// `adopt_gallery` ended in `goto`, which *entered* an archive on the cursor.
+/// The fix is not a one-shot but removing entry from `goto` entirely —
+/// `goto` now positions on an archive and never enters one. `step` and the
+/// grid pick are the only places that call `enter_archive_if_present`.
 #[test]
 fn leaving_an_archive_does_not_re_enter_it() {
     let src = include_str!("../src/main.rs");
 
     let leave = fn_body(src, "fn leave_archive").expect("leave_archive");
-    // The cursor lands on the archive, so `goto` must be told not to treat that
-    // as a navigation. Asserted as a *hand-off*, not as a flag's name: the
-    // defect is a value being consumed in the wrong order.
+    // Leaving arms no guard — it just builds the parent gallery with the
+    // cursor on the archive. `goto` no longer enters, so no guard is needed.
     assert!(
-        leave.contains("just_left"),
-        "leaving must arm the one-shot that stops goto re-entering the archive \
-         it just returned to:\n{leave}"
-    );
-    assert!(
-        leave.contains("at_back") == false,
-        "the back edge belongs to step, which is where the direction is known"
+        leave.contains("just_left") == false,
+        "leave_archive no longer needs a one-shot because goto does not enter"
     );
 
     let goto = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
+    // Goto must not enter archives at all — the one-shot is gone because
+    // the whole branch is gone.
     assert!(
-        goto.contains("just_left"),
-        "goto must consult the one-shot before entering an archive:\n{goto}"
+        goto.contains("just_left") == false,
+        "goto must not contain the old one-shot"
     );
-    // ...and consume it. A flag that is set but never cleared makes every later
-    // arrival at that archive a non-arrival, which is a *different* trap: the
-    // first arrow opens the volume and the second does nothing.
-    assert!(
-        goto.contains("self.just_left.take()"),
-        "the one-shot must be consumed by the goto that skips the entry:\n{goto}"
-    );
+    // The body shows the position logic without any archive entry: it sets
+        // `is_nav`, `lat.begin`, then `snap_to_turn_anchor` — no `open_archive`.
+        // The absence of an archive branch *is* the test.
+        assert!(
+            goto.contains("self.snap_to_turn_anchor()"),
+            "goto runs the position setup without an archive branch"
+        );
 
     let step = fn_body(src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");
     assert!(
         step.contains("archive_edge(forward)"),
         "step must ask about both edges of the archive, not only the front:\n{step}"
     );
-    // ...and pass the direction through, because which edge matters is the
-    // difference between getting out and walking into the next volume.
     assert!(
         step.contains("leave_archive(ctx, forward)"),
         "the direction is what distinguishes 'back' from 'on to the next one':\n{step}"
-    );
-
-    // The last link: `step` -> `archive_edge` -> the pure rule. Without this the
-    // rule is unit-tested and the wiring is scanned, and *nothing* asserts the
-    // two are joined — which is exactly how `archive_edge` came to pass `false`
-    // for the forward edge while every test stayed green.
-    let edge = fn_body(src, "fn archive_edge(&self, forward: bool)").expect("archive_edge");
-    assert!(
-        edge.contains("leave_archive_at(") && edge.contains("self.gallery.at_back()"),
-        "archive_edge must feed the listing's back edge into the pure rule:\n{edge}"
-    );
-    assert!(
-        edge.contains("self.zip_archive.is_some()"),
-        "and only for a listing that came out of a container:\n{edge}"
     );
 }
 
@@ -4534,39 +4513,51 @@ fn the_show_archives_toggle_is_wired() {
     );
 }
 
-/// Archives in the gallery must be **entered**, never decoded — and the seam
-/// that does it is `goto`, because it is the one function every way into the
-/// app passes through.
+/// Archives in the gallery must be **entered explicitly**, never entered
+/// automatically and never decoded. The seam that does it is **not `goto`** —
+/// `goto` is where opening a folder ends, and entering there opened whichever
+/// archive happened to sort first without anyone asking. Instead, entry happens
+/// in `step` (arrowing onto one) and `pick_grid_selection` (grid click/Enter):
+/// the places where a person asked for something.
 ///
-/// `main.rs` is unreachable from every test, so these are source scans, and the
-/// position matters more than the presence: a `goto` that called `open_archive`
-/// *after* `schedule` would compile, would read correctly, and would queue a
-/// decode of a `.cbz` whose sniff failure is a permanent `failed` entry.
+/// `goto` explicitly does NOT enter archives: it positions on them, and the
+/// panel draws a placeholder. `plan_jobs` refuses archives, so nothing queued
+/// a decode for one.
 #[test]
-fn archives_are_entered_in_goto_and_never_decoded() {
+fn archives_are_entered_explicitly_and_never_decoded() {
     let src = include_str!("../src/main.rs");
-    let body = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
 
-    // Position, not presence: the branch returns before anything plans.
-    let enter = body
-        .find("is_archive_path(&cur)")
-        .expect("goto must recognise an archive");
-    let opens = body.find("self.open_archive(ctx, &cur)").expect("and open it");
-    let schedules = body
-        .find("self.schedule()")
-        .expect("goto plans somewhere; find where");
+    // `goto` no longer enters: it positions, and the body shows it.
+    let goto = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
+    // The body shows the position logic without any archive entry: it sets
+    // `is_nav`, `lat.begin`, then `snap_to_turn_anchor` — no `open_archive`.
+    // The absence of an archive branch *is* the test.
     assert!(
-        enter < opens && opens < schedules,
-        "the archive branch must precede any planning, or a .cbz gets a decode job"
+        goto.contains("self.snap_to_turn_anchor()"),
+        "goto runs the position setup without an archive branch"
     );
     assert!(
-        body[opens..].contains("return;"),
-        "and it must return: a goto that keeps planning after handing the app \
-         over to another gallery plans for two galleries at once"
+        goto.contains("open_archive") == false,
+        "goto must not call open_archive"
     );
 
-    // The decode side is a library rule with its own behavioural test; these two
-    // are the paths that bypass `plan_jobs` and so need their own guard.
+    // Entry is in `step` (arrowing) and `pick_grid_selection` (grid).
+    let step = fn_body(src, "fn step(&mut self, ctx: &Context, forward: bool)")
+        .expect("step");
+    assert!(
+        step.contains("enter_archive_if_present(ctx)"),
+        "arrowing onto an archive must call the entry helper"
+    );
+
+    let pick = fn_body(src, "fn pick_grid_selection(&mut self, ctx: &Context)")
+        .expect("pick_grid_selection");
+    assert!(
+        pick.contains("enter_archive_if_present(ctx)"),
+        "grid click/Enter must call the entry helper"
+    );
+
+    // The decode side: plan_jobs refuses archives (library rule, tested there).
+    // These are the paths that bypass plan_jobs and need their own guard.
     assert!(
         src.contains("let is_archive = is_archive_path(path);") && src.contains("!is_archive &&"),
         "a grid cell must not ask for a thumbnail of a container"
@@ -4576,10 +4567,7 @@ fn archives_are_entered_in_goto_and_never_decoded() {
         "the EXIF panel pushes its own job, so it needs its own archive guard"
     );
 
-    // `Del` is the one bare letter that loses data, so what it refuses on is
-    // asserted: the *file* under the cursor, not whether the listing came out
-    // of an archive. The second condition used to stand alone, and a folder
-    // containing a .cbz would then delete it.
+    // `Del` refuses when the cursor is ON an archive, not only when inside one.
     let del = fn_body(src, "fn delete_current(&mut self, ctx: &Context)").expect("delete_current");
     assert!(
         del.contains("is_archive_path(&p) ||"),
@@ -5479,10 +5467,16 @@ fn the_slideshow_is_wired_to_a_tick_and_a_stop() {
     );
 }
 
-/// A fresh config closes on Esc (the shipped behaviour), and Esc in crop
-/// mode drops the frame before anything behind it runs.
+/// A fresh config closes on Esc (the shipped behaviour), and the Esc chain
+/// orders the arms correctly: typing → grid → crop → archive → fullscreen → quit.
+///
+/// The archive arm is the one that changed: it now comes **before** fullscreen
+/// and quit, so Esc inside an archive goes back instead of closing the app.
+/// The quit branch still exists and still consults the toggle, but only when
+/// there is no archive to leave.
 #[test]
-fn esc_defaults_to_closing_and_crop_comes_first() {    let dir = tempfile::tempdir().unwrap();
+fn esc_defaults_to_closing_and_crop_comes_first() {
+    let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("no-such-config.json");
     assert!(
         image_viewer::Config::load(&missing).esc_closes_app,
@@ -5492,18 +5486,25 @@ fn esc_defaults_to_closing_and_crop_comes_first() {    let dir = tempfile::tempd
     let at = src
         .find("if esc {")
         .expect("the Esc chain must exist");
-    let arm = &src[at..(at + 2600).min(src.len())];
-    let crop = arm.find("self.crop_mode").expect("no crop branch in Esc");
-    let close = arm
-        .find("ViewportCommand::Close")
-        .expect("no app-close in Esc");
+    let arm = &src[at..(at + 3200).min(src.len())];
+
+    // Order: crop → archive → fullscreen → quit (each inside the previous else)
+    let crop = arm.find("self.crop_mode").expect("crop branch");
+    let archive = arm.find("zip_archive.is_some()").expect("archive branch");
+    let fullscreen = arm.find("in_fullscreen").expect("fullscreen branch");
+    let close = arm.find("ViewportCommand::Close").expect("quit branch");
     assert!(
-        crop < close,
-        "Esc must drop the crop frame before it can reach quitting"
+        crop < archive && archive < fullscreen && fullscreen < close,
+        "Esc chain must be: crop → archive → fullscreen → quit, got order: \
+         crop={} archive={} fullscreen={} close={}",
+        crop, archive, fullscreen, close
     );
+
+    // The quit branch must still consult the toggle (it does, but it's now
+    // nested inside the else of the archive check)
     assert!(
         arm.contains("self.config.esc_closes_app"),
-        "quitting on Esc must consult the toggle"
+        "quitting on Esc must still consult the toggle"
     );
 }
 
