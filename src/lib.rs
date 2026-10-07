@@ -261,6 +261,15 @@ pub struct Config {
     #[serde(default)]
     pub recursive_folders: bool,
 
+    /// List `.zip`/`.cbz`/`.7z`/`.rar` files in a folder scan, beside the images.
+    ///
+    /// **Defaulted to true**, and that direction matters: the feature shipped on,
+    /// so a config written before this key existed has to keep listing archives.
+    /// The surprising direction to be wrong in is the silent one — a folder of
+    /// manga that quietly stopped showing its volumes.
+    #[serde(default = "default_true")]
+    pub show_archives: bool,
+
     /// Esc on a bare image viewer closes the app. On by default (the shipped
     /// behaviour); off means Esc stops at leaving crop mode / grid /
     /// fullscreen and never quits. The filter box keeps its own Esc
@@ -789,6 +798,7 @@ impl Config {
             wheel_navigation: false,
             loop_back: true,
             recursive_folders: false,
+            show_archives: true,
             esc_closes_app: true,
             renderer: RendererPref::default(),
             convert_wide_gamut: false,
@@ -1048,8 +1058,32 @@ pub const IMAGE_CRATE_DECODERS_WE_SKIP: &[(&str, &str)] = &[
     ("avif", "already handled, and better, by the heic crate"),
 ];
 
+/// Whether archives are listed by a folder scan. Defaults to on.
+///
+/// A process-wide setting rather than an argument, for the same reason
+/// [`thumbnail_cache_enabled`] is one: `is_browsable` is asked from the flat
+/// scan, the recursive walk and `Gallery::new`, and threading a flag through all
+/// three (and through every test that builds a gallery) would be a second thing
+/// to forget rather than a smaller API.
+static SHOW_ARCHIVES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Set whether a folder scan lists archives. See [`show_archives_enabled`].
+pub fn set_show_archives(on: bool) {
+    SHOW_ARCHIVES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Are archives listed by a folder scan?
+///
+/// Public so a test can save and restore it: it is process-wide, and a test that
+/// changed it without restoring would silently decide the answer for every test
+/// that ran after it.
+pub fn show_archives_enabled() -> bool {
+    SHOW_ARCHIVES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// True if a folder scan should list this file: an image the app can decode, or
-/// an archive it can open.
+/// an archive it can open and [`show_archives_enabled`] says to list.
 ///
 /// **Archives are listed, and are deliberately not in
 /// [`SUPPORTED_EXTENSIONS`].** That constant gates *decoding* - it is also what
@@ -1057,9 +1091,13 @@ pub const IMAGE_CRATE_DECODERS_WE_SKIP: &[(&str, &str)] = &[
 /// it would make an archive both a browsable item and something the decoders
 /// are handed. Listing and decoding are different questions, and this
 /// predicate is the listing one.
+///
+/// One predicate rather than an extension list per scan: the flat scan, the
+/// recursive walk and `Gallery::new` all ask here, so a setting that hides
+/// archives cannot be honoured by one of them and missed by the others.
 pub fn is_browsable(p: &Path) -> bool {
     if is_archive_path(p) {
-        return true;
+        return show_archives_enabled();
     }
     let ext = p
         .extension()

@@ -2107,6 +2107,15 @@ impl MyApp {
         // the answer is in the config, so reading it back keeps the two in step.
         let renderer = config.renderer.resolve(None);
 
+        // **Before the gallery is built below**, unlike the other settings the
+        // library reads, which are applied further down. `Gallery::new` scans
+        // the folder, and `is_browsable` asks this flag on every entry — so a
+        // setter placed with the rest would arrive after the session's first
+        // listing had already been built from the default. The saved setting
+        // would then take effect only on the next rescan, which is a session
+        // later and reads as the toggle not working.
+        image_viewer::set_show_archives(config.show_archives);
+
         // Optional CLI argument: a file or a folder ("Open with…"). Must be the
         // first *non-flag* argument: `nth(1)` would take `--perf` as the path
         // and silently open the persisted folder instead.
@@ -8090,6 +8099,17 @@ impl eframe::App for MyApp {
                     self.rescan(ctx, true);
                 }
                 ui.small("One gallery over the whole tree. The 2 s watcher walks it every poll, so this costs a walk per level.");
+                if ui
+                    .checkbox(&mut self.config.show_archives, "Show archives (zip, cbz, 7z, rar)")
+                    .changed()
+                {
+                    self.config.save(&self.config_path);
+                    // The library reads this through `is_browsable`, so nothing is
+                    // rescanned until it is told — and a listing rebuilt before
+                    // the setter ran would keep the old answer.
+                    image_viewer::set_show_archives(self.config.show_archives);
+                    self.rescan(ctx, true);
+                }
                 ui.add_space(6.0);
                 if ui
                     .checkbox(

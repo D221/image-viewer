@@ -485,6 +485,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Zoom keys 1-4 | 1× toggles 1:1 mode, 2×-8× one-shot jumps (all configurable) |
 | Fit view | off | Sticky fit-to-window (`F`); mutually exclusive with `T`. Photos open at 100% with everything off |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
+| Show archives | on | Lists `.zip`/`.cbz`/`.7z`/`.rar` in a folder beside the images. Off hides them from every scan and the grid |
 | Include subfolders | off | One gallery over the whole tree (sorts apply globally); the 2 s watcher walks it every poll |
 
 ## Archives
@@ -507,6 +508,10 @@ first page — so you cycle through one volume forever and never reach the secon
 - The status line reads `vol1.cbz - 42 images, press right to open`, and the grid
   cell shows the member count. Both come from a header read, not a decode.
 - `Del` refuses on an archive. So does move/copy.
+
+To pick and choose without turning them off, the filter box matches on file name:
+`cbz` shows only the `.cbz` files, `7z` only the `.7z`, `zip` matches `.zip` and
+`.cbz` together. "Show archives" in Settings makes that permanent.
 - Members are flattened: nested folders do not become folders, non-images are
   skipped, and two members that would flatten to the same file name are counted
   once.

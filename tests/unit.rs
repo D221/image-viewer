@@ -4495,6 +4495,45 @@ fn leaving_an_archive_does_not_re_enter_it() {
     );
 }
 
+/// The archive visibility toggle must be wired end to end: told to the library
+/// (or the next scan answers from a flag nobody set) and followed by a rescan
+/// (or the panel changes the setting and the listing does not).
+#[test]
+fn the_show_archives_toggle_is_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("image_viewer::set_show_archives(config.show_archives)"),
+        "start-up must tell the library before the first scan"
+    );
+    let before = src.find("set_show_archives(config.show_archives)").expect("start-up call");
+    let scan = src.find("let files = Self::sorted_scan(").expect("the start-up scan");
+    assert!(
+        before < scan,
+        "the setting has to be set before the scan that reads it, or the first \
+         listing of the session answers from a stale flag"
+    );
+
+    let panel = fn_body(src, "impl eframe::App for MyApp").expect("the app impl");
+    assert!(
+        panel.contains("&mut self.config.show_archives"),
+        "the toggle must exist in Settings"
+    );
+    let toggle = panel
+        .find("&mut self.config.show_archives")
+        .expect("the checkbox");
+    let setter = panel
+        .find("set_show_archives(self.config.show_archives)")
+        .expect("the setter");
+    let rescan = panel[toggle..]
+        .find("self.rescan(ctx, true)")
+        .expect("the rescan");
+    assert!(
+        toggle < setter && setter < toggle + rescan,
+        "save, then tell the library, then rescan — a rescan before the setter \
+         rebuilds the listing from the old flag and the toggle looks inert"
+    );
+}
+
 /// Archives in the gallery must be **entered**, never decoded — and the seam
 /// that does it is `goto`, because it is the one function every way into the
 /// app passes through.
@@ -4903,6 +4942,80 @@ fn write_test_7z(path: &std::path::Path, members: &[(&str, Vec<u8>)]) {
     }
     sevenz_rust2::compress_to_path(&staging, path).unwrap();
     let _ = std::fs::remove_dir_all(&staging);
+}
+
+/// "Show archives" must actually hide them — from *both* scans, with images
+/// untouched, and the getter must round-trip so a test can put it back.
+///
+/// The getter is public for the reason `thumbnail_cache_enabled` is: the flag is
+/// process-wide (it is the house pattern for a setting the library has to see,
+/// because one predicate serves the flat scan, the recursive walk and
+/// `Gallery::new`), so a test that changes it has to be able to restore it. A
+/// test that forgot would silently decide the answer for the ones after it.
+#[test]
+fn the_show_archives_setting_hides_archives_and_spares_images() {
+    use image_viewer::{is_browsable, scan_folder, scan_folder_recursive, set_show_archives,
+        show_archives_enabled};
+    // Restore whatever the rest of the suite expects, however this test ends.
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_show_archives(true);
+        }
+    }
+    let _restore = Restore;
+
+    assert!(show_archives_enabled(), "on by default: the feature shipped on");
+    // Round-trip both ways *before* the scans, and leave it on: the "off"
+    // assertions below are a separate state, and a test that left the flag
+    // flipped would decide the answer for everything after it.
+    set_show_archives(false);
+    assert!(!show_archives_enabled(), "the getter must round-trip the setter");
+    set_show_archives(true);
+    assert!(show_archives_enabled(), "...and back again");
+
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("vol2");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.path().join("a.jpg"), b"x").unwrap();
+    for name in ["v1.cbz", "v2.7z", "v3.rar", "v4.zip"] {
+        std::fs::write(dir.path().join(name), b"x").unwrap();
+    }
+    std::fs::write(sub.join("deep.cbz"), b"x").unwrap();
+
+    let names = |v: Vec<std::path::PathBuf>| -> Vec<String> {
+        v.iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(scan_folder(dir.path())),
+        vec!["a.jpg", "v1.cbz", "v2.7z", "v3.rar", "v4.zip"],
+        "on: every archive is listed beside the image"
+    );
+    assert_eq!(names(scan_folder_recursive(dir.path())).len(), 6);
+
+    set_show_archives(false);
+    assert_eq!(
+        names(scan_folder(dir.path())),
+        vec!["a.jpg"],
+        "off: the image is still browsable, and no archive appears"
+    );
+    assert_eq!(
+        names(scan_folder_recursive(dir.path())),
+        vec!["a.jpg"],
+        "off: the recursive walk uses the same predicate, so it hides them too"
+    );
+    assert!(
+        !is_browsable(std::path::Path::new("x/v1.cbz")),
+        "the predicate itself is what changes, not a second list of extensions"
+    );
+    assert!(is_browsable(std::path::Path::new("x/a.jpg")));
 }
 
 /// Archives are **listed** in a folder scan, and are deliberately not in
