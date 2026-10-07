@@ -2438,11 +2438,14 @@ impl MyApp {
         self.exif_loading = self.cur.is_some();
         self.full_due = Some(Instant::now() + FULL_DWELL);
         // Blocking mode: only wait when the preview isn't already cached.
+        // Archives have no preview, so don't wait for them.
         self.waiting_load = self.config.block_while_loading
             && self
                 .cur
                 .as_ref()
-                .is_some_and(|c| !self.previews.contains_key(c));
+                .is_some_and(|c| {
+                    !is_archive_path(&c.path) && !self.previews.contains_key(c)
+                });
 
         if let Some(name) = self
             .cur
@@ -5641,15 +5644,29 @@ impl MyApp {
                     let mut ratio = if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
                     if reset {
                         self.fit_window_pending = false;
-                        // Always absolute: T mode shows 100% and hugs the
-                        // window to it (clamped to the monitor below), never
-                        // a shrink-to-fit — the shrink rule could not tell
-                        // "bigger than the screen" from "bigger than the
-                        // window", so it shrank to the window instead.
+                        // T mode: fit the window to the image at 1:1, but if the
+                        // image is larger than the monitor, scale it down to fit
+                        // (maintaining aspect ratio). This matches JPEGView
+                        // behaviour — 1:1 only when it fits, otherwise shrink to
+                        // fit the monitor.
                         self.view.fit = false;
-                        self.view.scale = 1.0 / ppp;
                         self.view.offset = Vec2::ZERO;
-                        ratio = 1.0;
+                        // Available space for the image on the monitor (monitor
+                        // minus window chrome). Chrome = inner - panel (panels,
+                        // title bar, etc.).
+                        let chrome_x = (inner.x - panel.width()).max(0.0);
+                        let chrome_y = (inner.y - panel.height()).max(0.0);
+                        let available_x = work.0 - chrome_x;
+                        let available_y = work.1 - chrome_y;
+                        // Max scale that fits the image in the available space,
+                        // capped at 1.0 (never upscale).
+                        let max_scale = (available_x / natural.x)
+                            .min(available_y / natural.y)
+                            .min(1.0)
+                            .max(0.01);
+                        self.view.scale = max_scale / ppp;
+                        self.view.offset = Vec2::ZERO;
+                        ratio = max_scale;
                     }
                     // `wrap` clears only here, on convergence: it doubles as the
                     // settle flag, so clearing it up front would run the loop
