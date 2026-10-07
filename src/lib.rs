@@ -490,6 +490,24 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("focus_search", "Slash", "Focus filter box"),
     ("fit_window", "T", "Fit window mode"),
 ];
+/// Every key name the matcher understands: the spelling capture stores
+/// and settings shows. The binary must map each of these both ways
+/// (pinned by scan); a name missing either way silently falls back to the
+/// shipped default.
+pub const KEY_NAMES: &[&str] = &[
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q",
+    "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    "Num0", "Num1", "Num2", "Num3", "Num4", "Num5", "Num6", "Num7", "Num8", "Num9",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+    "ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown",
+    "Space", "Enter", "Escape", "Tab", "Backspace", "Delete", "Insert",
+    "Home", "End", "PageUp", "PageDown",
+    "Comma", "Period", "Slash", "Semicolon", "Quote",
+    "OpenBracket", "CloseBracket", "Backslash", "Backtick",
+    "Minus", "Equals", "Plus",
+];
+
 /// Shipped chord for `action`, or `""` when unknown.
 pub fn default_binding(action: &str) -> &'static str {
     KEY_ACTIONS

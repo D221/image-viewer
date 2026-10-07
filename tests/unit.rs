@@ -4264,6 +4264,58 @@ fn key_overrides_win_and_blanks_fall_back() {
     assert_eq!(image_viewer::split_chord("Ctrl"), None);
 }
 
+/// Every default chord's key must be a known name: otherwise it can never
+/// match, and the action ships dead.
+#[test]
+fn every_default_key_is_a_known_name() {
+    for (id, chord, _) in image_viewer::KEY_ACTIONS {
+        let (_, _, _, name) = image_viewer::split_chord(chord)
+            .unwrap_or_else(|| panic!("default chord of `{id}` names no key"));
+        assert!(
+            image_viewer::KEY_NAMES.contains(&name.as_str()),
+            "default chord of `{id}` names unknown key `{name}`"
+        );
+    }
+}
+
+/// Capture, totality, and live labels must be wired: the capture state and
+/// its commit path, both directions of the key-name table for every known
+/// name, and buttons built through the live-label helper.
+#[test]
+fn capture_and_labels_are_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.capturing = Some(") && src.contains("press keys… (Esc cancels)"),
+        "Settings must offer click-to-capture with an Esc out"
+    );
+    assert!(
+        src.contains("is already ") && src.contains("pick another"),
+        "a chord taken by another action must be refused by name"
+    );
+    for name in image_viewer::KEY_NAMES {
+        // Single characters ride the char-match branches, not string arms.
+        if name.len() == 1 {
+            continue;
+        }
+        assert!(
+            src.contains(&format!("\"{name}\" =>")),
+            "key name `{name}` has no parse arm"
+        );
+        assert!(
+            src.contains(&format!("Key::{name} => \"{name}\"")),
+            "key name `{name}` has no reverse arm"
+        );
+    }
+    assert!(
+        src.contains("is_ascii_alphabetic") && src.contains("is_ascii_digit"),
+        "single characters must route through the char-match branches"
+    );
+    assert!(
+        src.contains("fn action_button_text("),
+        "buttons must go through the live-label helper"
+    );
+}
+
 /// UserCmd expansion (Tier 1 #2): {file}/{dir}/{name} expand, unknowns stay.
 #[test]
 fn user_command_templates_expand_against_the_current_file() {
@@ -4575,9 +4627,19 @@ fn fit_window_pins_chrome_places_late_and_shows_state() {
         src.contains("pending_pos"),
         "centering must wait for the resize to settle, not race it"
     );
+    let at = src
+        .find("self.config.fit_window_mode,")
+        .expect("the mode toggle must exist");
+    let from = at.saturating_sub(200);
+    let arm = &src[from..(at + 400).min(src.len())];
     assert!(
-        src.contains(".selectable_label(self.config.fit_window_mode, \"Fit window (T)\")"),
-        "the mode needs a button with a visible state like Crop"
+        arm.contains("selectable_label(")
+            && arm.contains("action_button_text(&self.config, \"Fit window\", \"fit_window\")"),
+        "the mode needs a selectable button showing the live chord, like Crop"
+    );
+    assert!(
+        src.contains("action_button_text(&self.config, \"Fit window\", \"fit_window\")"),
+        "the mode button must show the live chord, not a hardcoded one"
     );
 }
 
@@ -4697,17 +4759,9 @@ fn printing_is_wired_to_ctrl_p() {
         src.contains("fn print_current(&mut self"),
         "there must be a print action"
     );
-    let at = src
-        .find("let print_key = ctx.input")
-        .expect("the print chord must exist");
-    let arm = &src[at..(at + 900).min(src.len())];
     assert!(
-        arm.contains("repeat: false"),
-        "the print chord must filter key-repeat, or a hold opens a dialog per frame"
-    );
-    assert!(
-        !arm.contains("key_pressed"),
-        "the print chord must not read through key_pressed, which fires on repeats"
+        src.contains("action_pressed_fresh(ctx, &kb, \"print\")"),
+        "print must go through the edge-triggered matcher, not a bespoke chord"
     );
     let body_at = src
         .find("fn print_current(&mut self)")
@@ -4803,10 +4857,11 @@ fn the_settings_panel_scrolls() {
 /// Rebindable keys must be **wired**, and `main.rs` is unreachable from every
 /// test, so these are source scans - the established pattern here.
 #[test]
-fn the_rebindable_keys_are_wired_to_the_direction_rule() {    let src = include_str!("../src/main.rs");
+fn the_rebindable_keys_are_wired_to_the_direction_rule() {
+    let src = include_str!("../src/main.rs");
     assert!(
-        src.contains("set_nav_overrides(&self.config.keys)"),
-        "startup and the settings panel must push Config::keys into the nav table"
+        src.contains("set_nav_overrides(&self.config.keybindings)"),
+        "startup and the settings panel must push keybindings into the nav table"
     );
     assert!(
         src.contains("fn effective_nav_keys()"),
@@ -4817,6 +4872,10 @@ fn the_rebindable_keys_are_wired_to_the_direction_rule() {    let src = include_
     assert!(
         src.contains("NAV_REBINDABLE"),
         "there must be one action->meaning table for rebindable keys"
+    );
+    assert!(
+        src.contains("self.capturing = Some("),
+        "Settings must offer click-to-capture rebinding"
     );
 }
 
@@ -4840,22 +4899,35 @@ fn the_user_commands_are_wired_to_ctrl_digits() {
 
 /// Spawning must be edge-triggered: `key_pressed` also fires for OS
 /// key-repeat, and a repeat spawns one process per frame — a held Ctrl+1
-/// opened hundreds of Paint windows and froze the machine. The chord must
-/// therefore read raw events with `repeat: false`, never `key_pressed`.
+/// opened hundreds of Paint windows and froze the machine. Spawn-class
+/// actions therefore go through the raw-event matcher with `repeat: false`,
+/// never `key_pressed`.
 #[test]
 fn the_user_command_chord_ignores_key_repeat() {
     let src = include_str!("../src/main.rs");
     let at = src
-        .find("let user_cmd = ctx.input")
-        .expect("the user-command chord must exist");
-    let arm = &src[at..(at + 1600).min(src.len())];
+        .find("fn action_pressed_fresh(")
+        .expect("the edge-triggered matcher must exist");
+    let body = &src[at..(at + 1200).min(src.len())];
     assert!(
-        arm.contains("repeat: false"),
-        "the chord must filter OS key-repeat, or holding Ctrl+1 fork-bombs"
+        body.contains("repeat: false"),
+        "the matcher must filter OS key-repeat, or holding Ctrl+1 fork-bombs"
     );
     assert!(
-        !arm.contains("key_pressed"),
-        "the chord must not read through key_pressed, which fires on repeats"
+        !body.contains("key_pressed"),
+        "the matcher must read raw events, not key_pressed, which fires on repeats"
+    );
+    for action in ["print", "copy", "copy_path"] {
+        assert!(
+            src.contains(&format!("action_pressed_fresh(ctx, &kb, \"{action}\")")),
+            "spawn-class action `{action}` must go through the edge-triggered matcher"
+        );
+    }
+    // user_1..9 go through the same matcher via an explicit name table (not
+    // format-built, so the action-coverage test can see every one).
+    assert!(
+        src.contains("\"user_1\"") && src.contains("\"user_9\""),
+        "all nine user-command actions must be listed by name"
     );
 }
 
@@ -4902,15 +4974,16 @@ fn the_settings_panel_shows_the_build_id() {
 /// Beta features wear a red marker in the panel, next to the label — the
 /// same marker for both, matching the README's beta sections.
 #[test]
-fn beta_features_are_marked_beta_in_red() {    let src = include_str!("../src/main.rs");
-    for label in ["Double page mode (M)", "User commands (Ctrl+1..9):"] {
+fn beta_features_are_marked_beta_in_red() {
+    let src = include_str!("../src/main.rs");
+    for base in ["Double page mode", "User commands (Ctrl+1..9):"] {
         let at = src
-            .find(label)
-            .unwrap_or_else(|| panic!("{label} is gone from the settings panel"));
-        let arm = &src[at..(at + 400).min(src.len())];
+            .find(base)
+            .unwrap_or_else(|| panic!("{base} is gone from the settings panel"));
+        let arm = &src[at..(at + 600).min(src.len())];
         assert!(
             arm.contains("(beta)") && arm.contains("warn_fg_color"),
-            "{label} must be followed by a red (beta) marker"
+            "{base} must be followed by a red (beta) marker"
         );
     }
 }

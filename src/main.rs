@@ -153,22 +153,10 @@ const NAV_REBINDABLE: &[(&str, NavInput)] = &[
     ("page_prev", NavInput::Previous),
 ];
 
-/// Key names the settings dropdown offers. Deliberately the five shipped
-/// navigation keys and nothing else: any action can take any of them (swapping
-/// the arrows is the point), and a navigation action bound to `F` or `Delete`
-/// would collide with a bare letter or the one accepted exception.
-const KEY_NAME_OPTIONS: &[&str] = &["ArrowRight", "ArrowLeft", "Space", "PageDown", "PageUp"];
-
-/// Parse a key name from `Config::keys` into an `egui::Key`.
-///
-/// Match arms name the key (`egui::Key::Delete`) but never read the input
-/// (`i.key_pressed(..)`), so `tests/keybindings.rs::only_delete_reaches_the_recycle_bin`
-/// — which counts *reads* — still sees exactly one.
 /// Full key-name table for custom bindings: every `egui::Key` worth
 /// pressing, plus bare `"0"`–`"9"` mapping to the numpad-less `Num0`–`Num9`
 /// variants (egui has no bare digit keys, and nobody means the numpad when
 /// they write `"1"`). Anything else is unbound — see `resolve_action`.
-#[allow(dead_code)]
 fn parse_key_full(name: &str) -> Option<egui::Key> {
     let name = name.trim();
     if name.len() == 1 {
@@ -275,11 +263,112 @@ fn parse_key_full(name: &str) -> Option<egui::Key> {
     }
 }
 
-/// A resolved binding: the key plus the exact modifier set. Matching is
-/// exact on both (`resolve_action_pressed`): a bare letter never fires with
-/// a modifier held, and a chord never fires with extra ones.
-#[allow(dead_code)]
+/// Reverse of `parse_key_full`: the name capture stores and Settings
+/// shows. Must cover exactly the same keys — the totality scan in
+/// `tests/keybindings.rs` checks both directions against `KEY_NAMES`.
+fn key_name(key: egui::Key) -> &'static str {
+    match key {
+        egui::Key::A => "A",
+        egui::Key::B => "B",
+        egui::Key::C => "C",
+        egui::Key::D => "D",
+        egui::Key::E => "E",
+        egui::Key::F => "F",
+        egui::Key::G => "G",
+        egui::Key::H => "H",
+        egui::Key::I => "I",
+        egui::Key::J => "J",
+        egui::Key::K => "K",
+        egui::Key::L => "L",
+        egui::Key::M => "M",
+        egui::Key::N => "N",
+        egui::Key::O => "O",
+        egui::Key::P => "P",
+        egui::Key::Q => "Q",
+        egui::Key::R => "R",
+        egui::Key::S => "S",
+        egui::Key::T => "T",
+        egui::Key::U => "U",
+        egui::Key::V => "V",
+        egui::Key::W => "W",
+        egui::Key::X => "X",
+        egui::Key::Y => "Y",
+        egui::Key::Z => "Z",
+        egui::Key::Num0 => "Num0",
+        egui::Key::Num1 => "Num1",
+        egui::Key::Num2 => "Num2",
+        egui::Key::Num3 => "Num3",
+        egui::Key::Num4 => "Num4",
+        egui::Key::Num5 => "Num5",
+        egui::Key::Num6 => "Num6",
+        egui::Key::Num7 => "Num7",
+        egui::Key::Num8 => "Num8",
+        egui::Key::Num9 => "Num9",
+        egui::Key::F1 => "F1",
+        egui::Key::F2 => "F2",
+        egui::Key::F3 => "F3",
+        egui::Key::F4 => "F4",
+        egui::Key::F5 => "F5",
+        egui::Key::F6 => "F6",
+        egui::Key::F7 => "F7",
+        egui::Key::F8 => "F8",
+        egui::Key::F9 => "F9",
+        egui::Key::F10 => "F10",
+        egui::Key::F11 => "F11",
+        egui::Key::F12 => "F12",
+        egui::Key::ArrowRight => "ArrowRight",
+        egui::Key::ArrowLeft => "ArrowLeft",
+        egui::Key::ArrowUp => "ArrowUp",
+        egui::Key::ArrowDown => "ArrowDown",
+        egui::Key::Space => "Space",
+        egui::Key::Enter => "Enter",
+        egui::Key::Escape => "Escape",
+        egui::Key::Tab => "Tab",
+        egui::Key::Backspace => "Backspace",
+        egui::Key::Delete => "Delete",
+        egui::Key::Insert => "Insert",
+        egui::Key::Home => "Home",
+        egui::Key::End => "End",
+        egui::Key::PageUp => "PageUp",
+        egui::Key::PageDown => "PageDown",
+        egui::Key::Comma => "Comma",
+        egui::Key::Period => "Period",
+        egui::Key::Slash => "Slash",
+        egui::Key::Semicolon => "Semicolon",
+        egui::Key::Quote => "Quote",
+        egui::Key::OpenBracket => "OpenBracket",
+        egui::Key::CloseBracket => "CloseBracket",
+        egui::Key::Backslash => "Backslash",
+        egui::Key::Backtick => "Backtick",
+        egui::Key::Minus => "Minus",
+        egui::Key::Equals => "Equals",
+        egui::Key::Plus => "Plus",
+        _ => "?",
+    }
+}
+
+/// Settings label for an action id, for notices.
+fn action_label(id: &str) -> &str {
+    image_viewer::KEY_ACTIONS
+        .iter()
+        .find(|(a, _, _)| *a == id)
+        .map(|(_, _, label)| *label)
+        .unwrap_or(id)
+}
+
+/// Button text with the live chord: `("Save transformed…", "save")` gives
+/// `"Save transformed… (Ctrl+S)"` today and `"Save transformed… (X)"` after
+/// a rebind. Buttons never lie about keys, however they are rebound.
+fn action_button_text(config: &image_viewer::Config, base: &str, action: &str) -> String {
+    format!(
+        "{base} ({})",
+        image_viewer::resolve_binding(&config.keybindings, action)
+    )
+}
 #[derive(Clone, Copy)]
+/// A resolved binding: the key plus the exact modifier set. Matching is
+/// exact on both: a bare letter never fires with a modifier held, and a
+/// chord never fires with extra ones.
 struct ResolvedBinding {
     key: egui::Key,
     ctrl: bool,
@@ -292,7 +381,6 @@ struct ResolvedBinding {
 /// unbinding the action — a typo must leave the shipped chord working, not
 /// delete the feature. Returns `None` only when even the default will not
 /// parse, which cannot happen for shipped rows.
-#[allow(dead_code)]
 fn resolve_action(
     bindings: &std::collections::HashMap<String, String>,
     action: &str,
@@ -318,7 +406,6 @@ fn resolve_action(
 /// Resolve every action once per frame: shipped defaults with user
 /// overrides applied. Owns everything, so callers keep no borrow on the
 /// config across the `&mut self` dispatch that follows.
-#[allow(dead_code)]
 fn build_bindings(config: &image_viewer::Config) -> std::collections::HashMap<String, ResolvedBinding> {
     let mut m = std::collections::HashMap::new();
     for (id, _, _) in image_viewer::KEY_ACTIONS {
@@ -332,7 +419,6 @@ fn build_bindings(config: &image_viewer::Config) -> std::collections::HashMap<St
 /// Did `action`'s chord fire: the key pressed this frame with exactly the
 /// resolved modifiers. One predicate for the whole dispatch, so every site
 /// below agrees on what a binding means.
-#[allow(dead_code)]
 fn action_pressed(
     ctx: &egui::Context,
     bindings: &std::collections::HashMap<String, ResolvedBinding>,
@@ -344,7 +430,6 @@ fn action_pressed(
 /// Same question against an already-open input state, for the tuples that
 /// read several keys inside one `ctx.input` closure (nesting `ctx.input`
 /// calls is not something to rely on).
-#[allow(dead_code)]
 fn binding_down(
     i: &egui::InputState,
     bindings: &std::collections::HashMap<String, ResolvedBinding>,
@@ -362,7 +447,6 @@ fn binding_down(
 /// for OS key-repeat, and a held Ctrl+1 once opened hundreds of Paint
 /// windows. View navigation deliberately does NOT use this: holding an
 /// arrow to flip through is the feature, not the bug.
-#[allow(dead_code)]
 fn action_pressed_fresh(
     ctx: &egui::Context,
     bindings: &std::collections::HashMap<String, ResolvedBinding>,
@@ -1791,6 +1875,10 @@ struct MyApp {
     /// after the resize settles, or it anchors a window that then resizes out
     /// from under it. `(want_size, frames_left)`.
     pending_pos: Option<((f32, f32), u8)>,
+    /// Action id currently capturing a replacement chord in Settings (click
+    /// a chord, press keys). While set, the key dispatch stands down so the
+    /// capture press cannot act. Session-only, never persisted.
+    capturing: Option<String>,
     /// Last fit-window computation, for the status readout while the mode is
     /// on: ratio, drawn, panel, inner, ppp. Debugging bars means comparing
     /// these four numbers, so they are shown rather than logged.
@@ -2095,6 +2183,7 @@ impl MyApp {
             fit_arrive_pending: false,
             fit_iters: 0,
             pending_pos: None,
+            capturing: None,
             fit_debug: None,
             slideshow: false,
             slideshow_last: Instant::now(),
@@ -7042,10 +7131,11 @@ impl eframe::App for MyApp {
         // event path stays exactly as it was.
         let copy_alt = action_pressed_fresh(ctx, &kb, "copy");
         let copy_path_alt = action_pressed_fresh(ctx, &kb, "copy_path");
-        // `typing` is true when the search box owns the keyboard. All of this is
-        // global single-key handling, so it must stand down or typing "g" into
-        // the filter would toggle the grid and "r" would reload the folder.
-        if !typing {
+        // `typing` is true when the search box owns the keyboard, and
+        // `capturing` when a rebind button is waiting for keys: both stand
+        // the whole dispatch down, or typing "g" toggles the grid and a
+        // capture press of Delete recycles a photo.
+        if !typing && self.capturing.is_none() {
             if self.gallery_view {
                 // Grid: arrows move the highlight, PageUp/PageDown move a page,
                 // Home/End jump to the ends, Enter opens it. Clamped, so walking
@@ -7258,13 +7348,13 @@ impl eframe::App for MyApp {
                         self.step(ctx, nav_is_forward(NavInput::Right, rtl));
                     }
                     if ui
-                        .selectable_label(self.config.fit_mode, "Fit view (F)")
+                        .selectable_label(self.config.fit_mode, action_button_text(&self.config, "Fit view", "fit"))
                         .on_hover_text("Fit every image to the window")
                         .clicked()
                     {
                         self.toggle_fit_mode();
                     }
-                    if ui.button("Gallery (G)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Gallery", "grid")).clicked() {
                         self.toggle_gallery();
                     }
                     if ui.button("Rotate ⟲").clicked() {
@@ -7323,7 +7413,7 @@ impl eframe::App for MyApp {
                     // spells out the one real cost, which is that panning is
                     // unreachable while it is on.
                     if ui
-                        .selectable_label(self.crop_mode, "Crop (C)")
+                        .selectable_label(self.crop_mode, action_button_text(&self.config, "Crop", "crop"))
                         .on_hover_text("Drag on the image to frame. Hold Shift for a square.")
                         .clicked()
                     {
@@ -7351,33 +7441,36 @@ impl eframe::App for MyApp {
                     if ui
                         .add_enabled(
                             self.cur.is_some(),
-                            egui::Button::new("Save transformed… (Ctrl+S)"),
+                            egui::Button::new(action_button_text(&self.config, "Save transformed…", "save")),
                         )
                         .on_hover_text("New file beside this one, original untouched")
                         .clicked()
                     {
                         self.save_transformed_copy();
                     }
-                    if ui.button("Panels (I)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Panels", "panels")).clicked() {
                         self.suppress_resize_redecode = true;
                         self.show_panels = !self.show_panels;
                     }
-                    if ui.button("Left (L)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Left", "pane_left")).clicked() {
                         self.suppress_resize_redecode = true;
                         self.show_left = !self.show_left;
                     }
-                    if ui.button("Right (P)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Right", "pane_right")).clicked() {
                         self.suppress_resize_redecode = true;
                         self.show_right = !self.show_right;
                     }
                     if ui
-                        .selectable_label(self.config.fit_window_mode, "Fit window (T)")
+                        .selectable_label(
+                            self.config.fit_window_mode,
+                            action_button_text(&self.config, "Fit window", "fit_window"),
+                        )
                         .on_hover_text("Shrink the window to the picture; follows images and zooms while on")
                         .clicked()
                     {
                         self.fit_window_to_image();
                     }
-                    if ui.button("Delete (Del)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Delete", "del")).clicked() {
                         self.delete_current(ctx);
                     }
                     // No key advertised, because there is none: Move and Copy write
@@ -7389,22 +7482,22 @@ impl eframe::App for MyApp {
                     if ui.button("Copy…").clicked() {
                         self.transfer_current(ctx, true);
                     }
-                    if ui.button("Explore (E)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Explore", "explore")).clicked() {
                         self.explore_current();
                     }
-                    if ui.button("Reload (R)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Reload", "reload")).clicked() {
                         self.rescan(ctx, true);
                     }
-                    if ui.button("Copy IMG (Ctrl+C)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Copy IMG", "copy")).clicked() {
                         self.copy_image_to_clipboard(false);
                     }
                     if ui.button("Copy original").clicked() {
                         self.copy_image_to_clipboard(true);
                     }
-                    if ui.button("Wallpaper (W)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Wallpaper", "wall")).clicked() {
                         self.set_wallpaper();
                     }
-                    if ui.button("Print… (Ctrl+P)").clicked() {
+                    if ui.button(action_button_text(&self.config, "Print…", "print")).clicked() {
                         self.print_current();
                     }
                     if ui.button("Touch now").clicked() {
@@ -7772,53 +7865,103 @@ impl eframe::App for MyApp {
                 ui.add_space(6.0);
                 // ---- keys ---------------------------------------------------
                 //
-                // Rebindable navigation keys (Tier 1 #1). The dropdown offers the
-                // five shipped navigation keys, so any action can take any of
-                // them; the *meanings* are fixed in `NAV_REBINDABLE`, which is
-                // why a rebound key still asks `nav_is_forward` and cannot
-                // become a second opinion about direction. Bare letters are not
-                // here on purpose: they are the view-only safe list
-                // `tests/keybindings.rs` pins.
+                // Every action rebindable: click a chord, press keys. Meanings
+                // never change (navigation still asks `nav_is_forward`), only
+                // the chords. While one waits, the dispatch stands down so the
+                // capture press cannot act — deleting a photo by rebinding
+                // Delete is exactly the accident this gate exists to prevent.
                 ui.label("Keys:");
-                let mut keys_changed = false;
-                for (action, _meaning) in NAV_REBINDABLE {
-                    let current = image_viewer::resolve_binding(&self.config.keybindings, action);
-                    let mut selected = current.clone();
-                    ui.horizontal(|ui| {
-                        ui.label(*action);
-                        egui::ComboBox::from_id_salt(("nav_key", *action))
-                            .selected_text(selected.clone())
-                            .show_ui(ui, |ui| {
-                                for name in KEY_NAME_OPTIONS {
-                                    ui.selectable_value(
-                                        &mut selected,
-                                        (*name).to_owned(),
-                                        *name,
-                                    );
-                                }
-                            });
-                    });
-                    if selected != current {
-                        if selected == image_viewer::default_binding(action) {
-                            self.config.keybindings.remove(*action);
-                        } else {
-                            self.config.keybindings.insert((*action).to_owned(), selected);
-                        }
-                        keys_changed = true;
-                    }
-                }
-                if keys_changed {
-                    set_nav_overrides(&self.config.keybindings);
-                    self.config.save(&self.config_path);
-                    self.notice = Some("Keys updated".into());
-                }
-                ui.small("Bare letters (C, D, E, F, G, I, M, O, R, W, X) are fixed.");
                 if ui.button("Reset keys").clicked() {
                     self.config.keybindings.clear();
                     set_nav_overrides(&self.config.keybindings);
                     self.config.save(&self.config_path);
                     self.notice = Some("Keys reset to defaults".into());
                 }
+                // Capture: fresh (non-repeat) key presses become the chord.
+                // Bare Escape cancels (so Escape is not bindable — it already
+                // owns the typing/grid/fullscreen/quit chain, which is
+                // structural rather than a binding).
+                if let Some(action) = self.capturing.clone() {
+                    let pressed: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|e| match e {
+                                egui::Event::Key {
+                                    key,
+                                    pressed: true,
+                                    repeat: false,
+                                    modifiers,
+                                    ..
+                                } => Some((*key, *modifiers)),
+                                _ => None,
+                            })
+                            .collect()
+                    });
+                    if pressed.iter().any(|(k, m)| {
+                        *k == egui::Key::Escape && !m.any()
+                    }) {
+                        self.capturing = None;
+                    } else if let Some((key, mods)) = pressed.first() {
+                        let mut raw = String::new();
+                        if mods.ctrl {
+                            raw.push_str("Ctrl+");
+                        }
+                        if mods.shift {
+                            raw.push_str("Shift+");
+                        }
+                        if mods.alt {
+                            raw.push_str("Alt+");
+                        }
+                        raw.push_str(key_name(*key));
+                        match image_viewer::canonical_chord(&raw) {
+                            Some(chord) => {
+                                let clash = image_viewer::KEY_ACTIONS.iter().find(|(id, _, _)| {
+                                    *id != action
+                                        && image_viewer::resolve_binding(&self.config.keybindings, id)
+                                            == chord
+                                });
+                                if let Some((_, _, label)) = clash {
+                                    self.notice = Some(format!(
+                                        "{chord} is already {label} — pick another"
+                                    ));
+                                } else {
+                                    if chord == image_viewer::default_binding(&action) {
+                                        self.config.keybindings.remove(&action);
+                                    } else {
+                                        self.config.keybindings.insert(action.clone(), chord.clone());
+                                    }
+                                    set_nav_overrides(&self.config.keybindings);
+                                    self.config.save(&self.config_path);
+                                    self.notice = Some(format!("{label} is now {chord}", label = action_label(&action)));
+                                }
+                                self.capturing = None;
+                            }
+                            None => {
+                                self.capturing = None;
+                            }
+                        }
+                    }
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt("key_list")
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for (id, _, label) in image_viewer::KEY_ACTIONS {
+                            ui.horizontal(|ui| {
+                                ui.label(*label);
+                                let current = image_viewer::resolve_binding(&self.config.keybindings, id);
+                                let text = if self.capturing.as_deref() == Some(*id) {
+                                    "press keys… (Esc cancels)".to_owned()
+                                } else {
+                                    current.clone()
+                                };
+                                if ui.button(text).clicked() {
+                                    self.capturing = Some((*id).to_owned());
+                                }
+                            });
+                        }
+                    });
+                ui.small("Esc quits the app chain and is not bindable; Ctrl+C keeps its platform meaning alongside any alternative you set.");
                 ui.add_space(6.0);
                 // ---- user commands ------------------------------------------
                 //
@@ -7901,9 +8044,11 @@ impl eframe::App for MyApp {
                 // the promise that the rough edges are known and written down
                 // (README's beta sections), not that the setting is dangerous.
                 let mut mode_changed = false;
+                let manga_label = action_button_text(&self.config, "Double page mode", "manga");
+                let rtl_label = action_button_text(&self.config, "Right-to-left pages", "rtl");
                 ui.horizontal(|ui| {
                     mode_changed = ui
-                        .checkbox(&mut self.config.manga_mode, "Double page mode (M)")
+                        .checkbox(&mut self.config.manga_mode, manga_label)
                         .changed();
                     ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
                 });
@@ -7912,7 +8057,7 @@ impl eframe::App for MyApp {
                     self.goto(ctx);
                 }
                 if ui
-                    .checkbox(&mut self.config.manga_rtl, "Right-to-left pages (D)")
+                    .checkbox(&mut self.config.manga_rtl, rtl_label)
                     .changed()
                 {
                     self.config.save(&self.config_path);

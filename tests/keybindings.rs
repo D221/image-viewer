@@ -27,7 +27,7 @@
 use image_viewer::{default_binding, nav_is_forward, NavInput, KEY_ACTIONS};
 
 /// The region that reads keys and dispatches on them: the body of the
-/// `if !typing {` block, found by matching braces.
+/// `if !typing && self.capturing.is_none() {` block, found by matching braces.
 ///
 /// Scoped rather than the whole file so "does a bare key reach a file-writing
 /// action" is a question about the *dispatch*, not about the Move/Copy buttons,
@@ -46,10 +46,11 @@ fn dispatch_region() -> String {
 /// `only_delete_reaches_the_recycle_bin` spent a while asserting against a region
 /// that was not there.
 fn dispatch_region_in(src: &str) -> String {
+    let anchor = "if !typing && self.capturing.is_none() {";
     let start = src
-        .find("if !typing {")
-        .expect("the `if !typing` key-dispatch block is gone; update this test to match")
-        + "if !typing {".len();
+        .find(anchor)
+        .expect("the key-dispatch block is gone; update this test to match")
+        + anchor.len();
     let mut depth = 1i32;
     let mut end = src.len();
     for (i, b) in src.as_bytes()[start..].iter().enumerate() {
@@ -546,8 +547,13 @@ fn only_delete_reaches_the_recycle_bin() {
     }
 }
 
-/// The button labels must not advertise keys that no longer exist, which is how a
-/// stale binding survives a change to the handler.
+/// Button and toggle labels must never hardcode a key: every label that
+/// names a chord goes through `action_button_text`, which reads the live
+/// binding — otherwise the first rebind turns every label into a lie, which
+/// is exactly the stale-binding defect this test exists for.
+///
+/// Asserted as absence: any static `"...(X)"` label text left in a widget
+/// call fails, so adding a hardcoded label is what breaks, not removing one.
 #[test]
 fn the_buttons_do_not_advertise_keys_that_are_gone() {
     let src = source();
@@ -557,9 +563,28 @@ fn the_buttons_do_not_advertise_keys_that_are_gone() {
             "the `{label}` button still advertises a shortcut that has been removed"
         );
     }
+    for hint in [
+        "(Ctrl+S)", "(Ctrl+C)", "(Ctrl+P)", "(Ctrl+Shift", "(Del)", "(Space)", "(Home)",
+        "(End)", "(Enter)", "(F11)", "(Num", "(Comma)", "(Period)",
+    ] {
+        for (n, line) in src.lines().enumerate() {
+            let line = line.trim();
+            if (line.contains("ui.button(\"")
+                || line.contains("selectable_label(")
+                || line.contains(".checkbox("))
+                && line.contains(hint)
+            {
+                panic!(
+                    "line {} hardcodes a key hint `{hint}` in a widget label — route it through \
+                     action_button_text so it stays true when rebound:\n{line}",
+                    n + 1
+                );
+            }
+        }
+    }
     assert!(
-        src.contains("Crop (C)"),
-        "the crop button should advertise C"
+        src.contains("action_button_text(&self.config, \"Crop\", \"crop\")"),
+        "the crop toggle must show the live chord"
     );
 }
 
@@ -615,11 +640,11 @@ fn ctrl_c_is_read_from_the_copy_event_and_not_from_a_key() {
         src.contains("egui::Event::Copy"),
         "the copy chord should be read from `egui::Event::Copy`"
     );
-    // The button label is the user-facing half of the same promise, and it is
-    // still true — but only now.
+    // The button label is live: it shows the current chord for the copy
+    // action, which is Ctrl+C until rebound.
     assert!(
-        src.contains("Copy IMG (Ctrl+C)"),
-        "the Copy IMG button should still advertise Ctrl+C"
+        src.contains("action_button_text(&self.config, \"Copy IMG\", \"copy\")"),
+        "the Copy IMG button must show the live copy chord, not a hardcoded one"
     );
 }
 
@@ -917,19 +942,19 @@ fn home_and_end_reach_a_turn_rather_than_a_file() {
 fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live() {
     let src = code_only(&source());
 
-    for (label, field) in [
-        ("Double page mode (M)", "manga_mode"),
-        ("Right-to-left pages (D)", "manga_rtl"),
+    for (base, action, field) in [
+        ("Double page mode", "manga", "manga_mode"),
+        ("Right-to-left pages", "rtl", "manga_rtl"),
     ] {
         assert!(
-            src.contains(label),
-            "the settings panel no longer offers `{label}`. The keys are how a reader \
+            src.contains(&format!("action_button_text(&self.config, \"{base}\", \"{action}\")")),
+            "the settings panel no longer offers `{base}` with its live chord. The keys are how a reader \
              finds this feature, so a checkbox that lost its label is a setting that only \
              exists as a keystroke."
         );
         assert!(
             src.contains(&format!("&mut self.config.{field}")),
-            "the `{label}` checkbox is not bound to `config.{field}`."
+            "the `{base}` checkbox is not bound to `config.{field}`."
         );
     }
 

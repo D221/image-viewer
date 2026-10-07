@@ -293,7 +293,7 @@ should not quietly do that.
 
 
 
-| Key | Action |
+| Key | Action (shipped default — every row rebindable in Settings → Keys) |
 |---|---|
 | `←` `→` | Previous / next image, or previous / next **page** of a document (also `PgUp` / `PgDn` / `Space`) — in **manga mode**, previous / next **turn**, and right-to-left flips the arrows |
 | `↑` `↓` | In the grid: move the selection by a row |
@@ -303,7 +303,7 @@ should not quietly do that.
 | `F` | Toggle fit-view mode (every image fitted; mutually exclusive with `T`) |
 | `Shift+F` | Fill window (crop overflow, single image only) |
 | `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
-| `2`–`4` | Zoom presets 2–4 (2×, 4×, 8× by default; one-shot, temporary in 1:1 mode) |
+| `2`-`4` | Zoom presets 2-4 (2x, 4x, 8x by default; one-shot jumps) |
 | `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor). On fits now, arrivals refit, zooms re-hug |
 | `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
 | `K` | Pause / resume the animation |
@@ -311,7 +311,7 @@ should not quietly do that.
 | `L` / `P` | Toggle the left (EXIF) / right (settings) pane alone |
 | `/` | Focus the filter box |
 | `F11` | Fullscreen |
-| `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window |
+| `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window (the last step-offable in Settings; `Esc` itself is not rebindable) |
 | `C` | Toggle crop mode |
 | `Del` | Move to the Recycle Bin (never a hard delete) |
 | `E` `W` `R` | Explore folder, wallpaper, reload folder |
@@ -328,9 +328,9 @@ should not quietly do that.
 | Touch buttons | Set the file date to now, its EXIF date, or the whole visible folder to EXIF dates |
 | Copy original | The stored picture EXIF-oriented, no crop or turn (Ctrl+C copies framed) |
 | Portable mode | Empty `portable.txt` beside the exe keeps config, thumbs, spreads and wallpaper there |
-| Arrow keys / `Space` / `PgDn` / `PgUp` | Rebindable in Settings → Keys (bare letters stay fixed) |
+| Arrow keys / `Space` / `PgDn` / `PgUp` | Navigate (all rebindable like every other key) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
-| Mouse side buttons | Same as `←` / `→` |
+| Mouse side buttons | Same as `←` / `→` (still hardcoded — mouse is not rebindable yet) |
 | Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
 
 ### User commands (beta)
@@ -483,7 +483,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
 | Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |
-| Keys | defaults | Rebind the five navigation keys (`next`, `prev`, `next_alt`, `page_next`, `page_prev`) to any of ArrowRight/ArrowLeft/Space/PageDown/PageUp. Meanings never change, so manga direction still holds |
+| Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords are refused by name. `Esc` and mouse buttons are not rebindable |
 | User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
 
 The downscale filter, **Smooth** and sort mode re-decode immediately; the
