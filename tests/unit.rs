@@ -4288,16 +4288,19 @@ fn user_command_with_no_args_gets_the_file() {
 #[test]
 fn exif_dates_parse_strictly_and_touch_lands() {
     use std::time::{Duration, UNIX_EPOCH};
-    // 2024-03-17 14:34:56 UTC = 1710686096.
+    // 2024-03-17 14:34:56 UTC = 1710686096, in both spellings.
     assert_eq!(
         image_viewer::parse_exif_datetime("2024:03:17 14:34:56"),
+        UNIX_EPOCH.checked_add(Duration::from_secs(1710686096))
+    );
+    assert_eq!(
+        image_viewer::parse_exif_datetime("2024-03-17 14:34:56"),
         UNIX_EPOCH.checked_add(Duration::from_secs(1710686096))
     );
     // Leap day exists in 2024 and not in 2023.
     assert!(image_viewer::parse_exif_datetime("2024:02:29 00:00:00").is_some());
     assert!(image_viewer::parse_exif_datetime("2023:02:29 00:00:00").is_none());
     for bad in [
-        "2024-03-17 14:34:56",
         "2024:13:01 00:00:00",
         "2024:03:17",
         "2024:03:17 24:00:00",
@@ -4316,6 +4319,28 @@ fn exif_dates_parse_strictly_and_touch_lands() {
     let to = UNIX_EPOCH + Duration::from_secs(1700000000);
     image_viewer::touch_file_mtime(&p, to).unwrap();
     assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), to);
+}
+
+/// End to end through a real file: FFA02639.jpg carries DateTimeOriginal
+/// 2017-02-08 14:14:02, and the lookup-plus-parse must find it — a
+/// dashes-vs-colons mismatch here is exactly the shipped "No EXIF date".
+/// `test-images/` is gitignored, so this skips when absent.
+#[test]
+fn exif_date_reads_from_a_real_file() {
+    use std::time::{Duration, UNIX_EPOCH};
+    let path = std::path::Path::new("test-images/FFA02639.jpg");
+    if !path.exists() {
+        return;
+    }
+    let exif = nom_exif::read_exif(path).expect("fixture must parse");
+    let raw = exif
+        .get(nom_exif::ExifTag::DateTimeOriginal)
+        .map(|e| e.to_string())
+        .expect("fixture carries DateTimeOriginal");
+    assert_eq!(
+        image_viewer::parse_exif_datetime(&raw),
+        UNIX_EPOCH.checked_add(Duration::from_secs(1486563242))
+    );
 }
 
 /// Slideshow pacing: due once the interval has passed, never early, and a
@@ -4489,10 +4514,6 @@ fn adoption_follows_the_view_modes() {
     );
 }
 
-/// The three view modes exclude each other, arrivals in 1:1 pin the first
-/// preset, and both toggles exist with notices. `T` clearing its siblings
-/// is covered by the sticky scan; this covers the other two directions.
-#[test]
 /// The two view modes exclude each other: turning fit-view on disables
 /// fit-window, and vice versa.
 #[test]

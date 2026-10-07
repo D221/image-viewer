@@ -485,16 +485,20 @@ pub fn expand_user_command(cmd: &UserCommand, file: &std::path::Path) -> (String
     (expand_template(&cmd.program, file), args)
 }
 
-/// Parse an EXIF `DateTimeOriginal` (`"2024:03:17 14:34:56`) into a
-/// `SystemTime`. Anything else — wrong separators, month 13, Feb 30, a
-/// prefix-less Unix stamp — is `None` rather than a guessed date.
+/// Parse an EXIF `DateTimeOriginal` into a `SystemTime`. Accepts both the
+/// wire form (`"2024:03:17 14:34:56`) and the normalized form libraries
+/// hand out (`"2024-03-17 14:34:56` — nom-exif parses the tag into a
+/// `NaiveDateTime` whose `Display` uses dashes, so requiring colons rejects
+/// every real file). Anything else is `None` rather than a guessed date.
 ///
 /// No timezone: the tag carries none, so the stamp is read as UTC. That can
 /// disagree with the wall clock by the local offset; ordering photos is
 /// unaffected, which is what touching dates is for.
 pub fn parse_exif_datetime(s: &str) -> Option<std::time::SystemTime> {
     let (date, time) = s.split_once(' ')?;
-    let mut d = date.split(':');
+    // Colons on the wire, dashes after parsing — accept either.
+    let sep = if date.contains('-') { '-' } else { ':' };
+    let mut d = date.split(sep);
     let (y, mo, day): (i64, u64, u64) = (
         d.next()?.parse().ok()?,
         d.next()?.parse().ok()?,
