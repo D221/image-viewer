@@ -1095,9 +1095,15 @@ pub fn show_archives_enabled() -> bool {
 /// One predicate rather than an extension list per scan: the flat scan, the
 /// recursive walk and `Gallery::new` all ask here, so a setting that hides
 /// archives cannot be honoured by one of them and missed by the others.
+///
+/// **An archive is only browsable if it contains at least one image.** This
+/// check reads the archive header (central directory for zip/7z, file headers
+/// for RAR) but does not extract anything. An empty archive or one with no
+/// supported images is not listed at all — so pressing right on the previous
+/// image skips it entirely rather than opening an empty gallery.
 pub fn is_browsable(p: &Path) -> bool {
     if is_archive_path(p) {
-        return show_archives_enabled();
+        return show_archives_enabled() && archive_image_count(p).map(|c| c > 0).unwrap_or(false);
     }
     let ext = p
         .extension()

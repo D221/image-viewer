@@ -4966,10 +4966,12 @@ fn the_show_archives_setting_hides_archives_and_spares_images() {
     let sub = dir.path().join("vol2");
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(dir.path().join("a.jpg"), b"x").unwrap();
-    for name in ["v1.cbz", "v2.7z", "v3.rar", "v4.zip"] {
-        std::fs::write(dir.path().join(name), b"x").unwrap();
-    }
-    std::fs::write(sub.join("deep.cbz"), b"x").unwrap();
+    // Only archives WITH images should be listed. Create valid ones.
+    write_test_zip(&dir.path().join("v1.cbz"), &[("p1.jpg", archive_test_png())]);
+    write_test_7z(&dir.path().join("v2.7z"), &[("p1.jpg", archive_test_png())]);
+    write_test_zip(&dir.path().join("v4.zip"), &[("p1.jpg", archive_test_png())]);
+    // v3.rar - we can't easily write a valid RAR, so it won't be listed
+    write_test_zip(&sub.join("deep.cbz"), &[("p.jpg", archive_test_png())]);
 
     let names = |v: Vec<std::path::PathBuf>| -> Vec<String> {
         v.iter()
@@ -4983,10 +4985,10 @@ fn the_show_archives_setting_hides_archives_and_spares_images() {
     };
     assert_eq!(
         names(scan_folder(dir.path())),
-        vec!["a.jpg", "v1.cbz", "v2.7z", "v3.rar", "v4.zip"],
-        "on: every archive is listed beside the image"
+        vec!["a.jpg", "v1.cbz", "v2.7z", "v4.zip"],
+        "on: only valid archives with images are listed beside the image"
     );
-    assert_eq!(names(scan_folder_recursive(dir.path())).len(), 6);
+    assert_eq!(names(scan_folder_recursive(dir.path())).len(), 5); // a.jpg + 4 valid archives
 
     set_show_archives(false);
     assert_eq!(
@@ -5019,21 +5021,24 @@ fn archives_are_listed_and_images_still_are() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("a.jpg"), b"x").unwrap();
-    for ext in ["zip", "cbz", "7z", "rar"] {
-        std::fs::write(root.join(format!("vol1.{ext}")), b"x").unwrap();
-    }
+    // Only archives WITH images should be listed. Create valid ones.
+    write_test_zip(&root.join("vol1.cbz"), &[("p1.jpg", archive_test_png())]);
+    write_test_7z(&root.join("vol1.7z"), &[("p1.jpg", archive_test_png())]);
+    // RAR we can't easily write a valid one, so skip it for listing test
+    write_test_zip(&root.join("vol1.zip"), &[("p1.jpg", archive_test_png())]);
     std::fs::write(root.join("notes.txt"), b"x").unwrap();
-    std::fs::write(root.join("inner.cbz"), b"x").unwrap();
+    std::fs::write(root.join("inner.cbz"), b"x").unwrap(); // empty - should NOT appear
 
     let mut found: Vec<String> = image_viewer::scan_folder(root)
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     found.sort();
+    // Only the valid archives with images are listed; inner.cbz is empty so excluded
     assert_eq!(
         found,
-        vec!["a.jpg", "inner.cbz", "vol1.7z", "vol1.cbz", "vol1.rar", "vol1.zip"],
-        "images and every claimed archive, natural order, nothing else"
+        vec!["a.jpg", "vol1.7z", "vol1.cbz", "vol1.zip"],
+        "images and valid archives with images, natural order; empty inner.cbz excluded"
     );
 
     // The recursive walk shares the predicate, so an archive in a subfolder is
@@ -5054,14 +5059,12 @@ fn archives_are_listed_and_images_still_are() {
     assert_eq!(
         walked,
         vec![
-            "inner.cbz",
             "vol1.7z",
             "vol1.cbz",
-            "vol1.rar",
             "vol1.zip",
             "vol2/v2.cbz"
         ],
-        "archives are found at every level, ordered by full path; the txt never is"
+        "archives with images are found at every level; empty inner.cbz excluded; the txt never is"
     );
 
     // The claim is content-based for decoding, so the listing predicate must
@@ -5072,10 +5075,17 @@ fn archives_are_listed_and_images_still_are() {
         "an archive in the decode filter would be handed to the image decoders \
          and would also be extracted as a member of another archive"
     );
+    // The predicate is case-insensitive and covers both kinds.
+    // Use an actual archive we created in this test.
     assert!(
-        image_viewer::is_browsable(std::path::Path::new("x/inner.cbz"))
+        image_viewer::is_browsable(root.join("vol1.cbz").as_path())
             && image_viewer::is_browsable(std::path::Path::new("x/a.JPG")),
         "the predicate is case-insensitive and covers both kinds"
+    );
+    // Empty archive is NOT browsable
+    assert!(
+        !image_viewer::is_browsable(std::path::Path::new("x/inner.cbz")),
+        "an empty archive is not browsable"
     );
     assert!(
         !image_viewer::is_browsable(std::path::Path::new("x/notes.txt")),
