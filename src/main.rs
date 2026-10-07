@@ -3902,6 +3902,74 @@ impl MyApp {
         }
     }
 
+    /// Set the current file's modification date: now, or its EXIF
+    /// shooting date when the camera wrote one. A missing EXIF date is an
+    /// error naming the file, not a silent touch to epoch.
+    fn touch_current(&mut self, to_exif: bool) {
+        let Some(p) = self.gallery.current() else {
+            self.notice = Some("No image is open".into());
+            return;
+        };
+        let to = if to_exif {
+            let raw: Option<String> = nom_exif::read_exif(&p)
+                .ok()
+                .and_then(|ex| ex.get(nom_exif::ExifTag::DateTimeOriginal).map(|e| e.to_string()));
+            match raw.and_then(|s| image_viewer::parse_exif_datetime(&s)) {
+                Some(t) => t,
+                None => {
+                    self.error = Some(format!(
+                        "No EXIF date in {}",
+                        p.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                    return;
+                }
+            }
+        } else {
+            std::time::SystemTime::now()
+        };
+        match image_viewer::touch_file_mtime(&p, to) {
+            Ok(()) => {
+                self.notice = Some(format!(
+                    "Touched {}",
+                    p.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            Err(e) => self.error = Some(format!("Touch failed: {e}")),
+        }
+    }
+
+    /// Set every visible file's date to its EXIF shooting date. Files
+    /// without one are counted, not failed — a folder of screenshots has no
+    /// EXIF dates at all, and that is ordinary, not an error per file.
+    fn touch_folder_to_exif_dates(&mut self) {
+        // Touched through the filtered gallery (what you see), and cloned up
+        // front: touching changes mtimes the watcher stamps, so iterating a
+        // borrowed list while the poll below may rescan is asking for trouble.
+        let files: Vec<std::path::PathBuf> = self.gallery.files.clone();
+        if files.is_empty() {
+            self.notice = Some("No images to touch".into());
+            return;
+        }
+        let (mut ok, mut skipped) = (0, 0);
+        for p in &files {
+            let raw: Option<String> = nom_exif::read_exif(p)
+                .ok()
+                .and_then(|ex| ex.get(nom_exif::ExifTag::DateTimeOriginal).map(|e| e.to_string()));
+            match raw.and_then(|s| image_viewer::parse_exif_datetime(&s)) {
+                Some(t) => match image_viewer::touch_file_mtime(p, t) {
+                    Ok(()) => ok += 1,
+                    Err(_) => skipped += 1,
+                },
+                None => skipped += 1,
+            }
+        }
+        self.notice = Some(if skipped == 0 {
+            format!("Touched {ok} files")
+        } else {
+            format!("Touched {ok} files, {skipped} without EXIF dates")
+        });
+    }
+
     /// Copy the current file's path as text (Ctrl+Shift+C).
     ///
     /// Shares `Event::Copy` with the image copy: egui-winit's
@@ -7126,6 +7194,15 @@ impl eframe::App for MyApp {
                     }
                     if ui.button("Print… (Ctrl+P)").clicked() {
                         self.print_current();
+                    }
+                    if ui.button("Touch now").clicked() {
+                        self.touch_current(false);
+                    }
+                    if ui.button("Touch EXIF date").clicked() {
+                        self.touch_current(true);
+                    }
+                    if ui.button("Touch folder EXIF dates").clicked() {
+                        self.touch_folder_to_exif_dates();
                     }
                     ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
                 });

@@ -325,6 +325,7 @@ should not quietly do that.
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
 | `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |
+| Touch buttons | Set the file date to now, its EXIF date, or the whole visible folder to EXIF dates |
 | Arrow keys / `Space` / `PgDn` / `PgUp` | Rebindable in Settings → Keys (bare letters stay fixed) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` |

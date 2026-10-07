@@ -4283,6 +4283,41 @@ fn user_command_with_no_args_gets_the_file() {
     assert_eq!(args, vec!["C:/pics/a.jpg"]);
 }
 
+/// EXIF dates parse strict-shape or not at all; touching sets exactly the
+/// time asked for, readable back from the file.
+#[test]
+fn exif_dates_parse_strictly_and_touch_lands() {
+    use std::time::{Duration, UNIX_EPOCH};
+    // 2024-03-17 14:34:56 UTC = 1710686096.
+    assert_eq!(
+        image_viewer::parse_exif_datetime("2024:03:17 14:34:56"),
+        UNIX_EPOCH.checked_add(Duration::from_secs(1710686096))
+    );
+    // Leap day exists in 2024 and not in 2023.
+    assert!(image_viewer::parse_exif_datetime("2024:02:29 00:00:00").is_some());
+    assert!(image_viewer::parse_exif_datetime("2023:02:29 00:00:00").is_none());
+    for bad in [
+        "2024-03-17 14:34:56",
+        "2024:13:01 00:00:00",
+        "2024:03:17",
+        "2024:03:17 24:00:00",
+        "2024:03:17 14:34:56 extra",
+        "",
+    ] {
+        assert!(
+            image_viewer::parse_exif_datetime(bad).is_none(),
+            "{bad:?} must not parse"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("touched.jpg");
+    std::fs::write(&p, b"bytes").unwrap();
+    let to = UNIX_EPOCH + Duration::from_secs(1700000000);
+    image_viewer::touch_file_mtime(&p, to).unwrap();
+    assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), to);
+}
+
 /// Slideshow pacing: due once the interval has passed, never early, and a
 /// zero interval floors at one second rather than strobing every frame.
 #[test]
@@ -4648,6 +4683,22 @@ fn printing_is_wired_to_ctrl_p() {
     assert!(
         body.contains("spawn_guard("),
         "printing must go through the spawn guard like every external action"
+    );
+}
+
+/// Touch dates must be **wired**: single file to now or its EXIF date,
+/// whole visible folder to EXIF dates with the dateless counted, not failed.
+#[test]
+fn touch_dates_are_wired_to_menu_buttons() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn touch_current(&mut self")
+            && src.contains("fn touch_folder_to_exif_dates(&mut self"),
+        "both touch actions must exist"
+    );
+    assert!(
+        src.contains("touch_file_mtime(") && src.contains("parse_exif_datetime("),
+        "touching must go through the tested helpers, not inline date math"
     );
 }
 

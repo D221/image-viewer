@@ -485,6 +485,69 @@ pub fn expand_user_command(cmd: &UserCommand, file: &std::path::Path) -> (String
     (expand_template(&cmd.program, file), args)
 }
 
+/// Parse an EXIF `DateTimeOriginal` (`"2024:03:17 14:34:56`) into a
+/// `SystemTime`. Anything else — wrong separators, month 13, Feb 30, a
+/// prefix-less Unix stamp — is `None` rather than a guessed date.
+///
+/// No timezone: the tag carries none, so the stamp is read as UTC. That can
+/// disagree with the wall clock by the local offset; ordering photos is
+/// unaffected, which is what touching dates is for.
+pub fn parse_exif_datetime(s: &str) -> Option<std::time::SystemTime> {
+    let (date, time) = s.split_once(' ')?;
+    let mut d = date.split(':');
+    let (y, mo, day): (i64, u64, u64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    if d.next().is_some() {
+        return None;
+    }
+    let mut t = time.split(':');
+    let (h, mi, sec): (u64, u64, u64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+    );
+    if t.next().is_some() {
+        return None;
+    }
+    if !(1..=12).contains(&mo) || h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let max_day = match mo {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day < 1 || day > max_day {
+        return None;
+    }
+    // Days from civil date (Hinnant's algorithm), then seconds.
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (mo as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(
+        (days * 86400 + h as i64 * 3600 + mi as i64 * 60 + sec as i64).max(0) as u64,
+    ))
+}
+
+/// Set a file's modification time. Needs a write handle — `File::open` is
+/// read-only and fails here, which is a confusing permission error for a
+/// feature about dates.
+pub fn touch_file_mtime(path: &std::path::Path, to: std::time::SystemTime) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_modified(to)
+}
+
 /// Slideshow pacing: true once `secs` have passed since `last`.
 ///
 /// `secs` floors at 1 — a zero interval would advance every frame, which is
