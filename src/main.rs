@@ -3743,7 +3743,10 @@ impl MyApp {
                 forward,
                 self.gallery.at_front(),
                 self.gallery.at_back(),
-                true,
+                // When inside an archive and loop_back is on, don't leave
+                // at the back edge on forward press — let gallery.next() wrap
+                // within the archive instead.
+                !(forward && self.gallery.at_back() && self.config.loop_back),
             )
     }
 
