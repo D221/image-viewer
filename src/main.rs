@@ -178,6 +178,173 @@ fn parse_key_name(name: &str) -> Option<egui::Key> {
     }
 }
 
+/// Full key-name table for custom bindings: every `egui::Key` worth
+/// pressing, plus bare `"0"`–`"9"` mapping to the numpad-less `Num0`–`Num9`
+/// variants (egui has no bare digit keys, and nobody means the numpad when
+/// they write `"1"`). Anything else is unbound — see `resolve_action`.
+#[allow(dead_code)]
+fn parse_key_full(name: &str) -> Option<egui::Key> {
+    let name = name.trim();
+    if name.len() == 1 {
+        let c = name.chars().next().unwrap();
+        if c.is_ascii_alphabetic() {
+            return match c.to_ascii_uppercase() {
+                'A' => Some(egui::Key::A),
+                'B' => Some(egui::Key::B),
+                'C' => Some(egui::Key::C),
+                'D' => Some(egui::Key::D),
+                'E' => Some(egui::Key::E),
+                'F' => Some(egui::Key::F),
+                'G' => Some(egui::Key::G),
+                'H' => Some(egui::Key::H),
+                'I' => Some(egui::Key::I),
+                'J' => Some(egui::Key::J),
+                'K' => Some(egui::Key::K),
+                'L' => Some(egui::Key::L),
+                'M' => Some(egui::Key::M),
+                'N' => Some(egui::Key::N),
+                'O' => Some(egui::Key::O),
+                'P' => Some(egui::Key::P),
+                'Q' => Some(egui::Key::Q),
+                'R' => Some(egui::Key::R),
+                'S' => Some(egui::Key::S),
+                'T' => Some(egui::Key::T),
+                'U' => Some(egui::Key::U),
+                'V' => Some(egui::Key::V),
+                'W' => Some(egui::Key::W),
+                'X' => Some(egui::Key::X),
+                'Y' => Some(egui::Key::Y),
+                'Z' => Some(egui::Key::Z),
+                _ => None,
+            };
+        }
+        if c.is_ascii_digit() {
+            return match c {
+                '0' => Some(egui::Key::Num0),
+                '1' => Some(egui::Key::Num1),
+                '2' => Some(egui::Key::Num2),
+                '3' => Some(egui::Key::Num3),
+                '4' => Some(egui::Key::Num4),
+                '5' => Some(egui::Key::Num5),
+                '6' => Some(egui::Key::Num6),
+                '7' => Some(egui::Key::Num7),
+                '8' => Some(egui::Key::Num8),
+                '9' => Some(egui::Key::Num9),
+                _ => None,
+            };
+        }
+        return None;
+    }
+    match name {
+        "Num0" => Some(egui::Key::Num0),
+        "Num1" => Some(egui::Key::Num1),
+        "Num2" => Some(egui::Key::Num2),
+        "Num3" => Some(egui::Key::Num3),
+        "Num4" => Some(egui::Key::Num4),
+        "Num5" => Some(egui::Key::Num5),
+        "Num6" => Some(egui::Key::Num6),
+        "Num7" => Some(egui::Key::Num7),
+        "Num8" => Some(egui::Key::Num8),
+        "Num9" => Some(egui::Key::Num9),
+        "F1" => Some(egui::Key::F1),
+        "F2" => Some(egui::Key::F2),
+        "F3" => Some(egui::Key::F3),
+        "F4" => Some(egui::Key::F4),
+        "F5" => Some(egui::Key::F5),
+        "F6" => Some(egui::Key::F6),
+        "F7" => Some(egui::Key::F7),
+        "F8" => Some(egui::Key::F8),
+        "F9" => Some(egui::Key::F9),
+        "F10" => Some(egui::Key::F10),
+        "F11" => Some(egui::Key::F11),
+        "F12" => Some(egui::Key::F12),
+        "ArrowRight" => Some(egui::Key::ArrowRight),
+        "ArrowLeft" => Some(egui::Key::ArrowLeft),
+        "ArrowUp" => Some(egui::Key::ArrowUp),
+        "ArrowDown" => Some(egui::Key::ArrowDown),
+        "Space" => Some(egui::Key::Space),
+        "Enter" => Some(egui::Key::Enter),
+        "Escape" => Some(egui::Key::Escape),
+        "Tab" => Some(egui::Key::Tab),
+        "Backspace" => Some(egui::Key::Backspace),
+        "Delete" => Some(egui::Key::Delete),
+        "Insert" => Some(egui::Key::Insert),
+        "Home" => Some(egui::Key::Home),
+        "End" => Some(egui::Key::End),
+        "PageUp" => Some(egui::Key::PageUp),
+        "PageDown" => Some(egui::Key::PageDown),
+        "Comma" => Some(egui::Key::Comma),
+        "Period" => Some(egui::Key::Period),
+        "Slash" => Some(egui::Key::Slash),
+        "Semicolon" => Some(egui::Key::Semicolon),
+        "Quote" => Some(egui::Key::Quote),
+        "OpenBracket" => Some(egui::Key::OpenBracket),
+        "CloseBracket" => Some(egui::Key::CloseBracket),
+        "Backslash" => Some(egui::Key::Backslash),
+        "Backtick" => Some(egui::Key::Backtick),
+        "Minus" => Some(egui::Key::Minus),
+        "Equals" => Some(egui::Key::Equals),
+        "Plus" => Some(egui::Key::Plus),
+        _ => None,
+    }
+}
+
+/// A resolved binding: the key plus the exact modifier set. Matching is
+/// exact on both (`resolve_action_pressed`): a bare letter never fires with
+/// a modifier held, and a chord never fires with extra ones.
+#[allow(dead_code)]
+struct ResolvedBinding {
+    key: egui::Key,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+}
+
+/// Resolve one action to a chord: the user's override, else the shipped
+/// default. An unparseable override falls back to the default rather than
+/// unbinding the action — a typo must leave the shipped chord working, not
+/// delete the feature. Returns `None` only when even the default will not
+/// parse, which cannot happen for shipped rows.
+#[allow(dead_code)]
+fn resolve_action(
+    bindings: &std::collections::HashMap<String, String>,
+    action: &str,
+) -> Option<ResolvedBinding> {
+    for candidate in [
+        image_viewer::resolve_binding(bindings, action),
+        image_viewer::default_binding(action).to_owned(),
+    ] {
+        if let Some((ctrl, shift, alt, name)) = image_viewer::split_chord(&candidate) {
+            if let Some(key) = parse_key_full(&name) {
+                return Some(ResolvedBinding {
+                    key,
+                    ctrl,
+                    shift,
+                    alt,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Did `action`'s chord fire: the key pressed this frame with exactly the
+/// resolved modifiers. One predicate for the whole dispatch, so every site
+/// below agrees on what a binding means.
+#[allow(dead_code)]
+fn action_pressed(
+    ctx: &egui::Context,
+    bindings: &std::collections::HashMap<String, ResolvedBinding>,
+    action: &str,
+) -> bool {
+    let Some(b) = bindings.get(action) else {
+        return false;
+    };
+    ctx.input(|i| {
+        i.key_pressed(b.key) && i.modifiers.ctrl == b.ctrl && i.modifiers.shift == b.shift && i.modifiers.alt == b.alt
+    })
+}
+
 /// User overrides for rebindable navigation actions, mirroring
 /// `Config::keys`. A process global like the resample and thumbnail-cache
 /// flags, for the same reason: `nav_direction` is called from the input
