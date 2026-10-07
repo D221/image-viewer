@@ -366,6 +366,11 @@ pub struct Config {
     #[serde(default = "default_slideshow_secs")]
     pub slideshow_secs: u32,
 
+    /// Animation playback speed multiplier (1.0 = file timing). Read through
+    /// [`anim_frame_state`], which clamps.
+    #[serde(default = "default_anim_speed")]
+    pub anim_speed: f32,
+
     /// Zoom ratios on keys `1`–`4`, as source-pixel ratios (1.0 is 100%).
     /// Read through [`zoom_preset`], which clamps.
     #[serde(default = "default_zoom_presets")]
@@ -406,6 +411,11 @@ fn default_zoom_presets() -> [f32; 4] {
 /// the picture.
 fn default_slideshow_secs() -> u32 {
     3
+}
+
+/// File timing.
+fn default_anim_speed() -> f32 {
+    1.0
 }
 
 /// One external program entry for "Open with…" style scripting.
@@ -463,6 +473,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("explore", "E", "Reveal in Explorer"),
     ("reload", "R", "Reload folder"),
     ("wall", "W", "Set as wallpaper"),
+    ("wall_shown", "Shift+W", "Set displayed image as wallpaper"),
     ("save", "Ctrl+S", "Save transformed copy"),
     ("save_screen", "Ctrl+Shift+S", "Save screen-size copy"),
     ("crop", "C", "Crop mode"),
@@ -783,6 +794,7 @@ impl Config {
             keybindings: std::collections::HashMap::new(),
             user_commands: Vec::new(),
             slideshow_secs: default_slideshow_secs(),
+            anim_speed: default_anim_speed(),
             zoom_presets: default_zoom_presets(),
             always_on_top: false,
             hide_title_bar: false,
@@ -6129,6 +6141,35 @@ impl Animation {
             .sum();
         Duration::from_millis(ms)
     }
+}
+
+/// Playback-speed bounds: 0.1× is slow motion, 8× the ceiling. Zero would
+/// freeze on frame 0 and negative runs time backwards — neither is a speed.
+pub fn clamp_anim_speed(speed: f32) -> f32 {
+    speed.clamp(0.1, 8.0)
+}
+
+/// Current frame index and time until the next boundary (in real time, for
+/// repaint scheduling) for a playing animation, given elapsed playback time
+/// scaled by `speed` (1.0 = file timing). Zero/short delays are floored to
+/// 20 ms so a broken GIF can't spin the render loop.
+pub fn anim_frame_state(anim: &Animation, elapsed: Duration, speed: f32) -> (usize, Duration) {
+    let speed = clamp_anim_speed(speed);
+    let scaled = elapsed.mul_f32(speed);
+    let total = anim.total_duration().as_millis().max(1);
+    let t = scaled.as_millis() % total;
+    let mut acc = 0u128;
+    for (i, d) in anim.delays.iter().enumerate() {
+        let dm = d.as_millis().max(20);
+        if t < acc + dm {
+            return (i, Duration::from_millis((acc + dm - t) as u64).div_f32(speed));
+        }
+        acc += dm;
+    }
+    (
+        anim.frames.len().saturating_sub(1),
+        Duration::from_millis(20).div_f32(speed),
+    )
 }
 
 /// One frame step for a paused animation (`,` / `.`, YouTube-style):

@@ -4467,6 +4467,94 @@ fn stepping_wraps_and_presets_clamp() {
     assert_eq!(image_viewer::zoom_preset(&[0.0, -3.0, 100.0, 2.0], 2), 32.0);
 }
 
+/// The frame clock survives its move to lib with speed: file timing pins
+/// the old behavior, and 2x halves both the index math and the repaint wait
+/// (which is real time — scheduling an effective-time wait would repaint
+/// late by the speed factor).
+#[test]
+fn anim_frame_state_keeps_time_and_scales() {
+    use image_viewer::ImageData;
+    use std::time::Duration;
+    let frame = || ImageData {
+        width: 1,
+        height: 1,
+        rgba: vec![0, 0, 0, 255],
+        load_time: Duration::ZERO,
+    };
+    let anim = image_viewer::Animation {
+        frames: vec![frame(), frame()],
+        delays: vec![Duration::from_millis(100), Duration::from_millis(200)],
+    };
+    assert_eq!(
+        image_viewer::anim_frame_state(&anim, Duration::ZERO, 1.0),
+        (0, Duration::from_millis(100))
+    );
+    assert_eq!(
+        image_viewer::anim_frame_state(&anim, Duration::from_millis(150), 1.0),
+        (1, Duration::from_millis(150))
+    );
+    // Loops: total 300 ms, so 300 lands back on frame 0.
+    assert_eq!(
+        image_viewer::anim_frame_state(&anim, Duration::from_millis(300), 1.0),
+        (0, Duration::from_millis(100))
+    );
+    // 2x: 50 ms in means 100 ms along — frame 1, with 200 ms of effective
+    // time left reading as 100 ms on the wall clock.
+    assert_eq!(
+        image_viewer::anim_frame_state(&anim, Duration::from_millis(50), 2.0),
+        (1, Duration::from_millis(100))
+    );
+    // Clamped, not frozen: 0x behaves as the 0.1x floor.
+    let (idx, wait) = image_viewer::anim_frame_state(&anim, Duration::from_millis(1000), 0.0);
+    assert!(idx < 2 && wait > Duration::ZERO);
+    assert_eq!(image_viewer::clamp_anim_speed(0.0), 0.1);
+    assert_eq!(image_viewer::clamp_anim_speed(99.0), 8.0);
+}
+
+/// Playback speed must be **wired**: offered in Settings, and read by the
+/// frame clock (paint and resume agree through the same clamp).
+#[test]
+fn animation_speed_is_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.config.anim_speed"),
+        "Settings must offer the speed and the clock must read it"
+    );
+    assert!(
+        src.contains("clamp_anim_speed(self.config.anim_speed)"),
+        "resume must scale through the same clamp as the clock"
+    );
+}
+
+/// Wallpaper-as-displayed must be **wired**: crop and turn baked into a PNG
+/// beside the config (the shell reads files, never buffers), refusing the
+/// cases the path-keyed edit cannot express.
+#[test]
+fn wallpaper_shown_is_wired() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn set_wallpaper_shown(&mut self"),
+        "there must be a processed-wallpaper action"
+    );
+    let at = src
+        .find("fn set_wallpaper_shown(&mut self)")
+        .expect("the action must exist");
+    let body = &src[at..(at + 3500).min(src.len())];
+    assert!(
+        body.contains("region_for_save(") && body.contains("wallpaper.png"),
+        "it must bake through region_for_save into a config-side PNG"
+    );
+    assert!(
+        body.contains("Cannot wallpaper a transformed animation")
+            && body.contains("multi-page document"),
+        "animations and later pages must be refused, like save and copy refuse them"
+    );
+    assert!(
+        src.contains("binding_down(i, &kb, \"wall_shown\")"),
+        "Shift+W must reach it through the bindings map"
+    );
+}
+
 /// Fit window keeps the chrome it measures and clamps to the monitor.
 #[test]
 fn fit_window_hugs_content_and_clamps() {    // 800x600 window, 700x500 central: 100x100 of chrome, kept.

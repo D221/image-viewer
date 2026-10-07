@@ -315,7 +315,7 @@ should not quietly do that.
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window (the last step-offable in Settings; `Esc` itself is not rebindable) |
 | `C` | Toggle crop mode |
 | `Del` | Move to the Recycle Bin (never a hard delete) |
-| `E` `W` `R` | Explore folder, wallpaper, reload folder |
+| `E` `W` `R` | Explore folder, wallpaper, reload folder (`Shift+W`: wallpaper as displayed, crop and turn baked in) |
 | `M` | Toggle **double page mode** — show images as turns of one or two pages |
 | `D` | Toggle **right-to-left** pages (only while double page mode is on) |
 | `O` / `Shift+O` | One fewer / one more page opening alone at the front of the gallery |
@@ -477,6 +477,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
 | Descending sort | off | Reverse the sort order (Z→A, oldest/smallest first) |
 | Slideshow | off, every 3 s | Start/stop button plus pace (1–60 s). Advances until toggled off, or stops at the end with looping off |
+| Animation speed | 1× (file timing) | GIF/WebP/APNG playback multiplier, 0.1–8×, live |
 | Esc closes the app | on | Esc in crop mode drops the frame first; with this off Esc never quits |
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
 | Zoom keys 1-4 | 1× toggles 1:1 mode, 2×-8× one-shot jumps (all configurable) |

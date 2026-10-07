@@ -4125,9 +4125,10 @@ impl MyApp {
             return;
         };
         let n = av.anim.frames.len();
+        let speed = image_viewer::clamp_anim_speed(self.config.anim_speed);
         let cur = av
             .paused
-            .unwrap_or_else(|| anim_frame_state(&av.anim, av.start.elapsed()).0);
+            .unwrap_or_else(|| image_viewer::anim_frame_state(&av.anim, av.start.elapsed(), speed).0);
         av.paused = Some(image_viewer::step_frame(n, cur.min(n.saturating_sub(1)), forward));
     }
 
@@ -4145,9 +4146,19 @@ impl MyApp {
             return;
         };
         if let Some(held) = av.paused.take() {
-            av.start = now - image_viewer::anim_frame_start(&av.anim, held);
+            // Scaled back down: the stored offset is in animation time, but
+            // `start` ticks wall time. Same clamp the frame clock uses, or
+            // the two disagree about which frame is on screen.
+            av.start = now
+                - image_viewer::anim_frame_start(&av.anim, held)
+                    .div_f32(image_viewer::clamp_anim_speed(self.config.anim_speed));
         } else {
-            let idx = anim_frame_state(&av.anim, av.start.elapsed()).0;
+            let idx = image_viewer::anim_frame_state(
+                &av.anim,
+                av.start.elapsed(),
+                self.config.anim_speed,
+            )
+            .0;
             av.paused = Some(idx);
         }
     }
@@ -4629,6 +4640,88 @@ impl MyApp {
         }
     }
 
+    /// Wallpaper from the picture as displayed (Shift+W): the crop and the
+    /// turn baked into a PNG beside the config, because the shell reads a
+    /// file and never our buffers. Refuses animations and document pages
+    /// past the first for the same path-keyed-edit reason save and copy
+    /// refuse them (a frame drawn for page 1 applied to page 3 is a valid
+    /// picture of the wrong scan); unedited images go through the
+    /// original-file path, which handles those fine.
+    fn set_wallpaper_shown(&mut self) {
+        let Some(cur) = self.cur.clone() else {
+            return;
+        };
+        let p = cur.path.clone();
+        let edit = self.edits.get(&p);
+        if edit.is_identity() {
+            self.set_wallpaper();
+            return;
+        }
+        if cur.page > 0 {
+            self.error = Some(format!(
+                "Cannot wallpaper a single page of a multi-page document ({}/{}).",
+                cur.page + 1,
+                self.gallery.pages_in_current()
+            ));
+            return;
+        }
+        if self.anim.as_ref().is_some_and(|a| a.path == p) {
+            self.error = Some("Cannot wallpaper a transformed animation: it has many frames".into());
+            return;
+        }
+        // Same composition the save uses (stored pixels, EXIF part folded
+        // in), re-encoded losslessly: the desktop is display-only, so a
+        // second JPEG generation would be pure loss for nothing.
+        let dest = self
+            .config_path
+            .parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(std::env::temp_dir)
+            .join("wallpaper.png");
+        let fail = |e: String| format!("Wallpaper failed: {e}");
+        let bytes = match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(e) => {
+                self.error = Some(fail(e.to_string()));
+                return;
+            }
+        };
+        let tag = if image_viewer::is_jpeg_bytes(&bytes) {
+            image_viewer::exif_orientation(&p)
+        } else {
+            0
+        };
+        let data = match image_viewer::load_image_full(&p, 0) {
+            Ok(d) => d,
+            Err(e) => {
+                self.error = Some(fail(e.to_string()));
+                return;
+            }
+        };
+        let out = match image_viewer::region_for_save(&data, tag, edit.xform, edit.crop) {
+            Some(o) => o,
+            None => {
+                self.error = Some(fail("the crop fell outside the image".into()));
+                return;
+            }
+        };
+        let img = match image::RgbaImage::from_raw(out.width, out.height, out.rgba) {
+            Some(i) => i,
+            None => {
+                self.error = Some(fail("transformed buffer was malformed".into()));
+                return;
+            }
+        };
+        if let Err(e) = image::DynamicImage::ImageRgba8(img).save(&dest) {
+            self.error = Some(fail(e.to_string()));
+            return;
+        }
+        match wallpaper::set_from_path(&dest.to_string_lossy()) {
+            Ok(()) => self.notice = Some("Set processed image as wallpaper".into()),
+            Err(e) => self.error = Some(fail(e.to_string())),
+        }
+    }
+
     /// The turn's pages — **cursor first** — as `(key, stored dimensions, xform)`.
     ///
     /// **Dimensions, not textures, and that is the whole point of the split.**
@@ -5060,7 +5153,11 @@ impl MyApp {
                     }
                 }
             } else {
-                let (idx, next_in) = anim_frame_state(&av.anim, av.start.elapsed());
+                let (idx, next_in) = image_viewer::anim_frame_state(
+                &av.anim,
+                av.start.elapsed(),
+                self.config.anim_speed,
+            );
                 if idx != av.last_index {
                     let f = &av.anim.frames[idx];
                     av.tex.set(
@@ -6554,26 +6651,6 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
     }
 }
 
-/// Current frame index and time until the next boundary for a playing
-/// animation, given elapsed playback time. Zero/short delays are floored to
-/// 20 ms so a broken GIF can't spin the render loop.
-fn anim_frame_state(anim: &Animation, elapsed: Duration) -> (usize, Duration) {
-    let total = anim.total_duration().as_millis().max(1);
-    let t = elapsed.as_millis() % total;
-    let mut acc = 0u128;
-    for (i, d) in anim.delays.iter().enumerate() {
-        let dm = d.as_millis().max(20);
-        if t < acc + dm {
-            return (i, Duration::from_millis((acc + dm - t) as u64));
-        }
-        acc += dm;
-    }
-    (
-        anim.frames.len().saturating_sub(1),
-        Duration::from_millis(20),
-    )
-}
-
 /// One gallery-grid cell: thumbnail (or placeholder) + file name. Requests the
 /// thumbnail when it is missing, then returns true if the cell was clicked.
 ///
@@ -7079,12 +7156,13 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, explore, reload, wall, save_rot, save_screen, crop_key, pane_left, pane_right) = ctx.input(|i| {
+        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
                 binding_down(i, &kb, "explore"),
                 binding_down(i, &kb, "reload"),
                 binding_down(i, &kb, "wall"),
+                binding_down(i, &kb, "wall_shown"),
                 binding_down(i, &kb, "save"),
                 binding_down(i, &kb, "save_screen"),
                 // `Ctrl+C` never arrives as a key (toolkit interception, see
@@ -7294,6 +7372,8 @@ impl eframe::App for MyApp {
                 self.toggle_crop_mode(ctx);
             } else if wall {
                 self.set_wallpaper();
+            } else if wall_shown {
+                self.set_wallpaper_shown();
             } else if print_key {
                 self.print_current();
             }
@@ -7536,6 +7616,9 @@ impl eframe::App for MyApp {
                     }
                     if ui.button(action_button_text(&self.config, "Wallpaper", "wall")).clicked() {
                         self.set_wallpaper();
+                    }
+                    if ui.button(action_button_text(&self.config, "Wallpaper shown", "wall_shown")).clicked() {
+                        self.set_wallpaper_shown();
                     }
                     if ui.button(action_button_text(&self.config, "Print…", "print")).clicked() {
                         self.print_current();
@@ -8260,6 +8343,22 @@ impl eframe::App for MyApp {
                         self.config.save(&self.config_path);
                     }
                     ui.label("s");
+                });
+                // Animation playback speed, next to the slideshow for the
+                // same reason it sits there: both are time-based playback,
+                // and both apply live with no re-decode.
+                ui.horizontal(|ui| {
+                    ui.label("Animation speed (1 = file timing):");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.config.anim_speed)
+                                .range(0.1..=8.0)
+                                .speed(0.25),
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
                 });
                 ui.add_space(6.0);
                 ui.heading("File associations");
