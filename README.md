@@ -326,6 +326,7 @@ should not quietly do that.
 | `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |
 | Touch buttons | Set the file date to now, its EXIF date, or the whole visible folder to EXIF dates |
+| Copy original | The stored picture EXIF-oriented, no crop or turn (Ctrl+C copies framed) |
 | Arrow keys / `Space` / `PgDn` / `PgUp` | Rebindable in Settings → Keys (bare letters stay fixed) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` |

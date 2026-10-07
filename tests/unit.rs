@@ -4723,6 +4723,21 @@ fn touch_dates_are_wired_to_menu_buttons() {
     );
 }
 
+/// Copy-original shares the copy path with an identity edit: same sources,
+/// no re-decode, EXIF-oriented but uncropped and unturned.
+#[test]
+fn copy_original_shares_the_copy_path() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("fn copy_image_to_clipboard(&mut self, unedited: bool)"),
+        "there must be one copy path with an unedited arm"
+    );
+    assert!(
+        src.contains("Copy original") && src.contains("self.copy_image_to_clipboard(true)"),
+        "the menu must offer the unedited copy"
+    );
+}
+
 /// The settings panel must scroll: it long outgrew the window height, and
 /// `main.rs` is unreachable from every test, so this is a source scan - the
 /// established pattern here.

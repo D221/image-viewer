@@ -4137,7 +4137,7 @@ impl MyApp {
     /// Which buffer the pixels come from differs by path, and each one is in a
     /// different coordinate space — see [`image_viewer::region_for_save`], which is
     /// where the space arithmetic lives and is tested.
-    fn copy_image_to_clipboard(&mut self) {
+    fn copy_image_to_clipboard(&mut self, unedited: bool) {
         let Some(cur) = self.cur.clone() else {
             return;
         };
@@ -4166,8 +4166,15 @@ impl MyApp {
             return;
         }
         let edit = self.edits.get(&p);
-        let (xform, crop) = (edit.xform, edit.crop);
-        let edited = !edit.is_identity();
+        // Unedited ("copy original"): the stored picture EXIF-oriented, no
+        // crop, no turn — the same buffers through `region_for_save` with an
+        // identity edit, so this shares every source below instead of
+        // re-decoding its own.
+        let (xform, crop, edited) = if unedited {
+            (Xform::Identity, None, false)
+        } else {
+            (edit.xform, edit.crop, !edit.is_identity())
+        };
 
         // Fast path: full-res pixels already in memory, EXIF orientation applied.
         // **The key, not the path** — see `FullImage::is`. With the page missing this
@@ -4176,7 +4183,13 @@ impl MyApp {
         if let Some(f) = self.full.as_ref().filter(|f| f.is(&cur)) {
             match image_viewer::region_for_save(&f.data, f.exif_tag, xform, crop) {
                 Some(out) => match set_clipboard_rgba(out.width, out.height, out.rgba) {
-                    Ok(()) => self.notice = Some(copied_notice(out.width, out.height, &edit)),
+                    Ok(()) => {
+                        self.notice = Some(if unedited {
+                            format!("Copied {}x{} original to clipboard", out.width, out.height)
+                        } else {
+                            copied_notice(out.width, out.height, &edit)
+                        })
+                    }
                     Err(e) => self.error = Some(format!("Clipboard failed: {e}")),
                 },
                 None => self.error = Some("The crop does not fit this image".into()),
@@ -6945,7 +6958,7 @@ impl eframe::App for MyApp {
                 if clip_shift {
                     self.copy_path_to_clipboard(ctx);
                 } else {
-                    self.copy_image_to_clipboard();
+                    self.copy_image_to_clipboard(false);
                 }
             } else if save_rot {
                 self.save_transformed_copy();
@@ -7187,7 +7200,10 @@ impl eframe::App for MyApp {
                         self.rescan(ctx, true);
                     }
                     if ui.button("Copy IMG (Ctrl+C)").clicked() {
-                        self.copy_image_to_clipboard();
+                        self.copy_image_to_clipboard(false);
+                    }
+                    if ui.button("Copy original").clicked() {
+                        self.copy_image_to_clipboard(true);
                     }
                     if ui.button("Wallpaper (W)").clicked() {
                         self.set_wallpaper();
