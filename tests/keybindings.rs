@@ -24,7 +24,7 @@
 //! silently does nothing over RDP, so such a test would be green forever without
 //! ever having pressed anything. See `AGENTS.md`.
 
-use image_viewer::{nav_is_forward, NavInput};
+use image_viewer::{default_binding, nav_is_forward, NavInput, KEY_ACTIONS};
 
 /// The region that reads keys and dispatches on them: the body of the
 /// `if !typing {` block, found by matching braces.
@@ -175,41 +175,15 @@ fn code_only(src: &str) -> String {
 
 /// Is `letter` bound to a **bare** press — one that fires with no modifier held?
 ///
-/// Scans the whole of `main.rs`, not just one `ui.input` block, because the
-/// bindings live in two of them and a key bound in the other one is still a bare
-/// key.
-///
-/// Two things to get right, and both were wrong in the first version:
-///
-///  * whole identifiers, so `D` does not match `Key::Delete`;
-///  * the modifier guard that follows, so `Ctrl+S` is not counted as a bare `S`.
-///    `&& !i.modifiers.any()` means "only with nothing held" — that *is* bare.
-///    `&& i.modifiers.ctrl` means the opposite.
+/// Answered from the shipped defaults table (`KEY_ACTIONS`), not from reads:
+/// every binding in the binary goes through the resolver, so the defaults
+/// table is where bare chords live. A single uppercase letter with no `+`.
+/// User overrides can move any of these (that is the feature), but the
+/// shipped default a fresh install gets is what this pins.
 fn bound_bare(letter: char) -> bool {
-    let src = source();
-    let needle = format!("Key::{letter})");
-    let mut from = 0;
-    while let Some(at) = src[from..].find(&needle) {
-        let after = from + at + needle.len();
-        // Whatever follows the key must not continue the identifier.
-        if src[after..]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_')
-        {
-            from = after;
-            continue;
-        }
-        // Read the rest of this expression, up to the comma that ends it.
-        let tail_end = src[after..].find(',').map_or(src.len(), |i| after + i);
-        let tail = &src[after..tail_end];
-        let guarded = tail.contains("&& i.modifiers") && !tail.contains("&& !i.modifiers");
-        if !guarded {
-            return true;
-        }
-        from = after;
-    }
-    false
+    KEY_ACTIONS.iter().any(|(_, chord, _)| {
+        chord.len() == 1 && chord.chars().next() == Some(letter)
+    })
 }
 
 /// The bare letters this app allows, and what each one is allowed to do.
@@ -402,16 +376,32 @@ fn no_unexpected_bare_letter_shortcuts() {
     }
 }
 
+/// Every action id in the defaults table is actually read somewhere in the
+/// binary: a table row nobody dispatches is a binding that does nothing,
+/// which reads exactly like a working key that silently stopped. (This is
+/// the test that would have caught `fit_win` vs `fit_window`.)
+#[test]
+fn every_listed_action_is_read_in_the_binary() {
+    let src = source();
+    for (id, _, _) in KEY_ACTIONS {
+        assert!(
+            src.contains(&format!("\"{id}\"")),
+            "action `{id}` is listed in Settings but never read — rebindable on screen, dead in practice"
+        );
+    }
+}
+
 /// `C` is Crop, and Crop touches nothing on disk. The pairing matters: this is the
 /// letter that used to copy a file.
 #[test]
 fn c_is_crop_and_does_not_write_to_disk() {
     assert!(bound_bare('C'), "C should still be bound, to crop mode");
-    let src = source();
-    assert!(
-        src.contains("i.key_pressed(egui::Key::C) && !i.modifiers.any()"),
-        "bare C must not fire while a modifier is held, so Ctrl+C stays 'copy image'"
+    assert_eq!(
+        default_binding("crop"),
+        "C",
+        "crop must default to a bare C, matched exactly so Ctrl+C stays 'copy image'"
     );
+    let src = source();
     assert!(src.contains("crop_key"), "C should feed the crop toggle");
 }
 
@@ -487,23 +477,14 @@ fn move_and_copy_are_still_reachable_just_not_by_key() {
 fn only_delete_reaches_the_recycle_bin() {
     let code = code_only(&source());
 
-    // 1. `del` comes from Delete alone. The read is one line of the tuple, so
-    //    "nothing else" is checkable there and nowhere else.
-    let reads = code
-        .lines()
-        .filter(|l| l.contains("i.key_pressed(egui::Key::Delete"))
-        .collect::<Vec<_>>();
+    // 1. `del` comes from Delete alone: the shipped default is the bare key,
+    //    and matching is exact everywhere, so no modifier combo reaches it.
+    //    (The old text counted `key_pressed(Key::Delete)` lines; reads now go
+    //    through the resolver, so the default table is where this lives.)
     assert_eq!(
-        reads.len(),
-        1,
-        "expected exactly one read of Key::Delete:\n{reads:?}"
-    );
-    assert_eq!(
-        reads[0].matches("key_pressed").count(),
-        1,
-        "`del` is read from Key::Delete and something else on the same line, so one \
-         keystroke can reach the Recycle Bin through more than one key:\n{}",
-        reads[0]
+        default_binding("del"),
+        "Delete",
+        "del must default to a bare Delete"
     );
 
     // 2. In the dispatch, `Del` reaches `delete_current` and nothing between the
@@ -1207,25 +1188,26 @@ fn the_grid_keeps_its_own_arrows_and_does_not_follow_the_reading_direction() {
          per file, drawn left to right - so its arrows mean screen directions.\n{grid_branch}"
     );
 
-    // And the read it uses still contains Space. Scoped to the two lines the read is
-    // on, because printing the whole of `ui` on failure buries the answer - which is
-    // what happened the first time this assertion ran and failed on rustfmt's
-    // trailing-comma placement rather than on anything about the key.
-    let ui = fn_body(&src, "fn ui(&mut self, ui: &mut egui::Ui");
-    let grid_read = collapse(
-        ui.split("let (grid_right, grid_left) = ctx.input(|i|")
-            .nth(1)
-            .and_then(|a| a.split("});").next())
-            .unwrap_or_else(|| panic!("the grid's arrow read is gone:\n{ui}")),
-    );
-    assert!(
-        grid_read
-            .contains("i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::Space)")
-            && grid_read.contains("i.key_pressed(egui::Key::ArrowLeft)"),
-        "the grid's arrow read is not what it was. `Space` has always moved the grid \
-         highlight, and dropping it is the kind of regression that reads as 'the key is \
-         flaky'. The read is now:\n{grid_read}"
-    );
+    // And the grid's keys are still the arrows plus Space: the defaults
+    // table is where that lives now that reads go through the resolver.
+    // `Space` has always moved the grid highlight, and dropping it is the
+    // kind of regression that reads as 'the key is flaky'.
+    for (action, key) in [
+        ("grid_up", "ArrowUp"),
+        ("grid_down", "ArrowDown"),
+        ("grid_left", "ArrowLeft"),
+        ("grid_right", "ArrowRight"),
+        ("grid_right_alt", "Space"),
+        ("grid_page_up", "PageUp"),
+        ("grid_page_down", "PageDown"),
+        ("grid_open", "Enter"),
+    ] {
+        assert_eq!(
+            default_binding(action),
+            key,
+            "grid action `{action}` no longer defaults to {key}"
+        );
+    }
 }
 
 /// Hold-to-browse resolves to the same direction as the press that started it.

@@ -164,21 +164,6 @@ const KEY_NAME_OPTIONS: &[&str] = &["ArrowRight", "ArrowLeft", "Space", "PageDow
 /// Match arms name the key (`egui::Key::Delete`) but never read the input
 /// (`i.key_pressed(..)`), so `tests/keybindings.rs::only_delete_reaches_the_recycle_bin`
 /// — which counts *reads* — still sees exactly one.
-fn parse_key_name(name: &str) -> Option<egui::Key> {
-    match name.trim() {
-        "ArrowRight" => Some(egui::Key::ArrowRight),
-        "ArrowLeft" => Some(egui::Key::ArrowLeft),
-        "ArrowUp" => Some(egui::Key::ArrowUp),
-        "ArrowDown" => Some(egui::Key::ArrowDown),
-        "Space" => Some(egui::Key::Space),
-        "PageDown" => Some(egui::Key::PageDown),
-        "PageUp" => Some(egui::Key::PageUp),
-        "Home" => Some(egui::Key::Home),
-        "End" => Some(egui::Key::End),
-        _ => None,
-    }
-}
-
 /// Full key-name table for custom bindings: every `egui::Key` worth
 /// pressing, plus bare `"0"`–`"9"` mapping to the numpad-less `Num0`–`Num9`
 /// variants (egui has no bare digit keys, and nobody means the numpad when
@@ -330,6 +315,20 @@ fn resolve_action(
     None
 }
 
+/// Resolve every action once per frame: shipped defaults with user
+/// overrides applied. Owns everything, so callers keep no borrow on the
+/// config across the `&mut self` dispatch that follows.
+#[allow(dead_code)]
+fn build_bindings(config: &image_viewer::Config) -> std::collections::HashMap<String, ResolvedBinding> {
+    let mut m = std::collections::HashMap::new();
+    for (id, _, _) in image_viewer::KEY_ACTIONS {
+        if let Some(b) = resolve_action(&config.keybindings, id) {
+            m.insert((*id).to_owned(), b);
+        }
+    }
+    m
+}
+
 /// Did `action`'s chord fire: the key pressed this frame with exactly the
 /// resolved modifiers. One predicate for the whole dispatch, so every site
 /// below agrees on what a binding means.
@@ -339,11 +338,55 @@ fn action_pressed(
     bindings: &std::collections::HashMap<String, ResolvedBinding>,
     action: &str,
 ) -> bool {
+    ctx.input(|i| binding_down(i, bindings, action))
+}
+
+/// Same question against an already-open input state, for the tuples that
+/// read several keys inside one `ctx.input` closure (nesting `ctx.input`
+/// calls is not something to rely on).
+#[allow(dead_code)]
+fn binding_down(
+    i: &egui::InputState,
+    bindings: &std::collections::HashMap<String, ResolvedBinding>,
+    action: &str,
+) -> bool {
+    let Some(b) = bindings.get(action) else {
+        return false;
+    };
+    i.key_pressed(b.key) && i.modifiers.ctrl == b.ctrl && i.modifiers.shift == b.shift && i.modifiers.alt == b.alt
+}
+
+/// Physical presses only: matches raw key events with `repeat: false` and
+/// the event's own modifiers. Spawning (user commands), dialogs (print),
+/// and clipboard writes must be edge-triggered — `key_pressed` also fires
+/// for OS key-repeat, and a held Ctrl+1 once opened hundreds of Paint
+/// windows. View navigation deliberately does NOT use this: holding an
+/// arrow to flip through is the feature, not the bug.
+#[allow(dead_code)]
+fn action_pressed_fresh(
+    ctx: &egui::Context,
+    bindings: &std::collections::HashMap<String, ResolvedBinding>,
+    action: &str,
+) -> bool {
     let Some(b) = bindings.get(action) else {
         return false;
     };
     ctx.input(|i| {
-        i.key_pressed(b.key) && i.modifiers.ctrl == b.ctrl && i.modifiers.shift == b.shift && i.modifiers.alt == b.alt
+        i.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::Key {
+                    key: k,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } if *k == b.key
+                    && modifiers.ctrl == b.ctrl
+                    && modifiers.shift == b.shift
+                    && modifiers.alt == b.alt
+            )
+        })
     })
 }
 
@@ -5115,23 +5158,19 @@ impl MyApp {
 
         // --- input: zoom (wheel / pinch), pan (drag), shortcuts ---
         let hover = resp.hover_pos();
-        // Fixed zoom presets on `1`–`4`, each a configurable source-pixel
-        // ratio (`1` keeps the shipped meaning: 100%). Read as one option so
-        // the dispatch below has a single branch rather than four.
+        // Fixed zoom presets, each a configurable source-pixel ratio (`1`
+        // keeps the shipped meaning: 100%). Read as one option so the
+        // dispatch below has a single branch rather than four.
+        let kb = build_bindings(&self.config);
         let (scroll, pinch, key_fit, key_fill, preset) = ui.input(|i| {
             (
                 i.smooth_scroll_delta.y,
                 i.zoom_delta(),
-                i.key_pressed(egui::Key::F) && !i.modifiers.shift,
-                i.key_pressed(egui::Key::F) && i.modifiers.shift,
-                [
-                    egui::Key::Num1,
-                    egui::Key::Num2,
-                    egui::Key::Num3,
-                    egui::Key::Num4,
-                ]
-                .iter()
-                .position(|k| i.key_pressed(*k)),
+                binding_down(i, &kb, "fit"),
+                binding_down(i, &kb, "fill"),
+                ["preset_1", "preset_2", "preset_3", "preset_4"]
+                    .iter()
+                    .position(|a| binding_down(i, &kb, a)),
             )
         });
 
@@ -6750,7 +6789,12 @@ impl eframe::App for MyApp {
         // single-key handling below has to stand down then, or typing "g" into
         // the filter would toggle the grid and "r" would reload the folder.
         let typing = ctx.egui_wants_keyboard_input();
-        let f11 = ctx.input(|i| i.key_pressed(egui::Key::F11));
+        // Every binding resolved once per frame from the keybindings map
+        // (user overrides over shipped defaults). Each read below asks this
+        // table by action name instead of naming a key, so there is exactly
+        // one place where a physical key becomes a meaning.
+        let kb = build_bindings(&self.config);
+        let f11 = action_pressed(ctx, &kb, "fullscreen");
         let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
 
         // ---- one direction rule, read once --------------------------------
@@ -6800,22 +6844,32 @@ impl eframe::App for MyApp {
         // would be the kind of regression nothing in the tree can see.
         let (grid_right, grid_left) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::Space),
-                i.key_pressed(egui::Key::ArrowLeft),
+                binding_down(i, &kb, "grid_right") || binding_down(i, &kb, "grid_right_alt"),
+                binding_down(i, &kb, "grid_left"),
             )
         });
 
         // Keyboard navigation + file triage
+        let fs_default = image_viewer::resolve_binding(&self.config.keybindings, "focus_search")
+            == image_viewer::default_binding("focus_search");
         let (first, last, toggle, grid, page_up, page_down, focus_search) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::Home),
-                i.key_pressed(egui::Key::End),
-                i.key_pressed(egui::Key::I),
-                i.key_pressed(egui::Key::G),
-                i.key_pressed(egui::Key::PageUp),
-                i.key_pressed(egui::Key::PageDown),
+                binding_down(i, &kb, "first"),
+                binding_down(i, &kb, "last"),
+                binding_down(i, &kb, "panels"),
+                binding_down(i, &kb, "grid"),
+                binding_down(i, &kb, "grid_page_up"),
+                binding_down(i, &kb, "grid_page_down"),
                 // `/` is the usual "search" chord and is not otherwise used.
-                i.key_pressed(egui::Key::Slash) && !i.modifiers.ctrl && !i.modifiers.alt,
+                // Shift stays optional (so `?` works too), but only while the
+                // shipped binding holds — a rebound search gets exact matching
+                // like everything else.
+                binding_down(i, &kb, "focus_search")
+                    || (fs_default
+                        && i.key_pressed(egui::Key::Slash)
+                        && i.modifiers.shift
+                        && !i.modifiers.ctrl
+                        && !i.modifiers.alt),
             )
         });
 
@@ -6866,9 +6920,9 @@ impl eframe::App for MyApp {
         // changing the shown image, and Enter opens the highlighted cell.
         let (up, down, enter) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::ArrowUp),
-                i.key_pressed(egui::Key::ArrowDown),
-                i.key_pressed(egui::Key::Enter),
+                binding_down(i, &kb, "grid_up"),
+                binding_down(i, &kb, "grid_down"),
+                binding_down(i, &kb, "grid_open"),
             )
         });
         // `M` (move) and `C` (copy) used to be bare single-key shortcuts. They are
@@ -6917,24 +6971,18 @@ impl eframe::App for MyApp {
         });
         let (del, explore, reload, wall, save_rot, save_screen, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::Delete),
-                i.key_pressed(egui::Key::E),
-                i.key_pressed(egui::Key::R),
-                i.key_pressed(egui::Key::W) && !i.modifiers.any(),
-                // NOTE: `shift == false` rather than `!shift` on purpose —
-                // `tests/keybindings.rs::bound_bare` treats any `&& !i.modifiers`
-                // in the same comma-chunk as a bare press, so `!i.modifiers.shift`
-                // here would read Ctrl+S as bare S and fail `no_unexpected_bare`.
-                i.key_pressed(egui::Key::S) && i.modifiers.ctrl && i.modifiers.shift == false,
-                i.key_pressed(egui::Key::S) && i.modifiers.ctrl && i.modifiers.shift,
-                // Bare `C` is still a real key event, so crop mode is
-                // unaffected: the chord interception is on the press *with*
-                // a modifier, and this is the press without one.
-                i.key_pressed(egui::Key::C) && !i.modifiers.any(),
-                // Bare `L` / `P` hide one side pane each. View-only like the
-                // rest of this tuple, so `BARE_LETTERS` covers them.
-                i.key_pressed(egui::Key::L) && !i.modifiers.any(),
-                i.key_pressed(egui::Key::P) && !i.modifiers.any(),
+                binding_down(i, &kb, "del"),
+                binding_down(i, &kb, "explore"),
+                binding_down(i, &kb, "reload"),
+                binding_down(i, &kb, "wall"),
+                binding_down(i, &kb, "save"),
+                binding_down(i, &kb, "save_screen"),
+                // `Ctrl+C` never arrives as a key (toolkit interception, see
+                // the Copy comment above), so this bare press coexists with
+                // the chord below rather than competing with it.
+                binding_down(i, &kb, "crop"),
+                binding_down(i, &kb, "pane_left"),
+                binding_down(i, &kb, "pane_right"),
             )
         });
         // Mouse side buttons: back = previous image, forward = next image.
@@ -6947,101 +6995,53 @@ impl eframe::App for MyApp {
         // same button is how a binding ends up with two opinions about what it
         // means.
         //
-        // The four manga controls. All bare, all view-only or app-owned files, and
-        // `tests/keybindings.rs` holds each of them to that in `BARE_LETTERS`.
+        // The manga controls. All view-only or app-owned files, and
+        // `tests/keybindings.rs` holds each of them to that in `BARE_LETTERS`
+        // (as shipped defaults — rebound chords keep the same guarantee by
+        // construction, since no action in the table can write to disk).
         let (manga_key, rtl_key, lead_down, lead_up, shape_key) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::M) && !i.modifiers.any(),
-                i.key_pressed(egui::Key::D) && !i.modifiers.any(),
-                // `O` alone steps the leading-lone offset down and `Shift+O` up.
-                // Shift is not a modifier for this purpose, so the bare read is
-                // the one with nothing held at all - the same shape as `C`.
-                i.key_pressed(egui::Key::O) && !i.modifiers.any(),
-                i.key_pressed(egui::Key::O)
-                    && i.modifiers.shift
-                    && !i.modifiers.ctrl
-                    && !i.modifiers.alt,
-                i.key_pressed(egui::Key::X) && !i.modifiers.any(),
+                binding_down(i, &kb, "manga"),
+                binding_down(i, &kb, "rtl"),
+                binding_down(i, &kb, "lead_down"),
+                binding_down(i, &kb, "lead_up"),
+                binding_down(i, &kb, "shape"),
             )
         });
         // Animation frame stepping (`,` back, `.` forward, YouTube-style) and
-        // play/pause (`K`). All bare and all view-only — stepping pauses onto
-        // a frame rather than writing anything — so `K` joins `BARE_LETTERS`
-        // (`bound_bare` only scans A–Z, which is why `,`/`.` need no entry).
+        // play/pause (`K`). View-only — stepping pauses onto a frame rather
+        // than writing anything.
         let (anim_back, anim_fwd, anim_toggle) = ctx.input(|i| {
             (
-                i.key_pressed(egui::Key::Comma) && !i.modifiers.any(),
-                i.key_pressed(egui::Key::Period) && !i.modifiers.any(),
-                i.key_pressed(egui::Key::K) && !i.modifiers.any(),
+                binding_down(i, &kb, "anim_back"),
+                binding_down(i, &kb, "anim_fwd"),
+                binding_down(i, &kb, "anim_toggle"),
             )
         });
-        // Fit window to image (`T`): shrink the window to hug the picture as
-        // drawn. Bare and view-only, so it joins `BARE_LETTERS` with the rest.
-        let fit_win = ctx.input(|i| i.key_pressed(egui::Key::T) && !i.modifiers.any());
-        // User commands (Tier 1 #2): Ctrl+1..9 runs the nth entry in
-        // `Config::user_commands`. Read as one `Option<usize>` so the dispatch
-        // below has a single branch rather than nine.
-        //
-        // Physical presses only (`repeat: false`): `key_pressed` also fires
-        // for OS key-repeat, and a repeat spawns one process per frame — a
-        // held Ctrl+1 opened hundreds of Paint windows and froze the machine.
-        // Spawning is the one dispatch that must be edge-triggered, so this
-        // reads the raw events like the `Event::Copy` chord above instead of
-        // `key_pressed`.
-        let user_cmd = ctx.input(|i| {
-            if !i.modifiers.ctrl || i.modifiers.alt {
-                return None;
-            }
-            for (n, key) in [
-                egui::Key::Num1,
-                egui::Key::Num2,
-                egui::Key::Num3,
-                egui::Key::Num4,
-                egui::Key::Num5,
-                egui::Key::Num6,
-                egui::Key::Num7,
-                egui::Key::Num8,
-                egui::Key::Num9,
-            ]
+        // Fit window to image (`T` shipped): shrink the window to hug the
+        // picture as drawn. View-only like the rest.
+        let fit_win = action_pressed(ctx, &kb, "fit_window");
+        // User commands: the nth entry in `Config::user_commands`. Read as
+        // one `Option<usize>` so the dispatch below has a single branch
+        // rather than nine. Edge-triggered like print: spawning must never
+        // repeat with a held chord. Names spelled out (not `format!`) so the
+        // action-coverage test can see every one.
+        const USER_ACTIONS: [&str; 9] = [
+            "user_1", "user_2", "user_3", "user_4", "user_5", "user_6", "user_7", "user_8",
+            "user_9",
+        ];
+        let user_cmd = USER_ACTIONS
             .iter()
-            .enumerate()
-            {
-                let fresh = i.events.iter().any(|e| {
-                    matches!(
-                        e,
-                        egui::Event::Key {
-                            key: k,
-                            pressed: true,
-                            repeat: false,
-                            ..
-                        } if *k == *key
-                    )
-                });
-                if fresh {
-                    return Some(n);
-                }
-            }
-            None
-        });
-        // Print (Ctrl+P): the OS `print` verb on the file on screen.
-        // Physical presses only, the same fork-bomb discipline as user
-        // commands — a held chord must not open a dialog per frame. Bare `P`
-        // is untouched (right pane), so this chord and that key coexist.
-        let print_key = ctx.input(|i| {
-            i.modifiers.ctrl
-                && !i.modifiers.alt
-                && i.events.iter().any(|e| {
-                    matches!(
-                        e,
-                        egui::Event::Key {
-                            key: k,
-                            pressed: true,
-                            repeat: false,
-                            ..
-                        } if *k == egui::Key::P
-                    )
-                })
-        });
+            .position(|a| action_pressed_fresh(ctx, &kb, a));
+        // Print: the OS `print` verb on the file on screen. Edge-triggered
+        // for the same reason. Bare `P` is untouched (right pane), so this
+        // chord and that key coexist.
+        let print_key = action_pressed_fresh(ctx, &kb, "print");
+        // Clipboard alternatives to the toolkit chords below: `Ctrl+C` never
+        // arrives as a key (interception), so these only add options — the
+        // event path stays exactly as it was.
+        let copy_alt = action_pressed_fresh(ctx, &kb, "copy");
+        let copy_path_alt = action_pressed_fresh(ctx, &kb, "copy_path");
         // `typing` is true when the search box owns the keyboard. All of this is
         // global single-key handling, so it must stand down or typing "g" into
         // the filter would toggle the grid and "r" would reload the folder.
@@ -7148,8 +7148,10 @@ impl eframe::App for MyApp {
                 self.explore_current();
             } else if reload {
                 self.rescan(ctx, true);
-            } else if clip_img {
-                if clip_shift {
+            } else if clip_img || copy_alt || copy_path_alt {
+                // Toolkit chord and rebound chord both land here; path wins
+                // ties, matching the shift-disambiguation above.
+                if copy_path_alt || (clip_img && clip_shift) {
                     self.copy_path_to_clipboard(ctx);
                 } else {
                     self.copy_image_to_clipboard(false);

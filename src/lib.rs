@@ -482,6 +482,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("grid_down", "ArrowDown", "Grid: down"),
     ("grid_left", "ArrowLeft", "Grid: left"),
     ("grid_right", "ArrowRight", "Grid: right"),
+    ("grid_right_alt", "Space", "Grid: right (alt)"),
     ("grid_page_up", "PageUp", "Grid: page up"),
     ("grid_page_down", "PageDown", "Grid: page down"),
     ("grid_open", "Enter", "Grid: open"),
