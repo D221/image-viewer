@@ -1967,6 +1967,23 @@ struct MyApp {
     /// reader was inside the archive is reflected, and the cursor lands on the
     /// archive by name rather than on whatever now occupies that slot.
     archive_parent: Option<(PathBuf, PathBuf)>,
+    /// The archive the cursor was *put* on by [`Self::leave_archive`], consumed by
+    /// the next [`Self::goto`].
+    ///
+    /// **The one-shot that stops going back from re-entering.** Returning puts
+    /// the cursor on the archive so the reader can open it again with `→`, and
+    /// `goto` — which every way into the app passes through — enters an archive
+    /// the cursor is on. `adopt_gallery` ends in a `goto`, so without this the
+    /// act of leaving re-entered the archive and `←` did nothing at all.
+    ///
+    /// **An identity, not a flag.** It holds the *path* rather than a bool, for
+    /// the same reason `pending_drop` does: the value is set at one event and
+    /// read at another, and a bool would let one archive's arrival be swallowed
+    /// by another's exit. Comparing the path means only that archive's own
+    /// return is exempt — the next arrow onto any other archive enters it.
+    ///
+    /// Not a latch: `goto` takes it, so it holds for exactly one arrival.
+    just_left: Option<PathBuf>,
     /// A copy of a **dropped** file, in a directory this app owns, for as long as
     /// that file is open.
     ///
@@ -2248,6 +2265,7 @@ impl MyApp {
             zip_archive,
             zip_temp,
             archive_parent: None,
+            just_left: None,
             // A file only ever arrives here from the command line or the file
             // dialog, neither of which is a transient hand-off, so there is never
             // a copy to release at start-up. `load_dropped` owns one instead.
@@ -2340,7 +2358,16 @@ impl MyApp {
         // hands the whole app over to another gallery, and nothing that follows
         // should be planning for the archive.
         if let Some(cur) = self.gallery.current().map(|p| p.to_path_buf()) {
-            if is_archive_path(&cur) {
+            // The cursor being *put* here by `leave_archive` is a position, not a
+            // navigation, so it falls **through** rather than returning: the rest
+            // of `goto` still has to run — it is what sets `self.cur` and plans
+            // the queue. Planning for an archive is a no-op, because
+            // `plan_jobs` refuses archives and there is no preview to adopt, so
+            // the previous image stays painted, which is the same answer a drop in
+            // flight gives.
+            //
+            // Taken, not read: the exemption is for exactly this arrival.
+            if is_archive_path(&cur) && self.just_left.take() != Some(cur.clone()) {
                 self.open_archive(ctx, &cur);
                 return;
             }
@@ -2608,22 +2635,25 @@ impl MyApp {
         if self.config.block_while_loading && self.waiting_load {
             return true;
         }
-        // **Backing out of an archive is a step backwards.** At the first page
-        // of an archive, `prev` would loop to its last page (with `loop_back`
-        // on) or do nothing (off), and both are wrong: the thing before the
-        // archive's first page is the folder entry that opened it.
+        // **Both ends of an archive step out of it.** At the front, `prev` would loop
+        // to its last page (with `loop_back` on) or do nothing (off), and both
+        // are wrong: the thing before the archive's first page is the folder
+        // entry that opened it. At the back, `next` would wrap to the archive's
+        // *own* first member — which is what made a folder of archives behave
+        // like a folder of one, the reader cycling through the first volume
+        // forever and never reaching the second.
         //
         // Asked *before* the move rather than after it, because "we did not
         // move" and "we are leaving" are otherwise the same observation and the
-        // first one is the right answer for `loop_back: false` at the front of
-        // any folder. Deliberately not gated on `loop_back`: with looping off,
-        // pressing `←` inside an archive should still get out, and a viewer
-        // that traps the reader inside a 200-page archive with a setting that
-        // exists to stop the opposite is not honouring the setting.
+        // first one is the right answer for `loop_back: false` at the end of any
+        // folder. Deliberately not gated on `loop_back` for the way out: with
+        // looping off, pressing `←` inside an archive should still get out, and
+        // a viewer that traps the reader inside a 200-page archive with a setting
+        // that exists to stop the opposite is not honouring the setting.
         //
         // Returns true — the press did something — so `step`'s caller records a
         // navigation rather than a no-op.
-        if !forward && self.at_archive_front() && self.leave_archive(ctx) {
+        if self.archive_edge(forward) && self.leave_archive(ctx, forward) {
             return true;
         }
         // Manga mode moves a whole turn, which is one or two pages; single-image
@@ -3691,17 +3721,30 @@ impl MyApp {
         }
     }
 
-    /// Is the cursor on the first page of the open archive?
+    /// Is the cursor at either end of the open archive's listing?
     ///
-    /// The gate for [`Self::leave_archive`], asked rather than assumed because
-    /// an archive's gallery can also be a plain folder's — `zip_archive` is the
-    /// only thing that says the current listing came out of a container.
-    fn at_archive_front(&self) -> bool {
-        self.zip_archive.is_some() && self.gallery.current_page() == 0 && self.gallery.index == 0
+    /// `zip_archive` is the only thing that says the current listing came out of
+    /// a container — the same gallery type is used for a plain folder — so it is
+    /// asked here rather than assumed.
+    fn archive_edge(&self, forward: bool) -> bool {
+        self.zip_archive.is_some()
+            && image_viewer::leave_archive_at(
+                forward,
+                self.gallery.at_front(),
+                self.gallery.at_back(),
+                true,
+            )
     }
 
     /// Leave the open archive for the folder it was entered from, with the
     /// cursor back on the archive.
+    ///
+    /// `forward` is what the keypress was: `←` returns to the position the
+    /// archive was opened from and stays there, while `→` *continues* — it moves
+    /// on to the next entry in the folder, which is very often the next archive
+    /// and so enters it. Without that second case a folder of archives reads as
+    /// a folder of one, because `→` at an archive's last page had nowhere to go
+    /// but back to its own first page.
     ///
     /// Returns false when there is no parent to go back to — an archive opened
     /// from the command line or a dialog has none, and the caller must fall
@@ -3712,7 +3755,7 @@ impl MyApp {
     /// cursor is placed by *name* rather than by index: the saved index was
     /// taken before the reader may have sorted a newly arrived file ahead of
     /// it.
-    fn leave_archive(&mut self, ctx: &Context) -> bool {
+    fn leave_archive(&mut self, ctx: &Context, forward: bool) -> bool {
         let Some((folder, archive)) = self.archive_parent.take() else {
             return false;
         };
@@ -3733,10 +3776,11 @@ impl MyApp {
         {
             g.index = i;
         }
+        // Arm the one-shot *before* the adopt, because `adopt_gallery` ends in a
+        // `goto` and the cursor is about to be on an archive. Without this the
+        // act of leaving re-enters the archive.
+        self.just_left = Some(archive.clone());
         self.adopt_gallery(g, ctx);
-        // The cursor is on the archive, which `goto` would *enter* — so this is
-        // a position, not a navigation. `adopt_gallery` has already scheduled
-        // for it; the notice is what tells the reader they are back.
         self.notice = Some(format!(
             "Back in {} — press right to open {}",
             folder
@@ -3745,6 +3789,19 @@ impl MyApp {
                 .unwrap_or_else(|| folder.to_string_lossy().into_owned()),
             file_name_of(&archive)
         ));
+
+        // Continuing forwards: one step in the parent from the archive's own
+        // position, which lands on the next entry — and `goto` enters it when
+        // that is another archive, so walking a shelf of volumes is one press
+        // per volume rather than an unreachable list.
+        //
+        // Asked of the parent's own `next`, so `loop_back` still decides what
+        // "past the end" means: with it off, an archive that is the folder's
+        // last stays put instead of dropping the reader into the folder by a
+        // press with nowhere to land.
+        if forward && self.gallery.next() {
+            self.goto(ctx);
+        }
         true
     }
 

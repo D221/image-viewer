@@ -4384,6 +4384,117 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
     Some(&src[start..end])
 }
 
+/// Both ends of an archive must step **out** of it, not round its own listing.
+///
+/// This is the bug a reader hits as "only the first zip opens": `→` at an
+/// archive's last page used to be `pos_next`'s ordinary end-of-list wrap, which
+/// inside an archive wraps to the archive's *own* first member — so the folder's
+/// second, third and later archives were unreachable by arrowing, and one volume
+/// looped forever. The backward edge existed; the forward one did not.
+#[test]
+fn both_ends_of_an_archive_step_out_of_it() {
+    use image_viewer::{leave_archive_at, Gallery};
+    let dir = tempfile::tempdir().unwrap();
+    for n in ["a.jpg", "b.jpg", "c.jpg"] {
+        std::fs::write(dir.path().join(n), b"x").unwrap();
+    }
+    let mut g = Gallery::new(dir.path());
+    assert_eq!(g.len(), 3);
+
+    // Front and back, including the page dimension: `index + 1 == len` is the
+    // last *file*, not the last *position*.
+    assert!(g.at_front(), "a fresh listing starts at its front");
+    assert!(!g.at_back());
+    g.index = 2;
+    assert!(g.at_back(), "the last file is the back of the listing");
+    assert!(!g.at_front());
+
+    // Forward out, backward out — and never the other way round. A `→` at the
+    // *front* must not drop the reader into the parent folder, and a `←` at the
+    // back must not either.
+    assert!(leave_archive_at(true, true, true, true), "forward at the back leaves");
+    assert!(leave_archive_at(false, true, true, true), "backward at the front leaves");
+    assert!(!leave_archive_at(true, true, false, true), "forward mid-archive stays");
+    assert!(!leave_archive_at(false, false, true, true), "backward mid-archive stays");
+    assert!(!leave_archive_at(true, false, false, true), "nowhere to go, so nothing");
+
+    // `can_leave` is asked first and overrides both edges: with looping off and
+    // the archive as the folder's last entry there is nowhere to land, and being
+    // dropped into the folder by a press that had nowhere to go reads as broken.
+    assert!(!leave_archive_at(true, false, true, false));
+    assert!(!leave_archive_at(false, true, false, false));
+
+    // An empty listing has no back, so it cannot claim one.
+    let empty = Gallery::empty();
+    assert!(!empty.at_back());
+    assert!(empty.at_front(), "an empty listing is trivially at its front");
+}
+
+/// Leaving an archive must not re-enter it, and `step` must consult both edges.
+///
+/// Two separate defects, one symptom. `leave_archive` adopts a gallery whose
+/// cursor sits on the archive — and `adopt_gallery` ends in `goto`, which
+/// *enters* an archive on the cursor — so going back re-entered the archive and
+/// `←` did nothing at all. And `step` only asked about the front edge, so `→`
+/// at the last page fell through to `next()`'s own wrap.
+#[test]
+fn leaving_an_archive_does_not_re_enter_it() {
+    let src = include_str!("../src/main.rs");
+
+    let leave = fn_body(src, "fn leave_archive").expect("leave_archive");
+    // The cursor lands on the archive, so `goto` must be told not to treat that
+    // as a navigation. Asserted as a *hand-off*, not as a flag's name: the
+    // defect is a value being consumed in the wrong order.
+    assert!(
+        leave.contains("just_left"),
+        "leaving must arm the one-shot that stops goto re-entering the archive \
+         it just returned to:\n{leave}"
+    );
+    assert!(
+        leave.contains("at_back") == false,
+        "the back edge belongs to step, which is where the direction is known"
+    );
+
+    let goto = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
+    assert!(
+        goto.contains("just_left"),
+        "goto must consult the one-shot before entering an archive:\n{goto}"
+    );
+    // ...and consume it. A flag that is set but never cleared makes every later
+    // arrival at that archive a non-arrival, which is a *different* trap: the
+    // first arrow opens the volume and the second does nothing.
+    assert!(
+        goto.contains("self.just_left.take()"),
+        "the one-shot must be consumed by the goto that skips the entry:\n{goto}"
+    );
+
+    let step = fn_body(src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");
+    assert!(
+        step.contains("archive_edge(forward)"),
+        "step must ask about both edges of the archive, not only the front:\n{step}"
+    );
+    // ...and pass the direction through, because which edge matters is the
+    // difference between getting out and walking into the next volume.
+    assert!(
+        step.contains("leave_archive(ctx, forward)"),
+        "the direction is what distinguishes 'back' from 'on to the next one':\n{step}"
+    );
+
+    // The last link: `step` -> `archive_edge` -> the pure rule. Without this the
+    // rule is unit-tested and the wiring is scanned, and *nothing* asserts the
+    // two are joined — which is exactly how `archive_edge` came to pass `false`
+    // for the forward edge while every test stayed green.
+    let edge = fn_body(src, "fn archive_edge(&self, forward: bool)").expect("archive_edge");
+    assert!(
+        edge.contains("leave_archive_at(") && edge.contains("self.gallery.at_back()"),
+        "archive_edge must feed the listing's back edge into the pure rule:\n{edge}"
+    );
+    assert!(
+        edge.contains("self.zip_archive.is_some()"),
+        "and only for a listing that came out of a container:\n{edge}"
+    );
+}
+
 /// Archives in the gallery must be **entered**, never decoded — and the seam
 /// that does it is `goto`, because it is the one function every way into the
 /// app passes through.

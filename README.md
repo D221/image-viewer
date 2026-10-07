@@ -123,7 +123,7 @@ silently survived a restart would hide files with no obvious way back.
 Opening a `.zip`, `.cbz`, `.7z` or `.rar` extracts the image entries to a temp
 folder and opens it as a normal gallery, so paging, zooming and the grid all work
 unchanged. The temp folder is reused while the archive is unchanged and
-cleaned up on exit, and on `←` at the archive's first page. Comics are read-only:
+cleaned up on exit, and on stepping out at either end. Comics are read-only:
 delete/move/copy are refused rather than silently writing into the zip.
 
 Archives are also *listed* in a folder — see [Archives](#archives) below.
@@ -491,8 +491,18 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 
 `.zip`, `.cbz`, `.7z` and `.rar` files are **listed in a folder** alongside images,
 in every sort mode and in the grid, with no setting to turn on. Arrow onto one and
-it *opens* rather than decodes — press `←` at its first page to come back to the
-folder, with the cursor on the archive.
+it *opens* rather than decodes, and **both** ends of an archive step back out into
+the folder:
+
+- `←` at the archive's first page returns to the folder, cursor on the archive.
+- `→` at its last page *continues* — on to the next entry in the folder, which is
+  usually the next archive and so opens it. A shelf of volumes is one press per
+  volume rather than an unreachable list. With looping off, an archive that is the
+  folder's last entry stays put rather than dropping you in with nowhere to land.
+
+Both ends are deliberate. `→` at an archive's last page would otherwise be the
+ordinary end-of-list wrap, which inside an archive wraps to that archive's *own*
+first page — so you cycle through one volume forever and never reach the second.
 
 - The status line reads `vol1.cbz - 42 images, press right to open`, and the grid
   cell shows the member count. Both come from a header read, not a decode.

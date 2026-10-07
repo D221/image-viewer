@@ -10087,6 +10087,33 @@ impl Gallery {
         })
     }
 
+    /// Is the cursor on the first position of this listing?
+    ///
+    /// **About the whole listing, page included** — an archive's listing is its
+    /// members, so "the first page of the archive" is `page == 0 && index == 0`
+    /// and not merely the first file's first page. A reader who has to press
+    /// `←` twice to get out of a multi-page document has been left in it.
+    pub fn at_front(&self) -> bool {
+        self.page == 0 && self.index == 0
+    }
+
+    /// Is the cursor on the **last** position of this listing?
+    ///
+    /// The mirror of [`Self::at_front`], and the reason an archive can be left
+    /// forwards as well as backwards: without it, `→` at an archive's last
+    /// member is `pos_next`'s ordinary end-of-list wrap, which inside an archive
+    /// wraps to the archive's *own* first member. The reader is then cycling
+    /// through one volume's pages and can never reach the next archive in the
+    /// folder — which reads as "only the first zip loads".
+    ///
+    /// The page half is what makes it correct for a multi-page TIFF at either
+    /// end: `index + 1 == len` is the last *file*, not the last *position*.
+    pub fn at_back(&self) -> bool {
+        !self.files.is_empty()
+            && self.index + 1 == self.files.len()
+            && self.page + 1 >= self.pages_in_current()
+    }
+
     /// Whether advancing past either end wraps around. Separate from the field so
     /// a test can turn it off without reaching into the struct.
     pub fn set_loop_back(&mut self, on: bool) {
@@ -10657,6 +10684,26 @@ impl Gallery {
         // The list these counts described is gone.
         self.forget_pages();
     }
+}
+
+/// Should this keypress step out of the open archive?
+///
+/// **Both edges, and `can_leave` before either.** The forward edge is the one
+/// that was missing, and its absence is what trapped the reader: `→` at an
+/// archive's last page had nowhere to go but back to its own first page, so a
+/// folder of archives behaved like a folder of one.
+///
+/// `can_leave` is the parent's own answer to "is there anywhere to go", and it
+/// is asked *before* leaving. An archive with `loop_back` off whose entry is the
+/// folder's last must not be left by a press that has nowhere to land —
+/// otherwise the reader is dropped into the parent folder and the press looks
+/// broken, which is a worse answer than staying put.
+///
+/// Pure, and pure for the usual reason: the key handling that applies it is in
+/// the binary, unreachable from a test, so the rule it exists to apply is the
+/// part worth being able to test.
+pub fn leave_archive_at(forward: bool, at_front: bool, at_back: bool, can_leave: bool) -> bool {
+    can_leave && if forward { at_back } else { at_front }
 }
 
 /// The real [`PageCtx`]: a gallery, its page counts, and the shape cache.
