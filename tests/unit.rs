@@ -4723,6 +4723,39 @@ fn touch_dates_are_wired_to_menu_buttons() {
     );
 }
 
+/// Portable mode is the marker file: present means beside-the-exe, absent
+/// means the roaming paths — asserted against a tempdir, never the real
+/// executable's folder.
+#[test]
+fn portable_mode_follows_the_marker_file() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(image_viewer::portable_dir_from(dir.path()), None);
+    std::fs::write(dir.path().join("portable.txt"), b"").unwrap();
+    assert_eq!(
+        image_viewer::portable_dir_from(dir.path()),
+        Some(dir.path().to_path_buf())
+    );
+}
+
+/// All three persistent roots must consult portable mode, or portable is a
+/// config file sitting next to a roaming cache.
+#[test]
+fn persistent_roots_consult_portable_mode() {
+    let lib = include_str!("../src/lib.rs");
+    for f in [
+        "pub fn default_path()",
+        "pub fn thumb_cache_root()",
+        "pub fn spreads_root()",
+    ] {
+        let at = lib.find(f).unwrap_or_else(|| panic!("{f} is gone"));
+        let body = &lib[at..(at + 600).min(lib.len())];
+        assert!(
+            body.contains("portable_dir()"),
+            "{f} must check portable mode first"
+        );
+    }
+}
+
 /// Copy-original shares the copy path with an identity edit: same sources,
 /// no re-decode, EXIF-oriented but uncropped and unturned.
 #[test]

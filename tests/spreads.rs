@@ -6447,7 +6447,7 @@ fn the_full_resolution_buffer_is_keyed_by_page_not_by_path() {
              the second half of a zoomed spread is permanently soft",
         ),
         (
-            "fn copy_image_to_clipboard(&mut self)",
+            "fn copy_image_to_clipboard(&mut self, unedited: bool)",
             "f.is(&cur)",
             "Ctrl+C on page 2 of a document pastes page 1's pixels",
         ),
@@ -6500,7 +6500,7 @@ fn the_full_resolution_buffer_is_keyed_by_page_not_by_path() {
 #[test]
 fn copy_refuses_a_page_of_a_multi_page_document() {
     let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
-    let body = fn_body(&src, "fn copy_image_to_clipboard(&mut self)");
+    let body = fn_body(&src, "fn copy_image_to_clipboard(&mut self, unedited: bool)");
 
     let at = body
         .find("if cur.page > 0")

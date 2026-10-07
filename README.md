@@ -327,6 +327,7 @@ should not quietly do that.
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |
 | Touch buttons | Set the file date to now, its EXIF date, or the whole visible folder to EXIF dates |
 | Copy original | The stored picture EXIF-oriented, no crop or turn (Ctrl+C copies framed) |
+| Portable mode | Empty `portable.txt` beside the exe keeps config, thumbs, spreads and wallpaper there |
 | Arrow keys / `Space` / `PgDn` / `PgUp` | Rebindable in Settings → Keys (bare letters stay fixed) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` |

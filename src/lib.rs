@@ -565,6 +565,30 @@ fn default_true() -> bool {
     true
 }
 
+/// Portable mode: an empty `portable.txt` beside the executable keeps
+/// everything the app would otherwise scatter — config, thumbnails, spreads
+/// store, wallpaper copy — in that same folder. No interface beyond the
+/// file's existence (create it to opt in, delete it to roam again), and an
+/// existing `%APPDATA%` config does *not* migrate: portable starts fresh by
+/// construction, not by copying secrets around.
+///
+/// `portable_dir_from` takes the directory so tests can point it at a
+/// `tempfile` instead of the real executable's.
+pub fn portable_dir_from(exe_dir: &Path) -> Option<PathBuf> {
+    if exe_dir.join("portable.txt").is_file() {
+        Some(exe_dir.to_path_buf())
+    } else {
+        None
+    }
+}
+
+pub fn portable_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+        .and_then(|d| portable_dir_from(&d))
+}
+
 /// Drop a leading UTF-8 **BOM** from text that is about to be parsed as JSON.
 ///
 /// **Every JSON file this app reads can arrive with one, and without this every
@@ -671,6 +695,9 @@ impl Config {
 
     /// Get the default configuration path.
     pub fn default_path() -> PathBuf {
+        if let Some(dir) = crate::portable_dir() {
+            return dir.join("config.json");
+        }
         if let Some(appdata) = std::env::var_os("APPDATA") {
             PathBuf::from(appdata)
                 .join("image-viewer")
@@ -6354,6 +6381,9 @@ const THUMB_TRIM_TO_DEN: u64 = 5;
 /// worthless on another machine, and a profile folder is the wrong place for
 /// something this size.
 pub fn thumb_cache_root() -> PathBuf {
+    if let Some(dir) = portable_dir() {
+        return dir.join("thumbs");
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         PathBuf::from(local)
             .join("image-viewer")
@@ -6833,6 +6863,9 @@ type SpreadStore = std::collections::BTreeMap<String, GallerySpreads>;
 /// forgotten at exit, which is a far smaller failure than an app that will not
 /// start.
 pub fn spreads_root() -> Option<PathBuf> {
+    if let Some(dir) = portable_dir() {
+        return Some(dir.join("spreads.json"));
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         Some(PathBuf::from(local).join("image-viewer").join("spreads.json"))
     } else if let Some(home) = std::env::var_os("HOME") {
