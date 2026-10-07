@@ -7965,25 +7965,39 @@ impl eframe::App for MyApp {
                                         parse_key_full(&name).is_some()
                                     }) =>
                             {
-                                let clash = image_viewer::KEY_ACTIONS.iter().find(|(id, _, _)| {
-                                    *id != action
-                                        && image_viewer::resolve_binding(&self.config.keybindings, id)
-                                            == chord
-                                });
-                                if let Some((_, _, label)) = clash {
-                                    self.notice = Some(format!(
-                                        "{chord} is already {label} — pick another"
-                                    ));
+                                // Duplicates are allowed and shown, not
+                                // refused: blocking second-guesses the reader
+                                // (chords can be intentional — one key stepping
+                                // two views is sometimes exactly the point),
+                                // while a silent double-fire is the failure
+                                // mode. So the commit always lands, the notice
+                                // names the sharers, and every row below marks
+                                // its own conflicts in red.
+                                if chord == image_viewer::default_binding(&action) {
+                                    self.config.keybindings.remove(&action);
                                 } else {
-                                    if chord == image_viewer::default_binding(&action) {
-                                        self.config.keybindings.remove(&action);
-                                    } else {
-                                        self.config.keybindings.insert(action.clone(), chord.clone());
-                                    }
-                                    set_nav_overrides(&self.config.keybindings);
-                                    self.config.save(&self.config_path);
-                                    self.notice = Some(format!("{label} is now {chord}", label = action_label(&action)));
+                                    self.config.keybindings.insert(action.clone(), chord.clone());
                                 }
+                                set_nav_overrides(&self.config.keybindings);
+                                self.config.save(&self.config_path);
+                                let sharers: Vec<&str> = image_viewer::KEY_ACTIONS
+                                    .iter()
+                                    .filter(|(id, _, _)| {
+                                        *id != action
+                                            && image_viewer::resolve_binding(&self.config.keybindings, id)
+                                                == chord
+                                    })
+                                    .map(|(_, _, label)| *label)
+                                    .collect();
+                                self.notice = Some(if sharers.is_empty() {
+                                    format!("{label} is now {chord}", label = action_label(&action))
+                                } else {
+                                    format!(
+                                        "{label} is now {chord} (also: {sharers})",
+                                        label = action_label(&action),
+                                        sharers = sharers.join(", ")
+                                    )
+                                });
                                 self.capturing = None;
                             }
                             _ => {
@@ -8010,6 +8024,27 @@ impl eframe::App for MyApp {
                                 };
                                 if ui.button(text).clicked() {
                                     self.capturing = Some((*id).to_owned());
+                                }
+                                // Conflict marker: every other action on this
+                                // exact chord, in red. Duplicates fire
+                                // together — this row is where that reads as
+                                // intentional rather than mysterious.
+                                let others: Vec<&str> = image_viewer::KEY_ACTIONS
+                                    .iter()
+                                    .filter(|(other, _, _)| {
+                                        *other != *id
+                                            && image_viewer::resolve_binding(
+                                                &self.config.keybindings,
+                                                other,
+                                            ) == current
+                                    })
+                                    .map(|(_, _, other_label)| *other_label)
+                                    .collect();
+                                if !others.is_empty() {
+                                    ui.colored_label(
+                                        ui.visuals().warn_fg_color,
+                                        format!("also: {}", others.join(", ")),
+                                    );
                                 }
                             });
                         }

@@ -484,7 +484,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
 | Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |
-| Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords are refused by name. `Esc` and mouse buttons are not rebindable |
+| Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords show red `also:` markers instead of refusing. `Esc` and mouse buttons are not rebindable |
 | User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
 
 The downscale filter, **Smooth** and sort mode re-decode immediately; the

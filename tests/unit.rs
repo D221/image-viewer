@@ -4288,9 +4288,11 @@ fn capture_and_labels_are_wired() {
         src.contains("self.capturing = Some(") && src.contains("press keys… (Esc cancels)"),
         "Settings must offer click-to-capture with an Esc out"
     );
+    // Duplicates land with a warning naming the sharers (never refused),
+    // and every row marks its own conflicts in red.
     assert!(
-        src.contains("is already ") && src.contains("pick another"),
-        "a chord taken by another action must be refused by name"
+        src.contains("(also: {sharers})") && src.contains("\"also: {}\""),
+        "conflicts must show, not block"
     );
     for name in image_viewer::KEY_NAMES {
         // Single characters ride the char-match branches, not string arms.
