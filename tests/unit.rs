@@ -4341,10 +4341,12 @@ fn recursive_browsing_is_wired() {
     // read anywhere else is a gallery that misses the tree.
     assert_eq!(
         src.matches("config.recursive_folders && ").count(),
-        5,
-        "exactly the five read sites: startup scan, open_folder, open_file, scan_current \
-         (rescan) and the settings reload. A sixth means a rebuild was added without \
-         asking whether it sees the tree."
+        6,
+        "exactly the six read sites: startup scan, open_folder, open_file, scan_current \
+         (rescan), the settings reload, and leave_archive. A seventh means a rebuild was \
+         added without asking whether it sees the tree — leave_archive is the one that \
+         has to agree with the open it is going back from, or backing out lands in a \
+         flat listing of a folder the reader was browsing as a tree."
     );
     assert!(
         src.contains("fn scan_current(&self)") && src.contains("self.scan_current()"),
@@ -4353,6 +4355,85 @@ fn recursive_browsing_is_wired() {
     assert!(
         src.contains("load_all_from_folder_recursive("),
         "the position-preserving funnel must have a recursive arm"
+    );
+}
+
+/// The body of the function whose signature is `sig`, by brace counting.
+///
+/// The same helper as `tests/spreads.rs`, kept local rather than shared because
+/// each test binary compiles separately, and these scans sit beside the
+/// behaviour they belong to.
+fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
+    let start = src.find(sig)? + sig.len();
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, b) in src.as_bytes()[start..].iter().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
+    Some(&src[start..end])
+}
+
+/// Archives in the gallery must be **entered**, never decoded — and the seam
+/// that does it is `goto`, because it is the one function every way into the
+/// app passes through.
+///
+/// `main.rs` is unreachable from every test, so these are source scans, and the
+/// position matters more than the presence: a `goto` that called `open_archive`
+/// *after* `schedule` would compile, would read correctly, and would queue a
+/// decode of a `.cbz` whose sniff failure is a permanent `failed` entry.
+#[test]
+fn archives_are_entered_in_goto_and_never_decoded() {
+    let src = include_str!("../src/main.rs");
+    let body = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
+
+    // Position, not presence: the branch returns before anything plans.
+    let enter = body
+        .find("is_archive_path(&cur)")
+        .expect("goto must recognise an archive");
+    let opens = body.find("self.open_archive(ctx, &cur)").expect("and open it");
+    let schedules = body
+        .find("self.schedule()")
+        .expect("goto plans somewhere; find where");
+    assert!(
+        enter < opens && opens < schedules,
+        "the archive branch must precede any planning, or a .cbz gets a decode job"
+    );
+    assert!(
+        body[opens..].contains("return;"),
+        "and it must return: a goto that keeps planning after handing the app \
+         over to another gallery plans for two galleries at once"
+    );
+
+    // The decode side is a library rule with its own behavioural test; these two
+    // are the paths that bypass `plan_jobs` and so need their own guard.
+    assert!(
+        src.contains("let is_archive = is_archive_path(path);") && src.contains("!is_archive &&"),
+        "a grid cell must not ask for a thumbnail of a container"
+    );
+    assert!(
+        src.contains(".filter(|p| !is_archive_path(p))"),
+        "the EXIF panel pushes its own job, so it needs its own archive guard"
+    );
+
+    // `Del` is the one bare letter that loses data, so what it refuses on is
+    // asserted: the *file* under the cursor, not whether the listing came out
+    // of an archive. The second condition used to stand alone, and a folder
+    // containing a .cbz would then delete it.
+    let del = fn_body(src, "fn delete_current(&mut self, ctx: &Context)").expect("delete_current");
+    assert!(
+        del.contains("is_archive_path(&p) ||"),
+        "delete must refuse when the cursor is ON an archive, not only when inside one"
     );
 }
 
@@ -4668,6 +4749,256 @@ fn recursive_scan_walks_the_tree() {
             let _ = std::fs::remove_dir(&link);
         }
     }
+}
+
+/// A real 2x2 PNG, built here rather than vendored: `image` can write PNG, so
+/// `tests/fixtures/` is for formats nothing in the dependency set can produce.
+fn archive_test_png() -> Vec<u8> {
+    let img = image::RgbaImage::from_fn(2, 2, |x, y| image::Rgba([x as u8 * 80, y as u8 * 80, 40, 255]));
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
+/// Build a zip/cbz of the given members. `deflate` is the default on purpose:
+/// a *stored* zip would pass even if the reader only ever read headers.
+fn write_test_zip(path: &std::path::Path, members: &[(&str, Vec<u8>)]) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zw = zip::ZipWriter::new(file);
+    let opts: zip::write::FileOptions<()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in members {
+        zw.start_file(*name, opts).unwrap();
+        std::io::Write::write_all(&mut zw, bytes).unwrap();
+    }
+    zw.finish().unwrap();
+}
+
+/// Build a 7z of the given members, through the same crate that reads it back.
+///
+/// `compress_to_path` takes a *source path* rather than a list of entries, so
+/// this writes the members out first and compresses the tree. That also means
+/// the nested names (`ch1/01.png`) reach the archive as real directories, which
+/// is what the flattening has to deal with.
+fn write_test_7z(path: &std::path::Path, members: &[(&str, Vec<u8>)]) {
+    let staging = path.with_extension("7z-staging");
+    let _ = std::fs::remove_dir_all(&staging);
+    for (name, bytes) in members {
+        let p = staging.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, bytes).unwrap();
+    }
+    sevenz_rust2::compress_to_path(&staging, path).unwrap();
+    let _ = std::fs::remove_dir_all(&staging);
+}
+
+/// Archives are **listed** in a folder scan, and are deliberately not in
+/// `SUPPORTED_EXTENSIONS` — that constant gates decoding and also decides
+/// which members get extracted, so a zip in it would make a container
+/// something the image decoders are handed.
+///
+/// Every extension the app claims is asserted here, because the claim is what
+/// makes a folder's contents visible at all: a typo in this list is a format
+/// that silently does not appear in any folder, with no error anywhere.
+#[test]
+fn archives_are_listed_and_images_still_are() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("a.jpg"), b"x").unwrap();
+    for ext in ["zip", "cbz", "7z", "rar"] {
+        std::fs::write(root.join(format!("vol1.{ext}")), b"x").unwrap();
+    }
+    std::fs::write(root.join("notes.txt"), b"x").unwrap();
+    std::fs::write(root.join("inner.cbz"), b"x").unwrap();
+
+    let mut found: Vec<String> = image_viewer::scan_folder(root)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec!["a.jpg", "inner.cbz", "vol1.7z", "vol1.cbz", "vol1.rar", "vol1.zip"],
+        "images and every claimed archive, natural order, nothing else"
+    );
+
+    // The recursive walk shares the predicate, so an archive in a subfolder is
+    // found without a second list to keep in step.
+    let sub = root.join("vol2");
+    std::fs::create_dir_all(&sub).unwrap();
+    write_test_zip(&sub.join("v2.cbz"), &[("p.jpg", archive_test_png())]);
+    let walked: Vec<String> = image_viewer::scan_folder_recursive(root)
+        .iter()
+        .filter(|p| image_viewer::is_archive_path(p))
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    assert_eq!(
+        walked,
+        vec![
+            "inner.cbz",
+            "vol1.7z",
+            "vol1.cbz",
+            "vol1.rar",
+            "vol1.zip",
+            "vol2/v2.cbz"
+        ],
+        "archives are found at every level, ordered by full path; the txt never is"
+    );
+
+    // The claim is content-based for decoding, so the listing predicate must
+    // stay out of the decode filter. This is the assertion that would fail if
+    // someone 'fixed' the folder scan by adding cbz to SUPPORTED_EXTENSIONS.
+    assert!(
+        !image_viewer::SUPPORTED_EXTENSIONS.contains(&"cbz"),
+        "an archive in the decode filter would be handed to the image decoders \
+         and would also be extracted as a member of another archive"
+    );
+    assert!(
+        image_viewer::is_browsable(std::path::Path::new("x/inner.cbz"))
+            && image_viewer::is_browsable(std::path::Path::new("x/a.JPG")),
+        "the predicate is case-insensitive and covers both kinds"
+    );
+    assert!(
+        !image_viewer::is_browsable(std::path::Path::new("x/notes.txt")),
+        "not everything in a folder is browsable"
+    );
+}
+
+/// All three containers must produce the *same* flattened gallery: that shared
+/// contract is what makes one `open_archive` correct for every format, and a
+/// reader that quietly diverges (kept a subdirectory, kept a `.txt`, wrote two
+/// members to one name) would show a gallery unlike every other archive's.
+#[test]
+fn every_archive_format_yields_the_same_flattened_gallery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let png = archive_test_png();
+
+    // Two members that flatten to the same file name, one nested and one with a
+    // different case: without the case-insensitive claim, one silently wins and
+    // the gallery is a page short with no error anywhere.
+    let members: Vec<(&str, Vec<u8>)> = vec![
+        ("ch1/01.png", png.clone()),
+        ("ch2/01.PNG", png.clone()),
+        ("ch2/02.png", png.clone()),
+        ("notes.txt", b"ignore me".to_vec()),
+        ("inner.cbz", b"ignore me too".to_vec()),
+    ];
+
+    write_test_zip(&root.join("v.cbz"), &members);
+    write_test_7z(&root.join("v.7z"), &members);
+
+    let mut results = Vec::new();
+    for name in ["v.cbz", "v.7z"] {
+        let dest = root.join(format!("out-{name}"));
+        let (extracted, skipped) =
+            image_viewer::extract_archive(&root.join(name), &dest).unwrap_or_else(|e| {
+                panic!("{name} extracted nothing: {e}");
+            });
+        let mut got: Vec<String> = image_viewer::scan_folder(&dest)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_lowercase())
+            .collect();
+        got.sort();
+        results.push((name.to_string(), extracted, skipped, got));
+    }
+
+    for (name, extracted, skipped, got) in &results {
+        assert_eq!(*extracted, 2, "{name}: two distinct pages");
+        assert_eq!(*skipped, 0, "{name}: nothing was unreadable");
+        assert_eq!(
+            *got,
+            vec!["01.png".to_string(), "02.png".to_string()],
+            "{name}: flat, images only, the colliding member did not overwrite"
+        );
+    }
+    assert_eq!(
+        results[0].3, results[1].3,
+        "a cbz and a 7z of the same members must show the same gallery"
+    );
+
+    // The count is a header read, and it agrees with what extraction produced —
+    // it is what the status line and the grid cell draw, so a disagreement is a
+    // number on screen that is wrong.
+    assert_eq!(image_viewer::archive_image_count(&root.join("v.cbz")), Some(2));
+    assert_eq!(image_viewer::archive_image_count(&root.join("v.7z")), Some(2));
+    assert_eq!(
+        image_viewer::archive_image_count(&root.join("nope.7z")),
+        None,
+        "a missing archive has no count, rather than a zero that reads as 'empty'"
+    );
+    assert_eq!(
+        image_viewer::archive_image_count(&root.join("v.jpg")),
+        None,
+        "a non-archive has no count"
+    );
+
+    // `extract_archive` dispatches on the extension and refuses anything else
+    // by name, so an unhandled container is an error rather than an empty
+    // gallery that looks like an archive with no images in it.
+    let err = image_viewer::extract_archive(
+        std::path::Path::new("x.tar.zst"),
+        &root.join("out-none"),
+    )
+    .unwrap_err();
+    assert!(err.contains("zst"), "the error names the format: {err}");
+}
+
+/// A RAR this build cannot read must **say so**, not open as an empty gallery.
+///
+/// **What is and is not covered here, precisely.** Nothing in the dependency set
+/// can write a RAR, and the 7-Zip on this box is read-only for the format
+/// ("Not implemented" on write), so there is no RAR fixture to test against — a
+/// hand-built one would be this crate's guess at the format rather than the
+/// format. So the real archive path is untested here and this test covers only
+/// what is checkable:
+///
+///  * a RAR4 file - the format most `.rar` files in the wild actually are, and
+///    one this crate does not read - produces an error naming RAR, rather than
+///    an empty gallery, which reads as "an archive with no images in it";
+///  * the guard that catches an undecompressed member is content-based, so it
+///    can be tested directly on bytes.
+///
+/// **Not claimed:** that a real RAR5 with stored PNGs opens and yields the same
+/// flattened gallery as a cbz. That needs a RAR file this repo does not have,
+/// and saying otherwise would be the kind of claim that survives only because
+/// nobody can run the test.
+#[test]
+fn a_rar_this_build_cannot_read_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // RAR4's signature block: `Rar!\x1a\x07\x00`. Recognisably a RAR, and a
+    // version the `rar` crate does not parse.
+    let rar4 = root.join("vol.rar");
+    std::fs::write(&rar4, b"Rar!\x1a\x07\x00\x00\x00").unwrap();
+
+    let err = image_viewer::extract_archive(&rar4, &root.join("out")).unwrap_err();
+    assert!(
+        err.contains("RAR") || err.contains("Cannot read"),
+        "the error says the format could not be read: {err}"
+    );
+    assert!(
+        !root.join("out").exists() || image_viewer::scan_folder(&root.join("out")).is_empty(),
+        "an unreadable archive must not leave gallery entries behind"
+    );
+
+    // The member guard is content, so it is testable without an archive: bytes
+    // that are not a picture must be refused whatever the name says, because
+    // that is the shape of an undecompressed member.
+    assert!(image_viewer::looks_like_supported_image(&archive_test_png()));
+    assert!(!image_viewer::looks_like_supported_image(b"\x00\x01\x02not an image at all"));
+    assert!(!image_viewer::looks_like_supported_image(&[]));
+    assert!(
+        !image_viewer::looks_like_supported_image(b"RIFFxxxxWAVEfmt "),
+        "a RIFF that is a WAV is not a WebP, and the check says so"
+    );
 }
 
 /// T mode is always absolute: the shrink helper is deleted, so there is no

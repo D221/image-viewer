@@ -1048,21 +1048,35 @@ pub const IMAGE_CRATE_DECODERS_WE_SKIP: &[(&str, &str)] = &[
     ("avif", "already handled, and better, by the heic crate"),
 ];
 
-/// Scan a directory for supported image files, sorted alphabetically.
+/// True if a folder scan should list this file: an image the app can decode, or
+/// an archive it can open.
+///
+/// **Archives are listed, and are deliberately not in
+/// [`SUPPORTED_EXTENSIONS`].** That constant gates *decoding* - it is also what
+/// [`extract_zip`] uses to decide which members to write out, so a `.zip` in
+/// it would make an archive both a browsable item and something the decoders
+/// are handed. Listing and decoding are different questions, and this
+/// predicate is the listing one.
+pub fn is_browsable(p: &Path) -> bool {
+    if is_archive_path(p) {
+        return true;
+    }
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    SUPPORTED_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// Scan a directory for images and image archives, sorted alphabetically.
 pub fn scan_folder(folder: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(folder) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_file() {
-                let ext = p
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-                    files.push(p);
-                }
+            if p.is_file() && is_browsable(&p) {
+                files.push(p);
             }
         }
     }
@@ -1103,12 +1117,7 @@ pub fn scan_folder_recursive(folder: &Path) -> Vec<PathBuf> {
             }
             let p = entry.path();
             if ft.is_file() {
-                let ext = p
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+                if is_browsable(&p) {
                     out.push(p);
                 }
             } else if ft.is_dir() {
@@ -2456,7 +2465,17 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     };
 
     let need_preview = |key: &ImgKey| {
-        !p.cached.contains(key) && !p.failed.contains(&(key.clone(), Kind::Preview))
+        // **An archive is never a decode job.** `goto` enters the one the cursor
+        // is on, but the preload window walks its *neighbours* without consulting
+        // it: a folder of pages with a `.cbz` between two of them would queue a
+        // decode of the container, and the worker would sniff, fail, and write a
+        // `failed` entry that is permanent for the session — so re-entering the
+        // archive later would find the file poisoned by having had a neighbour.
+        // The cost of getting this wrong is paid by the reader as a page that
+        // refuses to open, with no error to act on.
+        !is_archive_path(&key.path)
+            && !p.cached.contains(key)
+            && !p.failed.contains(&(key.clone(), Kind::Preview))
     };
 
     // A stale preview is cached *and* still wanted: the texture stays on screen
@@ -4773,6 +4792,12 @@ pub fn color_info(path: &Path) -> ColorInfo {
 pub fn scan_colour(folder: &Path) -> Vec<(PathBuf, ColorInfo)> {
     scan_folder_sorted(folder, SortMode::Name)
         .into_iter()
+        // Archives are listed by a folder scan and are **not** auditable by
+        // this: `color_info` reads the whole file, so auditing a 200 MB `.cbz`
+        // would pull all of it into memory to report that a container has no
+        // colour profile of its own. The images inside it are audited when it
+        // is opened.
+        .filter(|p| !is_archive_path(p))
         .map(|p| {
             let info = color_info(&p);
             (p, info)
@@ -8546,12 +8571,77 @@ pub fn buffer_has_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|p| p[3] != 255)
 }
 
-/// True if the path looks like a zip-based image archive (cbz/zip).
+/// The archive containers this app can open.
+///
+/// A member listing is the only thing every one of these promises: read the
+/// names, count them, decide which are images. What comes *out* of a member is
+/// the reader's business and is not uniform — see [`extract_archive`].
+pub const ARCHIVE_EXTENSIONS: [&str; 4] = ["zip", "cbz", "7z", "rar"];
+
+/// True if the path looks like an image archive this app can open.
+///
+/// **Listing an archive is not decoding it.** This predicate decides what a
+/// folder scan yields; [`is_browsable`] adds the images to it, and neither puts
+/// an archive in [`SUPPORTED_EXTENSIONS`], which is what the decoders and
+/// [`extract_zip`] filter members with. A zip in there would make a container
+/// something the image decoders get handed.
 pub fn is_archive_path(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_lowercase().as_str(), "cbz" | "zip"))
+        .map(|e| ARCHIVE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// Turn one archive member's name into the file name it will be written as, or
+/// `None` if it should not be written at all.
+///
+/// **Shared by all three readers**, which is the point: the gallery inside an
+/// archive is the same whichever container it came from, so a `.rar` and a
+/// `.cbz` of the same pages produce the same files in the same order.
+///
+/// Three filters, each load-bearing:
+///  * **directories** — an archive member may name a folder.
+///  * **non-images** — by [`SUPPORTED_EXTENSIONS`], which is deliberately *not*
+///    the listing predicate. A `.zip` inside a `.zip` is not extracted, so an
+///    archive can never contain a browsable archive and the gallery is one level
+///    deep by construction.
+///  * **illegal and reserved names** — entries may carry characters NTFS
+///    refuses, plus the trailing dot or space it silently strips, so the name is
+///    compared *after* cleaning rather than before.
+fn archive_member_name(raw: &str) -> Option<String> {
+    let name = std::path::Path::new(raw).file_name()?.to_str()?;
+    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+    if !SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20 {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // NTFS silently drops a trailing dot or space, so `page.png ` would collide
+    // with `page.png` after cleaning - compare what will actually be on disk.
+    let trimmed = safe.trim_end_matches(['.', ' ']).to_string();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed)
+}
+
+/// Name an extracted member uniquely, case-insensitively.
+///
+/// Two archive members can flatten to the same file name — `ch1/page01.jpg`
+/// twice, or `page01.jpg` and `PAGE01.JPG` — and Windows treats those as one
+/// file, so the second would silently overwrite the first and the gallery would
+/// be a page shorter than the archive with no error anywhere. Returns `false`
+/// when the name is taken.
+fn claim_member_name(seen: &mut std::collections::HashSet<String>, safe: &str) -> bool {
+    seen.insert(safe.to_lowercase())
 }
 
 /// A file the app now owns a copy of, and the directory that copy lives in.
@@ -8785,29 +8875,10 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
             encrypted += 1;
             continue;
         }
-        let Some(name) = std::path::Path::new(f.name())
-            .file_name()
-            .and_then(|n| n.to_str())
-        else {
+        let Some(safe) = archive_member_name(f.name()) else {
             continue;
         };
-        let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
-        if !SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-            continue;
-        }
-        // Windows-safe file name (entries may contain characters that are
-        // illegal in NTFS file names), deduplicated case-insensitively.
-        let safe: String = name
-            .chars()
-            .map(|c| {
-                if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        if !seen.insert(safe.to_lowercase()) {
+        if !claim_member_name(&mut seen, &safe) {
             continue;
         }
         let mut out = std::fs::File::create(dest.join(&safe)).map_err(|e| e.to_string())?;
@@ -8815,6 +8886,281 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
         extracted += 1;
     }
     Ok((extracted, encrypted))
+}
+
+/// Extract image entries from a 7z archive. Same contract as [`extract_zip`].
+///
+/// **Encrypted entries cannot be counted the way zip counts them**: 7z reports
+/// one archive-level flag, so a password-protected `.7z` arrives here as an
+/// error from the reader rather than as a per-member skip. That is the honest
+/// shape for it — a whole-archive refusal rather than a partial gallery.
+pub fn extract_7z(archive: &Path, dest: &Path) -> Result<(usize, usize), String> {
+    use sevenz_rust2::ArchiveReader;
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut reader = ArchiveReader::open(archive, sevenz_rust2::Password::empty())
+        .map_err(|e| e.to_string())?;
+    let mut extracted = 0;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut names: Vec<(String, bool)> = Vec::new();
+    reader
+        .for_each_entries(|entry, _| {
+            names.push((entry.name().to_string(), entry.is_directory()));
+            Ok(true)
+        })
+        .map_err(|e| e.to_string())?;
+    for (name, is_dir) in names {
+        if is_dir {
+            continue;
+        }
+        let Some(safe) = archive_member_name(&name) else {
+            continue;
+        };
+        if !claim_member_name(&mut seen, &safe) {
+            continue;
+        }
+        // `read_file` decodes the whole member into memory. 7z members are
+        // solid by default, so a reader that streams would decode the members
+        // before it anyway; the difference is only the transient buffer, and a
+        // comic page is a few MB.
+        let bytes = reader.read_file(&name).map_err(|e| e.to_string())?;
+        std::fs::write(dest.join(&safe), &bytes).map_err(|e| e.to_string())?;
+        extracted += 1;
+    }
+    Ok((extracted, 0))
+}
+
+/// Extract image entries from a RAR archive. Same contract as [`extract_zip`].
+///
+/// **Only stored (uncompressed) members come out, and that is a limit of the
+/// `rar` crate rather than a choice.** Its extractor has an unpack step marked
+/// `todo`, so a *compressed* member's stored bytes would be written out as if
+/// they were the page — a file that is not a JPEG, which the decoders then
+/// reject with an error the user has no way to interpret.
+///
+/// `rar` 0.4 exposes exactly one entry point, [`rar::Archive::extract_all`],
+/// which writes every member of the archive into a directory and hands back the
+/// parsed structure. So this extracts to a scratch directory, then applies the
+/// same member-name and content rules the other two readers apply *before* the
+/// bytes reach the gallery. The scratch directory is deleted either way.
+///
+/// A RAR4 file fails inside `extract_all` (it parses RAR5 headers), which
+/// surfaces as an error rather than as an empty gallery — the honest outcome
+/// for a format this crate does not read.
+pub fn extract_rar(archive: &Path, dest: &Path) -> Result<(usize, usize), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    // A sibling of `dest`, never inside it: `extract_all` writes member names
+    // verbatim, so a member called `sub/page.jpg` creates directories, and a
+    // scratch dir under `dest` would be scanned by the gallery.
+    let scratch = dest.with_extension("rar-scratch");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
+    let parsed = rar::Archive::extract_all(
+        archive.to_string_lossy().as_ref(),
+        scratch.to_string_lossy().as_ref(),
+        "",
+    );
+    let archive = match parsed {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return Err(format!("Cannot read this RAR ({e})"));
+        }
+    };
+    // The name list is authoritative over the directory walk: a member whose
+    // name is not a safe flat file name must not become a gallery entry, and a
+    // compressed one must not become one either.
+    let mut kept: Vec<(String, PathBuf)> = Vec::new();
+    for block in &archive.files {
+        let name = block.name.clone();
+        let Some(safe) = archive_member_name(&name) else {
+            continue;
+        };
+        let path = scratch.join(Path::new(&name).file_name().unwrap_or_default());
+        if path.is_file() {
+            kept.push((safe, path));
+        }
+    }
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut extracted = 0;
+    let mut skipped = 0;
+    for (safe, path) in kept {
+        if !claim_member_name(&mut seen, &safe) {
+            continue;
+        }
+        match verify_extracted_image(&path) {
+            Ok(true) => {
+                std::fs::copy(&path, dest.join(&safe)).map_err(|e| e.to_string())?;
+                extracted += 1;
+            }
+            // **The compression case.** The bytes are not an image, so the
+            // member is counted as skipped and the status line says why. Left in
+            // place it would become a gallery entry that fails to decode with a
+            // message about a corrupt file, which is both untrue and useless.
+            Ok(false) => skipped += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok((extracted, skipped))
+}
+
+/// True if these leading bytes are an image this app can decode.
+///
+/// **Content, never a file name**, which is the codebase's rule for choosing a
+/// decoder and is what makes it worth having here too: a member can arrive under
+/// a `.png` name carrying bytes that are not a picture. It exists as a public
+/// function because the archive readers need it *after* extracting, and that
+/// check is what stops an undecompressed member from becoming a gallery entry
+/// that later fails to decode with a message about a corrupt file.
+pub fn looks_like_supported_image(head: &[u8]) -> bool {
+    is_jpeg_bytes(head)
+        || head.starts_with(b"\x89PNG\r\n\x1a\n")
+        || is_gif_bytes(head)
+        // `RIFF` alone is not WebP: WAV and AVI start the same way, so the form
+        // type four bytes in is the part that decides it.
+        || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP"))
+        || is_qoi_bytes(head)
+        || is_tiff_bytes(head)
+        || is_bmp_bytes(head)
+        || is_ico_bytes(head)
+}
+
+/// True if a just-extracted file really is an image, read from its own bytes.
+fn verify_extracted_image(path: &Path) -> Result<bool, std::io::Error> {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let mut f = std::fs::File::open(path)?;
+    let n = f.read(&mut head)?;
+    Ok(looks_like_supported_image(&head[..n]))
+}
+
+/// Extract every image member of any supported archive into `dest`.
+///
+/// **The three readers are not equally capable, and this function does not
+/// pretend otherwise.** Returns `(extracted, skipped)` where `skipped` counts
+/// members the reader could not produce — encrypted for zip, compressed for
+/// rar — so the caller can say how many and why rather than showing a short
+/// gallery with no explanation.
+pub fn extract_archive(archive: &Path, dest: &Path) -> Result<(usize, usize), String> {
+    let ext = archive
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "zip" | "cbz" => extract_zip(archive, dest),
+        "7z" => extract_7z(archive, dest),
+        "rar" => extract_rar(archive, dest),
+        other => Err(format!("Unsupported archive: .{other}")),
+    }
+}
+
+/// How many images an archive holds, without extracting it.
+///
+/// **A header read, not a decode.** zip and 7z read their central directory
+/// and RAR walks its file headers; no member payload is touched, so this is
+/// bounded by the header rather than by the archive. It is what lets the status
+/// line say `vol1.cbz - 42 images` and a grid cell draw a label, and it runs on
+/// the UI thread, so it must stay this cheap.
+///
+/// How many images an archive holds, without extracting it.
+///
+/// **A header read, not a decode.** zip and 7z read their central directory
+/// and RAR walks its file headers; no member payload is touched, so this is
+/// bounded by the header rather than by the archive. It is what lets the status
+/// line say `vol1.cbz - 42 images` and a grid cell draw a label, and it runs on
+/// the UI thread, so it must stay this cheap.
+///
+/// **It counts what extraction would produce, not how many members the archive
+/// holds.** Two members can flatten to the same file name — `ch1/01.png` and
+/// `ch2/01.PNG` both become `01.png`, and Windows has one file there — so a
+/// plain member tally says 3 for a 2-page archive. The number on screen would
+/// then disagree with the gallery beside it, and the caller has no way to tell
+/// which one is lying. Hence the same [`claim_member_name`] the extractors use.
+///
+/// `None` for anything that cannot be read: the caller has a path, not a
+/// problem to solve, and the error belongs at open time.
+pub fn archive_image_count(archive: &Path) -> Option<usize> {
+    let ext = archive
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "zip" | "cbz" => {
+            let f = std::fs::File::open(archive).ok()?;
+            let mut z = zip::ZipArchive::new(f).ok()?;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut n = 0usize;
+            for i in 0..z.len() {
+                if let Ok(entry) = z.by_index(i) {
+                    if entry.is_dir() {
+                        continue;
+                    }
+                    if let Some(safe) = archive_member_name(entry.name()) {
+                        if claim_member_name(&mut seen, &safe) {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            Some(n)
+        }
+        "7z" => {
+            use sevenz_rust2::{ArchiveReader, Password};
+            let mut reader = ArchiveReader::open(archive, Password::empty()).ok()?;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut n = 0usize;
+            reader
+                .for_each_entries(|entry, _| {
+                    if !entry.is_directory() {
+                        if let Some(safe) = archive_member_name(entry.name()) {
+                            if claim_member_name(&mut seen, &safe) {
+                                n += 1;
+                            }
+                        }
+                    }
+                    Ok(true)
+                })
+                .ok()?;
+            Some(n)
+        }
+        "rar" => {
+            // The one public entry point extracts to a directory, so counting
+            // without writing is not offered. This is a header read plus a
+            // scratch directory, which is still bounded by the member list and
+            // not by the payload.
+            let scratch = std::env::temp_dir().join(format!(
+                "iv-rar-count-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&scratch);
+            let archive = rar::Archive::extract_all(
+                archive.to_string_lossy().as_ref(),
+                scratch.to_string_lossy().as_ref(),
+                "",
+            )
+            .ok()?;
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let n = archive
+                .files
+                .iter()
+                .filter(|b| {
+                    let written = scratch
+                        .join(std::path::Path::new(&b.name).file_name().unwrap_or_default())
+                        .is_file();
+                    match (archive_member_name(&b.name), written) {
+                        (Some(safe), true) => claim_member_name(&mut seen, &safe),
+                        _ => false,
+                    }
+                })
+                .count();
+            let _ = std::fs::remove_dir_all(&scratch);
+            Some(n)
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

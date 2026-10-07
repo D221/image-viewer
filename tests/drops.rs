@@ -542,15 +542,27 @@ fn a_drop_copy_is_released_on_exit_and_on_quit() {
     );
     // Counted, because the failure this guards is a *forgotten site*: a copy the
     // app never releases is a directory in `%TEMP%` for the rest of the machine's
-    // life, and nothing anywhere reports it. Six today - open_archive,
-    // open_folder, pick_folder, open_file, on_exit and Esc-to-quit - and a seventh
-    // has to be added here rather than left to chance.
+    // life, and nothing anywhere reports it. Seven today - open_archive,
+    // open_folder, pick_folder, open_file, leave_archive, on_exit and Esc-to-quit
+    // - and an eighth has to be added here rather than left to chance.
+    //
+    // `leave_archive` is the one that came with a real obligation attached:
+    // backing out of an archive releases the temp dir `open_archive` created, so
+    // without the call the archive's extracted pages would sit in `%TEMP%` for
+    // every visit rather than for the session.
     let total = src.matches("self.close_transients()").count();
     assert_eq!(
-        total, 6,
-        "expected 6 release sites (open_file, open_folder, open_archive, pick_folder, \
-         on_exit, Esc-to-quit); a new one means a new way to leak a copy, so name it \
-         here"
+        total, 7,
+        "expected 7 release sites (open_file, open_folder, open_archive, leave_archive, \
+         pick_folder, on_exit, Esc-to-quit); a new one means a new way to leak a copy, \
+         so name it here"
+    );
+    // ...and named, not just counted: the new site is only correct if it
+    // releases the *archive's* half on the way out.
+    let leave = fn_body(src, "fn leave_archive");
+    assert!(
+        leave.contains("self.close_transients()"),
+        "leaving an archive must release its extracted temp dir:\n{leave}"
     );
 }
 

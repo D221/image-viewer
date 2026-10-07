@@ -120,11 +120,13 @@ silently survived a restart would hide files with no obvious way back.
 
 ### Archives
 
-Opening a `.cbz` or `.zip` extracts the image entries to a temp folder and
-opens it as a normal gallery, so paging, zooming and the grid all work
+Opening a `.zip`, `.cbz`, `.7z` or `.rar` extracts the image entries to a temp
+folder and opens it as a normal gallery, so paging, zooming and the grid all work
 unchanged. The temp folder is reused while the archive is unchanged and
-cleaned up on exit. Comics are read-only: delete/move/copy are refused rather
-than silently writing into the zip.
+cleaned up on exit, and on `←` at the archive's first page. Comics are read-only:
+delete/move/copy are refused rather than silently writing into the zip.
+
+Archives are also *listed* in a folder — see [Archives](#archives) below.
 
 ### Triage
 
@@ -484,6 +486,24 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Fit view | off | Sticky fit-to-window (`F`); mutually exclusive with `T`. Photos open at 100% with everything off |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
 | Include subfolders | off | One gallery over the whole tree (sorts apply globally); the 2 s watcher walks it every poll |
+
+## Archives
+
+`.zip`, `.cbz`, `.7z` and `.rar` files are **listed in a folder** alongside images,
+in every sort mode and in the grid, with no setting to turn on. Arrow onto one and
+it *opens* rather than decodes — press `←` at its first page to come back to the
+folder, with the cursor on the archive.
+
+- The status line reads `vol1.cbz - 42 images, press right to open`, and the grid
+  cell shows the member count. Both come from a header read, not a decode.
+- `Del` refuses on an archive. So does move/copy.
+- Members are flattened: nested folders do not become folders, non-images are
+  skipped, and two members that would flatten to the same file name are counted
+  once.
+- **7z and zip read fully. RAR5 reads only uncompressed members** — the Rust RAR
+  reader cannot decompress, so compressed pages are counted as unreadable and
+  skipped rather than shown as broken images. RAR4 is not supported and says so.
+  Archives are extracted to `%TEMP%\image-viewer`, released on leaving and on exit.
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
 | Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |
 | Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords show red `also:` markers instead of refusing. `Esc` and mouse buttons are not rebindable |
@@ -565,7 +585,7 @@ Turning the setting off stops it being written at all; nothing else changes.
 ## Command line
 
 ```
-image-viewer.exe [file | folder | archive.zip | archive.cbz]
+image-viewer.exe [file | folder | archive.zip | archive.cbz | archive.7z | archive.rar]
 image-viewer.exe --register      # add this build to the "Open with" list
 image-viewer.exe --unregister
 image-viewer.exe --icc-scan <folder>   # report the colour space of every image

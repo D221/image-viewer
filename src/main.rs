@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 
 use image_viewer::perf;
 use image_viewer::{
-    buffer_has_alpha, extract_zip, fill_scale, fit_scale_no_upscale, forget_thumbnail, grid_cols,
+    archive_image_count, buffer_has_alpha, extract_archive, fill_scale, fit_scale_no_upscale,
+    forget_thumbnail, grid_cols,
     is_archive_path, last_anchor, load_grid_thumbnail, load_image_full, load_page_preview_full,
     load_spread_overrides, nav_is_forward, protected_preview_keys, save_spread_overrides,
     scan_folder_sorted_dir, set_downscale_filter, set_downscale_smoothing, set_linear_resample,
@@ -1950,8 +1951,22 @@ struct MyApp {
     /// Start of the previous frame, for the frame-interval metric.
     t_prev_frame: Option<Instant>,
     pending_advance: Option<bool>, // queued step, consumed after one painted frame
-    zip_archive: Option<PathBuf>, // archive currently open (cbz/zip)
+    zip_archive: Option<PathBuf>, // archive currently open (cbz/zip/7z/rar)
     zip_temp: Option<PathBuf>, // its extracted temp dir
+    /// The folder the current archive was entered **from**, and the index the
+    /// archive sat at in it. Left by `enter_archive`, spent by `leave_archive`.
+    ///
+    /// **One slot, not a stack, and one level is provably enough.**
+    /// `archive_member_name` filters a member by `SUPPORTED_EXTENSIONS`, which
+    /// does not contain `zip`, so an archive can never contain a browsable
+    /// archive: there is nothing a second level could hold. A stack would be
+    /// code for a case that cannot arrive.
+    ///
+    /// Holding the *index* rather than the whole list is deliberate: the parent
+    /// folder is rescanned on the way out, so a file added or deleted while the
+    /// reader was inside the archive is reflected, and the cursor lands on the
+    /// archive by name rather than on whatever now occupies that slot.
+    archive_parent: Option<(PathBuf, PathBuf)>,
     /// A copy of a **dropped** file, in a directory this app owns, for as long as
     /// that file is open.
     ///
@@ -2093,7 +2108,7 @@ impl MyApp {
             }
             Some(a) if a.is_file() && is_archive_path(&a) => {
                 let temp = Self::zip_temp_for(&a);
-                match extract_zip(&a, &temp) {
+                match extract_archive(&a, &temp) {
                     Ok((count, _)) if count > 0 => {
                         zip_archive = Some(a.clone());
                         zip_temp = Some(temp.clone());
@@ -2232,6 +2247,7 @@ impl MyApp {
             pending_advance: None,
             zip_archive,
             zip_temp,
+            archive_parent: None,
             // A file only ever arrives here from the command line or the file
             // dialog, neither of which is a transient hand-off, so there is never
             // a copy to release at start-up. `load_dropped` owns one instead.
@@ -2306,7 +2322,29 @@ impl MyApp {
     // ---- navigation -------------------------------------------------------
 
     /// Point the app at `gallery.current()` and (re)plan all background work.
+    ///
+    /// **An archive is entered here, not decoded here.** `goto` is the funnel
+    /// every way into the app passes through — `step`, the grid pick, `Del`'s
+    /// reschedule, resume, the filter — so the one branch below covers all of
+    /// them. A `.cbz` in the gallery has no image bytes, so the alternative is a
+    /// decode job that sniffs, fails, and writes a `failed` entry that is
+    /// permanent for the session: the archive would be a cell that can never
+    /// load, with no error the reader can act on.
+    ///
+    /// It is the *cursor* that enters, not the keypress. `leave_archive` puts
+    /// the cursor back on the archive without calling `goto` — `adopt_gallery`
+    /// has already planned for that position — which is what stops coming back
+    /// out immediately.
     fn goto(&mut self, ctx: &Context) {
+        // Ahead of everything else here, including the latency mark below: this
+        // hands the whole app over to another gallery, and nothing that follows
+        // should be planning for the archive.
+        if let Some(cur) = self.gallery.current().map(|p| p.to_path_buf()) {
+            if is_archive_path(&cur) {
+                self.open_archive(ctx, &cur);
+                return;
+            }
+        }
         // A goto that follows a keypress is navigation; a fresh open/click is a
         // selection. They are reported separately because the preloaded case
         // (0 ms) is the common one for navigation.
@@ -2568,6 +2606,24 @@ impl MyApp {
     fn step(&mut self, ctx: &Context, forward: bool) -> bool {
         // "Wait for load" mode: throttle stepping to decode completion.
         if self.config.block_while_loading && self.waiting_load {
+            return true;
+        }
+        // **Backing out of an archive is a step backwards.** At the first page
+        // of an archive, `prev` would loop to its last page (with `loop_back`
+        // on) or do nothing (off), and both are wrong: the thing before the
+        // archive's first page is the folder entry that opened it.
+        //
+        // Asked *before* the move rather than after it, because "we did not
+        // move" and "we are leaving" are otherwise the same observation and the
+        // first one is the right answer for `loop_back: false` at the front of
+        // any folder. Deliberately not gated on `loop_back`: with looping off,
+        // pressing `←` inside an archive should still get out, and a viewer
+        // that traps the reader inside a 200-page archive with a setting that
+        // exists to stop the opposite is not honouring the setting.
+        //
+        // Returns true — the press did something — so `step`'s caller records a
+        // navigation rather than a no-op.
+        if !forward && self.at_archive_front() && self.leave_archive(ctx) {
             return true;
         }
         // Manga mode moves a whole turn, which is one or two pages; single-image
@@ -3558,13 +3614,27 @@ impl MyApp {
             .join(format!("{:016x}", h.finish()))
     }
 
-    /// Open a cbz/zip image archive: extract supported entries to a stable
-    /// temp dir and treat it as a folder gallery.
+    /// Open a zip/cbz/7z/rar image archive: extract supported entries to a
+    /// stable temp dir and treat it as a folder gallery.
+    ///
+    /// **The parent is remembered here, and only here.** An archive can only be
+    /// entered from a folder — an archive holds no browsable archive — so this
+    /// is entered at most once per session per depth, and `archive_parent` has
+    /// exactly one writer. The record is taken *after* `close_transients`,
+    /// which is the call that would otherwise clear it.
     fn open_archive(&mut self, ctx: &Context, archive: &PathBuf) {
         self.close_transients();
+        let from_folder = self.folder.clone();
+        let from_name = archive.clone();
         let temp = Self::zip_temp_for(archive);
-        match extract_zip(archive, &temp) {
-            Ok((count, encrypted)) if count > 0 => {
+        match extract_archive(archive, &temp) {
+            Ok((count, skipped)) if count > 0 => {
+                // Only a real folder earns a way back. Opening an archive from
+                // the command line or a dialog has no parent to return to, and
+                // `Esc` is the way out there.
+                if self.zip_archive.is_none() && from_folder != temp {
+                    self.archive_parent = Some((from_folder, from_name));
+                }
                 self.zip_archive = Some(archive.clone());
                 self.zip_temp = Some(temp.clone());
                 self.folder = temp.clone();
@@ -3594,20 +3664,24 @@ impl MyApp {
                 self.reset_display();
                 // `zip_archive` was set above, so this keys the gallery by the
                 // archive's own path and not by `self.folder`, which is the temp
-                // directory `extract_zip` just wrote — a name that changes on every
-                // re-extract, so keying by it would lose every override the first
-                // time the archive was edited.
+                // directory `extract_archive` just wrote — a name that changes on
+                // every re-extract, so keying by it would lose every override the
+                // first time the archive was edited.
                 self.refresh_spreads();
                 self.goto(ctx);
-                let mut n = format!("Archive: {count} images");
-                if encrypted > 0 {
-                    n += &format!(" ({encrypted} encrypted skipped)");
-                }
+                // `skipped` is not always encrypted: the rar reader cannot
+                // decompress, so for it the skipped members are compressed ones.
+                // The wording names what was dropped rather than guessing why.
+                let n = if skipped > 0 {
+                    format!("Archive: {count} images ({skipped} unreadable, skipped)")
+                } else {
+                    format!("Archive: {count} images")
+                };
                 self.notice = Some(n);
             }
-            Ok((_, encrypted)) => {
-                let msg = if encrypted > 0 {
-                    format!("{encrypted} encrypted entries — unsupported")
+            Ok((_, skipped)) => {
+                let msg = if skipped > 0 {
+                    format!("{skipped} entries could not be read")
                 } else {
                     "No images inside the archive".to_string()
                 };
@@ -3615,6 +3689,63 @@ impl MyApp {
             }
             Err(e) => self.error = Some(format!("Archive failed: {e}")),
         }
+    }
+
+    /// Is the cursor on the first page of the open archive?
+    ///
+    /// The gate for [`Self::leave_archive`], asked rather than assumed because
+    /// an archive's gallery can also be a plain folder's — `zip_archive` is the
+    /// only thing that says the current listing came out of a container.
+    fn at_archive_front(&self) -> bool {
+        self.zip_archive.is_some() && self.gallery.current_page() == 0 && self.gallery.index == 0
+    }
+
+    /// Leave the open archive for the folder it was entered from, with the
+    /// cursor back on the archive.
+    ///
+    /// Returns false when there is no parent to go back to — an archive opened
+    /// from the command line or a dialog has none, and the caller must fall
+    /// through to the normal previous-image behaviour.
+    ///
+    /// **The folder is rescanned rather than restored from a saved list**, so a
+    /// file added or deleted while the reader was inside is reflected, and the
+    /// cursor is placed by *name* rather than by index: the saved index was
+    /// taken before the reader may have sorted a newly arrived file ahead of
+    /// it.
+    fn leave_archive(&mut self, ctx: &Context) -> bool {
+        let Some((folder, archive)) = self.archive_parent.take() else {
+            return false;
+        };
+        self.close_transients();
+        self.folder = folder.clone();
+        let mut g = Gallery::new(&folder);
+        if self.config.load_all_on_startup {
+            Self::load_folder_into(
+                &folder,
+                self.config.recursive_folders && self.zip_archive.is_none(),
+                &mut g,
+            );
+        }
+        if let Some(i) = g
+            .files
+            .iter()
+            .position(|f| file_name_of(f) == file_name_of(&archive))
+        {
+            g.index = i;
+        }
+        self.adopt_gallery(g, ctx);
+        // The cursor is on the archive, which `goto` would *enter* — so this is
+        // a position, not a navigation. `adopt_gallery` has already scheduled
+        // for it; the notice is what tells the reader they are back.
+        self.notice = Some(format!(
+            "Back in {} — press right to open {}",
+            folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| folder.to_string_lossy().into_owned()),
+            file_name_of(&archive)
+        ));
+        true
     }
 
     /// Open one file. `transient` says the caller does **not** vouch for the
@@ -4010,7 +4141,13 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
-        if self.zip_archive.is_some() {
+        // **The current *file*, not "am I inside an archive".** Those were the same
+        // thing until archives became listable; with a `.cbz` sitting in a folder
+        // the cursor can be on one while `zip_archive` is `None`, and a
+        // misplaced arrow would send a 200 MB volume to the recycle bin.
+        // `Del` is the one bare letter allowed to lose data, so the guard that
+        // decides where it points is not the place to be off by one concept.
+        if is_archive_path(&p) || self.zip_archive.is_some() {
             self.error = Some("Delete is not supported for archives".into());
             return;
         }
@@ -4032,7 +4169,9 @@ impl MyApp {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
-        if self.zip_archive.is_some() {
+        // Same reasoning as `delete_current`: the file under the cursor, not whether
+        // the listing came out of an archive.
+        if is_archive_path(&p) || self.zip_archive.is_some() {
             self.error = Some("Move/copy is not supported for archives".into());
             return;
         }
@@ -4905,6 +5044,26 @@ impl MyApp {
             idx,
             self.gallery.len()
         );
+        // Standing on an archive says what it holds and what pressing → does.
+        // **The cursor, not `shown`**: an archive has no picture on screen — the
+        // previous image is still painted, deliberately — so a readout built
+        // from `shown` would name a file the reader is not on.
+        //
+        // Read once here and nowhere else. The count is a header read on the UI
+        // thread, which is why it is bounded to a header; putting it in the
+        // per-frame path of every panel would be a way to make start-up slow.
+        if let Some(cur) = self.gallery.current() {
+            if is_archive_path(cur) {
+                match archive_image_count(cur) {
+                    // Spelling the key rather than drawing an arrow: egui's
+                    // default font subset has no `→` glyph and renders it as an
+                    // empty square, which reads as a missing character rather
+                    // than as a key.
+                    Some(n) => s.push_str(&format!(" - {n} images, press right to open")),
+                    None => s.push_str(" - unreadable container"),
+                }
+            }
+        }
         // "page 3/12" in the readout as well as the title, because the title bar is
         // not always visible and this is where the position already is.
         let pages = self.gallery.pages_in_current();
@@ -6731,7 +6890,12 @@ fn grid_cell(
     // per frame, and it self-heals after `schedule()` wipes the queue.
     // `tries` counts *completed* attempts, so jobs lost to a queue wipe cost
     // nothing; only real decode failures count against the budget.
-    if !thumbs.contains_key(path) && tries.get(path).copied().unwrap_or(0) < THUMB_TRIES {
+    // **No thumbnail job for an archive, ever.** An archive has no pixels to
+    // decode; asking produces a failure that spends one of `THUMB_TRIES`' three
+    // attempts, and a cell that can never draw. The cell is drawn from the
+    // member count instead, which is a header read.
+    let is_archive = is_archive_path(path);
+    if !is_archive && !thumbs.contains_key(path) && tries.get(path).copied().unwrap_or(0) < THUMB_TRIES {
         loader.push(Job {
             // A grid cell is one picture, so it is always the file's first page.
             key: ImgKey::first(path),
@@ -6823,12 +6987,29 @@ fn grid_cell(
             }
         }
         _ => {
+            // An archive's cell draws its **member count** where a thumbnail
+            // would go, because that is the one fact that tells the reader what
+            // arrowing onto it will do. The count is a header read; the cell is
+            // the reason it is allowed to be.
+            //
+            // `None` (unreadable container) says so rather than showing a
+            // number, and the ellipsis is left for a cell that is genuinely
+            // still decoding — which an archive never is, so a reader can tell
+            // the two apart without being told.
+            let text = if is_archive {
+                match archive_image_count(path) {
+                    Some(n) => format!("{n} images"),
+                    None => "?".to_string(),
+                }
+            } else {
+                "\u{2026}".to_string()
+            };
             // Centred like a real thumbnail would be.
             child.painter().text(
                 img_area.center(),
                 egui::Align2::CENTER_CENTER,
-                "\u{2026}",
-                egui::FontId::proportional(16.0),
+                text,
+                egui::FontId::proportional(if is_archive { 11.0 } else { 16.0 }),
                 ui.visuals().weak_text_color(),
             );
         }
@@ -7717,7 +7898,17 @@ impl eframe::App for MyApp {
                     self.show_panels && self.show_left,
                     self.exif_loading,
                 ) {
-                    if let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) {
+                    // The panel pushes this rather than waiting for the plan, so
+                    // it is the one metadata path `plan_jobs`' archive guard does
+                    // not cover. An archive has no EXIF and `color_info` reads
+                    // the *whole file* to find out — a 200 MB read for a fact
+                    // that is false before the read starts.
+                    if let Some(path) = self
+                        .cur
+                        .as_ref()
+                        .map(|k| k.path().to_path_buf())
+                        .filter(|p| !is_archive_path(p))
+                    {
                         self.loader.push(Job {
                             // EXIF describes the file, so it is read once and not
                             // per page — the same key `plan_jobs` uses.
