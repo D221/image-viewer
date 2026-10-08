@@ -5796,7 +5796,16 @@ impl MyApp {
             }
         }
         if resp.double_clicked() {
-            target_scale = fit_scale;
+            // In T mode, double-click should return to the T-mode initial scale
+            // (1:1 or shrink-to-fit monitor), not fit-to-panel. Set the pending
+            // flag so the T-mode reset runs on the next frame.
+            if self.config.fit_window_mode {
+                self.fit_window_pending = true;
+                self.fit_iters = 6;
+                target_scale = 1.0;
+            } else {
+                target_scale = fit_scale;
+            }
         }
         if key_fill && pages.is_empty() {
             // Single-image only: a turn's layout (`spread_fit`, pan bounds,
