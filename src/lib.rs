@@ -519,20 +519,34 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("fit_window", "T", "Fit window mode"),
 ];
 
-/// `Ctrl+V` is **not** a rebindable action, and cannot be.
+/// **There is no paste action, and there cannot be one. Copying an image opens
+/// it.** Read before "fixing" this.
 ///
-/// `egui-winit` intercepts `is_paste_command`, pushes [`egui::Event::Paste`]
-/// and returns **before** pushing the key it matched - the same reason
-/// `Ctrl+C` needed `Event::Copy` rather than `key_pressed(Key::C)`, and the same
-/// reason `Ctrl+S` works only because it is *not* on that list. A `KEY_ACTIONS`
-/// row for it would look exactly like the working ones and could never fire,
-/// which is the failure mode the capture UI already guards against for an
-/// unparseable chord: a binding that reads as configured and does nothing.
+/// Both halves were read in `egui-winit` 0.36's source rather than inferred, and
+/// together they mean an image paste reaches this app as nothing at all:
 ///
-/// So the paste chord is read as a raw event in the input handler and does not
-/// appear in Settings. The cost is that it cannot be rebound; the benefit is
-/// that it works, which is the only property a table row could claim.
-pub const PASTE_NOTE: &str = "Ctrl+V is handled as a raw event and is not rebindable";
+/// - `is_paste_command` is `Key::Paste || (modifiers.command && key == V) ||
+///   (windows && modifiers.shift && key == Insert)`. When it matches, the handler
+///   pushes an event and **returns before pushing the `Key`**. `command` is
+///   `ctrl` on Windows, so the test does not exclude `alt` — meaning even
+///   `Ctrl+Alt+V` is swallowed. There is no modifier combination that survives.
+/// - `Event::Paste` is pushed only `if !contents.is_empty()` on the clipboard's
+///   **text**. A screenshot has no text, so the event does not fire either.
+///
+/// `eframe` 0.36's `App` trait has no window-event hook, `ViewportBuilder` has no
+/// event handler, and `raw_input_hook` sees the events egui-winit already
+/// filtered. So there is nothing to bind and nothing to observe.
+///
+/// Hence the watcher: a per-frame read of `GetClipboardSequenceNumber`, with the
+/// bitmap read on a worker. [`clipboard_action`] is the rule.
+///
+/// A `KEY_ACTIONS` row for a paste would look exactly like the working ones and
+/// could never fire — the failure mode the capture UI already guards against for
+/// an unparseable chord, and one that would be invisible until someone pressed
+/// Ctrl+V in anger. So the absence is deliberate and is written down here.
+pub const PASTE_NOTE: &str =
+    "Copy an image and it opens - Ctrl+V cannot be seen by an egui app (egui-winit \
+     consumes the key and pushes Event::Paste only for a clipboard that also holds text)";
 
 /// Every key name the matcher understands: the spelling capture stores
 /// and settings shows. The binary must map each of these both ways
@@ -3936,19 +3950,7 @@ pub fn save_transformed(
         return Err(SaveError::Lossy(format_name(&bytes).to_owned()));
     }
 
-    // Named for what the file *is*, from the resolved values rather than the
-    // caller's: a no-op crop was already resolved to `None` above for exactly
-    // this reason, and the same holds for the transform — `display_xform`
-    // composes the EXIF tag with the user's turns, so Identity here means
-    // nothing turned, whatever was asked for. An unedited save is a copy.
-    let infix = if crop.is_some() {
-        "cropped"
-    } else if xform != Xform::Identity {
-        "rotated"
-    } else {
-        "copy"
-    };
-    let dest = unique_dest_named(src, infix);
+    let dest = unique_dest_named(src, save_infix(xform, crop));
     std::fs::write(&dest, &out).map_err(SaveError::Write)?;
     Ok(dest)
 }
@@ -4160,6 +4162,41 @@ fn format_for_dest(dest: &Path) -> Result<image::ImageFormat, SaveError> {
         other => Err(SaveError::Unsupported(format!(
             "cannot write .{other} - choose .jpg, .png, .webp, .bmp or .tiff"
         ))),
+    }
+}
+
+/// The infix a saved copy is named for: what the file **is**, from the resolved
+/// values rather than the caller's.
+///
+/// `_cropped` if a crop survived, else `_rotated` if the composed transform is
+/// not the identity, else `_copy`.
+///
+/// **Named for what happened, so an unedited save is a `_copy` and never a
+/// `_rotated`.** This was a reported bug and the sharpest version of "read the
+/// value at the wrong level": the save-as panel picked its infix from the
+/// *user's* edit (`crop.is_some() ? "cropped" : "rotated"`), which cannot
+/// distinguish "turned" from "untouched", so an unedited image was named
+/// `_rotated` while `Ctrl+S` — running the identical rule through
+/// [`save_transformed`] — named the very same picture `_copy`.
+///
+/// **Two things must be composed before this is asked, and both callers do it.**
+/// A crop that covers the whole picture is not a crop (the save path resolves
+/// that to `None` first), and `xform` must be the *composed* transform from
+/// [`display_xform`], which folds in the EXIF tag — so a phone photo stored
+/// sideways is `_rotated` on its own, and "Identity" means nothing turned
+/// *whatever was asked for*. Passing a raw `Xform` here is the mistake, and it
+/// is the one that produced the report.
+///
+/// It is a function rather than inline code because two features now name files
+/// — `Ctrl+S` and save-as — and a rule duplicated between them is a rule that
+/// will answer differently to the same question.
+pub fn save_infix(xform: Xform, crop: Option<Crop>) -> &'static str {
+    if crop.is_some() {
+        "cropped"
+    } else if xform != Xform::Identity {
+        "rotated"
+    } else {
+        "copy"
     }
 }
 
@@ -9022,6 +9059,49 @@ pub fn drop_copy_dir(src: &Path, meta: &std::fs::Metadata) -> PathBuf {
 /// on a path that is already shutting down.
 pub fn forget_drop_copy(copy: &DropCopy) {
     let _ = std::fs::remove_dir_all(&copy.dir);
+}
+
+/// What a per-frame clipboard check should do about the number it just read.
+///
+/// Pure, because the rule it encodes is one that has already produced a feature
+/// that could never fire and a feature that could fire on its own writes — and
+/// neither failure was visible at the call site. Both are one comparison each,
+/// and a comparison that cannot be tested in isolation is a comparison that gets
+/// inverted.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ClipboardAction {
+    /// Nothing to do: either the counter failed, or nothing changed, or the
+    /// change was this app's own clipboard write.
+    Ignore,
+    /// The clipboard changed under someone else's hand. Read the image.
+    Paste,
+}
+
+/// Decide what a clipboard sequence-number reading means.
+///
+/// Three inputs and no I/O, which is what makes the interesting rows testable:
+///
+/// - `seq == 0` is [`GetClipboardSequenceNumber`]'s *failure* answer, and 0 is
+///   also the "nothing seen yet" value, so a call that keeps failing degrades to
+///   the feature never firing rather than to a wrong answer.
+/// - `seq == seen` is the overwhelmingly common case — one counter read per
+///   frame — and returning `Ignore` is what keeps the frame cheap.
+/// - **`write_seq` is this app's own last write**, and skipping it is not an
+///   optimisation: `Ctrl+C` puts a bitmap on the clipboard, so without this the
+///   watcher hands the picture straight back and reopens the file the reader is
+///   already looking at. That is the failure mode where the feature appears to
+///   work *too well*.
+///
+/// **The comparison is `<=`, and it relies on the counter being monotonic within
+/// a session.** It wraps at `u32`, which takes four billion clipboard changes;
+/// a session that long has other problems, and the alternative — storing every
+/// sequence number ever seen — is worse than the thing it protects against.
+pub fn clipboard_action(seq: u32, seen: u32, write_seq: u32) -> ClipboardAction {
+    if seq == 0 || seq == seen || (write_seq != 0 && seq <= write_seq) {
+        ClipboardAction::Ignore
+    } else {
+        ClipboardAction::Paste
+    }
 }
 
 /// Write pasted clipboard pixels to a file this app owns, and hand back the

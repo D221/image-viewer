@@ -1334,6 +1334,20 @@ enum Msg {
         src: PathBuf,
         result: Result<image_viewer::DropCopy, String>,
     },
+    /// A clipboard image, read and written out on a worker.
+    ///
+    /// **`seq` is the clipboard sequence number the read started at, and it is
+    /// what makes a stale answer recognisable** — the same job `src` does for a
+    /// drop. Two clipboard changes can be in flight at once (the watcher fires
+    /// again on the next frame while the first read is still running), and the
+    /// older one must not open over the top of the newer. Comparing sequence
+    /// numbers is the identity here because the thing being pasted has no path
+    /// and no stamp of its own: two pastes of *different* images share every
+    /// other observable property.
+    Pasted {
+        seq: u32,
+        result: Result<image_viewer::DropCopy, String>,
+    },
 }
 
 /// Start the worker pool for this app: real decoding, real panic capture, and
@@ -2016,6 +2030,22 @@ struct MyApp {
     /// reader was inside the archive is reflected, and the cursor lands on the
     /// archive by name rather than on whatever now occupies that slot.
     archive_parent: Option<(PathBuf, PathBuf)>,
+    /// Last clipboard sequence number this app has *acted on*, so the per-frame
+    /// poll is a comparison rather than a read of the bitmap.
+    ///
+    /// Advanced **before** the worker is spawned, not after it answers, so a
+    /// second clipboard change while the first read is in flight starts its own
+    /// read instead of being swallowed as "no change".
+    clipboard_seen: u32,
+    /// The newest clipboard change this app is still waiting on, 0 when it is
+    /// not waiting on one.
+    ///
+    /// This is the drop copy's `pending_drop`, for the same reason: an answer
+    /// that lands after a newer paste must not open. Kept separate from
+    /// [`Self::clipboard_seen`] because they answer different questions — one
+    /// is "have I seen this change", the other is "is this answer still wanted"
+    /// — and a dropped stale answer is a picture over the top of the newer one.
+    pending_paste: Option<u32>,
     /// The save-as panel: open or closed, and everything it is holding.
     ///
     /// **Not a `Config` field.** Every other dialog-ish value in this app is
@@ -2315,6 +2345,8 @@ impl MyApp {
             zip_archive,
             zip_temp,
             archive_parent: None,
+            clipboard_seen: 0,
+            pending_paste: None,
             save_as: SaveAsState {
                 open: false,
                 dest: String::new(),
@@ -3432,7 +3464,43 @@ impl MyApp {
                         }
                     }
                 }
+            Msg::Pasted { seq, result } => {
+                // **A stale paste is discarded, by sequence number, and its
+                // directory released.** Two clipboard changes can be in flight
+                // at once — the watcher fires again on the next frame while the
+                // first read is still running — and the older one must not open
+                // over the top of the newer.
+                //
+                // The comparison is on the sequence number rather than on a path
+                // because a pasted image has no path of its own and no stamp:
+                // two pastes share nothing else that could tell them apart, and
+                // the *directory* cannot, since it is content-addressed and two
+                // copies of the same picture resolve to the same one.
+                if self.pending_paste != Some(seq) {
+                    // Whoever is no longer waiting owns it, and `%TEMP%` is what
+                    // has to be reclaimed — but **not if it is the picture the
+                    // app has already opened**. That is the same conditional the
+                    // drop arm has, and for the same reason: the user may have
+                    // pasted this same content twice, in which case the stale
+                    // answer's directory *is* the one on screen.
+                    if let Ok(c) = result {
+                        if Some(&c.file) != self.drop_copy.as_ref().map(|d| &d.file) {
+                            image_viewer::forget_drop_copy(&c);
+                        }
+                    }
+                    continue;
+                }
+                self.pending_paste = None;
+                match result {
+                    Ok(copy) => self.open_pasted(ctx, copy),
+                    // **A clipboard change with no image in it is not an error.**
+                    // Copying text moves the counter, and there is nothing to
+                    // open; saying so would put a red banner on screen for
+                    // something the reader did not ask for.
+                    Err(_) => {}
+                }
             }
+        }
         }
         if resched {
             self.schedule();
@@ -6694,13 +6762,34 @@ impl MyApp {
             return;
         };
         let p = cur.path.clone();
-        let edit = self.edits.get(&p);
-        let infix = if edit.crop.is_some() { "cropped" } else { "rotated" };
+        let infix = self.save_as_infix(&p);
         let dest = image_viewer::unique_dest_named(&p, infix);
         self.save_as.dest = dest.to_string_lossy().into_owned();
         self.save_as.quality = image_viewer::DEFAULT_JPEG_QUALITY;
         self.save_as.max_long = String::new();
         self.save_as.open = true;
+    }
+
+    /// The infix the panel's default name carries — [`image_viewer::save_infix`]
+    /// fed the *composed* transform, which is the whole point.
+    ///
+    /// **The EXIF tag is folded in here, and folding it in is the difference
+    /// between matching `Ctrl+S` and not.** `save_transformed` names its file
+    /// from `display_xform(exif_tag, user)`, so a phone photo stored sideways is
+    /// `_rotated` on its own and an untouched landscape JPEG is `_copy`. Asking
+    /// this question of the raw `edit.xform` instead answers "did the user press
+    /// a turn key", which is a different question from "did the picture move" —
+    /// and it is the one that named every unedited picture `_rotated`.
+    ///
+    /// It is a separate function rather than a line inside `open_save_as` only
+    /// because [`Self::do_save_as`]'s confirmation has to agree with the name
+    /// the panel was pre-filled with; two sites asking one question is how they
+    /// drift.
+    fn save_as_infix(&self, path: &Path) -> &'static str {
+        let edit = self.edits.get(path);
+        let exif = image_viewer::exif_orientation(path);
+        let xform = image_viewer::display_xform(exif, edit.xform);
+        image_viewer::save_infix(xform, edit.crop)
     }
 
     /// Perform the save the panel describes.
@@ -6777,45 +6866,108 @@ impl MyApp {
         }
     }
 
-    /// Open the clipboard's image, if it has one.
+    /// Watch the clipboard for an image, and open one when it appears.
     ///
-    /// **Read from [`egui::Event::Paste`], never from a key.** `egui-winit`
-    /// intercepts the paste command, pushes the event and returns before pushing
-    /// the key it matched, so `key_pressed(Key::V)` with ctrl is *never true* —
-    /// the same trap `Ctrl+C` fell into, and the reason `Ctrl+S` works is that
-    /// it is not on that list. The event carries **text**, not pixels, so it is a
-    /// signal that a paste happened; the pixels are read from `arboard` here.
+    /// **There is no keystroke here, and that is the finding rather than a
+    /// simplification.** `egui-winit` intercepts `is_paste_command` — which is
+    /// `Key::Paste || (command && V) || (win && shift && Insert)` — and returns
+    /// *before* pushing the `Key` event, so Ctrl+V reaches this app as nothing
+    /// at all; not even Ctrl+Alt+V survives, because the test is on `command`
+    /// alone. And `Event::Paste` is pushed only `if !contents.is_empty()` on the
+    /// clipboard's **text**, which a screenshot does not have, so the event does
+    /// not fire either. Both facts were read in the crate's source, and the
+    /// combination is why "Ctrl+V does nothing" was a report rather than a bug
+    /// in a handler: there was no handler to be wrong.
     ///
-    /// **Image only, and that is a limit of the toolkit rather than a choice.**
-    /// `arboard` 3.6 exposes exactly two reads — `get_text` and `get_image` —
-    /// and no file API at all, so "the clipboard holds a *file*" cannot even be
-    /// asked through it. Detecting that would mean raw Win32 `OleGetClipboard`
-    /// and `IDataObject`, which is a P/Invoke module for one message. So pixels
-    /// are opened and anything else says what it found; a clipboard holding a
-    /// copied *file* lands on the refusal, which is right anyway — that file is
-    /// one the user owns and did not ask us to copy.
-    fn paste_from_clipboard(&mut self, ctx: &Context) {
-        let img = match arboard::Clipboard::new().and_then(|mut cb| cb.get_image()) {
-            Ok(i) => i,
-            Err(e) => {
-                self.error = Some(format!(
-                    "Nothing to paste: the clipboard holds no image ({e}). \
-                     Copy a screenshot or an image from another app."
-                ));
-                return;
-            }
-        };
-        match image_viewer::write_pasted_image(&img.bytes, img.width as u32, img.height as u32) {
-            Ok(copy) => {
-                // The paste's directory is this app's to own for as long as the
-                // picture is open, exactly like a drop copy: `open_file(transient
-                // = true)` releases the previous one and makes the paste the
-                // thing the app is holding.
-                self.close_transients();
-                self.open_file(ctx, copy.file.clone(), true);
-            }
-            Err(e) => self.error = Some(format!("Paste failed: {e}")),
+    /// **So the clipboard itself is the trigger.** This runs once per frame and
+    /// reads one counter ([`clipboard_seq`], a shared-memory read). When it
+    /// moves and the change was not this app's own clipboard write, a worker
+    /// reads the bitmap and writes the file — the bitmap read is the expensive
+    /// part and it is on the worker for the same reason the drop copy is, since
+    /// a screenshot is megabytes and the paint thread must not block on it.
+    ///
+    /// **What this changes, plainly: you no longer press Ctrl+V.** Copying an
+    /// image — a screenshot in Paint, "copy image" in a browser — opens it. The
+    /// alternative was a key that is not Ctrl+V, which does not match what
+    /// people press.
+    ///
+    /// **Text copies do nothing.** Windows replaces the whole clipboard on every
+    /// copy, so a text copy leaves no bitmap and this finds no image. Copying a
+    /// *file* in Explorer likewise: no bitmap, nothing opens.
+    fn clipboard_poll(&mut self) {
+        let seq = clipboard_seq();
+        // 0 is the failure answer *and* the "nothing seen yet" value, so the
+        // first frames and a persistently failing call both land on `Ignore` —
+        // the feature simply does not fire, which is the right degradation.
+        //
+        // The whole rule is [`image_viewer::clipboard_action`]: failure, "nothing
+        // changed", and "this app wrote it". A scan could only prove the
+        // identifier appears in this body — and when the guard was a literal
+        // `if false && …` the scan stayed green, which is how presence is known
+        // not to be the property.
+        let seen = self.clipboard_seen;
+        if image_viewer::clipboard_action(
+            seq,
+            seen,
+            CLIPBOARD_WRITE_SEQ.load(std::sync::atomic::Ordering::Relaxed),
+        ) == image_viewer::ClipboardAction::Ignore
+        {
+            return;
         }
+        // **Advanced after the decision, not before.** `clipboard_action` compares
+        // against `seen` to answer "has anything changed", and writing the new
+        // value first makes `seq == seen` true on every call - a feature that
+        // never fires, which is exactly the bug this replaced. Same
+        // read-then-write order as `pending_drop`, and pinned by position rather
+        // than by the presence of the assignment.
+        self.clipboard_seen = seq;
+        self.pending_paste = Some(seq);
+        let tx = self.drop_tx.clone();
+        let wake = self.drop_wake.clone();
+        std::thread::spawn(move || {
+            // The bitmap read is the expensive half - a screenshot is megabytes -
+            // and it happens here rather than in `clipboard_poll` for the same
+            // reason the drop's copy does: the paint thread must not block on it.
+            // The counter read that got us here is the cheap half and stayed
+            // there.
+            let result = match arboard::Clipboard::new().and_then(|mut cb| cb.get_image()) {
+                Ok(img) => image_viewer::write_pasted_image(
+                    &img.bytes,
+                    img.width as u32,
+                    img.height as u32,
+                ),
+                // `arboard`'s error is not a `String` and the channel carries the
+                // library's error type, so it is rendered rather than mapped
+                // into a second error hierarchy for one call site.
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(Msg::Pasted { seq, result });
+            wake.request_repaint();
+        });
+    }
+
+    /// Open a pasted clipboard image, once its worker has written the file.
+    ///
+    /// **`false`, for the same reason the drop's own copy gets `false`: the path
+    /// is already inside a directory this app owns, so `transient = true` would
+    /// ask `open_file` to take a copy *of the copy*.** The paste worker wrote
+    /// straight into that directory; there is no hand-off left to protect.
+    ///
+    /// The lifetime is still ours to release: `close_transients` first, then
+    /// `self.drop_copy = Some(copy)` **after** `open_file`, because that call
+    /// releases the previous copy and the ordering is the whole reason the
+    /// tests/drops.rs scans compare byte offsets rather than presence.
+    fn open_pasted(&mut self, ctx: &Context, copy: image_viewer::DropCopy) {
+        self.close_transients();
+        let name = copy
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let file = copy.file.clone();
+        self.open_file(ctx, file, false);
+        self.drop_copy = Some(copy);
+        self.notice = Some(format!("Pasted {name} from the clipboard."));
     }
 
     /// Draw the save-as panel. Returns whether it is still open, because the
@@ -7330,6 +7482,17 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
     }
 
     fn frame_prelude(&mut self, ctx: &Context) {
+        // The clipboard watcher, per frame. **This is where a paste is noticed,
+        // because egui cannot report one** - `egui-winit` consumes the Ctrl+V
+        // key before it reaches the app and pushes `Event::Paste` only for a
+        // clipboard that also holds *text*, which a screenshot is not. The whole
+        // argument is on [`Self::clipboard_poll`]; what matters here is only that
+        // the check is a counter read and not a bitmap read.
+        //
+        // Placed in the prelude so a paste that arrives with nothing else
+        // happening still lands this frame rather than waiting for the next
+        // event to drive one.
+        self.clipboard_poll();
         // The previous frame has been presented by the time the next one
         // starts, so this is where "first visible pixels" is honestly known.
         self.lat.commit_frame();
@@ -7611,8 +7774,54 @@ fn set_clipboard_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), Stri
         height: height as usize,
         bytes: std::borrow::Cow::Owned(rgba),
     })
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // **Mark our own write, or the watcher pastes it back at us.** `Ctrl+C` puts
+    // a bitmap on the clipboard, the sequence number moves, and a watcher that
+    // cannot tell whose change it is would immediately re-open the picture just
+    // copied. Recording the number here is what separates "someone copied a
+    // screenshot" from "we copied one".
+    CLIPBOARD_WRITE_SEQ.store(clipboard_seq(), std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
+
+/// Windows' clipboard change counter, or 0 if the call failed.
+///
+/// **This is the only signal available for an image paste**, and it is a signal
+/// about the clipboard rather than about the keyboard. `egui-winit` intercepts
+/// `is_paste_command` — `Key::Paste || (command && V) || (win && shift && Insert)`
+/// — and returns *before* pushing the `Key` event, so no modifier combination
+/// reaches the app; and it pushes `Event::Paste` only when the clipboard's
+/// **text** is non-empty, which a screenshot never is. Both halves were read in
+/// the crate source rather than inferred, and together they mean an image paste
+/// produces no egui event of any kind.
+///
+/// So: nothing inside egui reports Ctrl+V, and the clipboard has to be asked
+/// instead. That is why this exists and why the trigger is a poll — see
+/// [`MyApp::clipboard_poll`].
+///
+/// The call itself is a read of shared user32 state, not an `OleGetClipboard`,
+/// so it is cheap enough to make once per frame; the expensive part (reading
+/// the bitmap) is what goes to a worker.
+fn clipboard_seq() -> u32 {
+    // A failure returns 0, which the caller treats as "no change", so this
+    // degrades to the feature simply not firing rather than to a wrong answer.
+    unsafe { GetClipboardSequenceNumber() }
+}
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetClipboardSequenceNumber() -> u32;
+}
+
+/// The sequence number as of the last clipboard write **this app** made.
+///
+/// A global rather than a field because the write happens inside
+/// [`set_clipboard_rgba`], which is a free function taking pixels by value, and
+/// threading `&mut MyApp` into it would put the app's state behind an
+/// `arboard` call for no reason. It is written from one place and read from one
+/// place, both of which are in this file.
+static CLIPBOARD_WRITE_SEQ: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 /// What went on the clipboard, said in the terms the user acted in.
 ///
@@ -7832,7 +8041,23 @@ impl eframe::App for MyApp {
             self.show_panels = fs; // entering fullscreen hides panels; leaving restores
         }
         if esc {
-            if typing {
+            // **The save-as panel is above everything, `typing` included.**
+            //
+            // Its path box holds focus the moment it opens, so `typing` is true
+            // while the user is naming a file — and Esc landed in the search
+            // box's arm, which cleared the *filter* and left the panel standing.
+            // One Esc later it fell through to the quit branch and closed the
+            // app with the panel still up.
+            //
+            // So the panel is checked before `typing`, and the rule it follows
+            // is the same one the archive arm states below: Esc is "go back one
+            // level", and a modal panel is a level above the viewer. It is also
+            // the only modal here that *writes* — Esc on a panel holding a
+            // half-typed destination must not be a quit, for the same reason Esc
+            // in crop mode drops the frame instead.
+            if self.save_as.open {
+                self.save_as.open = false;
+            } else if typing {
                 // Esc belongs to the search box while it has focus: clear the
                 // filter, or if there is nothing to clear just defocus. It must
                 // not fall through to "close the grid" or "quit the app" —
@@ -7937,17 +8162,6 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        // **The paste chord, as a raw event.** `egui-winit` intercepts
-        // `is_paste_command` and returns before pushing the key, so there is no
-        // `Key` event for this to bind to — see [`image_viewer::PASTE_NOTE`].
-        // The event carries text rather than pixels, so it is a *signal*; the
-        // pixels are read from the clipboard in the handler.
-        //
-        // Read here, inside the same `!typing` guard as every other chord, so
-        // Ctrl+V in the filter box pastes text and does not open an image over
-        // the top of the gallery.
-        let paste_evt =
-            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
         let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
@@ -8158,8 +8372,6 @@ impl eframe::App for MyApp {
                 } else {
                     self.copy_image_to_clipboard(false);
                 }
-            } else if paste_evt {
-                self.paste_from_clipboard(ctx);
             } else if save_rot {
                 self.save_transformed_copy();
             } else if save_screen {

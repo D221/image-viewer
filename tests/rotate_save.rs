@@ -1876,3 +1876,46 @@ fn save_as_refuses_a_destination_it_cannot_write() {
         "writing into a missing directory must fail rather than pick another path"
     );
 }
+/// The infix a saved copy is named for is a **shared** rule, and the report was
+/// that the two callers answered differently to the same question: `Ctrl+S` said
+/// `_copy` and save-as said `_rotated`, for the same unedited picture.
+///
+/// The assertion is on [`save_infix`] as a function, because that is what both
+/// call sites use — a test that only checked one caller would still be green
+/// with the other one reading the wrong value.
+#[test]
+fn an_unedited_save_is_a_copy_and_a_turned_one_is_a_rotated_one() {
+    use image_viewer::{save_infix, Crop, Xform};
+
+    // The reported case, exactly: nothing turned, nothing cropped.
+    assert_eq!(
+        save_infix(Xform::Identity, None),
+        "copy",
+        "an unedited save is a copy, not a rotated one"
+    );
+
+    // Every non-identity symmetry is still a rotation for naming purposes.
+    for x in [
+        Xform::Rot90,
+        Xform::Rot180,
+        Xform::Rot270,
+        Xform::FlipH,
+        Xform::FlipV,
+        Xform::Transpose,
+        Xform::Transverse,
+    ] {
+        assert_eq!(save_infix(x, None), "rotated", "{x:?} moves the picture");
+    }
+
+    // A crop wins over the transform name, because a crop turns the picture too
+    // and `_rotated` would then be true and useless — `_cropped` is what the
+    // user actually did.
+    let c = Crop {
+        x: 0,
+        y: 0,
+        w: 10,
+        h: 10,
+    };
+    assert_eq!(save_infix(Xform::Identity, Some(c)), "cropped");
+    assert_eq!(save_infix(Xform::Rot90, Some(c)), "cropped");
+}

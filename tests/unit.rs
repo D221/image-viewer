@@ -5478,12 +5478,22 @@ fn the_slideshow_is_wired_to_a_tick_and_a_stop() {
 }
 
 /// A fresh config closes on Esc (the shipped behaviour), and the Esc chain
-/// orders the arms correctly: typing → grid → crop → archive → fullscreen → quit.
+/// orders the arms correctly: save-as panel → typing → grid → crop → archive →
+/// fullscreen → quit.
 ///
-/// The archive arm is the one that changed: it now comes **before** fullscreen
-/// and quit, so Esc inside an archive goes back instead of closing the app.
-/// The quit branch still exists and still consults the toggle, but only when
-/// there is no archive to leave.
+/// Two arms changed. The **archive** arm comes before fullscreen and quit, so Esc
+/// inside an archive goes back instead of closing the app. The **save-as panel**
+/// arm comes before everything *including* `typing`, because the panel's path box
+/// holds focus the moment it opens — so `typing` is true while it is up, and Esc
+/// landed in the search box's arm, clearing the *filter* and leaving the panel
+/// standing. The quit branch still exists and still consults the toggle, but only
+/// when there is nothing to close.
+///
+/// The window below was 3200 bytes and is now 8000, and that change is part of the
+/// fix's story: the doc comment above pushed the fullscreen arm to byte +3242, so
+/// the test failed with "fullscreen branch" missing while the Esc chain was
+/// perfectly correct. A byte window a comment can move is a test that measures
+/// the comment.
 #[test]
 fn esc_defaults_to_closing_and_crop_comes_first() {
     let dir = tempfile::tempdir().unwrap();
@@ -5496,18 +5506,25 @@ fn esc_defaults_to_closing_and_crop_comes_first() {
     let at = src
         .find("if esc {")
         .expect("the Esc chain must exist");
-    let arm = &src[at..(at + 3200).min(src.len())];
+    let arm = &src[at..(at + 8000).min(src.len())];
 
-    // Order: crop → archive → fullscreen → quit (each inside the previous else)
+    // Order: save-as panel → typing → crop → archive → fullscreen → quit, each
+    // inside the previous `else`. **Position, not mere presence**: an arm that is
+    // earlier in the text but not nested in the previous else stops nothing, and
+    // that is the whole content of the save-as fix.
+    let panel = arm.find("if self.save_as.open {").expect("save-as panel arm");
+    let typing = arm.find("} else if typing {").expect("typing arm");
     let crop = arm.find("self.crop_mode").expect("crop branch");
     let archive = arm.find("zip_archive.is_some()").expect("archive branch");
     let fullscreen = arm.find("in_fullscreen").expect("fullscreen branch");
     let close = arm.find("ViewportCommand::Close").expect("quit branch");
     assert!(
-        crop < archive && archive < fullscreen && fullscreen < close,
-        "Esc chain must be: crop → archive → fullscreen → quit, got order: \
-         crop={} archive={} fullscreen={} close={}",
-        crop, archive, fullscreen, close
+        panel < typing && typing < crop && crop < archive && archive < fullscreen
+            && fullscreen < close,
+        "Esc chain must be: save-as panel → typing → crop → archive → fullscreen \
+         → quit, got order: panel={} typing={} crop={} archive={} fullscreen={} \
+         close={}",
+        panel, typing, crop, archive, fullscreen, close
     );
 
     // The quit branch must still consult the toggle (it does, but it's now
@@ -5921,8 +5938,10 @@ fn save_as_and_paste_are_wired() {
     // changed what saving does.
     let open = fn_body(src, "fn open_save_as(&mut self)").expect("open_save_as");
     assert!(
-        open.contains("unique_dest_named"),
-        "the destination must be prefilled from the same naming rule as Ctrl+S"
+        open.contains("self.save_as_infix(&p)"),
+        "open_save_as must ask the shared rule for the name, not pick one itself \
+         - hardcoding a crop test and otherwise saying `rotated` cannot tell \
+         turned from untouched, and named every unedited picture `_rotated`"
     );
     assert!(
         open.contains("DEFAULT_JPEG_QUALITY"),
@@ -5931,6 +5950,21 @@ fn save_as_and_paste_are_wired() {
     assert!(
         open.contains("self.save_as.max_long = String::new()"),
         "and the size must start blank, which means 'do not resize'"
+    );
+    // The composition is asserted separately, because "called the shared rule"
+    // and "asked it about the *composed* transform" are two properties and the
+    // report was the second one.
+    let infix = fn_body(src, "fn save_as_infix(&self, path: &Path)").expect("save_as_infix");
+    assert!(
+        infix.contains("display_xform") && infix.contains("exif_orientation"),
+        "the infix must be asked of the *composed* transform: Ctrl+S names from \
+         display_xform(exif, user), so a photo stored sideways is `_rotated` on \
+         its own and an untouched one is `_copy`"
+    );
+    assert!(
+        infix.contains("save_infix("),
+        "and the rule itself must be the library's shared save_infix, so the two \
+         callers cannot answer the same question differently"
     );
 
     // The panel must be drawn *before* the early returns, or it is invisible
@@ -5945,27 +5979,170 @@ fn save_as_and_paste_are_wired() {
          cannot be opened while the grid is up"
     );
 
-    // --- paste: the raw event, and never a key ---
+// **Esc closes the panel, and it is checked before `typing` as well as
+    // before the quit.** This is a reported bug, and the arm order is the whole
+    // content of the fix: the panel's path box holds focus the moment it opens,
+    // so `typing` is true, so Esc landed in the search box's arm - clearing the
+    // *filter* and leaving the panel standing - and one Esc later fell through
+    // to the quit branch. Both halves are asserted, because "before typing"
+    // alone would still let Esc clear the search filter.
+    //
+    // **Absolute offsets, not `fn_body`.** `fn_body` starts counting *after* its
+    // marker, so `fn_body(src, "if esc {")` returns the body of the panel arm
+    // alone - the marker already consumed the `if`'s own brace - and this
+    // assertion then failed on "typing esc arm" for a chain that was correct. The
+    // helper answers "the body of the next thing", which is the wrong question
+    // for an if/else chain: what matters is where the arms sit *relative to each
+    // other*, so the offsets are taken from `if esc {` and compared.
+    let esc_at = src.find("if esc {").expect("the Esc chain");
+    let esc_panel = src[esc_at..]
+        .find("if self.save_as.open {")
+        .map(|i| i + esc_at)
+        .expect("panel esc arm");
+    let esc_typing = src[esc_at..]
+        .find("} else if typing {")
+        .map(|i| i + esc_at)
+        .expect("typing esc arm");
+    let esc_quit = src[esc_at..]
+        .find("self.config.esc_closes_app")
+        .map(|i| i + esc_at)
+        .expect("quit arm");
     assert!(
-        src.contains("egui::Event::Paste(_)") && src.contains("paste_from_clipboard(ctx)"),
-        "paste must be read from the raw event and reach the handler"
+        esc_panel < esc_typing,
+        "the save-as panel's Esc arm must come before the `typing` arm: the \
+         panel's path box has focus, so `typing` is true while it is open and \
+         Esc would clear the search filter instead of closing the panel"
+    );
+    assert!(
+        esc_panel < esc_quit,
+        "and before the quit branch: Esc on a modal that can write a file must \
+         never close the app"
+    );
+
+    // --- paste: the pixels come from the clipboard, and the trigger is a poll ---
+    let watcher = fn_body(src, "fn clipboard_poll(&mut self)").expect("clipboard poll");
+    assert!(
+        watcher.contains("get_image"),
+        "the pixels must come from the clipboard's image flavour, not from the \
+         event's text"
     );
     assert!(
         !lib.contains(r#"("paste", "Ctrl+V""#),
-        "Ctrl+V must NOT be a KEY_ACTIONS row: egui-winit intercepts the paste \\
-         command and returns before pushing the key, so such a row could never \\
+        "Ctrl+V must NOT be a KEY_ACTIONS row: egui-winit intercepts the paste \
+         command and returns before pushing the key, so such a row could never \
          fire while looking exactly like one that does"
     );
     assert!(
         lib.contains("PASTE_NOTE"),
-        "and the reason it is absent must be written down, so the next person \\
+        "and the reason it is absent must be written down, so the next person \
          does not 'fix' it by adding the row"
     );
-    // The guard matters: Ctrl+V in the filter box must paste text, not open an
-    // image over the gallery.
-    let dispatch = fn_body(src, "} else if paste_evt {").expect("paste dispatch");
+
+    // **The chord is invisible to egui, so the trigger has to be a poll.** That
+    // is what made Ctrl+V do nothing: egui-winit pushes `Event::Paste` only
+    // `if !contents.is_empty()` on the clipboard's *text*, so a screenshot - the
+    // one thing anyone pastes - produces no event at all, and with it no `Key`
+    // event either. Nothing inside egui reports the press, so the only way to
+    // notice a paste is to ask the clipboard.
+    let frame =
+        fn_body(src, "fn frame_prelude(&mut self, ctx: &Context)").expect("frame_prelude");
     assert!(
-        !dispatch.is_empty(),
-        "the paste arm must exist"
+        frame.contains("clipboard_poll"),
+        "the paste trigger must be a per-frame clipboard poll: there is no egui \
+         input event that reports an image paste, so anything listening only for \
+         one is a feature that can never fire"
+    );
+    // **The decision itself is a library function, tested as a truth table**
+    // (`the_clipboard_rule_ignores_failure_no_change_and_our_own_write`). What
+    // remains here is only the two things a scan can actually establish: that the
+    // binary asks the rule rather than re-implementing it, and that it advances
+    // `clipboard_seen` *after* asking.
+    assert!(
+        watcher.contains("clipboard_action"),
+        "the binary must ask the shared rule, not re-derive it - a scan cannot \
+         prove a comparison is right, only that it is spelled somewhere"
+    );
+    // **The order is the bug.** `clipboard_action` compares against `seen` to
+    // answer "has anything changed"; storing `seq` into it first makes `seq ==
+    // seen` true on every call and the feature never fires, which is the very
+    // report this replaced. So the *store* has to come after the *read*, and a
+    // presence check cannot tell those apart.
+    // **Anchored on the call, not the name.** The first version searched for
+    // `clipboard_action` and matched the *doc comment* above the call, which sits
+    // before the store - so moving the store above the ask left it green. Naming
+    // the call with its paren is what makes it a position rather than a mention,
+    // and the same reason the mutating probe had to be re-run.
+    let asks = watcher
+        .find("image_viewer::clipboard_action(")
+        .expect("asks the rule");
+    let stores = watcher
+        .find("self.clipboard_seen = seq;")
+        .expect("advances the seen counter");
+    assert!(
+        asks < stores,
+        "`clipboard_seen` must be advanced after the rule has read it: storing \
+         first makes `seq == seen` always true and the watcher never fires"
+    );
+    // And the write side has to exist at all, or the suppression above is
+    // comparing against a number nobody ever sets.
+    assert!(
+        fn_body(src, "fn set_clipboard_rgba(")
+            .expect("set_clipboard_rgba")
+            .contains("CLIPBOARD_WRITE_SEQ.store"),
+        "a clipboard write of this app's own must record its sequence number, \
+         or Ctrl+C re-opens the picture it just copied"
+    );
+}
+/// The clipboard watcher's decision rule, as a truth table.
+///
+/// **Every row here is a way the feature can be wrong, and two of them were
+/// wrong in this session's first attempt.** "Nothing changed" ignored the copy
+/// entirely, so Ctrl+V could never fire - the bug that was reported. "Our own
+/// write" not ignored is a feature that works *too well*: `Ctrl+C` puts a bitmap
+/// on the clipboard and the watcher would hand it straight back, reopening the
+/// file the reader is already looking at.
+///
+/// It is a library function rather than three comparisons in the binary because a
+/// source scan proved nothing: with the guard written as `if false && ...` the
+/// identifier was still in the function body and the scan stayed green. That is
+/// the whole argument for putting a rule here.
+#[test]
+fn the_clipboard_rule_ignores_failure_no_change_and_our_own_write() {
+    use image_viewer::{clipboard_action, ClipboardAction as A};
+
+    // The ordinary frame: nothing has happened. This is one read per frame, so it
+    // is the row that has to be cheap and correct.
+    assert_eq!(clipboard_action(7, 7, 0), A::Ignore, "no change since last frame");
+    assert_eq!(clipboard_action(7, 7, 5), A::Ignore, "no change, and we wrote earlier");
+
+    // **The failure answer.** `GetClipboardSequenceNumber` returns 0 when the call
+    // fails, and 0 is also the initial "seen" value - so a call that keeps
+    // failing degrades to the feature not firing rather than to pasting whatever
+    // happens to be on the clipboard.
+    assert_eq!(clipboard_action(0, 7, 0), A::Ignore, "a failed read is not a change");
+    assert_eq!(clipboard_action(0, 0, 0), A::Ignore, "and 0 vs 0 is still not a change");
+
+    // **Our own write.** `write_seq` is the counter as of the last clipboard write
+    // this app made, so anything at or below it is ours.
+    assert_eq!(
+        clipboard_action(5, 4, 5),
+        A::Ignore,
+        "the change we just made ourselves must not be pasted back at us"
+    );
+    assert_eq!(
+        clipboard_action(5, 4, 9),
+        A::Ignore,
+        "anything at or below our last write is already handled"
+    );
+    // `write_seq == 0` means "this app has not written", and must not suppress
+    // anything - a reader who has never copied must still get their first paste.
+    assert_eq!(clipboard_action(9, 8, 0), A::Paste, "no write yet: a change is a change");
+
+    // Someone else's change.
+    assert_eq!(clipboard_action(6, 5, 5), A::Paste, "a change past our last write is a paste");
+    assert_eq!(
+        clipboard_action(6, 5, 3),
+        A::Paste,
+        "and one past a stale write seq too"
     );
 }

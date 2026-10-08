@@ -247,18 +247,32 @@ what `Ctrl+S` would have written — the same `_rotated` / `_cropped` name, qual
 - Saving over an existing file is not prevented — you named the destination, and
   an existing file is not overwritten silently by a name you did not choose.
 
-### Pasting an image (`Ctrl+V`)
+### Pasting an image — the clipboard watcher
 
-`Ctrl+V` opens the clipboard's image, if it has one: a screenshot, or an image
-copied from a browser or another editor. The pixels are written to a temp file
-this app owns and opened like a dropped file, so it is released on the next open
-and on exit, and nothing is ever written to your own disk.
+**Copy an image and it opens.** A screenshot in Paint, "copy image" in a browser,
+anything that puts a bitmap on the clipboard. There is **no key to press**, and
+that is not a design choice so much as a constraint worked out in the source:
 
-`Ctrl+V` is **not** rebindable. `egui-winit` intercepts the paste command and
-consumes the key, so a rebindable row for it would look configured and never
-fire — the same reason `Ctrl+C` is read from a raw event. Clipboard *files* are
-not opened: `arboard` offers no API to read them, and copying a file you own is
-not a request to paste it.
+- `egui-winit` intercepts the paste command — `Key::Paste`,
+  `Ctrl+V`, or `Shift+Insert` — and returns *before* pushing the `Key` event. No
+  modifier combination reaches this app, so `Ctrl+V` cannot be bound to anything.
+- It pushes `Event::Paste` only when the clipboard's **text** is non-empty. A
+  screenshot has no text, so that event does not fire either.
+
+Nothing inside egui reports an image paste, so the clipboard itself is the
+trigger: a per-frame read of Windows' clipboard change counter (a shared-memory
+read, not a bitmap read), and the bitmap — which is megabytes — is read on a
+worker, exactly like a dropped file's copy. Copying **text** or a **file** moves
+the counter but leaves no bitmap, so neither opens anything.
+
+`Ctrl+C` (copy this image out) is explicitly *not* a paste: the app records the
+counter when it writes, so the picture you just copied is never handed straight
+back to you.
+
+The pasted file goes to `%TEMP%` in a directory this app owns and releases on the
+next open and on exit, and nothing is ever written to your own disk. Pastes that
+arrive out of order — two clipboard changes while the first is still being read —
+are discarded by sequence number rather than opening over the top of the newer one.
 
 ### Saving a transform or crop (`Ctrl+S`)
 
@@ -360,7 +374,7 @@ should not quietly do that.
 | `Ctrl+Shift+C` | Copy the current file's path as text |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
 | `Ctrl+Shift+A` | Save as — a panel to pick the file, format, JPEG quality and a maximum long side. Opens pre-filled with exactly what `Ctrl+S` would write, so pressing Save without touching anything gives the same file |
-| `Ctrl+V` | Open the clipboard's image (a screenshot, or an image copied from another app). Not rebindable — see below |
+| *(no key)* | Copy an image anywhere and it opens — see below. `Ctrl+V` cannot work in an egui app and the reason is worth knowing |
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
 | `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |
