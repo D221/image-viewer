@@ -217,6 +217,13 @@ const BARE_LETTERS: &[(&str, &str)] = &[
     ),
     ("P", "toggle the right (settings) pane - view only"),
     ("R", "rescan the folder - read-only"),
+    (
+        "V",
+        "paste the clipboard's image - writes only to a temp directory this app \
+         owns and releases on the next open, so it cannot touch a user's images; \
+         the key is V rather than a chord only because egui-winit swallows every \
+         variant of Ctrl+V (see image_viewer::PASTE_NOTE)",
+    ),
     ("T", "fit the window to the picture - view only"),
     (
         "W",

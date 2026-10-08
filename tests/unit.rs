@@ -6021,10 +6021,27 @@ fn save_as_and_paste_are_wired() {
 
     // --- paste: the pixels come from the clipboard, and the trigger is a poll ---
     let watcher = fn_body(src, "fn clipboard_poll(&mut self)").expect("clipboard poll");
+    // **The read lives in `start_paste`, not `clipboard_poll`.** It has to: the
+    // watcher decides whether to paste and the explicit button decides without
+    // asking, so both call one spawn rather than each having a copy of "read the
+    // bitmap, write the file, report it". A second copy is a second thing that can
+    // forget the token, and forgetting the token is how a stale answer opens over
+    // the top of a newer one.
+    let spawn = fn_body(src, "fn start_paste(&mut self)").expect("start_paste");
     assert!(
-        watcher.contains("get_image"),
+        spawn.contains("get_image"),
         "the pixels must come from the clipboard's image flavour, not from the \
          event's text"
+    );
+    assert!(
+        spawn.contains("std::thread::spawn"),
+        "and the bitmap read must be on a worker: a screenshot is megabytes, and \
+         this is the same stall the drop copy was moved off"
+    );
+    assert!(
+        watcher.contains("start_paste()"),
+        "the watcher must go through that spawn rather than reading the clipboard \
+         itself - otherwise the two paths drift on the token"
     );
     assert!(
         !lib.contains(r#"("paste", "Ctrl+V""#),
@@ -6052,13 +6069,77 @@ fn save_as_and_paste_are_wired() {
          input event that reports an image paste, so anything listening only for \
          one is a feature that can never fire"
     );
+    // **The chord cannot be a variant of Ctrl+V, checked against the crate rather
+    // than asserted from memory.** egui-winit's `is_paste_command` is
+    // `Key::Paste || (modifiers.command && key == V) || (win && shift && Insert)`
+    // with *no shift exclusion* on the ctrl arm, and `command` is `ctrl` on
+    // Windows - so `Ctrl+Shift+V` and `Ctrl+Alt+V` are both swallowed, as is
+    // `Shift+Insert`. Only a non-`V` letter survives. Asserted as the absence of a
+    // V-chord row, because a row that looks configured and cannot fire is exactly
+    // what this file exists to catch.
+    assert!(
+        !lib.contains(r#"("paste_now", "Ctrl"#),
+        "a Ctrl+V-ish row cannot work: egui-winit drops the key before the app \
+         ever sees it. See image_viewer::PASTE_NOTE."
+    );
+    assert!(
+        lib.contains(r#"("paste_now", "V", "Paste clipboard image now"),"#),
+        "the explicit paste must be bound to something egui delivers - a bare \
+         letter is the only chord shape that survives the interception"
+    );
+
+    // **Edge-triggered, and the helper is the proof.** `binding_down` uses
+    // `key_pressed`, which fires on OS key-repeat, so a *held* `V` would spawn a
+    // megabyte bitmap read per repeat tick and a `%TEMP%` directory each time.
+    // Asserted by *which helper* reads it, not by the letter - the letter is the
+    // same in both readings and so cannot tell them apart.
+    assert!(
+        !src.contains(r#"binding_down(i, &kb, "paste_now")"#),
+        "paste_now must not go through `binding_down`: that uses `key_pressed`, \
+         which fires on key repeat, so each repeat would spawn a bitmap read"
+    );
+    let fresh = src
+        .find(r#"action_pressed_fresh(ctx, &kb, "paste_now")"#)
+        .expect("the paste chord must be read edge-triggered");
+    let dispatched = src.find("} else if paste_now {").expect("paste dispatch");
+    assert!(
+        fresh < dispatched,
+        "and the edge-triggered read must precede the arm that acts on it"
+    );
+
+    // **The button is the one gesture nothing can swallow**, because a click
+    // never reaches `is_paste_command`. It is also the one path that bypasses the
+    // watcher's suppression, so it must call `paste_now` and not the watcher's
+    // rule: `Ctrl+C` puts a bitmap on the clipboard and a watcher cannot tell
+    // that from a pasted screenshot, but a click is unambiguous.
+    // `ui.button(..)`, not `egui::Button::new(..)` — matched as written rather than
+    // as a shape half-remembered, because a scan looking for a form the code does
+    // not use cannot fail for the right reason.
+    assert!(
+        src.contains(r#".button(action_button_text(&self.config, "Paste", "paste_now"))"#),
+        "there must be a Paste button: it is the one paste gesture no keyboard \
+         interception can swallow"
+    );
+    let now = fn_body(src, "fn paste_now(&mut self)").expect("paste_now");
+    assert!(
+        !now.contains("clipboard_action"),
+        "an explicit paste must not be suppressed by the watcher rule: a click \
+         after this app's own Ctrl+C is a request, where the watcher has to stay \
+         quiet because it cannot tell the two apart"
+    );
+    assert!(
+        now.contains("start_paste()"),
+        "and it must go through the same worker as the watcher, so the two paths \
+         cannot drift on the token"
+    );
+
     // **The decision itself is a library function, tested as a truth table**
     // (`the_clipboard_rule_ignores_failure_no_change_and_our_own_write`). What
     // remains here is only the two things a scan can actually establish: that the
     // binary asks the rule rather than re-implementing it, and that it advances
     // `clipboard_seen` *after* asking.
     assert!(
-        watcher.contains("clipboard_action"),
+        watcher.contains("image_viewer::clipboard_action("),
         "the binary must ask the shared rule, not re-derive it - a scan cannot \
          prove a comparison is right, only that it is spelled somewhere"
     );

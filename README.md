@@ -247,32 +247,32 @@ what `Ctrl+S` would have written — the same `_rotated` / `_cropped` name, qual
 - Saving over an existing file is not prevented — you named the destination, and
   an existing file is not overwritten silently by a name you did not choose.
 
-### Pasting an image — the clipboard watcher
+### Pasting an image — `V`, or the **Paste** button
 
-**Copy an image and it opens.** A screenshot in Paint, "copy image" in a browser,
-anything that puts a bitmap on the clipboard. There is **no key to press**, and
-that is not a design choice so much as a constraint worked out in the source:
+Two ways to ask for it, because the keyboard route is compromised:
 
-- `egui-winit` intercepts the paste command — `Key::Paste`,
-  `Ctrl+V`, or `Shift+Insert` — and returns *before* pushing the `Key` event. No
-  modifier combination reaches this app, so `Ctrl+V` cannot be bound to anything.
-- It pushes `Event::Paste` only when the clipboard's **text** is non-empty. A
-  screenshot has no text, so that event does not fire either.
+- **`V`** — a bare letter, and the only chord shape that survives.
+- **Paste** (top bar, beside *Save as…*) — the most reliable of the two. A click
+  never goes through the keyboard at all.
 
-Nothing inside egui reports an image paste, so the clipboard itself is the
-trigger: a per-frame read of Windows' clipboard change counter (a shared-memory
-read, not a bitmap read), and the bitmap — which is megabytes — is read on a
-worker, exactly like a dropped file's copy. Copying **text** or a **file** moves
-the counter but leaves no bitmap, so neither opens anything.
+`Ctrl+V` cannot work here, or in any egui app, and the reason is read out of
+`egui-winit`'s source rather than guessed: `is_paste_command` matches
+`Key::Paste`, `Ctrl+V`, or `Shift+Insert` and returns **before pushing the key**,
+and its ctrl arm has no `shift` exclusion — so `Ctrl+Shift+V` and `Ctrl+Alt+V`
+are swallowed too. It pushes `Event::Paste` only when the clipboard's *text* is
+non-empty, which a screenshot is not.
 
-`Ctrl+C` (copy this image out) is explicitly *not* a paste: the app records the
-counter when it writes, so the picture you just copied is never handed straight
-back to you.
+**The button and the key do one thing the automatic watcher cannot.** Copying an
+image also opens it on its own, but that watcher has to ignore a clipboard change
+it cannot attribute — including this app's own `Ctrl+C`, which puts a bitmap on
+the clipboard. Pressing `V` or clicking **Paste** is unambiguous, so it acts
+anyway.
 
-The pasted file goes to `%TEMP%` in a directory this app owns and releases on the
-next open and on exit, and nothing is ever written to your own disk. Pastes that
-arrive out of order — two clipboard changes while the first is still being read —
-are discarded by sequence number rather than opening over the top of the newer one.
+**Nothing is ever written to your own disk.** The pasted file goes to `%TEMP%` in
+a directory this app owns, released on the next open and on exit. Pastes that
+arrive out of order — two changes while the first is still being read — are
+discarded by request token rather than opening over the top of the newer one.
+Clicking **Paste** with nothing usable on the clipboard says so.
 
 ### Saving a transform or crop (`Ctrl+S`)
 
@@ -374,7 +374,8 @@ should not quietly do that.
 | `Ctrl+Shift+C` | Copy the current file's path as text |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
 | `Ctrl+Shift+A` | Save as — a panel to pick the file, format, JPEG quality and a maximum long side. Opens pre-filled with exactly what `Ctrl+S` would write, so pressing Save without touching anything gives the same file |
-| *(no key)* | Copy an image anywhere and it opens — see below. `Ctrl+V` cannot work in an egui app and the reason is worth knowing |
+| `V` | Open the clipboard's image now. The **Paste** button does the same and cannot be swallowed — `Ctrl+V`, and every variant of it, is consumed by `egui-winit` before the app sees it |
+| *(no key)* | Copy an image anywhere and it opens — see below |
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
 | `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |
