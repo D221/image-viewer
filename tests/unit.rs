@@ -5804,3 +5804,168 @@ fn side_panes_hide_individually_and_gate_their_reads() {
         "the left gate must close before the right panel, or L hides both"
     );
 }
+
+/// A paste of clipboard **pixels** becomes a real file this app owns, and it is
+/// an actual decodable image - not bytes written to a path that then fails at
+/// decode time with a message about a file the user never had.
+#[test]
+fn a_pasted_clipboard_image_becomes_a_file_we_can_open() {
+    use image_viewer::write_pasted_image;
+    // 2x2 RGBA, straight from the clipboard's shape.
+    let rgba: Vec<u8> = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+    let copy = write_pasted_image(&rgba, 2, 2).expect("a 2x2 RGBA buffer is a valid paste");
+
+    // **Read the bytes before any other test can replace them.** The paste
+    // directory is keyed by process id, and this binary runs every test in one
+    // process, so a second paste anywhere in the suite overwrites this file.
+    // That is correct behaviour for a clipboard - one paste, one picture - but it
+    // means a test that writes and then *decodes* has a race with any other test
+    // that pastes, and the symptom would be a pixel comparison against another
+    // test's data rather than an obvious failure.
+    let bytes = std::fs::read(&copy.file).unwrap();
+    let decoded = image::load_from_memory(&bytes).expect("the pasted bytes are a PNG").to_rgba8();
+    let (dw, dh) = decoded.dimensions();
+    let pixels = decoded.into_raw();
+
+    assert_eq!((dw, dh), (2, 2));
+    assert_eq!(&pixels[0..4], &[255, 0, 0, 255], "top-left red");
+    assert_eq!(&pixels[8..12], &[0, 0, 255, 255], "bottom-left blue");
+
+    assert!(copy.file.is_file(), "the pasted file exists");
+    assert!(
+        copy.file.extension().map(|e| e == "png").unwrap_or(false),
+        "a paste is written as PNG: the clipboard carries no format to preserve, \
+         and PNG is the one that keeps every pixel"
+    );
+    let bytes2 = std::fs::read(&copy.file).unwrap();
+    assert!(
+        bytes2.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "and the bytes are really PNG, not a file named .png"
+    );
+
+    // Released like any other copy the app owns.
+    image_viewer::forget_drop_copy(&copy);
+    assert!(!copy.file.exists(), "the paste is released with its directory");
+}
+
+/// A paste whose buffer does not match the dimensions it claims is refused at
+/// the boundary. **Refused, not written**: a file that cannot decode is a
+/// confusing report about a path the user never had.
+///
+/// **Only the size is checked, and that is the point rather than a gap.** A paste
+/// is decoded RGBA, not an encoded file, so there is no magic byte to find - a
+/// content check would either refuse every real paste or accept every buffer
+/// while claiming to have verified something. The size is the whole contract,
+/// and this test is what pins that: a buffer of the right length is accepted
+/// whatever its bytes are, because "right length" is the only claim being made.
+#[test]
+fn a_paste_that_does_not_match_its_claimed_size_is_refused() {
+    use image_viewer::write_pasted_image;
+    // A truncated buffer for the dimensions it claims.
+    let err = write_pasted_image(&[0u8; 4], 64, 64).unwrap_err();
+    assert!(err.contains("not 64x64"), "the size mismatch is named: {err}");
+
+    // Degenerate dimensions.
+    assert!(write_pasted_image(&[], 0, 0).is_err());
+    assert!(write_pasted_image(&[0u8; 16], 2, 0).is_err());
+
+    // Right length, arbitrary bytes: **accepted**, because those bytes are a
+    // 2x2 picture of whatever values, and the caller is the clipboard.
+    let copy = write_pasted_image(&(0..16u8).collect::<Vec<u8>>(), 2, 2)
+        .expect("a correctly-sized RGBA buffer is a paste whatever its values");
+    assert!(copy.file.is_file());
+    image_viewer::forget_drop_copy(&copy);
+}
+/// Save-as and paste must be **wired**, not merely present as functions.
+///
+/// `main.rs` is unreachable from every test, so these are source scans. Each one
+/// exists because the feature it covers has a specific way of silently doing
+/// nothing: a chord bound to a key the toolkit swallows, a panel that is drawn
+/// after an early return so it is invisible in half the states, a defaults
+/// value that differs from the behaviour it claims to match.
+#[test]
+fn save_as_and_paste_are_wired() {
+    let src = include_str!("../src/main.rs");
+    let lib = include_str!("../src/lib.rs");
+
+    // --- save-as: the chord, the action, the panel, the call ---
+    // The action table lives in `lib.rs`, so the *listing* is checked there and
+    // the wiring here. Reading one file for both would have made this assertion
+    // vacuous rather than wrong.
+    assert!(
+        lib.contains(r#"("save_as", "Ctrl+Shift+A", "Save as (choose file, quality, size)"),"#),
+        "save_as must be a listed action so it appears in Settings and is rebindable"
+    );
+    assert!(
+        src.contains(r#"binding_down(i, &kb, "save_as")"#),
+        "the action must be read from the binding table"
+    );
+    assert!(
+        src.contains("} else if save_as {\n                self.open_save_as();"),
+        "the chord must reach open_save_as"
+    );
+    assert!(
+        src.contains("fn do_save_as(&mut self)"),
+        "and open_save_as must lead to an actual save, not just a panel"
+    );
+    assert!(
+        src.contains("save_transformed_to(&p, edit.xform, edit.crop, &dest, quality, max_long)"),
+        "the panel's numbers must reach the library call - a save that ignores \\
+         the quality slider is a slider that lies"
+    );
+
+    // **Defaults are the current behaviour.** This is the requirement, so it is
+    // asserted rather than described: open_save_as must pre-fill the unique
+    // name Ctrl+S would have chosen, with quality at the shared default and no
+    // resize. A panel that opens on a different name means "save as" quietly
+    // changed what saving does.
+    let open = fn_body(src, "fn open_save_as(&mut self)").expect("open_save_as");
+    assert!(
+        open.contains("unique_dest_named"),
+        "the destination must be prefilled from the same naming rule as Ctrl+S"
+    );
+    assert!(
+        open.contains("DEFAULT_JPEG_QUALITY"),
+        "and the quality must start at the shared default"
+    );
+    assert!(
+        open.contains("self.save_as.max_long = String::new()"),
+        "and the size must start blank, which means 'do not resize'"
+    );
+
+    // The panel must be drawn *before* the early returns, or it is invisible
+    // over the grid and over the archive placeholder - the two states where a
+    // reader is most likely to want it.
+    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    let panel_at = central.find("if self.save_as.open {").expect("panel draw");
+    let grid_at = central.find("if self.gallery_view {").expect("grid branch");
+    assert!(
+        panel_at < grid_at,
+        "the save-as panel must be drawn before the grid's early return, or it \\
+         cannot be opened while the grid is up"
+    );
+
+    // --- paste: the raw event, and never a key ---
+    assert!(
+        src.contains("egui::Event::Paste(_)") && src.contains("paste_from_clipboard(ctx)"),
+        "paste must be read from the raw event and reach the handler"
+    );
+    assert!(
+        !lib.contains(r#"("paste", "Ctrl+V""#),
+        "Ctrl+V must NOT be a KEY_ACTIONS row: egui-winit intercepts the paste \\
+         command and returns before pushing the key, so such a row could never \\
+         fire while looking exactly like one that does"
+    );
+    assert!(
+        lib.contains("PASTE_NOTE"),
+        "and the reason it is absent must be written down, so the next person \\
+         does not 'fix' it by adding the row"
+    );
+    // The guard matters: Ctrl+V in the filter box must paste text, not open an
+    // image over the gallery.
+    let dispatch = fn_body(src, "} else if paste_evt {").expect("paste dispatch");
+    assert!(
+        !dispatch.is_empty(),
+        "the paste arm must exist"
+    );
+}

@@ -226,6 +226,40 @@ Probing for a working graphics backend...
    vulkan: unavailable
 ```
 
+### Saving as (`Ctrl+Shift+A`)
+
+`Ctrl+S` always picks the name and the size. `Ctrl+Shift+A` lets you choose
+them: a **file** path, a **format** (`.jpg`, `.png`, `.webp`, `.bmp`, `.tiff`),
+a **JPEG quality** and a **maximum long side**. It opens pre-filled with exactly
+what `Ctrl+S` would have written — the same `_rotated` / `_cropped` name, quality
+85, no resize — so opening the panel and pressing Save produces the same file
+`Ctrl+S` would have.
+
+- **The format follows the destination, not the source.** A PNG saved to
+  `out.jpg` is written as JPEG, because the alternative is a file whose
+  extension lies about its contents.
+- **Quality is JPEG's alone.** `image` has one lossy encoder; PNG, BMP and TIFF
+  are written losslessly and the panel says so rather than offering a slider that
+  does nothing. WebP is also lossless here for the same reason.
+- **A maximum long side never upscales.** A 256px image asked for 1000 stays
+  256px; there is no point inventing pixels nobody had. Blank means original size.
+- **Same refusals as `Ctrl+S`**: animations and pages of a multi-page document.
+- Saving over an existing file is not prevented — you named the destination, and
+  an existing file is not overwritten silently by a name you did not choose.
+
+### Pasting an image (`Ctrl+V`)
+
+`Ctrl+V` opens the clipboard's image, if it has one: a screenshot, or an image
+copied from a browser or another editor. The pixels are written to a temp file
+this app owns and opened like a dropped file, so it is released on the next open
+and on exit, and nothing is ever written to your own disk.
+
+`Ctrl+V` is **not** rebindable. `egui-winit` intercepts the paste command and
+consumes the key, so a rebindable row for it would look configured and never
+fire — the same reason `Ctrl+C` is read from a raw event. Clipboard *files* are
+not opened: `arboard` offers no API to read them, and copying a file you own is
+not a request to paste it.
+
 ### Saving a transform or crop (`Ctrl+S`)
 
 Turning, mirroring and cropping are view transforms by default, so nothing you do
@@ -325,6 +359,8 @@ should not quietly do that.
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
 | `Ctrl+Shift+C` | Copy the current file's path as text |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
+| `Ctrl+Shift+A` | Save as — a panel to pick the file, format, JPEG quality and a maximum long side. Opens pre-filled with exactly what `Ctrl+S` would write, so pressing Save without touching anything gives the same file |
+| `Ctrl+V` | Open the clipboard's image (a screenshot, or an image copied from another app). Not rebindable — see below |
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
 | `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |

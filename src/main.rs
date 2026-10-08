@@ -1793,6 +1793,55 @@ struct View {
     offset: Vec2, // image centre relative to panel centre, in points
 }
 
+/// What the save-as dropdown offers.
+///
+/// **The formats [`image_viewer::save_transformed_to`] can actually encode**, not
+/// every extension the app can open. A destination the user can pick in a
+/// dropdown and then be refused at save time is a trap, and the two sets differ:
+/// the app reads GIF and AVIF and writes neither.
+const SAVE_AS_FORMATS: &[&str] = &["jpg", "png", "webp", "bmp", "tiff"];
+
+/// The save-as panel's contents, held in [`MyApp::save_as`].
+///
+/// **A path the user is typing, plus two numbers, and nothing else.** The source
+/// picture is deliberately *not* in here: it is read from `cur` at save time.
+/// A panel that captured a path would keep saving the picture you were looking
+/// at when you opened it, after you had navigated somewhere else — and the
+/// notice would name a file whose pixels came from a different image.
+struct SaveAsState {
+    open: bool,
+    /// Pre-filled with the `_rotated` / `_cropped` unique name at the moment the
+    /// panel opens, so pressing Save with no edits does exactly what `Ctrl+S`
+    /// does. That is the "defaults auto-selected as now" requirement, and the
+    /// reason the panel never opens empty: an empty path is not a default, it is
+    /// a question.
+    dest: String,
+    /// JPEG quality, 1..=100. Only meaningful for a JPEG destination, and the
+    /// panel says so rather than offering a slider that does nothing.
+    quality: u8,
+    /// Bound on the long side in pixels; blank means "do not resize".
+    max_long: String,
+    formats: &'static [&'static str],
+}
+
+/// Swap a path's extension, keeping the folder and the stem.
+///
+/// A string function rather than `Path::with_extension` because the input is
+/// whatever the user has typed so far, and `with_extension` on a path with a
+/// trailing separator produces surprises. A path with no extension gains one.
+fn replace_extension(dest: &str, ext: &str) -> String {
+    let (dir, stem) = match dest.rfind(['/', '\\']) {
+        Some(i) => (&dest[..=i], &dest[i + 1..]),
+        None => ("", dest),
+    };
+    // The dot must come *after* the last separator for `archive.part1` to keep
+    // its stem, and after index 0 for a dotfile not to lose its name.
+    match stem.rfind('.') {
+        Some(i) if i > 0 => format!("{dir}{}{ext}", &stem[..i]),
+        _ => format!("{dir}{stem}.{ext}"),
+    }
+}
+
 struct MyApp {
     folder: PathBuf,
     gallery: Gallery,
@@ -1967,6 +2016,15 @@ struct MyApp {
     /// reader was inside the archive is reflected, and the cursor lands on the
     /// archive by name rather than on whatever now occupies that slot.
     archive_parent: Option<(PathBuf, PathBuf)>,
+    /// The save-as panel: open or closed, and everything it is holding.
+    ///
+    /// **Not a `Config` field.** Every other dialog-ish value in this app is
+    /// either a mode that should survive a restart (fit window, sort order) or
+    /// something a native file dialog owns. Save-as is neither: it is a panel
+    /// opened for one save and dismissed after it, and persisting a half-typed
+    /// path and a quality slider would mean a settings entry for a value nobody
+    /// wants to have remembered.
+    save_as: SaveAsState,
     /// A copy of a **dropped** file, in a directory this app owns, for as long as
     /// that file is open.
     ///
@@ -2257,6 +2315,13 @@ impl MyApp {
             zip_archive,
             zip_temp,
             archive_parent: None,
+            save_as: SaveAsState {
+                open: false,
+                dest: String::new(),
+                quality: image_viewer::DEFAULT_JPEG_QUALITY,
+                max_long: String::new(),
+                formats: SAVE_AS_FORMATS,
+            },
             // A file only ever arrives here from the command line or the file
             // dialog, neither of which is a transient hand-off, so there is never
             // a copy to release at start-up. `load_dropped` owns one instead.
@@ -5398,6 +5463,17 @@ impl MyApp {
             image_viewer::ResizeAction::Idle => {}
         }
 
+        // The save-as panel, drawn as a window over whatever is behind it and
+        // **before the early returns below**, so it also appears over the grid
+        // and over the archive placeholder. Placed after those returns it would
+        // be invisible in exactly the two states where a reader is most likely
+        // to want it: looking at a folder (the grid), and standing on a
+        // container.
+        if self.save_as.open {
+            let still_open = self.save_as_panel(ui);
+            self.save_as.open = still_open;
+        }
+
         // Gallery grid view (G): scrollable thumbnail grid, click to open.
         // This must run *before* the panel rect is allocated below — an
         // allocated rect consumes the whole panel, leaving the grid's
@@ -6604,6 +6680,220 @@ impl MyApp {
     /// The grid is otherwise untouched, deliberately: one cell per file, page 1 only,
     /// as it has always been. When inside an archive, index 0 is the "go back" cell
     /// and is handled separately.
+    /// Open the save-as panel, pre-filled with what `Ctrl+S` would write.
+    ///
+    /// **The defaults are the current behaviour, deliberately.** `Ctrl+S` picks a
+    /// `_rotated` / `_cropped` name that does not exist and writes the full-res
+    /// picture; this pre-fills exactly that name, sets quality to the number the
+    /// screen-save already uses, and leaves the resize blank. A user who opens
+    /// the panel and presses Save without touching anything gets a file
+    /// identical to the one `Ctrl+S` would have written, which is the only way
+    /// "save-as" can be an addition rather than a change.
+    fn open_save_as(&mut self) {
+        let Some(cur) = self.cur.clone() else {
+            return;
+        };
+        let p = cur.path.clone();
+        let edit = self.edits.get(&p);
+        let infix = if edit.crop.is_some() { "cropped" } else { "rotated" };
+        let dest = image_viewer::unique_dest_named(&p, infix);
+        self.save_as.dest = dest.to_string_lossy().into_owned();
+        self.save_as.quality = image_viewer::DEFAULT_JPEG_QUALITY;
+        self.save_as.max_long = String::new();
+        self.save_as.open = true;
+    }
+
+    /// Perform the save the panel describes.
+    ///
+    /// **Reads `cur`, not a captured source.** See [`SaveAsState`]: a panel
+    /// that remembered which picture it was opened on would save that picture
+    /// after the reader had navigated elsewhere, and name it as though it were
+    /// the one on screen.
+    ///
+    /// The animation and document-page refusals are the same ones `Ctrl+S`
+    /// makes, duplicated rather than shared — four lines each, against a shared
+    /// function that would have to take the edit and both guards as arguments.
+    /// The risk of them drifting is why each refusal names itself, so a test can
+    /// read the message and tell which guard fired.
+    fn do_save_as(&mut self) {
+        let Some(cur) = self.cur.clone() else {
+            return;
+        };
+        let p = cur.path.clone();
+        if self.anim.as_ref().is_some_and(|a| a.path == p) {
+            self.error = Some("Cannot save a transformed animation: it has many frames".into());
+            return;
+        }
+        if cur.page > 0 {
+            self.error = Some(format!(
+                "Cannot save a single page of a multi-page document ({}/{}). \
+                 Saving works on the whole file.",
+                cur.page + 1,
+                self.gallery.pages_in_current()
+            ));
+            return;
+        }
+        let dest = PathBuf::from(self.save_as.dest.trim());
+        if dest.as_os_str().is_empty() {
+            self.error = Some("No destination: type or pick a file name".into());
+            return;
+        }
+        // Blank means "leave it alone", and 0 is how `save_transformed_to` is
+        // told that. A non-numeric box is an error rather than a silent 0:
+        // "I typed a size and it saved full-size" is a worse answer than "that
+        // is not a number".
+        let max_long = match self.save_as.max_long.trim() {
+            "" => 0,
+            s => match s.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => {
+                    self.error = Some(format!("Max long side must be a number, got {s:?}"));
+                    return;
+                }
+            },
+        };
+        let quality = self.save_as.quality;
+        let edit = self.edits.get(&p);
+        match image_viewer::save_transformed_to(&p, edit.xform, edit.crop, &dest, quality, max_long) {
+            Ok(out) => {
+                let name = dest
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let sized = if max_long == 0 {
+                    String::new()
+                } else {
+                    format!(" (long side <= {max_long})")
+                };
+                self.notice = Some(if out.lossless {
+                    format!("Saved {name} ({} , lossless){sized}", edit.label())
+                } else {
+                    format!("Saved {name} ({} , re-encoded at quality {quality}){sized}", edit.label())
+                });
+                self.save_as.open = false;
+            }
+            Err(e) => self.error = Some(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Open the clipboard's image, if it has one.
+    ///
+    /// **Read from [`egui::Event::Paste`], never from a key.** `egui-winit`
+    /// intercepts the paste command, pushes the event and returns before pushing
+    /// the key it matched, so `key_pressed(Key::V)` with ctrl is *never true* —
+    /// the same trap `Ctrl+C` fell into, and the reason `Ctrl+S` works is that
+    /// it is not on that list. The event carries **text**, not pixels, so it is a
+    /// signal that a paste happened; the pixels are read from `arboard` here.
+    ///
+    /// **Image only, and that is a limit of the toolkit rather than a choice.**
+    /// `arboard` 3.6 exposes exactly two reads — `get_text` and `get_image` —
+    /// and no file API at all, so "the clipboard holds a *file*" cannot even be
+    /// asked through it. Detecting that would mean raw Win32 `OleGetClipboard`
+    /// and `IDataObject`, which is a P/Invoke module for one message. So pixels
+    /// are opened and anything else says what it found; a clipboard holding a
+    /// copied *file* lands on the refusal, which is right anyway — that file is
+    /// one the user owns and did not ask us to copy.
+    fn paste_from_clipboard(&mut self, ctx: &Context) {
+        let img = match arboard::Clipboard::new().and_then(|mut cb| cb.get_image()) {
+            Ok(i) => i,
+            Err(e) => {
+                self.error = Some(format!(
+                    "Nothing to paste: the clipboard holds no image ({e}). \
+                     Copy a screenshot or an image from another app."
+                ));
+                return;
+            }
+        };
+        match image_viewer::write_pasted_image(&img.bytes, img.width as u32, img.height as u32) {
+            Ok(copy) => {
+                // The paste's directory is this app's to own for as long as the
+                // picture is open, exactly like a drop copy: `open_file(transient
+                // = true)` releases the previous one and makes the paste the
+                // thing the app is holding.
+                self.close_transients();
+                self.open_file(ctx, copy.file.clone(), true);
+            }
+            Err(e) => self.error = Some(format!("Paste failed: {e}")),
+        }
+    }
+
+    /// Draw the save-as panel. Returns whether it is still open, because the
+    /// caller draws it as an overlay and must know whether to keep doing so.
+    fn save_as_panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut close = false;
+        let mut save = false;
+        egui::Window::new("Save as")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.add_space(4.0);
+                ui.label("File:");
+                ui.text_edit_singleline(&mut self.save_as.dest);
+                ui.add_space(4.0);
+                ui.label("Format:");
+                // **Replaces the extension, never the whole path.** The obvious
+                // `selectable_value(&mut dest, dest.clone(), "png")` assigns the
+                // entire path to the string `"png"`, so picking a format throws
+                // away the folder and the name the user typed. The destination
+                // box above stays editable, so a hand-typed extension is still
+                // respected — the dropdown is a shortcut, not the authority.
+                let current_ext = self.save_as.dest.rsplit('.').next().unwrap_or("").to_lowercase();
+                egui::ComboBox::from_id_salt("save_as_format")
+                    .selected_text(current_ext.clone())
+                    .show_ui(ui, |ui| {
+                        for f in self.save_as.formats {
+                            if ui
+                                .selectable_label(current_ext == *f, format!(".{f}"))
+                                .clicked()
+                            {
+                                let dest = std::mem::take(&mut self.save_as.dest);
+                                self.save_as.dest = replace_extension(&dest, f);
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Quality:");
+                    ui.add(egui::Slider::new(&mut self.save_as.quality, 1..=100).text(""));
+                });
+                // **The slider is told when it does nothing**, rather than left
+                // silently inert. `image` 0.25 has one lossy encoder (JPEG) and
+                // none for the rest, so a quality slider on a PNG is a control
+                // that does not do what it says.
+                let dest_ext = self.save_as.dest.rsplit('.').next().unwrap_or("").to_lowercase();
+                if !matches!(dest_ext.as_str(), "jpg" | "jpeg") {
+                    ui.label("Quality applies to JPEG only; this format is lossless.");
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Max long side:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.save_as.max_long)
+                            .desired_width(70.0)
+                            .hint_text("original"),
+                    );
+                });
+                ui.label("Blank = keep the original size.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if save {
+            self.do_save_as();
+        }
+        if close {
+            self.save_as.open = false;
+        }
+        self.save_as.open
+    }
+
     fn pick_grid_selection(&mut self, ctx: &Context) {
         if self.gallery.is_empty() {
             return;
@@ -7647,7 +7937,18 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, crop_key, pane_left, pane_right) = ctx.input(|i| {
+        // **The paste chord, as a raw event.** `egui-winit` intercepts
+        // `is_paste_command` and returns before pushing the key, so there is no
+        // `Key` event for this to bind to — see [`image_viewer::PASTE_NOTE`].
+        // The event carries text rather than pixels, so it is a *signal*; the
+        // pixels are read from the clipboard in the handler.
+        //
+        // Read here, inside the same `!typing` guard as every other chord, so
+        // Ctrl+V in the filter box pastes text and does not open an image over
+        // the top of the gallery.
+        let paste_evt =
+            ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))));
+        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
                 binding_down(i, &kb, "explore"),
@@ -7656,6 +7957,7 @@ impl eframe::App for MyApp {
                 binding_down(i, &kb, "wall_shown"),
                 binding_down(i, &kb, "save"),
                 binding_down(i, &kb, "save_screen"),
+                binding_down(i, &kb, "save_as"),
                 // `Ctrl+C` never arrives as a key (toolkit interception, see
                 // the Copy comment above), so this bare press coexists with
                 // the chord below rather than competing with it.
@@ -7856,10 +8158,14 @@ impl eframe::App for MyApp {
                 } else {
                     self.copy_image_to_clipboard(false);
                 }
+            } else if paste_evt {
+                self.paste_from_clipboard(ctx);
             } else if save_rot {
                 self.save_transformed_copy();
             } else if save_screen {
                 self.save_scaled_copy();
+            } else if save_as {
+                self.open_save_as();
             } else if crop_key {
                 self.toggle_crop_mode(ctx);
             } else if wall {
@@ -8059,6 +8365,19 @@ impl eframe::App for MyApp {
                         .clicked()
                     {
                         self.save_transformed_copy();
+                    }
+                    // Sits beside it because it is the same action with a
+                    // destination attached, and a save you cannot choose the
+                    // name of is not a save-as.
+                    if ui
+                        .add_enabled(
+                            self.cur.is_some(),
+                            egui::Button::new(action_button_text(&self.config, "Save as…", "save_as")),
+                        )
+                        .on_hover_text("Choose file, format, quality and size")
+                        .clicked()
+                    {
+                        self.open_save_as();
                     }
                     if ui.button(action_button_text(&self.config, "Panels", "panels")).clicked() {
                         self.suppress_resize_redecode = true;

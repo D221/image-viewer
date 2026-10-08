@@ -492,6 +492,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("wall_shown", "Shift+W", "Set displayed image as wallpaper"),
     ("save", "Ctrl+S", "Save transformed copy"),
     ("save_screen", "Ctrl+Shift+S", "Save screen-size copy"),
+    ("save_as", "Ctrl+Shift+A", "Save as (choose file, quality, size)"),
     ("crop", "C", "Crop mode"),
     ("copy", "Ctrl+C", "Copy image (alt chord)"),
     ("copy_path", "Ctrl+Shift+C", "Copy path (alt chord)"),
@@ -517,6 +518,22 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("focus_search", "Slash", "Focus filter box"),
     ("fit_window", "T", "Fit window mode"),
 ];
+
+/// `Ctrl+V` is **not** a rebindable action, and cannot be.
+///
+/// `egui-winit` intercepts `is_paste_command`, pushes [`egui::Event::Paste`]
+/// and returns **before** pushing the key it matched - the same reason
+/// `Ctrl+C` needed `Event::Copy` rather than `key_pressed(Key::C)`, and the same
+/// reason `Ctrl+S` works only because it is *not* on that list. A `KEY_ACTIONS`
+/// row for it would look exactly like the working ones and could never fire,
+/// which is the failure mode the capture UI already guards against for an
+/// unparseable chord: a binding that reads as configured and does nothing.
+///
+/// So the paste chord is read as a raw event in the input handler and does not
+/// appear in Settings. The cost is that it cannot be rebound; the benefit is
+/// that it works, which is the only property a table row could claim.
+pub const PASTE_NOTE: &str = "Ctrl+V is handled as a raw event and is not rebindable";
+
 /// Every key name the matcher understands: the spelling capture stores
 /// and settings shows. The binary must map each of these both ways
 /// (pinned by scan); a name missing either way silently falls back to the
@@ -3717,6 +3734,15 @@ pub enum SaveError {
     Lossy(String),
     #[error("writing failed: {0}")]
     Write(std::io::Error),
+    /// The destination could not be written *and* the reason is not an I/O
+    /// error - an extension with no encoder behind it, or none at all.
+    ///
+    /// Separate from [`SaveError::Write`] because the remedy is different: an
+    /// I/O failure is the disk's business and a retry may fix it, while this is
+    /// the request's and no retry will ever change the answer. Both render as a
+    /// refusal, because both must.
+    #[error("{0}")]
+    Unsupported(String),
 }
 
 /// Human name for a format, for the "cannot save this" message.
@@ -3958,15 +3984,53 @@ pub fn save_transformed_scaled(
     crop: Option<Crop>,
     max_long: u32,
 ) -> Result<ScaledSave, SaveError> {
+    let dest = unique_dest_named(src, "screen");
+    save_transformed_to(src, user, crop, &dest, DEFAULT_JPEG_QUALITY, max_long)
+}
+
+/// The JPEG quality both re-encode paths use when the caller has no opinion.
+///
+/// **85, and it is stated here rather than tuned here**, because this path is
+/// lossy by construction and the number only moves artefacts around. It is the
+/// de-facto viewer default (JPEGView's `JPEGSaveQuality`) and it was the
+/// number [`save_transformed_scaled`] already used, so naming it once is what
+/// keeps the screen-save and the save-as from drifting apart.
+pub const DEFAULT_JPEG_QUALITY: u8 = 85;
+
+/// Write the current edit to `dest`, re-encoded, at a chosen quality and size.
+///
+/// **The destination's extension picks the format**, not the source's: a PNG
+/// saved to `out.jpg` is written as JPEG, because the alternative is a file
+/// whose extension lies about its contents — and a viewer that writes one is
+/// worse than useless, since the *next* program to open it fails on a file that
+/// looks fine in a file listing.
+///
+/// `max_long` of 0 means "do not resize"; anything else is a bound on the long
+/// side and **never upscales**, so a 256px source asked for 1000 stays 256px.
+/// Upscaling would invent pixels nobody had, and this codebase's whole premise
+/// is that what you see is what the file has.
+///
+/// `quality` is used for JPEG only. PNG and WebP-lossless are lossless formats
+/// and the number is ignored rather than being an error, so a dialog that
+/// always shows the slider does not have to hide it per format.
+///
+/// **Never overwrites.** `Ctrl+S` picks a `_rotated` name that does not exist;
+/// save-as is the path where the user named the destination, so the *user's*
+/// intent is already "this exact path", and if it exists the honest thing is
+/// to report it rather than silently write `_rotated2` somewhere they are not
+/// looking. The caller has already asked the user to confirm.
+pub fn save_transformed_to(
+    src: &Path,
+    user: Xform,
+    crop: Option<Crop>,
+    dest: &Path,
+    quality: u8,
+    max_long: u32,
+) -> Result<ScaledSave, SaveError> {
     let bytes = std::fs::read(src).map_err(SaveError::Read)?;
+    let fmt = format_for_dest(dest)?;
+    let lossless = fmt != image::ImageFormat::Jpeg;
     let is_jpeg = is_jpeg_bytes(&bytes);
-    let (fmt, lossless) = if is_jpeg {
-        (image::ImageFormat::Jpeg, false)
-    } else if let Some(fmt) = lossless_raster(&bytes) {
-        (fmt, true)
-    } else {
-        return Err(SaveError::Lossy(format_name(&bytes).to_owned()));
-    };
     // `image`'s JPEG decoder does not apply EXIF orientation, so these are
     // stored pixels and `display_xform` is the same composition the lossless
     // path uses — the crop below is in display space either way.
@@ -3991,21 +4055,32 @@ pub fn save_transformed_scaled(
     let (ow, oh, px) = xform
         .apply_rgba(cw, ch, &cropped)
         .ok_or_else(|| SaveError::Decode("buffer did not match its dimensions".into()))?;
-    let scaled = downscale_image(
-        &ImageData {
+    // **`max_long == 0` means no resize at all**, and that is not the same as a
+    // resize to 1px: `downscale_image` treats its argument as a target, so
+    // `max_long.max(1)` on a 0 would quietly shrink every save-as to a
+    // thumbnail. The scale is therefore computed here rather than handed over,
+    // so "leave it alone" is a value the pipeline can actually express.
+    let scaled = if max_long == 0 || ow.max(oh) <= max_long {
+        ImageData {
             width: ow,
             height: oh,
             rgba: px,
             load_time: std::time::Duration::ZERO,
-        },
-        max_long.max(1),
-    );
+        }
+    } else {
+        downscale_image(
+            &ImageData {
+                width: ow,
+                height: oh,
+                rgba: px,
+                load_time: std::time::Duration::ZERO,
+            },
+            max_long,
+        )
+    };
     let (sw, sh) = (scaled.width, scaled.height);
     let mut buf = Vec::new();
     if fmt == image::ImageFormat::Jpeg {
-        // The de-facto viewer default (JPEGView's JPEGSaveQuality); stated
-        // here rather than tuned here, because this path is lossy by
-        // construction and the number only moves artefacts around.
         // JPEG has no alpha: drop it the same way every 32→24-bit save path
         // here does, rather than asking the encoder to guess.
         let rgb: Vec<u8> = scaled
@@ -4014,29 +4089,78 @@ pub fn save_transformed_scaled(
             .flat_map(|px| [px[0], px[1], px[2]])
             .collect();
         let mut cursor = std::io::Cursor::new(&mut buf);
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, 85);
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality);
         enc.encode(&rgb, sw, sh, image::ExtendedColorType::Rgb8)
             .map_err(|e| SaveError::Decode(format!("re-encoding failed: {e}")))?;
     } else {
         let out_img = image::RgbaImage::from_raw(sw, sh, scaled.rgba)
             .ok_or_else(|| SaveError::Decode("downscaled buffer was malformed".into()))?;
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        // **`quality` is deliberately not passed here, and that is not an
+        // oversight.** `image` 0.25 has one JPEG encoder with a quality knob
+        // and no lossy encoder for anything else, so a WebP "quality 40" would
+        // be a lossless WebP wearing a label that says otherwise — and the
+        // `lossless` flag below would then be the only honest thing in the
+        // result. Silently honouring the number on one format and ignoring it
+        // on the others, without saying which, is worse: the user sets 40 for
+        // file size and gets the opposite, with nothing to tell them.
+        //
+        // So PNG, BMP and TIFF are genuinely lossless, WebP is lossless too,
+        // and the quality slider is JPEG's. This is the "a setting that does
+        // nothing on most formats" problem, and the honest fix is for the
+        // dialog to say so rather than for the encoder to pretend.
         image::DynamicImage::ImageRgba8(out_img)
-            .write_to(&mut std::io::Cursor::new(&mut buf), fmt)
+            .write_to(&mut cursor, fmt)
             .map_err(|e| SaveError::Decode(format!("re-encoding failed: {e}")))?;
     }
     // EXIF orientation is baked into the pixels now, so carry the tag reset
-    // the lossless path does — for JPEG only, where a tag may exist.
-    if is_jpeg {
+    // the lossless path does — for JPEG only, where a tag may exist. **Only when
+    // the destination is a JPEG**: writing an orientation tag into a PNG that
+    // has no Exif block to begin with would be a corrupt file, and the old code
+    // got this right only because the destination always matched the source.
+    if is_jpeg && fmt == image::ImageFormat::Jpeg {
         neutralize_exif_orientation(&mut buf);
     }
-    let dest = unique_dest_named(src, "screen");
-    std::fs::write(&dest, &buf).map_err(SaveError::Write)?;
+    std::fs::write(dest, &buf).map_err(SaveError::Write)?;
     Ok(ScaledSave {
-        dest,
+        dest: dest.to_path_buf(),
         width: sw,
         height: sh,
         lossless,
     })
+}
+
+/// The output format, decided by the destination's extension.
+///
+/// **An extension we cannot encode is an error, not a guess.** Falling back to
+/// PNG would write correct pixels under a name that says otherwise, and
+/// guessing JPEG would do the same for a `.tga`; either way the user finds out
+/// from another program, not from here.
+///
+/// WebP is deliberately encoded as **lossless**: `image` 0.25 has no lossy
+/// WebP encoder, and a "lossy" WebP that is secretly lossless would make the
+/// `lossless` flag on the result a lie in the one direction that costs the user
+/// nothing (a bigger file) rather than the one that costs them a generation of
+/// compression.
+fn format_for_dest(dest: &Path) -> Result<image::ImageFormat, SaveError> {
+    let ext = dest
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => Ok(image::ImageFormat::Jpeg),
+        "png" => Ok(image::ImageFormat::Png),
+        "webp" => Ok(image::ImageFormat::WebP),
+        "bmp" => Ok(image::ImageFormat::Bmp),
+        "tif" | "tiff" => Ok(image::ImageFormat::Tiff),
+        "" => Err(SaveError::Unsupported(
+            "the destination has no extension, so there is no format to write".into(),
+        )),
+        other => Err(SaveError::Unsupported(format!(
+            "cannot write .{other} - choose .jpg, .png, .webp, .bmp or .tiff"
+        ))),
+    }
 }
 
 /// `photo.jpg` -> `photo_rotated.jpg`, or `photo_rotated2.jpg`, `...3` and so on
@@ -8900,6 +9024,85 @@ pub fn forget_drop_copy(copy: &DropCopy) {
     let _ = std::fs::remove_dir_all(&copy.dir);
 }
 
+/// Write pasted clipboard pixels to a file this app owns, and hand back the
+/// path to open.
+///
+/// **Pixels, not a path, and the distinction is the whole design.** A paste can
+/// arrive two ways: another program put image *bytes* on the clipboard (a
+/// screenshot, an image copied from a browser), or a file manager put a *file*
+/// on it. The first has no path anywhere and must be written to disk before it
+/// can be opened, because the app's whole pipeline reads from files - there is
+/// no "open from memory" entry point and inventing one would put a second decode
+/// path beside the one every other feature uses. The second is a path the user
+/// already owns and did not ask us to copy, so copying it would be a surprise
+/// and *not* copying it is what they wanted.
+///
+/// So this function only ever handles the first, and the caller is the one that
+/// has to tell the two apart.
+///
+/// **Under `%TEMP%`, for the same reason as the drop copy**: it is a working
+/// copy of something on the clipboard that is not a file at all, it is worthless
+/// once the clipboard changes, and `%TEMP%` is what the platform reclaims.
+///
+/// **Content-addressed, which is what makes "the same paste twice is one paste"
+/// true rather than aspirational.** The directory name is a hash of the pixels,
+/// so pasting the same picture twice lands on the same directory and the second
+/// paste replaces the first, while a *different* paste gets its own directory.
+/// A per-process name would give the same reuse property in production (the UI
+/// thread pastes serially) but is wrong the moment two pastes overlap - which
+/// is exactly what the test suite did, and the symptom was a pixel comparison
+/// against another test's data rather than an obvious failure. Hashing the
+/// content also means an identical screenshot pasted after a restart finds the
+/// copy it already made.
+///
+/// **The only validation is that the buffer is the size it claims to be**, and
+/// the absence of a content check is deliberate rather than an oversight. A
+/// paste arrives as *decoded RGBA pixels*, not as an encoded file, so there is
+/// no header to inspect and no magic bytes to find - [`looks_like_supported_image`]
+/// answers "is these bytes a file this app can decode", which is a different
+/// question from "are these bytes the picture the clipboard said they were". The
+/// first version of this function called it anyway and refused every paste,
+/// including a perfect one, which is the sharpest version of a check that
+/// compiles, reads correctly and is wrong.
+///
+/// So the size check is the whole contract. A buffer that does not match its
+/// dimensions is refused, because writing it would produce a file that fails at
+/// decode time with a message about a path the user never had.
+pub fn write_pasted_image(rgba: &[u8], width: u32, height: u32) -> Result<DropCopy, String> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() != w * h * 4 {
+        return Err(format!(
+            "clipboard image is {} bytes, which is not {}x{} RGBA",
+            rgba.len(),
+            w,
+            h
+        ));
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (width, height).hash(&mut h);
+    rgba.hash(&mut h);
+    let dir = std::env::temp_dir()
+        .join("image-viewer")
+        .join("paste")
+        .join(format!("{:016x}", h.finish()));
+    // Replaced rather than merged: the directory is this app's to own, and a
+    // stale file from an earlier paste of *different* bytes could not land here
+    // (the name is the hash), so this only clears a partial write.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make a paste directory: {e}"))?;
+    let file = dir.join("pasted.png");
+    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or_else(|| "clipboard image did not match its reported size".to_string())?;
+    img.save(&file)
+        .map_err(|e| format!("could not write the pasted image: {e}"))?;
+    Ok(DropCopy {
+        dir,
+        file,
+        reused: false,
+    })
+}
+
 /// Extract supported image entries from a zip/cbz archive into `dest`,
 /// flattening nested paths into the destination directory. Encrypted entries
 /// are skipped and counted. Returns (extracted, encrypted_skipped).
@@ -10948,5 +11151,4 @@ pub fn gps_altitude(exif: &nom_exif::Exif) -> Option<f64> {
         .unwrap_or(0);
     Some(if below == 1 { -alt } else { alt })
 }
-
 

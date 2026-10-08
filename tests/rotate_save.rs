@@ -1698,8 +1698,20 @@ fn screen_size_save_of_png_stays_lossless() {
 }
 
 /// Formats the lossless path refuses stay refused at screen size too.
+///
+/// **The refusal moved and its wording changed, and both are the point.** The
+/// format is now decided by the *destination*, which for a screen save is
+/// derived from the source name — so a `.gif` source still lands on a `.gif`
+/// destination and is still refused, but because there is no GIF encoder rather
+/// than because re-encoding would be lossy. The old message ("would have to be
+/// re-encoded, which is lossy") described a problem the user cannot fix by
+/// choosing a different save-as format; the new one names the formats that
+/// exist.
+///
+/// So the assertion is on the *refusal*, not on the old sentence: what must not
+/// happen is a GIF coming back re-encoded under a name that says GIF.
 #[test]
-fn screen_size_save_refuses_a_lossy_only_format() {
+fn screen_size_save_refuses_a_format_it_cannot_write() {
     use image_viewer::save_transformed_scaled;
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("a.gif");
@@ -1709,7 +1721,158 @@ fn screen_size_save_refuses_a_lossy_only_format() {
         .unwrap();
     std::fs::write(&p, &buf).unwrap();
     match save_transformed_scaled(&p, Xform::Identity, None, 100) {
-        Err(e) => assert!(e.to_string().contains("lossy")),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("gif") || msg.contains("lossy"),
+                "the refusal must name the problem, got: {msg}"
+            );
+        }
         Ok(d) => panic!("gif was re-encoded to {:?}", d.dest),
     }
+}
+
+/// Save-as writes exactly where it is told, in the format it is told, at the
+/// quality it is told - and the numbers are all *load-bearing*, which is why
+/// each is asserted rather than described.
+///
+/// The quality claim in particular cannot be "the slider moved": a JPEG encoder
+/// given a smaller number must produce a smaller file, and the only evidence
+/// that the number reached the encoder at all is the size ratio.
+/// `bench_rotate_save` uses the same ratio for the lossless claim, so the two
+/// assertions are the same kind of evidence.
+#[test]
+fn save_as_writes_the_named_path_at_the_named_quality() {
+    use image_viewer::{save_transformed_to, Xform};
+    let tmp = tempfile::tempdir().unwrap();
+    let src = write_jpeg(tmp.path(), "photo.jpg", &quadrants(256, 192), 0);
+
+    // A named destination, exactly that path - save-as does not invent a name.
+    let dest = tmp.path().join("out.jpg");
+    let out = save_transformed_to(&src, Xform::Rot90, None, &dest, 90, 0).unwrap();
+    assert_eq!(out.dest, dest, "the file is where it was told to go");
+    assert!(out.dest.is_file(), "and it exists");
+    assert_eq!(
+        (out.width, out.height),
+        (192, 256),
+        "turned, and unscaled (max_long = 0)"
+    );
+    assert!(!out.lossless, "a JPEG encode is a re-encode");
+    assert!(image_viewer::is_jpeg_bytes(&std::fs::read(&dest).unwrap()));
+
+    // Quality reaches the encoder: lower quality, smaller file. Both encode the
+    // *same* picture, so the only variable is the number.
+    let hi = tmp.path().join("hi.jpg");
+    let lo = tmp.path().join("lo.jpg");
+    save_transformed_to(&src, Xform::Identity, None, &hi, 100, 0).unwrap();
+    save_transformed_to(&src, Xform::Identity, None, &lo, 40, 0).unwrap();
+    let hi_len = std::fs::metadata(&hi).unwrap().len();
+    let lo_len = std::fs::metadata(&lo).unwrap().len();
+    assert!(
+        lo_len < hi_len,
+        "quality 40 ({} bytes) must be smaller than quality 100 ({} bytes); \
+         identical sizes mean the number never reached the encoder",
+        lo_len,
+        hi_len
+    );
+
+    // max_long is a bound on the long side and never upscales: a 256px source
+    // asked for 1000 stays 256. Upscaling would invent pixels nobody had.
+    let small =
+        save_transformed_to(&src, Xform::Identity, None, &tmp.path().join("s.jpg"), 85, 1000)
+            .unwrap();
+    assert_eq!((small.width, small.height), (256, 192), "no upscale");
+}
+
+/// The format follows the *destination*, not the source: a PNG source saved as
+/// `.jpg` must be a JPEG, or the file's extension lies about its contents.
+#[test]
+fn save_as_encodes_the_chosen_format_not_the_source_format() {
+    use image_viewer::{save_transformed_to, Xform};
+    let tmp = tempfile::tempdir().unwrap();
+    let mut buf = Vec::new();
+    quadrants(64, 48)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .unwrap();
+    let src = tmp.path().join("src.png");
+    std::fs::write(&src, &buf).unwrap();
+
+    let as_jpeg = tmp.path().join("out.jpg");
+    let out = save_transformed_to(&src, Xform::Identity, None, &as_jpeg, 85, 0).unwrap();
+    assert!(
+        image_viewer::is_jpeg_bytes(&std::fs::read(&as_jpeg).unwrap()),
+        "a .jpg destination is written as JPEG whatever the source was"
+    );
+    assert!(!out.lossless, "JPEG has a lossy step, so the result says so");
+
+    let as_png = tmp.path().join("out.png");
+    let out = save_transformed_to(&src, Xform::Identity, None, &as_png, 85, 0).unwrap();
+    assert!(
+        std::fs::read(&as_png)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"),
+        "a .png destination is written as PNG"
+    );
+    assert!(out.lossless, "PNG has no lossy step");
+}
+
+/// What the pixels look like is the same property the lossless save is tested
+/// for, and save-as must not lose it: the file it writes decodes to the
+/// transform that was applied.
+#[test]
+fn a_save_as_file_is_the_transform_that_was_on_screen() {
+    use image_viewer::{save_transformed_to, Xform};
+    let tmp = tempfile::tempdir().unwrap();
+    let src = write_jpeg(tmp.path(), "photo.jpg", &quadrants(128, 96), 0);
+
+    let dest = tmp.path().join("turned.jpg");
+    save_transformed_to(&src, Xform::Rot90, None, &dest, 92, 0).unwrap();
+
+    // Decode both through `image` - the encoder used the same pixels, modulo
+    // JPEG's lossy step, which flat colour survives at q92.
+    let got = image::open(&dest).unwrap().to_rgb8();
+    let want = quadrants(128, 96).rotate90().to_rgb8();
+    assert_eq!(
+        got.dimensions(),
+        want.dimensions(),
+        "turned dimensions: {}x{} vs {}x{}",
+        got.width(),
+        got.height(),
+        want.width(),
+        want.height()
+    );
+    // Compare quadrant centres: JPEG at q92 on flat colour is exact enough that
+    // a wrong turn would show as a mismatch of hundreds of levels.
+    for &(x, y) in &[(10, 10), (60, 10), (10, 40), (60, 40)] {
+        let a = got.get_pixel(x, y).0;
+        let b = want.get_pixel(x, y).0;
+        for (i, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+            assert!(
+                (*av as i32 - *bv as i32).abs() <= 12,
+                "channel {} at ({}, {}) is {} vs {} - the saved picture is not the \
+                 transformed one",
+                i,
+                x,
+                y,
+                av,
+                bv
+            );
+        }
+    }
+}
+
+/// An unwritable destination is an error, never a silent fallback to some
+/// other path. Saving somewhere the user did not choose is the one outcome
+/// worse than failing.
+#[test]
+fn save_as_refuses_a_destination_it_cannot_write() {
+    use image_viewer::{save_transformed_to, Xform};
+    let tmp = tempfile::tempdir().unwrap();
+    let src = write_jpeg(tmp.path(), "photo.jpg", &quadrants(32, 24), 0);
+    // A parent that does not exist.
+    let dest = tmp.path().join("no-such-dir").join("out.jpg");
+    assert!(
+        save_transformed_to(&src, Xform::Identity, None, &dest, 85, 0).is_err(),
+        "writing into a missing directory must fail rather than pick another path"
+    );
 }
