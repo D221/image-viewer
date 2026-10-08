@@ -1334,34 +1334,7 @@ enum Msg {
         src: PathBuf,
         result: Result<image_viewer::DropCopy, String>,
     },
-    /// A clipboard image, read and written out on a worker.
-    ///
-    /// **`seq` is the clipboard sequence number the read started at, and it is
-    /// what makes a stale answer recognisable** — the same job `src` does for a
-    /// drop. Two clipboard changes can be in flight at once (the watcher fires
-    /// again on the next frame while the first read is still running), and the
-    /// older one must not open over the top of the newer. Comparing sequence
-    /// numbers is the identity here because the thing being pasted has no path
-    /// and no stamp of its own: two pastes of *different* images share every
-    /// other observable property.
-    Pasted {
-        /// Which request this answers, and **not** which clipboard change.
-        ///
-        /// It was the clipboard sequence number, and that was wrong for the
-        /// explicit button: `GetClipboardSequenceNumber` returns 0 when the call
-        /// fails, so a button press during a failing call would claim the same
-        /// identity as every other failing call, and "is this answer still
-        /// wanted" would be answered by a number that means nothing.
-        ///
-        /// A local counter has no degenerate value: every paste gets its own and
-        /// only the newest is wanted. It is also the honest account of what
-        /// identity means here — two pastes of *the same picture* share a
-        /// content-addressed directory, so nothing about the clipboard could have
-        /// told them apart.
-        token: u64,
-        result: Result<image_viewer::DropCopy, String>,
-    },
-}
+    }
 
 /// Start the worker pool for this app: real decoding, real panic capture, and
 /// a repaint request when something arrives.
@@ -2043,26 +2016,6 @@ struct MyApp {
     /// reader was inside the archive is reflected, and the cursor lands on the
     /// archive by name rather than on whatever now occupies that slot.
     archive_parent: Option<(PathBuf, PathBuf)>,
-    /// Last clipboard sequence number this app has *acted on*, so the per-frame
-    /// poll is a comparison rather than a read of the bitmap.
-    ///
-    /// Advanced **before** the worker is spawned, not after it answers, so a
-    /// second clipboard change while the first read is in flight starts its own
-    /// read instead of being swallowed as "no change".
-    clipboard_seen: u32,
-    /// The newest clipboard change this app is still waiting on, 0 when it is
-    /// not waiting on one.
-    ///
-    /// This is the drop copy's `pending_drop`, for the same reason: an answer
-    /// that lands after a newer paste must not open. Kept separate from
-    /// [`Self::clipboard_seen`] because they answer different questions — one
-    /// is "have I seen this change", the other is "is this answer still wanted"
-    /// — and a dropped stale answer is a picture over the top of the newer one.
-    pending_paste: Option<u64>,
-    /// Next paste request's token. Monotonic and private, so `pending_paste`'s
-    /// comparison never has to reason about what a clipboard number means — and
-    /// in particular not about the 0 that a failed call returns.
-    paste_token: u64,
     /// The save-as panel: open or closed, and everything it is holding.
     ///
     /// **Not a `Config` field.** Every other dialog-ish value in this app is
@@ -2362,9 +2315,7 @@ impl MyApp {
             zip_archive,
             zip_temp,
             archive_parent: None,
-            clipboard_seen: 0,
-            pending_paste: None,
-            paste_token: 0,
+            
             save_as: SaveAsState {
                 open: false,
                 dest: String::new(),
@@ -3482,42 +3433,7 @@ impl MyApp {
                         }
                     }
                 }
-            Msg::Pasted { token, result } => {
-                // **A stale paste is discarded, by request token, and its
-                // directory released.** Two pastes can be in flight at once — the
-                // watcher fires again on the next frame while the first read is
-                // still running, or the reader presses `V` twice — and the older
-                // one must not open over the top of the newer.
-                //
-                // The token, not the path: a pasted image has no path of its own,
-                // and two pastes of the *same* picture resolve to the same
-                // content-addressed directory, so nothing about the file could
-                // have told them apart.
-                if self.pending_paste != Some(token) {
-                    // Whoever is no longer waiting owns it, and `%TEMP%` is what
-                    // has to be reclaimed — but **not if it is the picture the
-                    // app has already opened**. That is the same conditional the
-                    // drop arm has, and for the same reason: the user may have
-                    // pasted this same content twice, in which case the stale
-                    // answer's directory *is* the one on screen.
-                    if let Ok(c) = result {
-                        if Some(&c.file) != self.drop_copy.as_ref().map(|d| &d.file) {
-                            image_viewer::forget_drop_copy(&c);
-                        }
-                    }
-                    continue;
-                }
-                self.pending_paste = None;
-                match result {
-                    Ok(copy) => self.open_pasted(ctx, copy),
-                    // **A clipboard change with no image in it is not an error.**
-                    // Copying text moves the counter, and there is nothing to
-                    // open; saying so would put a red banner on screen for
-                    // something the reader did not ask for.
-                    Err(_) => {}
-                }
             }
-        }
         }
         if resched {
             self.schedule();
@@ -6883,150 +6799,6 @@ impl MyApp {
         }
     }
 
-    /// Watch the clipboard for an image, and open one when it appears.
-    ///
-    /// **There is no keystroke here, and that is the finding rather than a
-    /// simplification.** `egui-winit` intercepts `is_paste_command` — which is
-    /// `Key::Paste || (command && V) || (win && shift && Insert)` — and returns
-    /// *before* pushing the `Key` event, so Ctrl+V reaches this app as nothing
-    /// at all; not even Ctrl+Alt+V survives, because the test is on `command`
-    /// alone. And `Event::Paste` is pushed only `if !contents.is_empty()` on the
-    /// clipboard's **text**, which a screenshot does not have, so the event does
-    /// not fire either. Both facts were read in the crate's source, and the
-    /// combination is why "Ctrl+V does nothing" was a report rather than a bug
-    /// in a handler: there was no handler to be wrong.
-    ///
-    /// **So the clipboard itself is the trigger.** This runs once per frame and
-    /// reads one counter ([`clipboard_seq`], a shared-memory read). When it
-    /// moves and the change was not this app's own clipboard write, a worker
-    /// reads the bitmap and writes the file — the bitmap read is the expensive
-    /// part and it is on the worker for the same reason the drop copy is, since
-    /// a screenshot is megabytes and the paint thread must not block on it.
-    ///
-    /// **What this changes, plainly: you no longer press Ctrl+V.** Copying an
-    /// image — a screenshot in Paint, "copy image" in a browser — opens it. The
-    /// alternative was a key that is not Ctrl+V, which does not match what
-    /// people press.
-    ///
-    /// **Text copies do nothing.** Windows replaces the whole clipboard on every
-    /// copy, so a text copy leaves no bitmap and this finds no image. Copying a
-    /// *file* in Explorer likewise: no bitmap, nothing opens.
-    fn clipboard_poll(&mut self) {
-        let seq = clipboard_seq();
-        // 0 is the failure answer *and* the "nothing seen yet" value, so the
-        // first frames and a persistently failing call both land on `Ignore` —
-        // the feature simply does not fire, which is the right degradation.
-        //
-        // The whole rule is [`image_viewer::clipboard_action`]: failure, "nothing
-        // changed", and "this app wrote it". A scan could only prove the
-        // identifier appears in this body — and when the guard was a literal
-        // `if false && …` the scan stayed green, which is how presence is known
-        // not to be the property.
-        let seen = self.clipboard_seen;
-        if image_viewer::clipboard_action(
-            seq,
-            seen,
-            CLIPBOARD_WRITE_SEQ.load(std::sync::atomic::Ordering::Relaxed),
-        ) == image_viewer::ClipboardAction::Ignore
-        {
-            return;
-        }
-        // **Advanced after the decision, not before.** `clipboard_action` compares
-        // against `seen` to answer "has anything changed", and writing the new
-        // value first makes `seq == seen` true on every call - a feature that
-        // never fires, which is exactly the bug this replaced. Same
-        // read-then-write order as `pending_drop`, and pinned by position rather
-        // than by the presence of the assignment.
-        self.clipboard_seen = seq;
-        self.start_paste();
-    }
-
-    /// Read the clipboard's image on a worker and, when it lands, open it.
-    ///
-    /// **One spawn, two callers.** The watcher gets here when the counter says
-    /// someone else's change; `paste_now` gets here from the `V` key or the
-    /// toolbar button. Both do the same work, so both go through this — a second
-    /// copy of "read the bitmap, write the file, report it" is a second thing that
-    /// can forget the token, and forgetting the token is how a stale answer opens
-    /// over the top of a newer one.
-    ///
-    /// **The bitmap read is on a worker because it is megabytes.** A screenshot
-    /// is not a 256px thumbnail; doing this on the paint thread is the drop-copy
-    /// stall this codebase already measured and moved off (`bench_browse
-    /// drop_copy_ab`, 279 ms at 500 MB), and the reasoning is identical.
-    fn start_paste(&mut self) {
-        let token = self.paste_token;
-        self.paste_token = self.paste_token.wrapping_add(1);
-        self.pending_paste = Some(token);
-        let tx = self.drop_tx.clone();
-        let wake = self.drop_wake.clone();
-        std::thread::spawn(move || {
-            // **"Nothing to paste" is a normal outcome, not an error.** A
-            // clipboard can hold text or a file path and no bitmap, and the
-            // watcher fires on those changes too — they move the counter. So this
-            // arm is reached constantly by design, and a red banner each time
-            // would train the reader to ignore the banner that matters.
-            let result = match arboard::Clipboard::new().and_then(|mut cb| cb.get_image()) {
-                Ok(img) => image_viewer::write_pasted_image(
-                    &img.bytes,
-                    img.width as u32,
-                    img.height as u32,
-                ),
-                // `arboard`'s error is not a `String` and the channel carries the
-                // library's error type, so it is rendered rather than mapped into
-                // a second error hierarchy for one call site.
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = tx.send(Msg::Pasted { token, result });
-            wake.request_repaint();
-        });
-    }
-
-    /// Paste now, because the reader asked. The `V` key and the toolbar button.
-    ///
-    /// **This deliberately ignores the watcher two of its three rules**, and the
-    /// asymmetry is the point:
-    ///
-    /// - It does not consult [`image_viewer::clipboard_action`], so it is not
-    ///   suppressed when the last clipboard change was **this app's own** `Ctrl+C`.
-    ///   A watcher has to ignore that — it cannot tell "the user copied a
-    ///   screenshot" from "the user copied out of this window" — but a click is
-    ///   unambiguous, so honouring it is right rather than surprising.
-    /// - It does not compare against `clipboard_seen`, so it works even if
-    ///   `GetClipboardSequenceNumber` is failing, which is precisely when a
-    ///   watcher is blind and a button is most useful.
-    ///
-    /// It does **not** skip the worker: the bitmap is megabytes and the paint
-    /// thread must not block on it, which is the same reason a dropped file's
-    /// copy is not made here.
-    fn paste_now(&mut self) {
-        self.start_paste();
-    }
-
-    /// Open a pasted clipboard image, once its worker has written the file.
-    ///
-    /// **`false`, for the same reason the drop's own copy gets `false`: the path
-    /// is already inside a directory this app owns, so `transient = true` would
-    /// ask `open_file` to take a copy *of the copy*.** The paste worker wrote
-    /// straight into that directory; there is no hand-off left to protect.
-    ///
-    /// The lifetime is still ours to release: `close_transients` first, then
-    /// `self.drop_copy = Some(copy)` **after** `open_file`, because that call
-    /// releases the previous copy and the ordering is the whole reason the
-    /// tests/drops.rs scans compare byte offsets rather than presence.
-    fn open_pasted(&mut self, ctx: &Context, copy: image_viewer::DropCopy) {
-        self.close_transients();
-        let name = copy
-            .file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let file = copy.file.clone();
-        self.open_file(ctx, file, false);
-        self.drop_copy = Some(copy);
-        self.notice = Some(format!("Pasted {name} from the clipboard."));
-    }
-
     /// Draw the save-as panel. Returns whether it is still open, because the
     /// caller draws it as an overlay and must know whether to keep doing so.
     fn save_as_panel(&mut self, ui: &mut egui::Ui) -> bool {
@@ -7539,17 +7311,6 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
     }
 
     fn frame_prelude(&mut self, ctx: &Context) {
-        // The clipboard watcher, per frame. **This is where a paste is noticed,
-        // because egui cannot report one** - `egui-winit` consumes the Ctrl+V
-        // key before it reaches the app and pushes `Event::Paste` only for a
-        // clipboard that also holds *text*, which a screenshot is not. The whole
-        // argument is on [`Self::clipboard_poll`]; what matters here is only that
-        // the check is a counter read and not a bitmap read.
-        //
-        // Placed in the prelude so a paste that arrives with nothing else
-        // happening still lands this frame rather than waiting for the next
-        // event to drive one.
-        self.clipboard_poll();
         // The previous frame has been presented by the time the next one
         // starts, so this is where "first visible pixels" is honestly known.
         self.lat.commit_frame();
@@ -7831,54 +7592,8 @@ fn set_clipboard_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Result<(), Stri
         height: height as usize,
         bytes: std::borrow::Cow::Owned(rgba),
     })
-    .map_err(|e| e.to_string())?;
-    // **Mark our own write, or the watcher pastes it back at us.** `Ctrl+C` puts
-    // a bitmap on the clipboard, the sequence number moves, and a watcher that
-    // cannot tell whose change it is would immediately re-open the picture just
-    // copied. Recording the number here is what separates "someone copied a
-    // screenshot" from "we copied one".
-    CLIPBOARD_WRITE_SEQ.store(clipboard_seq(), std::sync::atomic::Ordering::Relaxed);
-    Ok(())
+    .map_err(|e| e.to_string())
 }
-
-/// Windows' clipboard change counter, or 0 if the call failed.
-///
-/// **This is the only signal available for an image paste**, and it is a signal
-/// about the clipboard rather than about the keyboard. `egui-winit` intercepts
-/// `is_paste_command` — `Key::Paste || (command && V) || (win && shift && Insert)`
-/// — and returns *before* pushing the `Key` event, so no modifier combination
-/// reaches the app; and it pushes `Event::Paste` only when the clipboard's
-/// **text** is non-empty, which a screenshot never is. Both halves were read in
-/// the crate source rather than inferred, and together they mean an image paste
-/// produces no egui event of any kind.
-///
-/// So: nothing inside egui reports Ctrl+V, and the clipboard has to be asked
-/// instead. That is why this exists and why the trigger is a poll — see
-/// [`MyApp::clipboard_poll`].
-///
-/// The call itself is a read of shared user32 state, not an `OleGetClipboard`,
-/// so it is cheap enough to make once per frame; the expensive part (reading
-/// the bitmap) is what goes to a worker.
-fn clipboard_seq() -> u32 {
-    // A failure returns 0, which the caller treats as "no change", so this
-    // degrades to the feature simply not firing rather than to a wrong answer.
-    unsafe { GetClipboardSequenceNumber() }
-}
-
-#[link(name = "user32")]
-extern "system" {
-    fn GetClipboardSequenceNumber() -> u32;
-}
-
-/// The sequence number as of the last clipboard write **this app** made.
-///
-/// A global rather than a field because the write happens inside
-/// [`set_clipboard_rgba`], which is a free function taking pixels by value, and
-/// threading `&mut MyApp` into it would put the app's state behind an
-/// `arboard` call for no reason. It is written from one place and read from one
-/// place, both of which are in this file.
-static CLIPBOARD_WRITE_SEQ: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
 
 /// What went on the clipboard, said in the terms the user acted in.
 ///
@@ -8219,16 +7934,6 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        // **The explicit paste, edge-triggered and read on its own.**
-        //
-        // Not in the `ctx.input` tuple above because that tuple's helper is
-        // `binding_down`, which uses `key_pressed` and therefore fires on **OS
-        // key-repeat**: holding `V` would spawn a bitmap read per repeat tick,
-        // each one megabytes, each one a directory under `%TEMP%`, with only the
-        // last surviving the token check. `action_pressed_fresh` matches
-        // `repeat: false` and is what anything spawning work uses — the same rule
-        // that stopped a held Ctrl+1 from opening hundreds of Paint windows.
-        let paste_now = action_pressed_fresh(ctx, &kb, "paste_now");
         let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
@@ -8445,8 +8150,6 @@ impl eframe::App for MyApp {
                 self.save_scaled_copy();
             } else if save_as {
                 self.open_save_as();
-            } else if paste_now {
-                self.paste_now();
             } else if crop_key {
                 self.toggle_crop_mode(ctx);
             } else if wall {
@@ -8659,29 +8362,6 @@ impl eframe::App for MyApp {
                         .clicked()
                     {
                         self.open_save_as();
-                    }
-                    // **The paste button, and it is not a consolation prize.**
-                    //
-                    // It is the *only* paste gesture that cannot be swallowed,
-                    // because a click never passes through `is_paste_command` —
-                    // and for the same reason it carries one thing the watcher
-                    // cannot: it acts even when the last clipboard change was
-                    // this app's own `Ctrl+C`, which `clipboard_action` has to
-                    // suppress. A watcher cannot tell those apart; a click is
-                    // unambiguous.
-                    //
-                    // **No `add_enabled` guard.** The button needs no current image
-                    // (the clipboard's is the subject), and whether the clipboard
-                    // holds a bitmap is not knowable without reading it — which is
-                    // megabytes, and doing that per *frame* to grey out a button
-                    // is the stall this app is built to avoid. Clicking with
-                    // nothing there says so.
-                    if ui
-                        .button(action_button_text(&self.config, "Paste", "paste_now"))
-                        .on_hover_text("Open the clipboard's image (Ctrl+V cannot reach an egui app)")
-                        .clicked()
-                    {
-                        self.paste_now();
                     }
                     if ui.button(action_button_text(&self.config, "Panels", "panels")).clicked() {
                         self.suppress_resize_redecode = true;

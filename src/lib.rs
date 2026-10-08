@@ -493,8 +493,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("save", "Ctrl+S", "Save transformed copy"),
     ("save_screen", "Ctrl+Shift+S", "Save screen-size copy"),
     ("save_as", "Ctrl+Shift+A", "Save as (choose file, quality, size)"),
-("paste_now", "V", "Paste clipboard image now"),
-    ("crop", "C", "Crop mode"),
+("crop", "C", "Crop mode"),
     ("copy", "Ctrl+C", "Copy image (alt chord)"),
     ("copy_path", "Ctrl+Shift+C", "Copy path (alt chord)"),
     ("print", "Ctrl+P", "Print"),
@@ -520,34 +519,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("fit_window", "T", "Fit window mode"),
 ];
 
-/// **There is no paste action, and there cannot be one. Copying an image opens
-/// it.** Read before "fixing" this.
-///
-/// Both halves were read in `egui-winit` 0.36's source rather than inferred, and
-/// together they mean an image paste reaches this app as nothing at all:
-///
-/// - `is_paste_command` is `Key::Paste || (modifiers.command && key == V) ||
-///   (windows && modifiers.shift && key == Insert)`. When it matches, the handler
-///   pushes an event and **returns before pushing the `Key`**. `command` is
-///   `ctrl` on Windows, so the test does not exclude `alt` — meaning even
-///   `Ctrl+Alt+V` is swallowed. There is no modifier combination that survives.
-/// - `Event::Paste` is pushed only `if !contents.is_empty()` on the clipboard's
-///   **text**. A screenshot has no text, so the event does not fire either.
-///
-/// `eframe` 0.36's `App` trait has no window-event hook, `ViewportBuilder` has no
-/// event handler, and `raw_input_hook` sees the events egui-winit already
-/// filtered. So there is nothing to bind and nothing to observe.
-///
-/// Hence the watcher: a per-frame read of `GetClipboardSequenceNumber`, with the
-/// bitmap read on a worker. [`clipboard_action`] is the rule.
-///
-/// A `KEY_ACTIONS` row for a paste would look exactly like the working ones and
-/// could never fire — the failure mode the capture UI already guards against for
-/// an unparseable chord, and one that would be invisible until someone pressed
-/// Ctrl+V in anger. So the absence is deliberate and is written down here.
-pub const PASTE_NOTE: &str =
-    "Copy an image and it opens - Ctrl+V cannot be seen by an egui app (egui-winit \
-     consumes the key and pushes Event::Paste only for a clipboard that also holds text)";
+
 
 /// Every key name the matcher understands: the spelling capture stores
 /// and settings shows. The binary must map each of these both ways
@@ -9062,128 +9034,6 @@ pub fn forget_drop_copy(copy: &DropCopy) {
     let _ = std::fs::remove_dir_all(&copy.dir);
 }
 
-/// What a per-frame clipboard check should do about the number it just read.
-///
-/// Pure, because the rule it encodes is one that has already produced a feature
-/// that could never fire and a feature that could fire on its own writes — and
-/// neither failure was visible at the call site. Both are one comparison each,
-/// and a comparison that cannot be tested in isolation is a comparison that gets
-/// inverted.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum ClipboardAction {
-    /// Nothing to do: either the counter failed, or nothing changed, or the
-    /// change was this app's own clipboard write.
-    Ignore,
-    /// The clipboard changed under someone else's hand. Read the image.
-    Paste,
-}
-
-/// Decide what a clipboard sequence-number reading means.
-///
-/// Three inputs and no I/O, which is what makes the interesting rows testable:
-///
-/// - `seq == 0` is [`GetClipboardSequenceNumber`]'s *failure* answer, and 0 is
-///   also the "nothing seen yet" value, so a call that keeps failing degrades to
-///   the feature never firing rather than to a wrong answer.
-/// - `seq == seen` is the overwhelmingly common case — one counter read per
-///   frame — and returning `Ignore` is what keeps the frame cheap.
-/// - **`write_seq` is this app's own last write**, and skipping it is not an
-///   optimisation: `Ctrl+C` puts a bitmap on the clipboard, so without this the
-///   watcher hands the picture straight back and reopens the file the reader is
-///   already looking at. That is the failure mode where the feature appears to
-///   work *too well*.
-///
-/// **The comparison is `<=`, and it relies on the counter being monotonic within
-/// a session.** It wraps at `u32`, which takes four billion clipboard changes;
-/// a session that long has other problems, and the alternative — storing every
-/// sequence number ever seen — is worse than the thing it protects against.
-pub fn clipboard_action(seq: u32, seen: u32, write_seq: u32) -> ClipboardAction {
-    if seq == 0 || seq == seen || (write_seq != 0 && seq <= write_seq) {
-        ClipboardAction::Ignore
-    } else {
-        ClipboardAction::Paste
-    }
-}
-
-/// Write pasted clipboard pixels to a file this app owns, and hand back the
-/// path to open.
-///
-/// **Pixels, not a path, and the distinction is the whole design.** A paste can
-/// arrive two ways: another program put image *bytes* on the clipboard (a
-/// screenshot, an image copied from a browser), or a file manager put a *file*
-/// on it. The first has no path anywhere and must be written to disk before it
-/// can be opened, because the app's whole pipeline reads from files - there is
-/// no "open from memory" entry point and inventing one would put a second decode
-/// path beside the one every other feature uses. The second is a path the user
-/// already owns and did not ask us to copy, so copying it would be a surprise
-/// and *not* copying it is what they wanted.
-///
-/// So this function only ever handles the first, and the caller is the one that
-/// has to tell the two apart.
-///
-/// **Under `%TEMP%`, for the same reason as the drop copy**: it is a working
-/// copy of something on the clipboard that is not a file at all, it is worthless
-/// once the clipboard changes, and `%TEMP%` is what the platform reclaims.
-///
-/// **Content-addressed, which is what makes "the same paste twice is one paste"
-/// true rather than aspirational.** The directory name is a hash of the pixels,
-/// so pasting the same picture twice lands on the same directory and the second
-/// paste replaces the first, while a *different* paste gets its own directory.
-/// A per-process name would give the same reuse property in production (the UI
-/// thread pastes serially) but is wrong the moment two pastes overlap - which
-/// is exactly what the test suite did, and the symptom was a pixel comparison
-/// against another test's data rather than an obvious failure. Hashing the
-/// content also means an identical screenshot pasted after a restart finds the
-/// copy it already made.
-///
-/// **The only validation is that the buffer is the size it claims to be**, and
-/// the absence of a content check is deliberate rather than an oversight. A
-/// paste arrives as *decoded RGBA pixels*, not as an encoded file, so there is
-/// no header to inspect and no magic bytes to find - [`looks_like_supported_image`]
-/// answers "is these bytes a file this app can decode", which is a different
-/// question from "are these bytes the picture the clipboard said they were". The
-/// first version of this function called it anyway and refused every paste,
-/// including a perfect one, which is the sharpest version of a check that
-/// compiles, reads correctly and is wrong.
-///
-/// So the size check is the whole contract. A buffer that does not match its
-/// dimensions is refused, because writing it would produce a file that fails at
-/// decode time with a message about a path the user never had.
-pub fn write_pasted_image(rgba: &[u8], width: u32, height: u32) -> Result<DropCopy, String> {
-    let (w, h) = (width as usize, height as usize);
-    if w == 0 || h == 0 || rgba.len() != w * h * 4 {
-        return Err(format!(
-            "clipboard image is {} bytes, which is not {}x{} RGBA",
-            rgba.len(),
-            w,
-            h
-        ));
-    }
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (width, height).hash(&mut h);
-    rgba.hash(&mut h);
-    let dir = std::env::temp_dir()
-        .join("image-viewer")
-        .join("paste")
-        .join(format!("{:016x}", h.finish()));
-    // Replaced rather than merged: the directory is this app's to own, and a
-    // stale file from an earlier paste of *different* bytes could not land here
-    // (the name is the hash), so this only clears a partial write.
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not make a paste directory: {e}"))?;
-    let file = dir.join("pasted.png");
-    let img = image::RgbaImage::from_raw(width, height, rgba.to_vec())
-        .ok_or_else(|| "clipboard image did not match its reported size".to_string())?;
-    img.save(&file)
-        .map_err(|e| format!("could not write the pasted image: {e}"))?;
-    Ok(DropCopy {
-        dir,
-        file,
-        reused: false,
-    })
-}
-
 /// Extract supported image entries from a zip/cbz archive into `dest`,
 /// flattening nested paths into the destination directory. Encrypted entries
 /// are skipped and counted. Returns (extracted, encrypted_skipped).
@@ -11232,4 +11082,3 @@ pub fn gps_altitude(exif: &nom_exif::Exif) -> Option<f64> {
         .unwrap_or(0);
     Some(if below == 1 { -alt } else { alt })
 }
-

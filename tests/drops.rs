@@ -290,10 +290,10 @@ fn a_drop_takes_a_copy_and_no_other_open_does() {
     // so opening it as transient would ask for a copy of the copy.
     let others = src.matches("self.open_file(ctx, ").count();
     assert_eq!(
-        others, 5,
-        "expected exactly five `open_file` call sites (the drop, the dialog, the \
-         copy a drop's worker reports, a failed copy's fallback to the source, \
-         and a paste); a new one has to answer `transient` deliberately"
+        others, 4,
+        "expected exactly four `open_file` call sites (the drop, the dialog, the \
+         copy a drop's worker reports, and a failed copy's fallback to the \
+         source); a new one has to answer `transient` deliberately"
     );
     for (site, why) in [
         ("self.open_file(ctx, file, false)", "the file dialog opens a file the user owns"),
@@ -542,24 +542,20 @@ fn a_drop_copy_is_released_on_exit_and_on_quit() {
     );
     // Counted, because the failure this guards is a *forgotten site*: a copy the
     // app never releases is a directory in `%TEMP%` for the rest of the machine's
-    // life, and nothing anywhere reports it. Eight today - open_archive,
-    // open_folder, pick_folder, open_file, leave_archive, paste_from_clipboard,
-    // on_exit and Esc-to-quit - and a ninth has to be added here rather than
-    // left to chance.
+    // life, and nothing anywhere reports it. Seven today - open_archive,
+    // open_folder, pick_folder, open_file, leave_archive, on_exit and Esc-to-quit
+    // - and an eighth has to be added here rather than left to chance.
     //
-    // Two of them came with a real obligation attached. `leave_archive`:
-    // backing out of an archive releases the temp dir `open_archive` created,
-    // so without the call the archive's extracted pages would sit in `%TEMP%`
-    // for every visit rather than for the session. `paste_from_clipboard`: the
-    // same shape as a drop, and for the same reason — a paste opens a file in a
-    // directory this app owns, so the *previous* one has to be released or a
-    // second paste leaks the first.
+    // `leave_archive` is the one that came with a real obligation attached:
+    // backing out of an archive releases the temp dir `open_archive` created, so
+    // without the call the archive's extracted pages would sit in `%TEMP%` for
+    // every visit rather than for the session.
     let total = src.matches("self.close_transients()").count();
     assert_eq!(
-        total, 8,
-        "expected 8 release sites (open_file, open_folder, open_archive, leave_archive, \
-         paste_from_clipboard, pick_folder, on_exit, Esc-to-quit); a new one means a new \
-         way to leak a copy, so name it here"
+        total, 7,
+        "expected 7 release sites (open_file, open_folder, open_archive, leave_archive, \
+         pick_folder, on_exit, Esc-to-quit); a new one means a new way to leak a copy, \
+         so name it here"
     );
     // ...and named, not just counted: the new site is only correct if it
     // releases the *archive's* half on the way out.
