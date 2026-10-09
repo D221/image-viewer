@@ -7162,6 +7162,14 @@ impl MyApp {
         }
     }
 
+    fn can_undo_current(&self) -> bool {
+        self.cur.as_ref().is_some_and(|p| self.history.can_undo(&p.path))
+    }
+
+    fn can_redo_current(&self) -> bool {
+        self.cur.as_ref().is_some_and(|p| self.history.can_redo(&p.path))
+    }
+
     /// Redo the view transform that the last [`Self::undo`] walked back.
     fn redo(&mut self, ctx: &Context) {
         let Some(p) = self.cur.clone() else { return };
@@ -8366,6 +8374,26 @@ impl eframe::App for MyApp {
                         .clicked()
                     {
                         self.reset_transform(ctx);
+                    }
+                    if ui
+                        .add_enabled(
+                            self.can_undo_current(),
+                            egui::Button::new("Undo").shortcut_text(""),
+                        )
+                        .on_hover_text("Undo the last turn, mirror or crop on this image")
+                        .clicked()
+                    {
+                        self.undo(ctx);
+                    }
+                    if ui
+                        .add_enabled(
+                            self.can_redo_current(),
+                            egui::Button::new("Redo").shortcut_text(""),
+                        )
+                        .on_hover_text("Redo the last undone transform")
+                        .clicked()
+                    {
+                        self.redo(ctx);
                     }
                     // Crop is a mode, not an action: the frame stays after the drag
                     // so it can be adjusted, and the mode says so. The hover text

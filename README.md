@@ -1,4 +1,10 @@
 # Image Viewer
+  image stays sharp, which briefly costs some CPU.
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
+# Image Viewer
+  image stays sharp, which briefly costs some CPU.
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
+# Image Viewer
 
 A fast desktop image viewer for Windows, written in Rust with
 [egui/eframe](https://github.com/emilk/egui). Built around one rule: **the UI
@@ -68,6 +74,8 @@ double-rotate).
   default: nothing is written to the file. **Save transformed…** (next to the
   buttons, or `Ctrl+S`) writes a new file beside the original with the transform
   baked in, losslessly (see below)
+
+**Undo (`Ctrl+Z`/`Ctrl+Shift+Z`)** covers the view transforms only - turn, mirror, reset-turn, crop and clear-crop. It is a per-image history (undo means "undo on this picture"), and it never writes to disk. Zoom, pan, settings changes and ratings are not undoable.
 - **Crop** (`C`) — drag on the image to frame a crop. The frame is drawn over the whole
   picture rather than the picture being cut on screen, so turning and mirroring
   still apply to the full frame, and the frame follows the image if you turn it
@@ -227,6 +235,7 @@ Probing for a working graphics backend...
 ```
 
 ### Saving as (`Ctrl+Shift+A`)
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
 
 `Ctrl+S` always picks the name and the size. `Ctrl+Shift+A` lets you choose
 them: a **file** path, a **format** (`.jpg`, `.png`, `.webp`, `.bmp`, `.tiff`),
@@ -346,6 +355,7 @@ should not quietly do that.
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
 | `Ctrl+Shift+C` | Copy the current file's path as text |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
 | `Ctrl+Shift+A` | Save as — a panel to pick the file, format, JPEG quality and a maximum long side. Opens pre-filled with exactly what `Ctrl+S` would write, so pressing Save without touching anything gives the same file |
 
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |

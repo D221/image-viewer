@@ -6170,3 +6170,19 @@ fn undo_and_redo_are_rebindable_chord_actions() {
         "redo must be a rebindable action too"
     );
 }
+
+/// The buttons sit with the transforms and grey out when there is nothing to
+/// undo. **Disabled state is the point**, not polish: an always-enabled undo that
+/// sometimes does nothing reads as broken, and one that is never enabled reads
+/// as absent.
+#[test]
+fn the_undo_buttons_sit_with_the_transforms_and_disable_when_empty() {
+    let src = include_str!("../src/main.rs");
+    let at = src.find(r#""Undo""#).expect("an Undo button");
+    let near = &src[at.saturating_sub(2500)..(at + 2500).min(src.len())];
+    assert!(
+        near.contains("can_undo") && near.contains("can_redo"),
+        "the undo/redo buttons must be gated on can_undo/can_redo so they disable \
+         when there is nothing to undo"
+    );
+}
