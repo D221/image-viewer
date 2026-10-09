@@ -6029,39 +6029,60 @@ fn history_is_per_path_and_a_new_edit_clears_redo() {
 /// would be worse than one that forgot the deepest step.
 #[test]
 fn the_history_is_capped_and_drops_the_oldest_step() {
-    use image_viewer::{Edit, EditHistory, Xform};
+    use image_viewer::{Crop, Edit, EditHistory};
     let p = std::path::Path::new("a.jpg");
     let mut h = EditHistory::default();
-    // 60 recorded states; the cap is 50.
-    for i in 0..60u8 {
-        h.record(p, Edit { xform: Xform::quarters_cw(i % 4), crop: None });
-    }
-    assert_eq!(h.len_for(p), 50, "the stack is bounded");
 
-    // Undoing 50 times lands on the oldest surviving entry, and one more is a
-    // no-op rather than a panic or another image's edit.
+    // 60 recorded states; the cap is 50. **Every state is distinct**, and that is
+    // the load-bearing part of this fixture: the crop width carries the index, so
+    // "which record is this?" is answerable without doing arithmetic on the cap.
     //
-    // The **order** of what comes back is the half that actually pins *which*
-    // end is dropped, and the length assertion above does not: dropping the
-    // newest instead of the oldest leaves the stack at 50 too, and the same 50
-    // undos still bottom out in `None`. Both halves are asserted because a test
-    // that cannot fail on the bug it is named for is decoration — this was
-    // verified by mutation (swap `remove(0)` for `pop()` and this test passed
-    // unchanged). `i = 59` is the newest record and `i = 10` the oldest survivor,
-    // so the first undo must hand back 59%4 and the fiftieth 10%4.
-    let mut undone = Vec::new();
-    for _ in 0..50 {
-        undone.push(h.undo(p, Edit::default()).expect("50 recorded steps"));
+    // The earlier version of this test cycled `Xform::quarters_cw(i % 4)` and
+    // identified records by that cycle's phase, which discriminated drop-oldest
+    // from drop-newest **only when `(60 - cap) % 4 != 0`**. At cap 50 that is
+    // true by luck (drop 10), and at cap 48 it is false (drop 12), so the whole
+    // assertion went blind at exactly the bug it was added to catch — a tuning
+    // change to the cap would have removed the check without any test failing.
+    // Distinct records make the window below a fact about the data rather than
+    // about the phase of a cycle.
+    //
+    // The crop also keeps each state non-identity, so a future "do not record a
+    // no-op edit" optimisation could not silently zero this fixture out.
+    for i in 0..60u8 {
+        h.record(p, Edit { xform: image_viewer::Xform::Identity, crop: Crop::new(0, 0, 1 + u32::from(i), 1) });
     }
+    let cap = h.len_for(p);
+    assert_eq!(cap, 50, "the stack is bounded");
+
+    // Undoing walks back one state per press, and one more is a no-op rather than
+    // a panic or another image's edit. The count comes from `len_for`, so the
+    // walk cannot silently disagree with the cap if that is ever retuned.
+    let mut undone = Vec::new();
+    for _ in 0..cap {
+        undone.push(h.undo(p, Edit::default()).expect("one step per recorded entry"));
+    }
+    let width = |e: &Edit| e.crop.map(|c| c.w);
+
+    // The **order** of what comes back is the half that pins *which* end is
+    // dropped, and the length assertion above does not: dropping the newest
+    // instead of the oldest leaves the stack at 50 too, and the same 50 undos
+    // still bottom out in `None`. Both halves are asserted because a test that
+    // cannot fail on the bug it is named for is decoration — verified by
+    // mutation: with `remove(0)` swapped for `pop()` the **un-strengthened
+    // version of this test** passed unchanged.
     assert_eq!(
-        undone.first().map(|e| e.xform),
-        Some(Xform::quarters_cw(59 % 4)),
+        undone.first().and_then(width),
+        Some(60),
         "undo walks back from the newest record, not the oldest"
     );
+    // Dropping the oldest 10 leaves records 10..=59, whose crop widths are
+    // 11..=60, so the last undo must hand back width 11. Derived from `cap`
+    // rather than hardcoded, so this expectation survives a retune instead of
+    // quietly agreeing with whatever the implementation happens to do.
     assert_eq!(
-        undone.last().map(|e| e.xform),
-        Some(Xform::quarters_cw(10 % 4)),
-        "the oldest surviving entry is the 50th undo, not the first"
+        undone.last().and_then(width),
+        Some(61 - cap as u32),
+        "the oldest surviving record is the last undo, not the first"
     );
     assert_eq!(h.undo(p, Edit::default()), None, "and it stops there");
 }
