@@ -1982,6 +1982,10 @@ struct MyApp {
     /// the next one, and returning to a turned photo must still find it turned.
     /// Lives in `lib.rs` so the rule can be tested — see [`image_viewer::ImageEdits`].
     edits: image_viewer::ImageEdits,
+    /// What each transform replaced, per file, so `Ctrl+Z` can walk it back.
+    /// Session-only, like `edits`: a step is not persisted, and a restart starts
+    /// with nothing to undo.
+    history: image_viewer::EditHistory,
     /// Crop mode: left-drag frames a crop instead of panning.
     ///
     /// A mode rather than a modifier, because a modifier would have to be held
@@ -2306,6 +2310,7 @@ impl MyApp {
             grid_sel: 0,
             grid_cols: 1,
             edits: image_viewer::ImageEdits::default(),
+            history: image_viewer::EditHistory::default(),
             crop_mode: false,
             grid_sel_scrolled: usize::MAX,
             lat: Latency::default(),
@@ -7109,8 +7114,20 @@ impl MyApp {
     ) {
         if let Some(p) = self.cur.clone() {
             // Per file, not per page: a turn is an edit to the document.
+            //
+            // **Recorded before the edit, not after** — `undo` hands back the
+            // state the image was in *before* this change, so recording
+            // afterwards would store the new state and make every undo a no-op
+            // that looks like it worked.
+            self.history.record(&p.path, self.edits.get(&p.path));
             f(&mut self.edits, &p.path);
         }
+        self.after_edit_change(ctx);
+    }
+
+    /// The tail every change to the picture's transform shares, so that undo,
+    /// redo and a turn cannot drift apart on whether the view re-fits.
+    fn after_edit_change(&mut self, ctx: &Context) {
         // An explicit turn/mirror keeps the current zoom contract: only the
         // legacy no-mode state refits, the way it always has. Fit-window and
         // fit-view already answer "how big", so a turn must not second-guess
@@ -7120,6 +7137,30 @@ impl MyApp {
         }
         self.view.offset = Vec2::ZERO;
         ctx.request_repaint();
+    }
+
+    /// Undo the last view transform on the current image.
+    ///
+    /// **Reads `cur`, not `shown`**, and applies the result to `cur`'s path:
+    /// the edit store is keyed by the file being edited, so restoring into a
+    /// different path would restore one image's edit onto another's picture.
+    fn undo(&mut self, ctx: &Context) {
+        let Some(p) = self.cur.clone() else { return };
+        let restored = self.history.undo(&p.path, self.edits.get(&p.path));
+        if let Some(e) = restored {
+            self.edits.set(&p.path, e);
+            self.after_edit_change(ctx);
+        }
+    }
+
+    /// Redo the view transform that the last [`Self::undo`] walked back.
+    fn redo(&mut self, ctx: &Context) {
+        let Some(p) = self.cur.clone() else { return };
+        let restored = self.history.redo(&p.path, self.edits.get(&p.path));
+        if let Some(e) = restored {
+            self.edits.set(&p.path, e);
+            self.after_edit_change(ctx);
+        }
     }
 
     /// The stored-space crop for a rectangle the user dragged on the **displayed**
@@ -7934,7 +7975,7 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, crop_key, pane_left, pane_right) = ctx.input(|i| {
+        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
                 binding_down(i, &kb, "explore"),
@@ -7944,6 +7985,8 @@ impl eframe::App for MyApp {
                 binding_down(i, &kb, "save"),
                 binding_down(i, &kb, "save_screen"),
                 binding_down(i, &kb, "save_as"),
+                binding_down(i, &kb, "undo"),
+                binding_down(i, &kb, "redo"),
                 // `Ctrl+C` never arrives as a key (toolkit interception, see
                 // the Copy comment above), so this bare press coexists with
                 // the chord below rather than competing with it.
@@ -8150,6 +8193,10 @@ impl eframe::App for MyApp {
                 self.save_scaled_copy();
             } else if save_as {
                 self.open_save_as();
+            } else if undo_key {
+                self.undo(ctx);
+            } else if redo_key {
+                self.redo(ctx);
             } else if crop_key {
                 self.toggle_crop_mode(ctx);
             } else if wall {

@@ -494,6 +494,8 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("save_screen", "Ctrl+Shift+S", "Save screen-size copy"),
     ("save_as", "Ctrl+Shift+A", "Save as (choose file, quality, size)"),
 ("crop", "C", "Crop mode"),
+    ("undo", "Ctrl+Z", "Undo view transform"),
+    ("redo", "Ctrl+Shift+Z", "Redo view transform"),
     ("copy", "Ctrl+C", "Copy image (alt chord)"),
     ("copy_path", "Ctrl+Shift+C", "Copy path (alt chord)"),
     ("print", "Ctrl+P", "Print"),

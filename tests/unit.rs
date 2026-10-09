@@ -6086,3 +6086,37 @@ fn the_history_is_capped_and_drops_the_oldest_step() {
     );
     assert_eq!(h.undo(p, Edit::default()), None, "and it stops there");
 }
+
+/// The four transform buttons share one tail, so `record` belongs there once.
+/// Asserted by **byte offset inside `apply_to_current`**, because presence is
+/// exactly what was true of the defect this guards: a call present, in the right
+/// function, after the edit.
+#[test]
+fn the_transform_tail_records_before_it_edits() {
+    let src = include_str!("../src/main.rs");
+    let body = fn_body(src, "fn apply_to_current(").expect("apply_to_current");
+    let at = body.find("history.record(").expect("record must be called");
+    let edit = body
+        .find("f(&mut self.edits, &p.path)")
+        .expect("the edit itself");
+    assert!(
+        at < edit,
+        "record must run BEFORE the edit is applied, or undo restores the state \
+         after the change and every undo is a no-op"
+    );
+}
+
+/// Both keys are rebindable actions, and both are chords rather than bare
+/// letters, so neither may appear in BARE_LETTERS.
+#[test]
+fn undo_and_redo_are_rebindable_chord_actions() {
+    let lib = include_str!("../src/lib.rs");
+    assert!(
+        lib.contains(r#"("undo", "Ctrl+Z", "Undo view transform"),"#),
+        "undo must be a KEY_ACTIONS row so it shows in Settings and can be rebound"
+    );
+    assert!(
+        lib.contains(r#"("redo", "Ctrl+Shift+Z", "Redo view transform"),"#),
+        "redo must be a rebindable action too"
+    );
+}
