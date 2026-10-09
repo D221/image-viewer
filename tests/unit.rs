@@ -5949,3 +5949,119 @@ fn save_as_and_paste_are_wired() {
     );
 
 }
+
+/// The undo stack is two per-path vectors and a rule about when each moves.
+/// Truth table first; the naming here matches the fields so a reader can check
+/// the implementation against this comment without opening it.
+#[test]
+fn undo_and_redo_walk_the_edit_history() {
+    use image_viewer::{Edit, EditHistory, Xform};
+
+    let p = std::path::Path::new("a.jpg");
+    let mut h = EditHistory::default();
+
+    // Review Focus #1: undo with nothing recorded is a no-op, not a panic.
+    assert_eq!(h.undo(p, Edit::default()), None, "nothing to undo");
+    assert!(!h.can_undo(p));
+    assert!(!h.can_redo(p));
+
+    // Record three states: identity, then turned, then turned twice.
+    //
+    // `record` is called **before** each change, so three records mean three
+    // changes and the image is now in a *fourth* state. That is why the walk
+    // below starts from `d` and not from the last recorded state `c`: treating
+    // `c` as the current state is the off-by-one that makes this test read as
+    // though undo handed back the state one *below* the top of the stack, which
+    // is a different data structure and a wrong one.
+    let a = Edit { xform: Xform::Identity, crop: None };
+    let b = Edit { xform: Xform::Rot90, crop: None };
+    let c = Edit { xform: Xform::Rot180, crop: None };
+    let d = Edit { xform: Xform::Rot270, crop: None };
+    h.record(p, a);
+    h.record(p, b);
+    h.record(p, c);
+    assert_eq!(h.len_for(p), 3);
+    assert!(h.can_undo(p));
+
+    // Undo returns the *previous* state and moves the current one to redo.
+    assert_eq!(h.undo(p, d), Some(c), "undo hands back the earlier edit");
+    assert_eq!(h.undo(p, c), Some(b), "and again");
+    assert_eq!(h.undo(p, b), Some(a), "down to the original state");
+    assert_eq!(h.undo(p, a), None, "past the start is a no-op");
+    assert!(h.can_redo(p));
+
+    // Redo walks back the other way, one state per press.
+    assert_eq!(h.redo(p, a), Some(b));
+    assert_eq!(h.redo(p, b), Some(c));
+    assert_eq!(h.redo(p, c), Some(d));
+    assert_eq!(h.redo(p, d), None, "and stops");
+}
+
+/// Two properties that are both one line of implementation and both invisible
+/// when broken: history is **per path**, and a new edit **clears redo**.
+#[test]
+fn history_is_per_path_and_a_new_edit_clears_redo() {
+    use image_viewer::{Edit, EditHistory, Xform};
+
+    let a = std::path::Path::new("a.jpg");
+    let b = std::path::Path::new("b.jpg");
+    let mut h = EditHistory::default();
+    let base = Edit { xform: Xform::Identity, crop: None };
+    let turned = Edit { xform: Xform::Rot90, crop: None };
+
+    // Review Focus #2: two images keep two independent histories. A shared
+    // stack would answer B's undo with A's edit.
+    h.record(a, base);
+    h.record(b, base);
+    assert_eq!(h.undo(a, turned), Some(base), "a has one step");
+    assert_eq!(h.undo(b, turned), Some(base), "b has one step, unaffected");
+    assert!(!h.can_undo(a), "a is exhausted");
+
+    // Review Focus #4: a new edit rewrites the future.
+    let mirrored = Edit { xform: Xform::FlipH, crop: None };
+    h.record(a, base);
+    assert!(!h.can_redo(a), "recording again clears redo for that path");
+    assert_eq!(h.redo(a, mirrored), None, "and the old future is unreachable");
+}
+
+/// The cap drops the **oldest** step, so the newest edit is never the one
+/// refused: a viewer that silently ignored a rotate because its history was full
+/// would be worse than one that forgot the deepest step.
+#[test]
+fn the_history_is_capped_and_drops_the_oldest_step() {
+    use image_viewer::{Edit, EditHistory, Xform};
+    let p = std::path::Path::new("a.jpg");
+    let mut h = EditHistory::default();
+    // 60 recorded states; the cap is 50.
+    for i in 0..60u8 {
+        h.record(p, Edit { xform: Xform::quarters_cw(i % 4), crop: None });
+    }
+    assert_eq!(h.len_for(p), 50, "the stack is bounded");
+
+    // Undoing 50 times lands on the oldest surviving entry, and one more is a
+    // no-op rather than a panic or another image's edit.
+    //
+    // The **order** of what comes back is the half that actually pins *which*
+    // end is dropped, and the length assertion above does not: dropping the
+    // newest instead of the oldest leaves the stack at 50 too, and the same 50
+    // undos still bottom out in `None`. Both halves are asserted because a test
+    // that cannot fail on the bug it is named for is decoration — this was
+    // verified by mutation (swap `remove(0)` for `pop()` and this test passed
+    // unchanged). `i = 59` is the newest record and `i = 10` the oldest survivor,
+    // so the first undo must hand back 59%4 and the fiftieth 10%4.
+    let mut undone = Vec::new();
+    for _ in 0..50 {
+        undone.push(h.undo(p, Edit::default()).expect("50 recorded steps"));
+    }
+    assert_eq!(
+        undone.first().map(|e| e.xform),
+        Some(Xform::quarters_cw(59 % 4)),
+        "undo walks back from the newest record, not the oldest"
+    );
+    assert_eq!(
+        undone.last().map(|e| e.xform),
+        Some(Xform::quarters_cw(10 % 4)),
+        "the oldest surviving entry is the 50th undo, not the first"
+    );
+    assert_eq!(h.undo(p, Edit::default()), None, "and it stops there");
+}
