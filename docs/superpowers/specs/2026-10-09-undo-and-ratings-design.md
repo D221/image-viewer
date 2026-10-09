@@ -138,15 +138,59 @@ file that reads as *valid but wrong* is worse than one that fails.
 
 ### Where it shows
 
+- **Left pane, top of it.** The left pane is the EXIF pane (`L` toggles it alone,
+  `I` the master), and the rating block sits **above the file's own metadata**,
+  under its own heading. It is not "a row among the EXIF": a rating is *your*
+  metadata, not the camera's, and interleaving it with shutter speed and ISO
+  would imply the camera recorded it.
+
+  Putting it here rather than in the settings pane or a floating window is the
+  default and it is deliberate — the left pane is the one panel that is already
+  open while you look at a picture, and it is where you are already reading
+  metadata. A rating that lives behind a settings toggle is a rating nobody sets.
+
+  **The pane draws it whenever the pane is drawn — but its read is deliberately
+  NOT part of `wants_exif`.** The pane pushes its own EXIF read through that
+  gate, so hiding the pane with `L` or `I` stops the expensive whole-file read.
+  A rating is one small sidecar and is not that read, so joining the gate would be
+  wrong twice: it would tie a 300-byte file to a 7–12 ms whole-image read, and it
+  would mean the rating you just set vanishes from the UI for as long as the pane
+  is hidden, which reads as the rating not having been saved.
+
+  So the two are deliberately decoupled: **visibility** follows the pane (there
+  is nowhere to draw it otherwise), **the read** does not follow the pane's EXIF
+  gate. The sidecar is small enough to read whenever the pane asks for it.
+
+  It also must not appear on an **archive** member: there is nowhere to write
+  `vol1.cbz/page003.jpg.xmp`, and a rating that silently goes nowhere when the
+  picture is inside an archive is worse than one that is refused visibly.
+
 - **Grid cell** — the label strip under the thumbnail gets the stars; a flagged
   image gets a marker. Visible without opening anything, which is the point of
-  rating while culling.
-- **EXIF panel** — a row above the file's own metadata. A rating is *your*
-  metadata, not the camera's, so it does not belong interleaved with shutter speed
-  and ISO.
+  rating while culling. (The label strip already exists — `GRID_LABEL_H` — so this
+  is filling space that is there.)
 - **Filter box** — `stars:4`, `flagged`, `tag:holiday`. This is what makes ratings
   worth having at all: rating 2000 photos is pointless if you cannot then navigate
   by the ratings.
+
+### Read cost
+
+Reading a rating is one small file next to the image, **not** an EXIF read. This
+is why the left pane's rating block is specified as separate from `wants_exif`
+above, and it is also why a rated folder costs nothing to browse: rating files are
+a few hundred bytes each, against the 7–12 ms whole-file read `color_info` needs.
+
+That asymmetry is the reason ratings can live in the panel at all. If a rating
+required the same read EXIF does, the "only read metadata while the panel is on"
+rule — worth 4.4 ms on a 7 MB file and 7–12 ms on a real photo — would have to
+extend to it, and the block would go blank every time the pane was hidden.
+
+### Archive members
+
+**No ratings inside archives.** A sidecar has nowhere to go for
+`vol1.cbz/page003.jpg`, and a rating that vanishes when you leave the archive is
+worse than one refused with a message. Same family of refusal as `Del` and
+move/copy on archives, which are already refused rather than silently redirected.
 
 ### Keys
 
