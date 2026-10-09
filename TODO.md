@@ -142,7 +142,49 @@ it; a 24-bit CMYK scan is the common print case and it is already covered.
 
 ---
 
-## 4. Smaller queued items
+## 4. Feature gaps, surveyed
+
+Surveyed 2026-10-09 against the shipped feature set. **Zoom-to-cursor was on this
+list and is not**: it was assumed absent and is in fact implemented and careful
+(`main.rs` keeps the point under the cursor fixed, asking `spread_centre` at two
+different scales so a turn's anchor holds as the layout moves). Do not "add" it.
+
+Shipped from this survey, or in progress: **undo** (`Ctrl+Z`/`Ctrl+Shift+Z`, view
+transforms only) and **ratings/tags** (XMP sidecars, 0-5 stars + flag + keywords,
+with `stars:`/`flagged`/`tag:` in the filter box). Both specced in
+`docs/superpowers/specs/2026-10-09-undo-and-ratings-design.md`.
+
+- **Histogram / exposure readout.** Nothing from the pixels themselves — the EXIF
+  panel shows what the camera recorded, never what the file actually contains.
+  Worth it on its own terms (clipping and black-point at a glance), and it is
+  also **the cheapest instrument available for §1**: wide-gamut correctness has no
+  ground truth, and a per-channel histogram plus black/white clipping counts is
+  something that can be *compared* rather than squinted at. It would also inform
+  §7's `Smooth` decision, which is currently made by looking at pages.
+
+- **Metadata editing.** Caption, artist, description: all absent, and there is no
+  write path at all — `nom-exif` is read-only in this tree. Blocked on the same
+  question as the ratings' storage decision (§ ratings above), and if the XMP
+  sidecar lands first then most of this is the same parser with more attributes.
+  **Do it after, not before.**
+
+- **Grid cell size.** `GRID_CELL` is a hardcoded `const f32 = 150.0` with no
+  setting. Trivial — it is a constant and the layout already derives from it
+  (`GRID_ROW_H`, `grid_cols`) — and the payoff is real on a high-DPI display
+  where 150 pt cells are either wasteful or too small to judge a photo.
+
+- **Slideshow shuffle.** One line: pick a random permutation when the show starts
+  instead of walking in sort order. Everything else about the show exists
+  (`slideshow_secs`, `slideshow_due`, loop).
+
+- **Comparison / light-table.** Declined by the user; recorded here only so it is
+  not re-proposed from scratch. The reason is the app's own rule: N images
+  resident at once is the one shape that fights "the UI thread only paints
+  textures that are already in memory", and it needs N full-resolution buffers.
+
+---
+
+## 4a. Smaller queued items
 
 - **The file-change watcher is unverified** (`check_changed`, `invalidate_path` —
   both in `main.rs`, so no test can reach them). Worth one manual pass: change a
