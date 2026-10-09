@@ -4384,6 +4384,56 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
     Some(&src[start..end])
 }
 
+/// Crop is the one site where "record before the change" is not adjacent to the
+/// change: `set_crop` runs **per drag frame**, so recording at the mutation would
+/// push ~200 entries for one gesture and make undo useless after a single drag.
+///
+/// So the record goes on **press**, and this asserts that it is on the press path
+/// rather than merely present somewhere in the function — the same lesson as
+/// `the_turns_second_half_is_derived_not_latched`.
+#[test]
+fn a_crop_gesture_records_once_on_press() {
+    let src = include_str!("../src/main.rs");
+    let body = fn_body(src, "fn crop_from_screen(").expect("crop_from_screen");
+    // `record` must NOT be inside crop_from_screen (it is pure geometry).
+    assert!(
+        !body.contains("history.record("),
+        "crop_from_screen is pure geometry; recording inside it would record \
+         once per drag frame"
+    );
+    // It must be on the press handler, which runs once per gesture. The arm is
+    // entered every frame the button is held, so the record must also sit after
+    // the `primary_pressed()` test that makes it a press.
+    let press = fn_body(src, "fn central(").expect("central");
+    let pressed = press
+        .find("primary_pressed()")
+        .expect("the crop press must test for the press frame");
+    let record = press
+        .find("self.history.record(")
+        .expect("the crop press must record");
+    let set_crop = press
+        .find("self.edits.set_crop(")
+        .expect("the crop drag must set");
+    assert!(
+        pressed < record && record < set_crop,
+        "the record must be on the press path, after the press test and before \
+         the drag sets the crop"
+    );
+    // Every clear must record immediately before it, so a third `clear_crop`
+    // site cannot appear unrecorded. The count is not compared with the number
+    // of records: `apply_to_current` records too, and it is not a clear.
+    let clear = "self.edits.clear_crop(";
+    let sites: Vec<usize> = src.match_indices(clear).map(|(i, _)| i).collect();
+    assert!(!sites.is_empty(), "expected clear_crop sites in main.rs");
+    for at in sites {
+        let before = &src[at.saturating_sub(120)..at];
+        assert!(
+            before.contains("self.history.record("),
+            "every clear_crop must record just before it; unrecorded site at byte {at}"
+        );
+    }
+}
+
 /// Both ends of an archive must step **out** of it, not round its own listing.
 ///
 /// This is the bug a reader hits as "only the first zip opens": `→` at an

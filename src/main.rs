@@ -6546,9 +6546,10 @@ impl MyApp {
         // applies the drag threshold.
         let pvx = self.previews.get(&shown);
         if self.crop_mode {
-            let (down, origin, ptr) = ui.input(|i| {
+            let (down, pressed, origin, ptr) = ui.input(|i| {
                 (
                     i.pointer.button_down(egui::PointerButton::Primary),
+                    i.pointer.primary_pressed(),
                     i.pointer.press_origin(),
                     resp.interact_pointer_pos(),
                 )
@@ -6556,6 +6557,14 @@ impl MyApp {
             if let (true, Some(start), Some(p), Some(pv), Some(cur)) =
                 (down, origin, ptr, pvx, self.cur.clone())
             {
+                // **Once per gesture, on the press** — not at the `set_crop` below,
+                // which runs every frame the pointer moves. Recording per frame
+                // would push hundreds of entries for one drag, and undo would then
+                // need hundreds of presses to cross it. This arm is entered on every
+                // frame the button is held, so the press frame is tested explicitly.
+                if pressed {
+                    self.history.record(&cur.path, self.edits.get(&cur.path));
+                }
                 // Shift is a temporary 1:1 whatever the setting says, because it
                 // is the one shape that is always wanted and never worth a trip to
                 // the settings panel. Read per frame rather than latched on press:
@@ -7278,6 +7287,7 @@ impl MyApp {
         self.crop_mode = !self.crop_mode;
         if !self.crop_mode {
             if let Some(p) = self.cur.clone() {
+                self.history.record(&p.path, self.edits.get(&p.path));
                 self.edits.clear_crop(&p.path);
             }
         }
@@ -8380,6 +8390,7 @@ impl eframe::App for MyApp {
                         .clicked()
                     {
                         if let Some(p) = self.cur.clone() {
+                            self.history.record(&p.path, self.edits.get(&p.path));
                             self.edits.clear_crop(&p.path);
                         }
                         ctx.request_repaint();
