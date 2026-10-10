@@ -10279,6 +10279,61 @@ pub struct Gallery {
     shapes: std::collections::HashMap<ImgKey, (u32, u32)>,
 }
 
+/// A filter needle interpreted as a rating query rather than a name substring.
+///
+/// Checked before the substring fallback, in this order: `stars:N`, `stars:N+`,
+/// `flagged` / `unflagged`, `tag:NAME` (case-insensitive substring of the tag
+/// list). Both `stars:` forms mean *at least* N — the pinned test has `stars:4`
+/// matching a 5-star file, so `stars:N` is not an equality check and the `+`
+/// is accepted but redundant. The needle handed here is already trimmed and
+/// lowercased, so `tag:` matching lowercases only the stored tags.
+enum RatingTerm {
+    StarsAtLeast(u8),
+    Flagged,
+    Unflagged,
+    Tag(String),
+}
+
+/// Parse an already-trimmed-and-lowercased needle as a rating query.
+///
+/// `flagged` / `unflagged` match only the whole needle: `flagged pics` stays a
+/// name substring, since a word that merely leads a longer needle is not the
+/// query. `stars:` and `tag:` match on prefix; an empty `tag:` (`tag:` alone)
+/// is not a query and falls back to substring, while an unparseable `stars:`
+/// value is a query that matches nothing.
+fn parse_rating_term(needle: &str) -> Option<RatingTerm> {
+    if let Some(rest) = needle.strip_prefix("stars:") {
+        if let Some(min) = rest.strip_suffix('+') {
+            return min.parse::<u8>().ok().map(RatingTerm::StarsAtLeast);
+        }
+        return rest.parse::<u8>().ok().map(RatingTerm::StarsAtLeast);
+    }
+    if needle == "flagged" {
+        return Some(RatingTerm::Flagged);
+    }
+    if needle == "unflagged" {
+        return Some(RatingTerm::Unflagged);
+    }
+    if let Some(name) = needle.strip_prefix("tag:") {
+        if !name.is_empty() {
+            return Some(RatingTerm::Tag(name.to_string()));
+        }
+    }
+    None
+}
+
+fn rating_term_matches(term: &RatingTerm, ratings: &Ratings) -> bool {
+    match term {
+        RatingTerm::StarsAtLeast(n) => ratings.rating.stars >= *n,
+        RatingTerm::Flagged => ratings.rating.flag,
+        RatingTerm::Unflagged => !ratings.rating.flag,
+        RatingTerm::Tag(name) => ratings
+            .tags
+            .iter()
+            .any(|t| t.to_lowercase().contains(name)),
+    }
+}
+
 impl Gallery {
     pub fn new(folder: &Path) -> Self {
         Self {
@@ -10746,6 +10801,20 @@ impl Gallery {
     /// whitespace-only needle means "no filter". The folder is scanned flat, so
     /// there is no directory component to match beyond the name.
     ///
+    /// Before the substring fallback, a needle that parses as a rating query is
+    /// decided from the sidecar instead of the name: `stars:N` and `stars:N+`
+    /// (both: at least N), `flagged`, `unflagged`, or `tag:NAME`
+    /// (case-insensitive substring of the tag list). A file with no sidecar
+    /// reads as `stars:0` and not-flagged, so `stars:1+` excludes it rather
+    /// than erroring; a damaged sidecar is likewise treated as unrated, so a
+    /// broken sidecar can never hide its image. An unparseable `stars:` value
+    /// (`stars:x`, `stars:`) matches nothing — it is a rating query, not a name.
+    ///
+    /// Sidecars are read once per candidate per call. This runs once per filter
+    /// change (never per frame), and only rating needles touch the disk at all,
+    /// so there is no cross-call cache to go stale when a rating is edited
+    /// while a filter is active.
+    ///
     /// The current image is kept if it survived, otherwise the index falls back
     /// to the nearest surviving position (clamped, never out of range). Returns
     /// true if the current image changed, which is the caller's cue to re-goto.
@@ -10754,6 +10823,11 @@ impl Gallery {
         let needle = needle.trim().to_lowercase();
         self.files = if needle.is_empty() {
             all.to_vec()
+        } else if let Some(term) = parse_rating_term(&needle) {
+            all.iter()
+                .filter(|p| rating_term_matches(&term, &Ratings::read(p).unwrap_or_default()))
+                .cloned()
+                .collect()
         } else {
             all.iter()
                 .filter(|p| file_name_of(p).to_lowercase().contains(&needle))

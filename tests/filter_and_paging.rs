@@ -5,7 +5,7 @@
 //! real `Gallery::set_filtered` rather than a reimplementation.
 
 use image_viewer::{file_name_of, Gallery};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn p(s: &str) -> PathBuf {
     PathBuf::from("/photos").join(s)
@@ -279,4 +279,63 @@ fn test_grid_paging_handles_a_partial_last_page_and_a_tiny_folder() {
             assert!(grid_move(0, last, cols, rows, k) <= last);
         }
     }
+}
+
+/// The image files in `dir` (sidecars excluded) whose names match `needle`,
+/// through the real `Gallery::set_filtered` rather than a reimplementation.
+fn names_matching(dir: &Path, needle: &str) -> Vec<String> {
+    let mut all: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().map(|e| e != "xmp").unwrap_or(true))
+        .collect();
+    all.sort();
+    let mut g = Gallery::empty();
+    g.set_filtered(&all, needle);
+    g.files.iter().map(|f| file_name_of(f)).collect()
+}
+
+/// The point of rating at all: being able to navigate by it. A rating you cannot
+/// filter on is a number you have to remember.
+#[test]
+fn the_filter_can_narrow_by_rating_flag_and_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, stars, flag, tags) in [
+        ("a.jpg", 5u8, true, vec!["holiday"]),
+        ("b.jpg", 3, false, vec![]),
+        ("c.jpg", 0, false, vec!["holiday", "family"]),
+    ] {
+        let p = dir.path().join(name);
+        std::fs::write(&p, b"\xff\xd8\xff\xe0jpeg").unwrap();
+        let r = image_viewer::ratings::Ratings {
+            rating: image_viewer::ratings::Rating { stars, flag },
+            tags: tags.into_iter().map(String::from).collect(),
+        };
+        r.write(&p).unwrap();
+    }
+
+    let all: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|n| !n.ends_with(".xmp"))
+        .collect();
+    assert_eq!(all.len(), 3);
+
+    assert_eq!(names_matching(dir.path(), "stars:4"), vec!["a.jpg"]);
+    assert_eq!(
+        names_matching(dir.path(), "stars:3+"),
+        vec!["a.jpg", "b.jpg"]
+    );
+    assert_eq!(names_matching(dir.path(), "flagged"), vec!["a.jpg"]);
+    assert_eq!(names_matching(dir.path(), "tag:family"), vec!["c.jpg"]);
+    assert_eq!(
+        names_matching(dir.path(), "tag:HOLIDAY").len(),
+        2,
+        "case-insensitive"
+    );
 }
