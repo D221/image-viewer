@@ -9,7 +9,25 @@ pub mod icon;
 
 /// Star ratings, pick flags and tags, stored as XMP sidecars.
 pub mod ratings;
-pub use ratings::{Rating, Ratings, sidecar_path};
+pub use ratings::{Rating, Ratings};
+
+/// The sidecar path for an image, or `None` inside an archive.
+///
+/// Appends `.xmp` (`photo.png` becomes `photo.png.xmp`) so files sharing a
+/// stem do not share a sidecar.
+///
+/// Lives here rather than in `ratings` so the archive refusal — the rule the
+/// whole ratings UI depends on — sits beside `is_archive_path` and is pinned
+/// by a scan against this file. Re-exported through `ratings` so the
+/// `image_viewer::ratings::sidecar_path` path keeps working.
+pub fn sidecar_path(image: &Path) -> Option<PathBuf> {
+    if is_archive_path(image) {
+        return None;
+    }
+    let mut s = image.as_os_str().to_os_string();
+    s.push(".xmp");
+    Some(PathBuf::from(s))
+}
 
 use nom_exif::{ExifTag, URational};
 use serde::{Deserialize, Serialize};

@@ -16,6 +16,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub use crate::sidecar_path;
+
 /// Our own keywords namespace. Namespaced under our own URI so it cannot
 /// collide with another tool's element.
 const IVIEWER_NS: &str = "https://image-viewer.local/ns/1.0/";
@@ -49,19 +51,6 @@ impl Rating {
 pub struct Ratings {
     pub rating: Rating,
     pub tags: Vec<String>,
-}
-
-/// The sidecar path for an image, or `None` inside an archive.
-///
-/// Appends `.xmp` (`photo.png` becomes `photo.png.xmp`) so files sharing a
-/// stem do not share a sidecar.
-pub fn sidecar_path(image: &Path) -> Option<PathBuf> {
-    if crate::is_archive_path(image) {
-        return None;
-    }
-    let mut s = image.as_os_str().to_os_string();
-    s.push(".xmp");
-    Some(PathBuf::from(s))
 }
 
 /// The end of a markup span starting at `lt`: `-->` for comments, `?>` for

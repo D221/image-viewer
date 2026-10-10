@@ -6186,3 +6186,46 @@ fn the_undo_buttons_sit_with_the_transforms_and_disable_when_empty() {
          when there is nothing to undo"
     );
 }
+
+/// The rating block lives in the **left pane, above the file's own metadata**,
+/// and — this is the part that is easy to get wrong — its read must NOT be part
+/// of `wants_exif`. That gate exists to stop a 7-12 ms whole-file read; a rating
+/// is a 300-byte sidecar, and joining them would mean the rating vanishes from
+/// the UI whenever the pane is hidden.
+#[test]
+fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
+    let src = include_str!("../src/main.rs");
+    let exif_at = src.find("wants_exif(").expect("the EXIF gate exists");
+    let rating_at = src.find("Ratings::read(").expect("the rating is read somewhere");
+    assert!(
+        rating_at > exif_at,
+        "the rating read must come after the EXIF gate's own read, so it is a \
+         separate path rather than folded into it"
+    );
+    // The left pane lives in `fn ui(`, not `fn central(`: central paints only
+    // the middle panel (it ends well before the pane code), while the EXIF pane
+    // is built in `ui`. The property is "above the EXIF heading in the pane",
+    // so this scans the pane — anchored on its `pane.show` closure rather than
+    // on `fn ui(`, because the naive brace counter in `fn_body` closes `ui`
+    // early on a comment quoting code with unbalanced braces. The left pane is
+    // the first `pane.show` in the file, so `find` lands on it.
+    let pane = fn_body(src, "pane.show(ui, |ui|").expect("the left pane");
+    let block = pane.find("rating_widget").or_else(|| pane.find("Rating"))
+        .expect("a rating block in the pane");
+    let heading = pane.find(r#"ui.heading("EXIF")"#).expect("the EXIF heading");
+    assert!(block < heading, "the rating block is above the camera's own metadata");
+}
+
+/// Archives get no ratings: there is nowhere to write `vol1.cbz/p003.jpg.xmp`,
+/// and a rating that disappears on leaving the archive is worse than a refusal.
+#[test]
+fn archives_are_refused_a_rating() {
+    let lib = include_str!("../src/lib.rs");
+    assert!(
+        fn_body(lib, "pub fn sidecar_path(")
+            .expect("sidecar_path")
+            .contains("is_archive_path"),
+        "sidecar_path must return None for an archive member, which is what \
+         refuses the write"
+    );
+}

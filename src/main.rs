@@ -1324,6 +1324,15 @@ enum Msg {
         path: PathBuf,
         info: Option<String>,
     },
+    /// A sidecar rating read, made on a worker.
+    ///
+    /// `path` is the image it was read for, so a stale answer — the reader
+    /// moved on while the read was in flight — is recognised in `pump` and
+    /// thrown away rather than shown for the wrong image.
+    Rating {
+        path: PathBuf,
+        result: Result<image_viewer::Ratings, String>,
+    },
     /// A dropped file's copy, made on a worker.
     ///
     /// `src` is the path that was dropped, and it is here so a **stale** answer
@@ -1912,6 +1921,16 @@ struct MyApp {
 
     exif_info: Option<String>,
     exif_loading: bool,
+    /// The sidecar rating for the image the cursor is on. Read off the UI
+    /// thread through the same worker+message shape as every other read, and
+    /// deliberately NOT part of the `wants_exif` gate: that gate exists to stop
+    /// a 7-12 ms whole-file read, and a 300-byte sidecar must not vanish from
+    /// the UI just because EXIF is not wanted.
+    rating: image_viewer::Ratings,
+    /// Which image `rating` was read for, or `None` when no read is in hand —
+    /// cleared in `goto` beside `exif_info`, so a stale rating is never shown
+    /// for the wrong image.
+    rating_for: Option<PathBuf>,
     show_panels: bool,
     /// Left (EXIF) and right (settings) panes individually. `show_panels`
     /// (`I`) is the master: a pane paints only when both its flag and the
@@ -2284,6 +2303,8 @@ impl MyApp {
             anim: None,
             exif_info: None,
             exif_loading: false,
+            rating: image_viewer::Ratings::default(),
+            rating_for: None,
             show_panels: true,
             show_left: true,
             show_right: true,
@@ -2507,6 +2528,8 @@ impl MyApp {
         self.notice = None;
         self.exif_info = None;
         self.exif_loading = self.cur.is_some();
+        self.rating_for = None;
+        self.request_rating();
         self.full_due = Some(Instant::now() + FULL_DWELL);
         // Blocking mode: only wait when the preview isn't already cached.
         // Archives have no preview, so don't wait for them.
@@ -3379,6 +3402,17 @@ impl MyApp {
                         self.exif_loading = false;
                     }
                 }
+                Msg::Rating { path, result } => {
+                    // A stale answer is ignored: the reader moved on while the
+                    // read was in flight, and the request for the new image is
+                    // already on its way. A damaged sidecar is an `Err` and
+                    // shows as unrated rather than an error banner on every
+                    // visit — the image itself is untouched.
+                    if self.cur.as_ref().is_some_and(|c| c.path == path) {
+                        self.rating = result.unwrap_or_default();
+                        self.rating_for = Some(path);
+                    }
+                }
                 Msg::DropCopy { src, result } => {
                     // **Stale answers are thrown away, not opened.** The reader
                     // dropped something else while this copy was running, and
@@ -3696,6 +3730,86 @@ impl MyApp {
             let _ = tx.send(Msg::DropCopy { src, result });
             wake.request_repaint();
         });
+    }
+
+    /// Read the sidecar rating for the cursor image, off the UI thread.
+    ///
+    /// **Its own thread rather than the loader's queue**, for the same reason as
+    /// `start_drop_copy` above: a rating is not a decode, so it is not in
+    /// `plan_jobs`' answer, and `Loader::replace` makes the queue match the plan
+    /// *exactly* — a queued rating job would be discarded by the next
+    /// `schedule()` and the pane would stay on "Loading rating…". A 300-byte
+    /// sidecar read is sub-millisecond, but it is still filesystem I/O in a
+    /// paint frame, so it goes through the same worker+message shape as every
+    /// other read rather than blocking.
+    ///
+    /// Separate from the `wants_exif` gate on purpose: that gate exists to stop
+    /// a 7-12 ms whole-file read when the panel is hidden, and joining this
+    /// read to it would mean the rating vanishes from the UI whenever the pane
+    /// does. Called from `goto`, which is also what clears `rating_for`.
+    fn request_rating(&mut self) {
+        let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) else {
+            return;
+        };
+        // Archives get no ratings: there is nowhere to write
+        // `vol1.cbz/p003.jpg.xmp`, and a rating that disappears on leaving the
+        // archive is worse than a refusal.
+        if is_archive_path(&path) {
+            return;
+        }
+        self.rating_for = None;
+        // The drop channel carries this too: it is just a `Sender<Msg>` plus a
+        // repaint handle, and a second channel for the same thing would be a
+        // second name for one mechanism.
+        let tx = self.drop_tx.clone();
+        let wake = self.drop_wake.clone();
+        std::thread::spawn(move || {
+            let result = image_viewer::Ratings::read(&path);
+            let _ = tx.send(Msg::Rating { path, result });
+            wake.request_repaint();
+        });
+    }
+
+    /// Add `delta` to the cursor image's star rating (clamped 0..=5), write the
+    /// sidecar, and re-read so the pane shows what is on disk. A write failure
+    /// lands in `self.error` with the message: it must be visible, never
+    /// silent.
+    fn set_stars(&mut self, ctx: &Context, delta: i32) {
+        let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) else {
+            return;
+        };
+        if is_archive_path(&path) {
+            return;
+        }
+        let mut rating = self.rating.clone();
+        rating.rating.stars = (rating.rating.stars as i32 + delta).clamp(0, 5) as u8;
+        if let Err(e) = rating.write(&path) {
+            self.error = Some(format!("Failed to write rating for {}: {e}", path.display()));
+            return;
+        }
+        self.rating = rating;
+        self.request_rating();
+        ctx.request_repaint();
+    }
+
+    /// Flip the cursor image's pick flag, then the same write + re-read as
+    /// `set_stars`.
+    fn toggle_flag(&mut self, ctx: &Context) {
+        let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) else {
+            return;
+        };
+        if is_archive_path(&path) {
+            return;
+        }
+        let mut rating = self.rating.clone();
+        rating.rating.flag = !rating.rating.flag;
+        if let Err(e) = rating.write(&path) {
+            self.error = Some(format!("Failed to write rating for {}: {e}", path.display()));
+            return;
+        }
+        self.rating = rating;
+        self.request_rating();
+        ctx.request_repaint();
     }
 
     /// Stable temp dir for an archive; reused when the archive is unchanged.
@@ -8528,6 +8642,34 @@ impl eframe::App for MyApp {
                 pane = pane.exact_size(240.0);
             }
             pane.show(ui, |ui| {
+                ui.heading("Rating");
+                // The rating is a 300-byte sidecar, not a whole-file read, so it
+                // is deliberately NOT part of the `wants_exif` gate below:
+                // joining them would hide the rating whenever EXIF is not
+                // wanted. Stars are ASCII `*` buttons — the default egui font
+                // lacks a star glyph and renders it as a blank box.
+                if let Some(cur) = self.cur.as_ref().map(|k| k.path().to_path_buf()) {
+                    if is_archive_path(&cur) {
+                        ui.label("Ratings: not available inside an archive");
+                    } else if self.rating_for.as_deref() != Some(cur.as_path()) {
+                        ui.label("Loading rating…");
+                    } else {
+                        let stars = self.rating.rating.stars;
+                        ui.horizontal(|ui| {
+                            for i in 1..=5u8 {
+                                if ui.selectable_label(stars >= i, "*").clicked() {
+                                    self.set_stars(ui.ctx(), i as i32 - stars as i32);
+                                }
+                            }
+                            let mut flag = self.rating.rating.flag;
+                            if ui.checkbox(&mut flag, "Flag").changed() {
+                                self.toggle_flag(ui.ctx());
+                            }
+                        });
+                    }
+                } else {
+                    ui.label("No image.");
+                }
                 ui.heading("EXIF");
                 // The panel is the only thing that shows this, so it is also the
                 // only thing that should ask for it. The gate is the *effective*
