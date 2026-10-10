@@ -7,6 +7,10 @@ pub mod perf;
 /// See the module docs for why it lives here and not in `examples/`.
 pub mod icon;
 
+/// Star ratings, pick flags and tags, stored as XMP sidecars.
+pub mod ratings;
+pub use ratings::{Rating, Ratings, sidecar_path};
+
 use nom_exif::{ExifTag, URational};
 use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
