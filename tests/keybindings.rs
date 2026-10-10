@@ -196,6 +196,14 @@ fn bound_bare(letter: char) -> bool {
 /// do.
 const BARE_LETTERS: &[(&str, &str)] = &[
     (
+        "B",
+        "flag/unflag the current image - this WRITES a .xmp sidecar beside the \
+         file, which is an extension of the bare-letter rule; it is accepted \
+         because a flag is a value with no wrong answer, it never touches the \
+         image itself, and the write is atomic. See the spec for why undo \
+         deliberately does not cover it.",
+    ),
+    (
         "C",
         "crop mode - a view transform, nothing written until Ctrl+S",
     ),

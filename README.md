@@ -167,6 +167,22 @@ on the same worker that decodes the picture, so with the panels hidden — F11, 
 image. Leaving fullscreen starts the read again, so the panel is never empty
 when you can see it.
 
+### Ratings
+
+Each image carries three rating attributes: a star rating (0-5), a pick flag,
+and a tag list. They are stored in an XMP sidecar beside the file —
+`photo.jpg` keeps its rating in `photo.jpg.xmp` — so the image bytes are never
+touched and the write is atomic. The left pane shows `*` buttons for the stars
+and a Flag checkbox; `+` / `-` nudge the stars and `B` flips the flag (tags are
+edited by other tools and only read here). Ratings are refused inside archives,
+which are read-only. Undo (`Ctrl+Z`) deliberately does not cover ratings: undo
+is per-image over turns, mirrors and crops, while a rating is a value with no
+wrong answer rather than an edit to take back.
+
+The filter box understands ratings as well as names: `stars:N` and `stars:N+`
+(both mean at least N), `flagged` / `unflagged`, and `tag:NAME` (case-insensitive
+substring of the tag list). Anything else stays a file-name substring match.
+
 ### Interface
 
 - Browse Folder… / Browse File… dialogs, plus drag-and-drop of a file, folder
@@ -346,6 +362,8 @@ should not quietly do that.
 | `F11` | Fullscreen |
 | `Esc` | Clear the filter (if typing) → close the grid → leave fullscreen → close the window (the last step-offable in Settings; `Esc` itself is not rebindable) |
 | `C` | Toggle crop mode |
+| `+` / `-` | Rating up / down one star (0-5, XMP sidecar) |
+| `B` | Flag / unflag the current image (XMP sidecar) |
 | `Del` | Move to the Recycle Bin (never a hard delete) |
 | `E` `W` `R` | Explore folder, wallpaper, reload folder (`Shift+W`: wallpaper as displayed, crop and turn baked in) |
 | `M` | Toggle **double page mode** — show images as turns of one or two pages |

@@ -8195,7 +8195,7 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, pane_left, pane_right) = ctx.input(|i| {
+        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, rating_up, rating_down, flag_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
                 binding_down(i, &kb, "explore"),
@@ -8211,6 +8211,9 @@ impl eframe::App for MyApp {
                 // the Copy comment above), so this bare press coexists with
                 // the chord below rather than competing with it.
                 binding_down(i, &kb, "crop"),
+                binding_down(i, &kb, "rating_up"),
+                binding_down(i, &kb, "rating_down"),
+                binding_down(i, &kb, "flag"),
                 binding_down(i, &kb, "pane_left"),
                 binding_down(i, &kb, "pane_right"),
             )
@@ -8419,6 +8422,12 @@ impl eframe::App for MyApp {
                 self.redo(ctx);
             } else if crop_key {
                 self.toggle_crop_mode(ctx);
+            } else if rating_up {
+                self.set_stars(ctx, 1);
+            } else if rating_down {
+                self.set_stars(ctx, -1);
+            } else if flag_key {
+                self.toggle_flag(ctx);
             } else if wall {
                 self.set_wallpaper();
             } else if wall_shown {
