@@ -10303,7 +10303,7 @@ enum RatingTerm {
 /// name substring, since a word that merely leads a longer needle is not the
 /// query. `stars:` and `tag:` match on prefix; an empty `tag:` (`tag:` alone)
 /// is not a query and falls back to substring, while an unparseable `stars:`
-/// value is a query that matches nothing.
+/// value is not a query either and likewise falls back to substring.
 fn parse_rating_term(needle: &str) -> Option<RatingTerm> {
     if let Some(rest) = needle.strip_prefix("stars:") {
         if let Some(min) = rest.strip_suffix('+') {
@@ -10811,7 +10811,8 @@ impl Gallery {
     /// reads as `stars:0` and not-flagged, so `stars:1+` excludes it rather
     /// than erroring; a damaged sidecar is likewise treated as unrated, so a
     /// broken sidecar can never hide its image. An unparseable `stars:` value
-    /// (`stars:x`, `stars:`) matches nothing — it is a rating query, not a name.
+    /// (`stars:x`, `stars:`) is not a query and falls back to a name
+    /// substring, which matches nothing unless a file is so named.
     ///
     /// Sidecars are read once per candidate per call. This runs once per filter
     /// change (never per frame), and only rating needles touch the disk at all,

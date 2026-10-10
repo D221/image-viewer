@@ -49,7 +49,7 @@ fn stars_are_clamped_and_a_flag_is_a_label() {
     let bytes = std::fs::read(image_viewer::ratings::sidecar_path(&p).unwrap()).unwrap();
     let s = String::from_utf8_lossy(&bytes);
     assert!(s.contains("Pick"), "flag must be xmp:Label Pick, got: {s}");
-    assert!(s.contains("5"), "stars clamp to 5, got: {s}");
+    assert!(s.contains("xmp:Rating=\"5\""), "stars clamp to 5, got: {s}");
 }
 
 #[test]

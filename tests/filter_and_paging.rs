@@ -339,3 +339,41 @@ fn the_filter_can_narrow_by_rating_flag_and_tag() {
         "case-insensitive"
     );
 }
+
+/// Files without a sidecar — and files with a damaged one — degrade to
+/// unrated rather than erroring or vanishing: `unflagged` and `stars:0`
+/// include them, and a damaged sidecar never hides its image.
+#[test]
+fn the_filter_treats_missing_and_damaged_sidecars_as_unrated() {
+    let dir = tempfile::tempdir().unwrap();
+    // Rated and flagged, for contrast.
+    let rated = dir.path().join("rated.jpg");
+    std::fs::write(&rated, b"\xff\xd8\xff\xe0jpeg").unwrap();
+    image_viewer::ratings::Ratings {
+        rating: image_viewer::ratings::Rating { stars: 4, flag: true },
+        tags: vec![],
+    }
+    .write(&rated)
+    .unwrap();
+    // No sidecar at all.
+    let plain = dir.path().join("plain.jpg");
+    std::fs::write(&plain, b"\xff\xd8\xff\xe0jpeg").unwrap();
+    // A damaged sidecar: an error when read directly...
+    let broken = dir.path().join("broken.jpg");
+    std::fs::write(&broken, b"\xff\xd8\xff\xe0jpeg").unwrap();
+    let side = image_viewer::ratings::sidecar_path(&broken).unwrap();
+    std::fs::write(&side, "this is not xml at all").unwrap();
+    assert!(image_viewer::ratings::Ratings::read(&broken).is_err());
+
+    // ...but unrated for filtering, so the image stays reachable.
+    assert_eq!(
+        names_matching(dir.path(), "unflagged"),
+        vec!["broken.jpg", "plain.jpg"]
+    );
+    assert_eq!(
+        names_matching(dir.path(), "stars:0"),
+        vec!["broken.jpg", "plain.jpg", "rated.jpg"]
+    );
+    assert_eq!(names_matching(dir.path(), "flagged"), vec!["rated.jpg"]);
+    assert_eq!(names_matching(dir.path(), "stars:4"), vec!["rated.jpg"]);
+}

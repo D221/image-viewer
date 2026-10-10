@@ -2549,6 +2549,10 @@ impl MyApp {
         self.notice = None;
         self.exif_info = None;
         self.exif_loading = self.cur.is_some();
+        // Reset the write base with the read marker: until the new sidecar
+        // read lands, `rating_for != cur` and the mutators below must not
+        // write the previous image's stars and tags onto this one.
+        self.rating = image_viewer::Ratings::default();
         self.rating_for = None;
         self.request_rating();
         self.full_due = Some(Instant::now() + FULL_DWELL);
@@ -3810,6 +3814,7 @@ impl MyApp {
             return;
         };
         if is_archive_path(&path) {
+            self.error = Some("Cannot rate an archive member: ratings need a sidecar beside the file".into());
             return;
         }
         let mut rating = self.rating.clone();
@@ -3835,6 +3840,7 @@ impl MyApp {
             return;
         };
         if is_archive_path(&path) {
+            self.error = Some("Cannot rate an archive member: ratings need a sidecar beside the file".into());
             return;
         }
         let mut rating = self.rating.clone();

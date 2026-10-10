@@ -285,7 +285,13 @@ fn minimal(ratings: &Ratings) -> String {
 ///   unchanged file keeps its bytes as-is, which is what preserves a `Second`
 ///   another tool made — and what keeps an absent label absent.
 /// - `<iviewer:Keywords>` is ours, so its whole span is replaced wholesale;
-///   when absent it is inserted before `</rdf:RDF>`.
+///   when absent it is inserted before `</rdf:RDF>`, or appended to the end
+///   when there is no `</rdf:RDF>` to hang it on.
+/// - Fallbacks that keep a rating from being dropped: XMP with no
+///   `<rdf:Description>` gets a fresh one (rating plus keywords) inserted
+///   before `</rdf:RDF>`, or appended when that closer is absent; likewise a
+///   Description-less insert carries the keywords along so the insert below
+///   finds its span.
 fn merge(existing: &str, new: &Ratings) -> String {
     if existing.trim().is_empty() || !existing.contains("<x:xmpmeta") {
         // Absent, blank, or not XMP at all: nothing worth preserving.
