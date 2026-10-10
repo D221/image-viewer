@@ -1764,6 +1764,15 @@ struct TilePage {
     slot: egui::Rect,
     /// The page's own transform, for `paint_tex`.
     xform: Xform,
+    /// The page's dimensions in **source** pixels — what the tile pitch is laid
+    /// out against. Usually the buffer's own size, and then the grid below is
+    /// exactly what it has always been; but a source past `MAX_TEXTURE_DIM`
+    /// decodes its "full" buffer DCT-scaled (a 17042px JPEG keeps an 8521px
+    /// buffer, since a wider texture would not fit the GPU), and a grid laid
+    /// out in buffer pixels at source pitch composes a small copy of the whole
+    /// image over its own top-left. The loop pitches every tile back up by
+    /// `src / buffer` instead.
+    src: egui::Vec2,
 }
 
 struct FullImage {
@@ -6508,6 +6517,10 @@ impl MyApp {
                     paint: if pages.is_empty() { rect } else { page_rects[0] },
                     slot: if pages.is_empty() { footprint } else { rects[0] },
                     xform,
+                    // `img_px` is the source's own size (`orig`), whatever the
+                    // buffer decoded to: for a DCT-scaled buffer this is where
+                    // the pitch-up ratio comes from.
+                    src: img_px,
                 })
             })
         };
@@ -6519,7 +6532,7 @@ impl MyApp {
             pages
                 .iter()
                 .enumerate()
-                .map(|(i, (key, (ow, _oh), xf))| {
+                .map(|(i, (key, (ow, oh), xf))| {
                     if i == 0 {
                         return cursor_page();
                     }
@@ -6538,6 +6551,9 @@ impl MyApp {
                         paint: page_rects[i],
                         slot: rects[i],
                         xform: *xf,
+                        // `ow`/`oh` are this page's source size, as `img_px` is the
+                        // cursor's: the ratio against the buffer is per page.
+                        src: egui::Vec2::new(*ow as f32, *oh as f32),
                     })
                 })
                 .collect()
@@ -6601,10 +6617,20 @@ impl MyApp {
                 let vis = panel.intersect(slot);
                 if vis.width() > 0.0 && vis.height() > 0.0 {
                     sharpened = true;
-                    let x0 = (((vis.min.x - paint.min.x) / scale).floor().max(0.0) as u32).min(fw);
-                    let y0 = (((vis.min.y - paint.min.y) / scale).floor().max(0.0) as u32).min(fh);
-                    let x1 = (((vis.max.x - paint.min.x) / scale).ceil().max(0.0) as u32).min(fw);
-                    let y1 = (((vis.max.y - paint.min.y) / scale).ceil().max(0.0) as u32).min(fh);
+                    // Source pixels per buffer pixel, per axis: 1.0 when the
+                    // buffer is the full decode, 2.0 when it is a half-res DCT
+                    // decode of a source past `MAX_TEXTURE_DIM`. The range below
+                    // is named in *buffer* pixels and the rect is pitched back
+                    // up — see `tile_axis_range` / `tile_draw_rect`, whose tests
+                    // pin both halves against the ghost this fixes.
+                    let kx = tp.src.x / fw.max(1) as f32;
+                    let ky = tp.src.y / fh.max(1) as f32;
+                    let (x0, x1) = image_viewer::tile_axis_range(
+                        vis.min.x, vis.max.x, paint.min.x, scale, kx, fw,
+                    );
+                    let (y0, y1) = image_viewer::tile_axis_range(
+                        vis.min.y, vis.max.y, paint.min.y, scale, ky, fh,
+                    );
 
                     if paint_log_on {
                         paint_pages.push(format!(
@@ -6635,9 +6661,19 @@ impl MyApp {
                                 tile.last_drawn = frame;
                                 let (px, py) = (tx * TILE, ty * TILE);
                                 let (tw, th) = (TILE.min(fw - px), TILE.min(fh - py));
+                                let q = image_viewer::tile_draw_rect(
+                                    (paint.min.x, paint.min.y),
+                                    px,
+                                    py,
+                                    tw,
+                                    th,
+                                    scale,
+                                    kx,
+                                    ky,
+                                );
                                 let r = Rect::from_min_size(
-                                    paint.min + Vec2::new(px as f32, py as f32) * scale,
-                                    Vec2::new(tw as f32, th as f32) * scale,
+                                    Pos2::new(q[0], q[1]),
+                                    Vec2::new(q[2], q[3]),
                                 );
                                 paint_tex(&painter, tile.tex.id(), r, uv, page_xform);
                                 if paint_log_on && paint_tiles.len() < 300 {

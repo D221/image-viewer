@@ -4780,6 +4780,73 @@ fn zoom_percent_reports_against_one_to_one() {
     assert_eq!(image_viewer::zoom_percent(50.0, 1.0), 5000);
 }
 
+/// The tile loop's range and rect math, pinned against the deep-zoom ghost:
+/// on a source past `MAX_TEXTURE_DIM` the tile buffer is a half-res DCT
+/// decode, and naming the range or the rect in source pixels composes a
+/// small copy of the whole image over its own top-left.
+#[test]
+fn tile_math_positions_tiles_in_buffer_pixels_at_source_pitch() {
+    // Full-res buffer (k == 1): the old arithmetic exactly. paint at 0,
+    // scale 0.5, visible 100..600 of a 2000px buffer.
+    assert_eq!(
+        image_viewer::tile_axis_range(100.0, 600.0, 0.0, 0.5, 1.0, 2000),
+        (200, 1200),
+        "k=1 reproduces the pre-fix numbers bit for bit"
+    );
+    assert_eq!(
+        image_viewer::tile_draw_rect((0.0, 0.0), 1024, 0, 1024, 1024, 0.5, 1.0, 1.0),
+        [512.0, 0.0, 512.0, 512.0]
+    );
+    // Half-res buffer (k == 2), the booklet shape: 17042px source in an
+    // 8521px buffer at scale 0.125. The visible 0..1067.5pt is buffer
+    // 0..4268, not source 0..8534 — naming it in source pixels cuts every
+    // tile from twice as far along as it is drawn.
+    assert_eq!(
+        image_viewer::tile_axis_range(0.0, 1067.5, 0.0, 0.125, 2.0, 8521),
+        (0, 4270)
+    );
+    // And the rect pitches the buffer span back up: tile (2,0) covers buffer
+    // 2048..3072, i.e. source 4096..6144, i.e. screen 512..768.
+    assert_eq!(
+        image_viewer::tile_draw_rect((0.0, 0.0), 2048, 0, 1024, 1024, 0.125, 2.0, 2.0),
+        [512.0, 0.0, 256.0, 256.0]
+    );
+    // Content and position agree: the drawn span is the buffer span pitched
+    // up, so the tile shows the source pixels it is drawn over.
+    let (x0, x1) = image_viewer::tile_axis_range(512.0, 768.0, 0.0, 0.125, 2.0, 8521);
+    assert_eq!((x0, x1), (2048, 3072));
+    // Clamping is against the buffer, not the source.
+    assert_eq!(
+        image_viewer::tile_axis_range(-100.0, 99999.0, 0.0, 0.125, 2.0, 8521),
+        (0, 8521)
+    );
+}
+
+/// The tile loop goes through the ratio-aware math, not around it: the old
+/// inline formula named the range in source pixels whatever the buffer was,
+/// which is the defect above, so its absence is asserted as well as the new
+/// calls' presence. Either half alone passes on a halfway revert.
+#[test]
+fn the_tile_loop_positions_through_the_ratio_aware_math() {
+    let src = include_str!("../src/main.rs");
+    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    assert!(
+        central.contains("image_viewer::tile_axis_range("),
+        "the tile range must come from tile_axis_range, which divides by the \
+         buffer-to-source ratio"
+    );
+    assert!(
+        central.contains("image_viewer::tile_draw_rect("),
+        "the tile rect must come from tile_draw_rect, which pitches the buffer \
+         span back up to source pixels"
+    );
+    assert!(
+        !central.contains("(vis.min.x - paint.min.x) / scale)"),
+        "the old inline range named source pixels for every buffer, which is \
+         what squeezed a half-size copy over the image's own top-left"
+    );
+}
+
 /// The frame clock survives its move to lib with speed: file timing pins
 /// the old behavior, and 2x halves both the index math and the repaint wait
 /// (which is real time — scheduling an effective-time wait would repaint

@@ -6643,6 +6643,55 @@ pub fn zoom_percent(scale: f32, ppp: f32) -> u32 {
     (scale * ppp * 100.0).round().max(0.0) as u32
 }
 
+/// One axis of the tile loop's source range: which buffer pixels the visible
+/// interval covers, clamped to the buffer.
+///
+/// `buf_to_src` is source pixels per buffer pixel — 1.0 when the tile buffer
+/// is the full decode, 2.0 when it is a half-res DCT decode (a source past
+/// `MAX_TEXTURE_DIM`, whose full texture would not fit the GPU). Dividing by
+/// it is what keeps the range in *buffer* pixels: without it the range is
+/// named in source pixels and every tile is cut from the wrong place.
+pub fn tile_axis_range(
+    vis_min: f32,
+    vis_max: f32,
+    paint_min: f32,
+    scale: f32,
+    buf_to_src: f32,
+    buf_dim: u32,
+) -> (u32, u32) {
+    let k = buf_to_src.max(f32::EPSILON);
+    let lo = ((vis_min - paint_min) / scale / k).floor().max(0.0) as u32;
+    let hi = ((vis_max - paint_min) / scale / k).ceil().max(0.0) as u32;
+    (lo.min(buf_dim), hi.min(buf_dim))
+}
+
+/// Where one tile lands on screen: the tile's buffer span, pitched up to
+/// source pixels, laid out from the page's paint origin at `scale`.
+///
+/// The pitch-up is the same `buf_to_src` ratio as [`tile_axis_range`], and
+/// for the same reason: a tile cut from a half-res buffer and laid out at
+/// source pitch lands every tile shifted and squeezed, composing a small
+/// copy of the whole image over the image's own top-left. At 1.0 this is
+/// exactly the old arithmetic, so full-res sources paint bit-identical
+/// rects.
+pub fn tile_draw_rect(
+    paint_min: (f32, f32),
+    px: u32,
+    py: u32,
+    tw: u32,
+    th: u32,
+    scale: f32,
+    kx: f32,
+    ky: f32,
+) -> [f32; 4] {
+    [
+        paint_min.0 + px as f32 * kx * scale,
+        paint_min.1 + py as f32 * ky * scale,
+        tw as f32 * kx * scale,
+        th as f32 * ky * scale,
+    ]
+}
+
 /// Window size hugging `content` (the picture as drawn, in points): the gap
 /// between the window's inner size and the central area is the side panels
 /// and bars, which keep whatever they have — so adding the same gap back
