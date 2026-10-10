@@ -6634,6 +6634,15 @@ pub fn zoom_preset(presets: &[f32; 4], i: usize) -> f32 {
     presets[i.min(3)].clamp(0.1, 32.0)
 }
 
+/// Zoom percentage for the status readout: 100% is one source pixel per
+/// physical pixel (`scale * ppp == 1`), whatever the window is. Against 1:1
+/// rather than against fit, so the number means the same on a panorama at
+/// 6% and a thumbnail at 400% — and so it stays put when the window moves
+/// but the zoom does not.
+pub fn zoom_percent(scale: f32, ppp: f32) -> u32 {
+    (scale * ppp * 100.0).round().max(0.0) as u32
+}
+
 /// Window size hugging `content` (the picture as drawn, in points): the gap
 /// between the window's inner size and the central area is the side panels
 /// and bars, which keep whatever they have — so adding the same gap back

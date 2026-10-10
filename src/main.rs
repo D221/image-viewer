@@ -5354,7 +5354,7 @@ impl MyApp {
 
     // ---- drawing ----------------------------------------------------------
 
-    fn status_text(&self) -> String {
+    fn status_text(&self, ppp: f32) -> String {
         let idx = if self.gallery.is_empty() {
             0
         } else {
@@ -5455,6 +5455,13 @@ impl MyApp {
                 }
             }
         }
+        // Zoom as a percentage of 1:1, so it means the same whatever the window
+        // is doing. `view.scale` is points per source pixel; times `ppp` that
+        // is physical pixels per source pixel, which is what the percent means.
+        s += &format!(
+            " - {}%",
+            image_viewer::zoom_percent(self.view.scale, ppp)
+        );
         if self.slideshow {
             s += &format!(" - slideshow {}s", self.config.slideshow_secs);
         }
@@ -6569,6 +6576,22 @@ impl MyApp {
         let mut budget = TILES_PER_FRAME;
         let mut pending = false;
         let mut sharpened = false;
+        // Temporary diagnostic for the reported deep-zoom ghost (a small copy
+        // of the image appearing top-left on 17k-wide panoramas): with
+        // `IV_PAINT_LOG` set, one line per frame lands in
+        // `%TEMP%\image-viewer-paint.log` with the preview rect, each page's
+        // tile range, and every painted tile's texture id and size. A tile
+        // texture bigger than 1024 on a side, or tile rects that do not cover
+        // the visible region, names the defect. Delete once diagnosed.
+        let paint_log_on = std::env::var_os("IV_PAINT_LOG").is_some();
+        static PAINT_LOG_TRUNC: std::sync::Once = std::sync::Once::new();
+        if paint_log_on {
+            PAINT_LOG_TRUNC.call_once(|| {
+                let _ = std::fs::remove_file(std::env::temp_dir().join("image-viewer-paint.log"));
+            });
+        }
+        let mut paint_pages: Vec<String> = Vec::new();
+        let mut paint_tiles: Vec<String> = Vec::new();
         for (tp, (tiles, _owner)) in tile_pages.iter().zip(maps.iter_mut()) {
             let Some(tp) = tp else { continue };
             let preview_density = tp.preview_density;
@@ -6583,6 +6606,12 @@ impl MyApp {
                     let x1 = (((vis.max.x - paint.min.x) / scale).ceil().max(0.0) as u32).min(fw);
                     let y1 = (((vis.max.y - paint.min.y) / scale).ceil().max(0.0) as u32).min(fh);
 
+                    if paint_log_on {
+                        paint_pages.push(format!(
+                            "page full={fw}x{fh} buflen={} prevden={preview_density:.2} range={x0},{y0},{x1},{y1}",
+                            tp.data.rgba.len()
+                        ));
+                    }
                     if x1 > x0 && y1 > y0 {
                         for ty in (y0 / TILE)..=((y1 - 1) / TILE) {
                             for tx in (x0 / TILE)..=((x1 - 1) / TILE) {
@@ -6611,6 +6640,19 @@ impl MyApp {
                                     Vec2::new(tw as f32, th as f32) * scale,
                                 );
                                 paint_tex(&painter, tile.tex.id(), r, uv, page_xform);
+                                if paint_log_on && paint_tiles.len() < 300 {
+                                    let ts = tile.tex.size();
+                                    paint_tiles.push(format!(
+                                        "({tx},{ty} {:?} {}x{} r=[{:.0},{:.0} {:.0}x{:.0}])",
+                                        tile.tex.id(),
+                                        ts[0],
+                                        ts[1],
+                                        r.min.x,
+                                        r.min.y,
+                                        r.width(),
+                                        r.height()
+                                    ));
+                                }
                             }
                         }
                     }
@@ -6689,6 +6731,23 @@ impl MyApp {
                         }
                     }
                 }
+            }
+        }
+        if paint_log_on {
+            let line = format!(
+                "frame={frame} scale={scale:.3} rect=[{:.0},{:.0} {:.0}x{:.0}] preview={tex_id:?} screenden={screen_density:.2} pages=[{}] tiles=[{}]\n",
+                rect.min.x,
+                rect.min.y,
+                rect.width(),
+                rect.height(),
+                paint_pages.join(" "),
+                paint_tiles.join(" "),
+            );
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(
+                std::env::temp_dir().join("image-viewer-paint.log"),
+            ) {
+                use std::io::Write as _;
+                let _ = f.write_all(line.as_bytes());
             }
         }
 
@@ -8473,7 +8532,7 @@ impl eframe::App for MyApp {
         if self.show_panels {
             egui::Panel::top("status").show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(self.status_text());
+                    ui.label(self.status_text(ui.ctx().pixels_per_point()));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Clear button first so it sits at the right edge.
                         if !self.filter.is_empty() && ui.small_button("x").clicked() {

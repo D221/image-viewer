@@ -4764,6 +4764,22 @@ fn stepping_wraps_and_presets_clamp() {
     assert_eq!(image_viewer::zoom_preset(&[0.0, -3.0, 100.0, 2.0], 2), 32.0);
 }
 
+/// The zoom readout is a ratio against 1:1, not against fit: 100% is one
+/// source pixel per physical pixel whatever the window is, so the number
+/// means the same on a panorama and a thumbnail.
+#[test]
+fn zoom_percent_reports_against_one_to_one() {
+    // 1:1 is `scale == 1/ppp` — the value the draw path itself uses — so it
+    // must read exactly 100 at every pixel ratio, not approximately.
+    assert_eq!(image_viewer::zoom_percent(1.0, 1.0), 100);
+    assert_eq!(image_viewer::zoom_percent(1.0 / 1.25, 1.25), 100);
+    assert_eq!(image_viewer::zoom_percent(1.0 / 2.0, 2.0), 100);
+    // A fitted 17000px panorama on a ~1000pt panel is single digits.
+    assert_eq!(image_viewer::zoom_percent(0.06, 1.0), 6);
+    // And deep zoom is the large number it is, not clamped to something neat.
+    assert_eq!(image_viewer::zoom_percent(50.0, 1.0), 5000);
+}
+
 /// The frame clock survives its move to lib with speed: file timing pins
 /// the old behavior, and 2x halves both the index math and the repaint wait
 /// (which is real time — scheduling an effective-time wait would repaint

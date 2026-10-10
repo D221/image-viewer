@@ -54,7 +54,8 @@ double-rotate).
 ### Viewing
 
 - Fit-to-window on load, `F` to re-fit, `1` for exactly 1:1
-- Zoom with the wheel, pan by dragging
+- Zoom with the wheel, pan by dragging. The status bar shows the zoom as a
+  percentage of 1:1, so it means the same whatever the window is doing
 - Progressive refinement: a cheap preview first, then full-resolution
   **1024px tiles** streamed in over it (up to 8 new tiles per frame) so
   zooming in never blocks
