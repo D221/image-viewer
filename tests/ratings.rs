@@ -174,11 +174,14 @@ fn a_second_label_survives_a_rating_change() {
 
 /// The Task 1 review's deferred minor: a literal `xmp:Rating="…"` sitting in
 /// element text (not in a tag) must not be read as the rating, nor rewritten.
+/// The decoy deliberately precedes the real attribute: a naive first-occurrence
+/// substring lookup reads the decoy, so this test fails on exactly the parser
+/// it pins.
 #[test]
 fn a_literal_rating_in_text_does_not_fool_the_parser() {
     let (_d, p) = temp_image("a.jpg");
     let side = image_viewer::ratings::sidecar_path(&p).unwrap();
-    std::fs::write(&side, r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"><dc:note xmlns:dc="http://purl.org/dc/elements/1.1/">a note about xmp:Rating="5" here</dc:note></rdf:Description></rdf:RDF></x:xmpmeta>"#).unwrap();
+    std::fs::write(&side, r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><dc:note xmlns:dc="http://purl.org/dc/elements/1.1/">a note about xmp:Rating="5" here</dc:note><rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmp:Rating="1"/></rdf:RDF></x:xmpmeta>"#).unwrap();
 
     let mut r = Ratings::read(&p).unwrap();
     assert_eq!(r.rating.stars, 1, "the text literal is not the rating");
