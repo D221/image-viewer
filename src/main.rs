@@ -8761,7 +8761,10 @@ impl eframe::App for MyApp {
                         ui.horizontal(|ui| {
                             for i in 1..=5u8 {
                                 if ui.selectable_label(stars >= i, "*").clicked() {
-                                    self.set_stars(ui.ctx(), i as i32 - stars as i32);
+                                    self.set_stars(
+                                        ui.ctx(),
+                                        image_viewer::ratings::star_click_delta(stars, i),
+                                    );
                                 }
                             }
                             let mut flag = self.rating.rating.flag;

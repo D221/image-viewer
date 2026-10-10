@@ -173,7 +173,8 @@ Each image carries three rating attributes: a star rating (0-5), a pick flag,
 and a tag list. They are stored in an XMP sidecar beside the file —
 `photo.jpg` keeps its rating in `photo.jpg.xmp` — so the image bytes are never
 touched and the write is atomic. The left pane shows `*` buttons for the stars
-and a Flag checkbox; `+` / `-` nudge the stars and `B` flips the flag (tags are
+and a Flag checkbox — clicking the lit star clears back to 0, since the row
+has no zero star to press; `+` / `-` nudge the stars and `B` flips the flag (tags are
 edited by other tools and only read here). Ratings are refused inside archives,
 which are read-only. Undo (`Ctrl+Z`) deliberately does not cover ratings: undo
 is per-image over turns, mirrors and crops, while a rating is a value with no

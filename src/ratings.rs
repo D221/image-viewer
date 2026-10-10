@@ -46,6 +46,22 @@ impl Rating {
     }
 }
 
+/// Delta to pass to `set_stars` when star `clicked` (1..=5) is pressed while
+/// the image shows `current` (0..=5).
+///
+/// Clicking a *different* level jumps straight to it; clicking the level
+/// already shown clears back to 0 — the Lightroom behavior, and the only way
+/// to unrate with the mouse, since the row has no zero star to press. Without
+/// this branch a click on the lit star computes `i - stars == 0`, a no-op that
+/// reads as a dead button.
+pub fn star_click_delta(current: u8, clicked: u8) -> i32 {
+    if clicked == current {
+        -(current as i32)
+    } else {
+        clicked as i32 - current as i32
+    }
+}
+
 /// Everything the sidecar holds for one image.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ratings {

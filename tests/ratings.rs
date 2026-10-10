@@ -209,3 +209,17 @@ fn a_write_leaves_no_temporary_file_behind() {
         .collect();
     assert!(leftovers.is_empty(), "no .tmp left beside the sidecar: {leftovers:?}");
 }
+
+/// Clicking the lit star clears the rating — the Lightroom behavior, and the
+/// only way to unrate with the mouse since the row has no zero star.
+/// Without the toggle branch this returns 0 for the lit star, a no-op click
+/// that reads as a dead button.
+#[test]
+fn clicking_the_lit_star_clears_the_rating() {
+    use image_viewer::ratings::star_click_delta;
+    assert_eq!(star_click_delta(3, 5), 2, "jump up to the clicked level");
+    assert_eq!(star_click_delta(3, 1), -2, "jump down to the clicked level");
+    assert_eq!(star_click_delta(3, 3), -3, "clicking the lit star unrates");
+    assert_eq!(star_click_delta(1, 1), -1, "a 1-star image can go back to 0");
+    assert_eq!(star_click_delta(0, 1), 1, "unrated image rates normally");
+}
