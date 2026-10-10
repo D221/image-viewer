@@ -1333,6 +1333,15 @@ enum Msg {
         path: PathBuf,
         result: Result<image_viewer::Ratings, String>,
     },
+    /// One grid cell's sidecar rating read, made on a worker.
+    ///
+    /// Keyed by path like the grid's thumbnail map, so a stale answer is
+    /// still the right file's answer — unlike the cursor read above, which
+    /// must be thrown away when the reader moved on.
+    GridRating {
+        path: PathBuf,
+        result: Result<image_viewer::Ratings, String>,
+    },
     /// A dropped file's copy, made on a worker.
     ///
     /// `src` is the path that was dropped, and it is here so a **stale** answer
@@ -2097,6 +2106,16 @@ struct MyApp {
     wheel_acc: f32, // accumulated wheel delta in wheel-navigation mode
     thumbs: HashMap<PathBuf, Thumb>, // grid thumbnails
     thumb_tries: HashMap<PathBuf, u8>, // per-path thumb attempts (bounded retry)
+    /// Sidecar ratings for grid cells, filled by the grid's thumbnail pass —
+    /// one worker read per newly visible cell, never a sidecar stat per cell
+    /// per frame. Separate from the cursor's `rating` field on purpose: that
+    /// holds one image's rating, and reading it per cell would show every
+    /// cell the current image's stars.
+    grid_ratings: HashMap<PathBuf, image_viewer::Ratings>,
+    /// Sidecar reads in flight, so a cell whose answer has not landed yet is
+    /// not re-asked every frame. Cleared on arrival in `pump`, and by an edit
+    /// that wrote a fresher value than the in-flight read could hold.
+    grid_rating_pending: HashSet<PathBuf>,
     gallery_view: bool, // grid browser open
     /// Every file in the folder, **unfiltered**. `gallery.files` is this list
     /// run through `filter`, so a filter is always reversible and the folder's
@@ -2361,6 +2380,8 @@ impl MyApp {
             wheel_acc: 0.0,
             thumbs: HashMap::new(),
             thumb_tries: HashMap::new(),
+            grid_ratings: HashMap::new(),
+            grid_rating_pending: HashSet::new(),
             all_files,
             filter: String::new(),
             stamps: HashMap::new(),
@@ -3413,6 +3434,16 @@ impl MyApp {
                         self.rating_for = Some(path);
                     }
                 }
+                Msg::GridRating { path, result } => {
+                    // A stale answer is dropped, not shown: an edit wrote a
+                    // fresher value into the map and cleared the pending mark
+                    // first, so an in-flight read from before the edit must
+                    // not clobber it. A damaged sidecar is an `Err` and shows
+                    // as unrated, like the pane.
+                    if self.grid_rating_pending.remove(&path) {
+                        self.grid_ratings.insert(path, result.unwrap_or_default());
+                    }
+                }
                 Msg::DropCopy { src, result } => {
                     // **Stale answers are thrown away, not opened.** The reader
                     // dropped something else while this copy was running, and
@@ -3788,6 +3819,11 @@ impl MyApp {
             return;
         }
         self.rating = rating;
+        // The grid holds this file's rating too: hand it what is on disk, and
+        // clear the pending mark so an in-flight read from before the edit
+        // lands stale and is dropped rather than clobbering this.
+        self.grid_ratings.insert(path.clone(), self.rating.clone());
+        self.grid_rating_pending.remove(&path);
         self.request_rating();
         ctx.request_repaint();
     }
@@ -3808,6 +3844,10 @@ impl MyApp {
             return;
         }
         self.rating = rating;
+        // Same freshness as `set_stars` above: the grid's copy is this write,
+        // not whatever an older in-flight read says.
+        self.grid_ratings.insert(path.clone(), self.rating.clone());
+        self.grid_rating_pending.remove(&path);
         self.request_rating();
         ctx.request_repaint();
     }
@@ -4393,6 +4433,11 @@ impl MyApp {
             self.previews
                 .retain(|k, _| now.contains(&k.path) || Some(&k.path) == cur.as_ref().map(|c| &c.path));
             self.thumbs.retain(|p, _| now.contains(p));
+            // Same reason, for the grid's ratings (and their in-flight marks):
+            // a hidden file's sidecar answer is unreachable until it is
+            // visible again, when one cheap re-read refills it.
+            self.grid_ratings.retain(|p, _| now.contains(p));
+            self.grid_rating_pending.retain(|p| now.contains(p));
         }
     }
 
@@ -7053,6 +7098,10 @@ impl MyApp {
             thumb_tries,
             loader,
             zip_archive,
+            grid_ratings,
+            grid_rating_pending,
+            drop_tx,
+            drop_wake,
             ..
         } = self;
         // When inside an archive, index 0 is the "go back" cell.
@@ -7145,6 +7194,27 @@ impl MyApp {
                                 let Some(path) = gallery.files.get(file_idx) else {
                                     continue;
                                 };
+                                // Fill the ratings map in the same pass that
+                                // queues thumbnails: one worker read per newly
+                                // visible cell, never a sidecar stat per cell
+                                // per frame. The pending mark is what makes it
+                                // once per cell — without it a cell whose
+                                // answer has not landed yet would spawn a
+                                // thread every frame. Archives get no ratings.
+                                if !is_archive_path(path)
+                                    && !grid_ratings.contains_key(path)
+                                    && !grid_rating_pending.contains(path)
+                                {
+                                    grid_rating_pending.insert(path.clone());
+                                    let owned = path.clone();
+                                    let tx = drop_tx.clone();
+                                    let wake = drop_wake.clone();
+                                    std::thread::spawn(move || {
+                                        let result = image_viewer::Ratings::read(&owned);
+                                        let _ = tx.send(Msg::GridRating { path: owned, result });
+                                        wake.request_repaint();
+                                    });
+                                }
                                 let resp = grid_cell(
                                     ui,
                                     path,
@@ -7154,6 +7224,7 @@ impl MyApp {
                                     thumbs,
                                     thumb_tries,
                                     loader,
+                                    grid_ratings,
                                 );
                                 resp
                             };
@@ -7562,6 +7633,7 @@ fn grid_cell(
     thumbs: &mut HashMap<PathBuf, Thumb>,
     tries: &mut HashMap<PathBuf, u8>,
     loader: &Loader,
+    ratings: &HashMap<PathBuf, image_viewer::Ratings>,
 ) -> egui::Response {
     let name = path
         .file_name()
@@ -7699,7 +7771,23 @@ fn grid_cell(
     }
     child.add(
         egui::Label::new(
-            egui::RichText::new(&name)
+            // Stars in the label strip, read from the map the grid pass
+            // filled — never a sidecar read here, which would be a filesystem
+            // read per cell per frame. `*` and `!` are ASCII, so no glyph can
+            // be missing from the default font.
+            egui::RichText::new(&{
+                let mut label = name.clone();
+                if let Some(r) = ratings.get(path) {
+                    if r.rating.flag {
+                        label = format!("! {label}");
+                    }
+                    if r.rating.stars > 0 {
+                        label.push(' ');
+                        label.push_str(&"*".repeat(r.rating.stars.min(5) as usize));
+                    }
+                }
+                label
+            })
                 .small()
                 .color(egui::Color32::from_gray(200)),
         )

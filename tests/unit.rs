@@ -6229,3 +6229,22 @@ fn archives_are_refused_a_rating() {
          refuses the write"
     );
 }
+
+/// The grid must read ratings from a **map the scan filled**, not stat a
+/// sidecar per cell per frame: `grid_cols` can be 24 across and the folder
+/// thousands deep, so a stat per visible cell is a filesystem storm in the paint
+/// frame.
+#[test]
+fn the_grid_reads_ratings_from_a_map_not_the_filesystem() {
+    let src = include_str!("../src/main.rs");
+    let cell = fn_body(src, "fn grid_cell(").expect("grid_cell");
+    assert!(
+        !cell.contains("Ratings::read("),
+        "grid_cell must not read sidecars - that is a filesystem read per cell \
+         per frame; it takes them from the ratings map"
+    );
+    assert!(
+        cell.contains("ratings") || cell.contains("rating"),
+        "and it must read a ratings map"
+    );
+}
