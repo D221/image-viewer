@@ -149,13 +149,10 @@ with `stars:`/`flagged`/`tag:` in the filter box), **grid cell size** (setting,
 restored on stop). Both specced in
 `docs/superpowers/specs/2026-10-09-undo-and-ratings-design.md`.
 
-- **Histogram / exposure readout.** Nothing from the pixels themselves — the EXIF
-  panel shows what the camera recorded, never what the file actually contains.
-  Worth it on its own terms (clipping and black-point at a glance), and it is
-  also **the cheapest instrument available for §1**: wide-gamut correctness has no
-  ground truth, and a per-channel histogram plus black/white clipping counts is
-  something that can be *compared* rather than squinted at. It would also inform
-  the `Smooth` low-pass decision, which is currently made by looking at pages.
+- **Histogram / exposure readout.** Shipped: per-channel levels plus
+  black/white clipped counts in the left pane, counted on the decode
+  worker from the preview buffer. As a P3 instrument it remains what the
+  section above says: comparison, not ground truth.
 
 - **Metadata editing.** Caption, artist, description: all absent, and there is no
   write path at all — `nom-exif` is read-only in this tree. Blocked on the same

@@ -5015,6 +5015,68 @@ fn the_tile_loop_positions_through_the_ratio_aware_math() {
     );
 }
 
+/// A histogram is exact on synthetic buffers: a solid color fills exactly
+/// one bin per channel, a gradient fills every bin once, and clipping
+/// counts are exact pixel counts. Ground truth by construction — no P3,
+/// no reference renderer, just counting.
+#[test]
+fn histogram_counts_bins_and_clipped_pixels_exactly() {
+    // Solid red 2x2: R[255]=4, G[0]=4, B[0]=4, nothing clipped.
+    let red = vec![
+        255u8, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+    ];
+    let h = image_viewer::histogram_rgba(&red, 2, 2);
+    assert_eq!(h.bins[0][255], 4);
+    assert_eq!(h.bins[1][0], 4);
+    assert_eq!(h.bins[2][0], 4);
+    assert_eq!(h.bins[0][0], 0);
+    assert_eq!(h.black, 0);
+    assert_eq!(h.white, 0);
+    // Half pure black, half pure white: clipping is exact.
+    let bw = vec![
+        0u8, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    ];
+    let h = image_viewer::histogram_rgba(&bw, 2, 2);
+    assert_eq!(h.black, 2);
+    assert_eq!(h.white, 2);
+    // Linear ramp across all 256 levels: every bin holds exactly one pixel.
+    let mut ramp = Vec::with_capacity(256 * 4);
+    for v in 0..=255u8 {
+        ramp.extend_from_slice(&[v, v, v, 255]);
+    }
+    let h = image_viewer::histogram_rgba(&ramp, 256, 1);
+    for ch in 0..3 {
+        for (level, &count) in h.bins[ch].iter().enumerate() {
+            assert_eq!(count, 1, "channel {ch} level {level}");
+        }
+    }
+    assert_eq!(h.black, 1);
+    assert_eq!(h.white, 1);
+}
+
+/// The histogram reaches the panel through the decode worker, not through
+/// the UI: `decode_preview` counts the preview buffer it already holds and
+/// the pane draws the cached numbers. A pane that counted pixels itself
+/// would walk a buffer per frame, and a worker that skipped the count
+/// would leave the panel showing a default histogram — zeros that read as
+/// "this photo is black".
+#[test]
+fn the_histogram_is_counted_on_the_worker_and_drawn_from_cache() {
+    let src = include_str!("../src/main.rs");
+    let decode = fn_body(src, "fn decode_preview(").expect("decode_preview");
+    assert!(
+        decode.contains("image_viewer::histogram_rgba("),
+        "decode_preview must count the preview buffer it already holds: the \
+         CPU pixels are dropped after upload, so later is too late"
+    );
+    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    assert!(
+        !central.contains("histogram_rgba("),
+        "the paint path must not count pixels itself — that is a buffer walk \
+         per frame"
+    );
+}
+
 /// The frame clock survives its move to lib with speed: file timing pins
 /// the old behavior, and 2x halves both the index math and the repaint wait
 /// (which is real time — scheduling an effective-time wait would repaint

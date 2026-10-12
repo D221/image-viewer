@@ -168,6 +168,11 @@ on the same worker that decodes the picture, so with the panels hidden — F11, 
 image. Leaving fullscreen starts the read again, so the panel is never empty
 when you can see it.
 
+Below the file's own data, a **Histogram** section shows per-channel levels
+for the picture on screen plus black- and white-clipped pixel counts with
+percentages. The levels are counted on the decode worker from the preview
+buffer and carried with it, so the panel draws numbers rather than pixels.
+
 ### Ratings
 
 Each image carries three rating attributes: a star rating (0-5), a pick flag,

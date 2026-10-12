@@ -1274,6 +1274,11 @@ struct PreviewData {
     // or TurboJPEG will not cut it where the user drew.
     exif_tag: u16,
     crop_grid: (u32, u32),
+    // Levels and clipped-pixel counts, counted on the worker from the same
+    // preview buffer the texture was uploaded from: a few hundred kilobytes
+    // walked once per decode, never per frame. Carried rather than recomputed
+    // because the CPU pixels are dropped after upload.
+    hist: image_viewer::Histogram,
 }
 
 /// What one grid cell needs, and nothing else.
@@ -1458,6 +1463,7 @@ fn decode_preview(path: &Path, target_dim: u32, page: u32) -> Result<PreviewData
         target: target_dim,
         exif_tag: r.exif_tag,
         crop_grid: r.crop_grid,
+        hist: image_viewer::histogram_rgba(&r.preview.rgba, r.preview.width, r.preview.height),
     })
 }
 
@@ -1722,6 +1728,9 @@ struct Preview {
     // *stored* coordinates, and that composition needs the tag.
     exif_tag: u16,
     crop_grid: (u32, u32),
+    // Levels and clipped-pixel counts from the decode worker: 3KB that rides
+    // the preview for free, so the panel draws numbers rather than pixels.
+    hist: image_viewer::Histogram,
 }
 
 /// Playback state for the animation currently on screen.
@@ -3331,6 +3340,7 @@ impl MyApp {
                                 target: p.target,
                                 exif_tag: p.exif_tag,
                                 crop_grid: p.crop_grid,
+                                hist: p.hist,
                                 px,
                                 tiles: HashMap::new(),
                             },
@@ -8950,6 +8960,69 @@ impl eframe::App for MyApp {
                         ui.label(format!(
                             "Size: {:.1} MB",
                             md.len() as f64 / (1024.0 * 1024.0)
+                        ));
+                    }
+                }
+                // Exposure histogram: levels counted on the worker from the
+                // preview-size buffer and carried with the preview, so this
+                // draws numbers rather than pixels. Below the file's own
+                // metadata because it describes the pixels, not the camera —
+                // and what the file contains is the thing the EXIF lines
+                // cannot say. Of the shown image (first frame for an
+                // animation), at preview resolution: plenty for exposure,
+                // and a full-res walk would buy nothing but time.
+                if let Some(hist) = self
+                    .shown
+                    .as_ref()
+                    .and_then(|k| self.previews.get(k))
+                    .map(|pv| &pv.hist)
+                {
+                    ui.separator();
+                    ui.heading("Histogram");
+                    let total = hist.counted();
+                    if total > 0 {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::Vec2::new(ui.available_width(), 64.0),
+                            egui::Sense::hover(),
+                        );
+                        let painter = ui.painter().with_clip_rect(rect);
+                        let max = hist
+                            .bins
+                            .iter()
+                            .flatten()
+                            .copied()
+                            .max()
+                            .unwrap_or(1)
+                            .max(1) as f32;
+                        for (ch, color) in [
+                            (0, egui::Color32::RED),
+                            (1, egui::Color32::GREEN),
+                            (2, egui::Color32::BLUE),
+                        ] {
+                            let pts: Vec<egui::Pos2> = (0..256)
+                                .map(|i| {
+                                    egui::Pos2::new(
+                                        rect.min.x + i as f32 / 255.0 * rect.width(),
+                                        rect.max.y - hist.bins[ch][i] as f32 / max
+                                            * rect.height(),
+                                    )
+                                })
+                                .collect();
+                            painter.add(egui::Shape::line(
+                                pts,
+                                egui::Stroke::new(1.0, color),
+                            ));
+                        }
+                        let pct = |n: u32| 100.0 * n as f64 / total as f64;
+                        ui.label(format!(
+                            "Black clipped: {} ({:.1}%)",
+                            hist.black,
+                            pct(hist.black)
+                        ));
+                        ui.label(format!(
+                            "White clipped: {} ({:.1}%)",
+                            hist.white,
+                            pct(hist.white)
                         ));
                     }
                 }
