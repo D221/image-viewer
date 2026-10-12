@@ -5124,6 +5124,66 @@ fn the_decode_failure_names_unclaimed_bytes_only() {
     );
 }
 
+/// A failed image must never show "Loading…": its decode will never be
+/// re-issued, so the overlay is a promise nothing keeps — and navigating
+/// away and back must re-state the stored error rather than blank it, since
+/// the revisit produces no new message of its own.
+#[test]
+fn a_failed_image_shows_its_error_instead_of_loading_forever() {
+    let src = include_str!("../src/main.rs");
+    // Anchored on the overlay's own condition, not on the first "Loading…"
+    // in the function: that literal also starts the shown-None branch and
+    // appears in a comment, and both read before the overlay without
+    // guarding it. `panel.left_top()` is the paint call itself, unique in
+    // the file.
+    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    let at = central
+        .find("self.cur != self.shown")
+        .expect("the overlay condition");
+    let tail = &central[at..];
+    let gate = tail.find("Kind::Preview))").expect("the failed check");
+    let paint = tail.find("panel.left_top()").expect("the overlay paint");
+    // The gate must come *before* the paint it guards: a check after the
+    // text is painted is a comment, not a condition.
+    assert!(
+        gate < paint,
+        "the Loading overlay must be gated on the failed set: without the \
+         gate it paints forever over an image that will never arrive"
+    );
+    // ...and `goto` re-states the stored message, because the revisit
+    // produces no new decode and therefore no new error of its own.
+    let goto = fn_body(src, "fn goto(&mut self").expect("goto");
+    assert!(
+        goto.contains("load_errors.get("),
+        "goto must re-state a stored failure message: clearing the banner \
+         without this leaves the revisit blank with no error and no spinner \
+         activity"
+    );
+}
+
+/// The stored message lives and dies with the `failed` entry: written on
+/// the same arm, cleared at every site that clears it. A message that
+/// outlives its failure is shown for an image that now decodes.
+#[test]
+fn the_stored_failure_message_cannot_outlive_its_failure() {
+    let src = include_str!("../src/main.rs");
+    assert!(
+        src.contains("self.load_errors.insert(key.clone(), msg.clone())"),
+        "the message must be stored on the failure arm, beside the failed \
+         entry it describes"
+    );
+    for site in [
+        "self.load_errors.retain(|k, _| k.path != p)",
+        "self.load_errors.clear()",
+    ] {
+        assert!(
+            src.contains(site),
+            "every site that clears `failed` must clear the message too, or \
+             a fixed file keeps reporting its old failure"
+        );
+    }
+}
+
 /// The frame clock survives its move to lib with speed: file timing pins
 /// the old behavior, and 2x halves both the index math and the repaint wait
 /// (which is real time — scheduling an effective-time wait would repaint

@@ -1901,6 +1901,12 @@ struct MyApp {
     /// `(key, kind)` pairs that failed to decode, permanent for the session.
     /// Per *image*, so a document with one unreadable page keeps its other pages.
     failed: HashSet<(ImgKey, Kind)>,
+    /// What a failed preview said, by image key — so navigating back to it
+    /// re-states the error instead of showing "Loading…" for a decode that
+    /// will never be re-issued. Written on the same arm that records the
+    /// `failed` entry and cleared everywhere that entry is cleared; the two
+    /// cannot drift apart because there is exactly one of each site.
+    load_errors: HashMap<ImgKey, String>,
     clock: u64,
     frame: u64,
 
@@ -2333,6 +2339,7 @@ impl MyApp {
             rx,
             previews: HashMap::new(),
             failed: HashSet::new(),
+            load_errors: HashMap::new(),
             clock: 0,
             frame: 0,
             cur: None,
@@ -2578,6 +2585,18 @@ impl MyApp {
         }
         self.error = None;
         self.notice = None;
+        // A revisit to an already-failed image issues no new decode, so say
+        // what the first attempt said rather than showing "Loading…" for a
+        // job that will never run. The entry is cleared everywhere the
+        // `failed` entry is, so this cannot outlive the failure it reports.
+        if let Some(msg) = self
+            .cur
+            .as_ref()
+            .and_then(|c| self.load_errors.get(c))
+            .cloned()
+        {
+            self.error = Some(msg);
+        }
         self.exif_info = None;
         self.exif_loading = self.cur.is_some();
         // Reset the write base with the read marker: until the new sidecar
@@ -3401,8 +3420,15 @@ impl MyApp {
                     }
                     Err(e) => {
                         eprintln!("Failed to load {}: {}", key, e);
+                        // Stored as well as shown: navigating away clears the
+                        // banner, and navigating back issues no new decode
+                        // (the `failed` entry is permanent), so without this
+                        // the revisit shows "Loading…" for a job that will
+                        // never run. `goto` re-states it from here.
+                        let msg = format!("Failed to load {}: {}", key, e);
+                        self.load_errors.insert(key.clone(), msg.clone());
                         if Some(&key) == self.cur.as_ref() {
-                            self.error = Some(format!("Failed to load {}: {}", key, e));
+                            self.error = Some(msg);
                             self.waiting_load = false;
                         }
                         // Failed is per *image*, not per file: a document whose
@@ -4329,6 +4355,7 @@ impl MyApp {
         self.thumbs.remove(p);
         self.thumb_tries.remove(p);
         self.failed.retain(|(q, _)| q.path != p);
+        self.load_errors.retain(|k, _| k.path != p);
         // Drop the on-disk cell too. Nothing *depends* on this — the stamp in the
         // entry already makes the changed file a cache miss on the next request,
         // which is why the watcher being wrong cannot show a stale picture — but
@@ -4533,6 +4560,7 @@ impl MyApp {
         // other pages are unreachable and holding their pixels is pure waste.
         self.previews.retain(|k, _| k.path != p);
         self.failed.retain(|(k, _)| k.path != p);
+        self.load_errors.retain(|k, _| k.path != p);
         self.gallery.forget_page_count(&p);
         // Same reason: the file is unreachable from here, so anything keyed on its
         // path is unreachable too.
@@ -6925,13 +6953,22 @@ impl MyApp {
         }
 
         if self.cur.is_some() && self.cur != self.shown {
-            painter.text(
-                panel.left_top() + Vec2::new(10.0, 10.0),
-                egui::Align2::LEFT_TOP,
-                "Loading…",
-                egui::FontId::proportional(14.0),
-                Color32::from_white_alpha(200),
-            );
+            // Never for a target that already failed: its decode will never
+            // be re-issued, so "Loading…" is a promise nothing keeps, and the
+            // stored error in the status bar is the honest readout instead.
+            let failed = self
+                .cur
+                .as_ref()
+                .is_some_and(|k| self.failed.contains(&(k.clone(), Kind::Preview)));
+            if !failed {
+                painter.text(
+                    panel.left_top() + Vec2::new(10.0, 10.0),
+                    egui::Align2::LEFT_TOP,
+                    "Loading…",
+                    egui::FontId::proportional(14.0),
+                    Color32::from_white_alpha(200),
+                );
+            }
         }
     }
 
@@ -9813,6 +9850,7 @@ impl eframe::App for MyApp {
                 self.full = None;
                 self.anim = None;
                 self.failed.clear();
+                self.load_errors.clear();
                 self.reset_display();
                 self.goto(ctx);
             }
