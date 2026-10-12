@@ -41,7 +41,7 @@ use image_viewer::{
     set_thumbnail_cache,
     spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
     DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
-    SortMode, Xform, GRID_CELL, GRID_LABEL_H, GRID_ROW_H, MAX_FULL_PIXELS,
+    SortMode, Xform, GRID_LABEL_H, grid_row_h, MAX_FULL_PIXELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -1996,6 +1996,10 @@ struct MyApp {
     /// first step waits a full interval rather than firing at once.
     slideshow: bool,
     slideshow_last: Instant,
+    /// The folder's own order while a shuffled show runs, so stopping the
+    /// show puts it back. `None` whenever no shuffled show is running — the
+    /// flag and the saved order are set and cleared together, never apart.
+    slideshow_saved: Option<Vec<PathBuf>>,
     next_scan: Instant, // periodic folder rescan (watcher)
     /// When an external process was last spawned (user command, Explorer).
     /// Rate-limits spawns so a repeating chord can never fork-bomb the
@@ -2347,6 +2351,7 @@ impl MyApp {
             fit_debug: None,
             slideshow: false,
             slideshow_last: Instant::now(),
+            slideshow_saved: None,
             next_scan: Instant::now() + RESCAN_INTERVAL,
             last_external_spawn: None,
             checker: Some(make_checker_texture(ctx)),
@@ -2808,6 +2813,48 @@ impl MyApp {
             }
         }
         moved
+    }
+
+    /// Install `files` as the gallery order, keeping the current image on
+    /// screen: the cursor is re-pointed by path, not by index, so a permuted
+    /// list does not jump to whatever now sits at the old slot.
+    ///
+    /// One funnel for both slideshow transitions (start shuffles, stop
+    /// restores), because the re-point is the part that is easy to forget and
+    /// a show that jumps on start or on stop is the symptom.
+    fn set_gallery_order(&mut self, files: Vec<PathBuf>) {
+        let current = self.gallery.current().map(|p| p.to_path_buf());
+        self.gallery.files = files;
+        if let Some(c) = current {
+            if let Some(i) = self.gallery.files.iter().position(|p| p == &c) {
+                self.gallery.index = i;
+            }
+        }
+    }
+
+    /// Begin a slideshow. With shuffle on, the folder's own order is saved
+    /// and the gallery walks a shuffled copy instead — same set of files,
+    /// fresh order every show. Stopping puts the saved order back, so this
+    /// changes nothing outside a running show.
+    fn start_slideshow(&mut self) {
+        self.slideshow = true;
+        self.slideshow_last = Instant::now();
+        if self.config.slideshow_shuffle && self.slideshow_saved.is_none() {
+            let saved = self.gallery.files.clone();
+            let mut order = saved.clone();
+            image_viewer::shuffle(&mut order);
+            self.set_gallery_order(order);
+            self.slideshow_saved = Some(saved);
+        }
+    }
+
+    /// End a slideshow from either off-ramp (the toggle or the natural
+    /// finish): a shuffled show puts the folder's own order back first.
+    fn stop_slideshow(&mut self) {
+        self.slideshow = false;
+        if let Some(saved) = self.slideshow_saved.take() {
+            self.set_gallery_order(saved);
+        }
     }
 
     /// The [`PageCtx`] the pairing is asked through: the gallery plus the
@@ -7124,9 +7171,14 @@ impl MyApp {
     /// move `grid_sel`, and Enter (or a click) opens it. Arrowing around a
     /// 2000-image folder therefore costs no re-decodes.
     fn gallery_grid(&mut self, ui: &mut egui::Ui, ctx: &Context, panel: egui::Rect) {
-        let cols = grid_cols(panel.width());
+        // One cell size in the app: the config value, clamped so a hand-edited
+        // config cannot park the grid at zero-width cells. Everything below —
+        // columns, row pitch, the go-back cell and each image cell — derives
+        // from it.
+        let cell = self.config.grid_cell.clamp(64.0, 400.0);
+        let cols = grid_cols(panel.width(), cell);
         self.grid_cols = cols; // Up/Down in update() step by this
-        let row_h = GRID_ROW_H;
+        let row_h = grid_row_h(cell);
         // How many rows actually fit, so PageUp/PageDown move a page rather than
         // a fixed guess. `show_rows` adds vertical item spacing on top of
         // row_h, so the pitch is not row_h.
@@ -7194,7 +7246,7 @@ impl MyApp {
                                     .unwrap_or_else(|| self.folder.to_string_lossy().into_owned());
                                 let name = format!("^ {}", folder_name);
                                 let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(GRID_CELL, GRID_CELL + GRID_LABEL_H),
+                                    egui::vec2(cell, cell + GRID_LABEL_H),
                                     egui::Sense::click(),
                                 );
                                 let fill = if idx == sel {
@@ -7218,7 +7270,7 @@ impl MyApp {
                                 );
                                 let img_area = egui::Rect::from_min_size(
                                     egui::Pos2::new(inner.min.x, inner.min.y),
-                                    egui::vec2(inner.width(), GRID_CELL),
+                                    egui::vec2(inner.width(), cell),
                                 );
                                 child.allocate_exact_size(img_area.size(), egui::Sense::hover());
                                 child.painter().text(
@@ -7267,7 +7319,7 @@ impl MyApp {
                                 let resp = grid_cell(
                                     ui,
                                     path,
-                                    GRID_CELL,
+                                    cell,
                                     idx == sel,
                                     clock,
                                     thumbs,
@@ -8500,7 +8552,7 @@ impl eframe::App for MyApp {
                 ) {
                     self.slideshow_last = Instant::now();
                     if !self.step(ctx, true) {
-                        self.slideshow = false;
+                        self.stop_slideshow();
                         self.notice = Some("Slideshow finished".into());
                     }
                 }
@@ -9030,6 +9082,23 @@ impl eframe::App for MyApp {
                     human_bytes(image_viewer::THUMB_CACHE_MAX_BYTES),
                     thumb_cache_root().display()
                 ));
+                // Sits with the thumbnail cache because it is the same surface:
+                // what a grid cell looks like. Applies live — the grid reads
+                // the value every frame, so no invalidation or re-decode.
+                ui.horizontal(|ui| {
+                    ui.label("Grid cell size:");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut self.config.grid_cell)
+                                .range(64.0..=400.0)
+                                .speed(1.0),
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
+                    ui.label("pt");
+                });
                                 let mut new_filter = self.config.downscale_filter;
                 ui.horizontal(|ui| {
                     ui.label("Filter:");
@@ -9540,8 +9609,11 @@ impl eframe::App for MyApp {
                         })
                         .clicked()
                     {
-                        self.slideshow = !self.slideshow;
-                        self.slideshow_last = Instant::now();
+                        if self.slideshow {
+                            self.stop_slideshow();
+                        } else {
+                            self.start_slideshow();
+                        }
                     }
                     ui.label("every");
                     if ui
@@ -9554,6 +9626,16 @@ impl eframe::App for MyApp {
                         self.config.save(&self.config_path);
                     }
                     ui.label("s");
+                    // Beside the pace because it is the same decision — how a
+                    // show walks — and a shuffle buried in a submenu is a
+                    // setting nobody finds. Session-only like the show itself:
+                    // reshuffled every start, folder order restored on stop.
+                    if ui
+                        .checkbox(&mut self.config.slideshow_shuffle, "Shuffle")
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
                 });
                 // Animation playback speed, next to the slideshow for the
                 // same reason it sits there: both are time-based playback,

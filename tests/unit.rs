@@ -1879,6 +1879,47 @@ fn a_config_written_before_smooth_downscale_still_loads_and_stays_off() {
     );
 }
 
+#[test]
+fn a_config_written_before_grid_cell_size_still_loads_at_150() {
+    // Same two constructions as the Smooth test above: an old file without the
+    // key (serde default) and a missing file (`Config::load`'s hand-built
+    // struct). Either one forgotten parks every existing user on the wrong
+    // cell size with no error.
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert_eq!(
+        cfg.grid_cell, 150.0,
+        "an old config without the key must come up at 150pt cells"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
+    assert_eq!(
+        fresh.grid_cell, 150.0,
+        "a first run must also come up at 150pt cells"
+    );
+}
+
+#[test]
+fn a_config_written_before_slideshow_shuffle_still_loads_with_it_off() {
+    // A shuffled show surprises anyone who did not ask for one, so an old
+    // config — and a new install — must come up with it off. Same two
+    // constructions as the tests above.
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert!(
+        !cfg.slideshow_shuffle,
+        "an old config without the key must not start shuffling shows"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
+    assert!(
+        !fresh.slideshow_shuffle,
+        "a first run must also come up with shuffle off"
+    );
+}
+
 /// **The regression guard: `Smooth` must not be the default, and the reason must
 /// not quietly stop being true.**
 ///
@@ -3241,7 +3282,69 @@ fn test_fit_to_window() {
 }
 
 
-use image_viewer::{grid_cols, GRID_CELL, GRID_LABEL_H, GRID_ROW_H};
+use image_viewer::{grid_cols, grid_row_h, GRID_CELL, GRID_LABEL_H};
+
+/// The grid geometry follows the cell size instead of the constant: 150pt is
+/// six columns across 1000pt, 300pt is three, and the row pitch is always
+/// cell + label + spacing.
+#[test]
+fn grid_geometry_follows_the_cell_size() {
+    assert_eq!(image_viewer::grid_cols(1000.0, 150.0), 6);
+    assert_eq!(image_viewer::grid_cols(1000.0, 300.0), 3);
+    assert_eq!(image_viewer::grid_row_h(150.0), 178.0);
+    assert_eq!(image_viewer::grid_row_h(300.0), 328.0);
+}
+
+/// A shuffled show saves the folder's order on start and both off-ramps
+/// restore it through one funnel. Asserted as counts, because the defect
+/// this guards is a *third* site setting the flag directly: a stop path
+/// that writes `slideshow = false` itself skips the restore and leaves the
+/// folder shuffled with no way back.
+#[test]
+fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
+    let src = include_str!("../src/main.rs");
+    let start = fn_body(src, "fn start_slideshow(&mut self)").expect("start_slideshow");
+    assert!(
+        start.contains("image_viewer::shuffle("),
+        "starting a shuffled show must walk a shuffled copy, not the folder order"
+    );
+    assert!(
+        start.contains("slideshow_saved = Some("),
+        "and it must save the folder's own order first, or stopping has \
+         nothing to put back"
+    );
+    let stop = fn_body(src, "fn stop_slideshow(&mut self)").expect("stop_slideshow");
+    assert!(
+        stop.contains("slideshow_saved.take()"),
+        "stopping must consume the saved order exactly once: a take that is \
+         missing restores nothing, and one that is not a take restores twice"
+    );
+    // The flag is written in exactly one place — inside stop_slideshow
+    // itself. A second writer anywhere else is a stop path that skips the
+    // restore and leaves the folder shuffled with no way back.
+    assert_eq!(
+        src.matches("self.slideshow = false").count(),
+        1,
+        "stopping the show must go through stop_slideshow alone: every direct \
+         write of the flag elsewhere is an off-ramp that skips the restore"
+    );
+}
+/// A shuffle is a permutation: same set in, same set out, in an order that
+/// is not the input order. The reorder half is probabilistic, so it runs
+/// over 64 files, where shuffling to identity has probability 1/64!.
+#[test]
+fn shuffle_keeps_every_file_and_reorders() {
+    let mut files: Vec<std::path::PathBuf> = (0..64)
+        .map(|i| std::path::PathBuf::from(format!("{i:03}.jpg")))
+        .collect();
+    let before = files.clone();
+    image_viewer::shuffle(&mut files);
+    let (mut a, mut b) = (before.clone(), files.clone());
+    a.sort();
+    b.sort();
+    assert_eq!(a, b, "a shuffle must not lose, duplicate or invent files");
+    assert_ne!(files, before, "a 64-file shuffle that changes nothing shuffled nothing");
+}
 
 /// Drive one headless egui pass and return its output.
 ///
@@ -3272,7 +3375,7 @@ fn grid_row(
 ) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show_rows(ui, GRID_ROW_H, 1, |ui, _| {
+        .show_rows(ui, grid_row_h(GRID_CELL), 1, |ui, _| {
             ui.horizontal(|ui| {
                 *gap = ui.spacing().item_spacing.x;
                 for i in 0..cols {
@@ -3351,7 +3454,7 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
         egui::CentralPanel::default().show(ui, |ui| {
             panel = ui.available_rect_before_wrap();
             // Same column math gallery_grid uses.
-            cols = grid_cols(panel.width());
+            cols = grid_cols(panel.width(), GRID_CELL);
             let mut hits = Vec::new();
             grid_row(ui, cols, &mut rects, &mut hits, &mut gap);
         });
@@ -3840,14 +3943,14 @@ fn test_gallery_scroll_offset_lands_the_selected_row_in_view() {
         let mut pitch = 0.0f32;
         let _ = run_pass(ctx, RawInput::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                pitch = GRID_ROW_H + ui.spacing().item_spacing.y;
+                pitch = grid_row_h(GRID_CELL) + ui.spacing().item_spacing.y;
                 // Mirrors the real grid: auto_shrink([false, true]) is what
                 // gives the scrollbar somewhere to live.
                 let mut sa = egui::ScrollArea::vertical().auto_shrink([false, true]);
                 if let Some(o) = offset {
                     sa = sa.vertical_scroll_offset(o);
                 }
-                sa.show_rows(ui, GRID_ROW_H, ROWS, |ui, range| {
+                sa.show_rows(ui, grid_row_h(GRID_CELL), ROWS, |ui, range| {
                     rows.extend(range.clone());
                     for row in range {
                         ui.horizontal(|ui| {
@@ -3873,7 +3976,7 @@ fn test_gallery_scroll_offset_lands_the_selected_row_in_view() {
     // 1. Fresh context, offset untouched: the selected row is off-screen and
     //    never built, so scroll_to_me has nothing to act on. This is the bug.
     let (rows, pitch) = laid_out_rows(&ctx, None);
-    assert!(pitch > GRID_ROW_H, "show_rows adds item spacing to the pitch");
+    assert!(pitch > grid_row_h(GRID_CELL), "show_rows adds item spacing to the pitch");
     assert!(
         !rows.contains(&SEL_ROW),
         "row {SEL_ROW} must start off-screen, otherwise this test is not \

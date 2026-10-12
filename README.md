@@ -397,7 +397,7 @@ should not quietly do that.
 > no quotes needed (there is no shell — quotes would arrive as literal `"`
 > characters). Spawns are detached, never waited on, and rate-limited to one
 > a second; chords fire on physical presses only, so holding one cannot
-> spawn a storm. One thing is open, written up in `TODO.md` §8:
+> spawn a storm. One thing is open, written up in `TODO.md` §7:
 >
 > - **A hard freeze opening Paint was reported twice and is parked.**
 >   Spawning itself is exonerated (a `cmd.exe` command runs exactly once, and
@@ -524,6 +524,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Smooth | off | Low-passes a downscaled page harder than the minimum, which hides a dot grid on some pages and costs edge sharpness. **Off by default** — it depends on the page. See the note below |
 | Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
 | Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB. See the note below |
+| Grid cell size | 150 pt | Side of one gallery-grid thumbnail (64–400 pt). Applies live, no re-decode |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
 | Mouse wheel flips images | off | Wheel pages instead of zooming (`Ctrl`+wheel still zooms) |
 | Loop back at folder ends | on | Wrapping past the last image returns to the first. On by default so older configs keep their existing behaviour |
@@ -531,7 +532,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Right-to-left pages | **on** | A turn opens on the right, so `←` reads forwards. `D`. On by default because it is only read while manga mode is |
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
 | Descending sort | off | Reverse the sort order (Z→A, oldest/smallest first) |
-| Slideshow | off, every 3 s | Start/stop button plus pace (1–60 s). Advances until toggled off, or stops at the end with looping off |
+| Slideshow | off, every 3 s | Start/stop button plus pace (1-60 s) and a Shuffle checkbox. Advances until toggled off, or stops at the end with looping off. Shuffle reshuffles every show and restores the folder order on stop |
 | Animation speed | 1× (file timing) | GIF/WebP/APNG playback multiplier, 0.1–8×, live |
 | Esc closes the app | on | Esc in crop mode drops the frame first; with this off Esc never quits |
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |

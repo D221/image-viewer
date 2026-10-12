@@ -163,6 +163,22 @@ fn test_other_containers_are_not_inspected_not_assumed() {
 }
 
 #[test]
+fn test_gif_has_no_profile_chunk_so_it_is_untagged_srgb() {
+    // A GIF carries no colour profile chunk at all — its colours come from a
+    // palette. The honest answer is UntaggedSrgb, by the same convention
+    // untagged PNG and JPEG already get, not NotInspected.
+    for bytes in [&b"GIF87a"[..], &b"GIF89a"[..]] {
+        let info = color_info_from_bytes(bytes, false, false);
+        assert_eq!(
+            info.space,
+            ColorSpace::UntaggedSrgb,
+            "{:?} has no profile to inspect, so it is untagged sRGB",
+            &bytes[..6]
+        );
+    }
+}
+
+#[test]
 fn test_malformed_profiles_never_panic_and_never_claim_srgb() {
     // Offsets, lengths and tag counts come straight out of the file. Every one
     // of these must degrade to Unknown, and must not be mistaken for sRGB.
@@ -651,7 +667,11 @@ fn test_a_corrupt_heif_claims_nothing_about_its_colour() {
 
     let cases: Vec<(&str, Vec<u8>)> = vec![
         ("empty", Vec::new()),
-        ("not a container at all", b"GIF89a and then some".to_vec()),
+        // Deliberately no recognised magic: GIF magic would make this a GIF
+        // by the detector's magic-based contract (see
+        // `test_gif_has_no_profile_chunk_so_it_is_untagged_srgb`), which is a
+        // claim about a format, not about garbage.
+        ("not a container at all", b"XXXX and then some".to_vec()),
         ("truncated inside ftyp", good[..12].to_vec()),
         ("truncated inside meta", good[..good.len() - 40].to_vec()),
     ];

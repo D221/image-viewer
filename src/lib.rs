@@ -333,6 +333,17 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub thumbnail_cache: bool,
 
+    /// Side of one gallery-grid thumbnail cell, in points. 150pt is the shipped
+    /// size; larger cells judge photos better on high-DPI displays, smaller
+    /// ones fit more per row. Read through [`grid_cols`] and [`grid_row_h`],
+    /// which derive everything else from it, so there is one number and not
+    /// a cell size plus a row pitch that can disagree.
+    ///
+    /// `#[serde(default)]` is not enough here — the default must be 150, not
+    /// 0, and 0 would mean zero-width cells. `default_grid_cell`.
+    #[serde(default = "default_grid_cell")]
+    pub grid_cell: f32,
+
     /// Only allow one instance of the viewer to run. When on (the default),
     /// a second launch tries to raise the first and exits; when off, multiple
     /// windows can open (each with its own archive temp dir, which is why the
@@ -403,6 +414,16 @@ pub struct Config {
     /// and 0 would mean "advance every frame". `default_slideshow_secs`.
     #[serde(default = "default_slideshow_secs")]
     pub slideshow_secs: u32,
+
+    /// Walk the folder in a fresh random order while the slideshow runs.
+    /// Session-only like the show itself: the order is reshuffled every time
+    /// a show starts and the folder's own order comes back when it ends, so
+    /// this changes nothing outside a running show.
+    ///
+    /// Off by default: a shuffled show surprises anyone who did not ask for
+    /// one.
+    #[serde(default)]
+    pub slideshow_shuffle: bool,
 
     /// Animation playback speed multiplier (1.0 = file timing). Read through
     /// [`anim_frame_state`], which clamps.
@@ -756,6 +777,12 @@ fn default_true() -> bool {
     true
 }
 
+/// The shipped grid cell size, and the value an old config without the key
+/// comes up on.
+fn default_grid_cell() -> f32 {
+    GRID_CELL
+}
+
 /// Portable mode: an empty `portable.txt` beside the executable keeps
 /// everything the app would otherwise scatter — config, thumbnails, spreads
 /// store, wallpaper copy — in that same folder. No interface beyond the
@@ -835,6 +862,7 @@ impl Config {
             convert_wide_gamut: false,
             crop_aspect: CropAspect::default(),
             thumbnail_cache: true,
+            grid_cell: default_grid_cell(),
             single_instance: true,
             last_by_folder: std::collections::HashMap::new(),
             manga_mode: false,
@@ -843,6 +871,7 @@ impl Config {
             keybindings: std::collections::HashMap::new(),
             user_commands: Vec::new(),
             slideshow_secs: default_slideshow_secs(),
+            slideshow_shuffle: false,
             anim_speed: default_anim_speed(),
             zoom_presets: default_zoom_presets(),
             always_on_top: false,
@@ -1229,17 +1258,23 @@ pub enum SortMode {
     Random,
 }
 
-/// Side of one gallery-grid (G) thumbnail.
+/// Side of one gallery-grid (G) thumbnail. The shipped size and the default
+/// every config without the key comes up on; the live value is
+/// [`Config::grid_cell`], which this only feeds.
 pub const GRID_CELL: f32 = 150.0;
 /// Label strip reserved under each grid thumbnail for the file name.
 pub const GRID_LABEL_H: f32 = 20.0;
-/// Vertical pitch of one grid row (cell + label + inter-row padding).
-pub const GRID_ROW_H: f32 = GRID_CELL + GRID_LABEL_H + 8.0;
+/// Vertical pitch of one grid row for a cell size: cell + label + inter-row
+/// padding. A function rather than a constant so there is one cell size in
+/// the app and not a size plus a pitch that can disagree.
+pub fn grid_row_h(cell: f32) -> f32 {
+    cell + GRID_LABEL_H + 8.0
+}
 
 /// How many grid cells fit across a display area `panel_w` points wide.
 /// Cells are laid out with egui's default 8pt item spacing, hence the +8.
-pub fn grid_cols(panel_w: f32) -> usize {
-    ((panel_w / (GRID_CELL + 8.0)).floor() as usize).clamp(1, 24)
+pub fn grid_cols(panel_w: f32, cell: f32) -> usize {
+    ((panel_w / (cell + 8.0)).floor() as usize).clamp(1, 24)
 }
 
 /// Which wgpu backends to enable at instance-creation time.
@@ -2112,8 +2147,10 @@ fn apply_sort_order(files: &mut [PathBuf], mode: SortMode, descending: bool) {
     }
 }
 
-/// Tiny xorshift shuffle (avoids a `rand` dependency).
-fn shuffle(files: &mut [PathBuf]) {
+/// Tiny xorshift shuffle (avoids a `rand` dependency). Public so a shuffled
+/// slideshow can reuse the same order Random sort gets, rather than a second
+/// implementation that could disagree with it about what "shuffled" means.
+pub fn shuffle(files: &mut [PathBuf]) {
     if files.len() < 2 {
         return;
     }
@@ -5057,6 +5094,12 @@ pub fn color_info_from_bytes(bytes: &[u8], is_jpeg: bool, is_png: bool) -> Color
     // knows only "not a JPEG, not a PNG" still gets a real answer.
     if is_heif_bytes(bytes) {
         return heif_color_info(bytes);
+    }
+    // A GIF has no colour profile chunk at all — its colours come from a
+    // palette. UntaggedSrgb by the same convention untagged PNG and JPEG get,
+    // not NotInspected.
+    if is_gif_bytes(bytes) {
+        return ColorInfo::plain(ColorSpace::UntaggedSrgb);
     }
     ColorInfo::not_inspected()
 }

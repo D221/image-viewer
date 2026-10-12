@@ -84,7 +84,7 @@ signal — confirm `red_primaries == Some(P3_D50_RED)` before touching pixels.
 
 ---
 
-## 2. WebP and GIF colour — the blind spot is not the one that was assumed
+## 2. WebP colour — the last uninspected format
 
 This item was written as "HEIF that states its colour with `nclx` instead of a
 profile". **Running `--icc-scan` over the real library says otherwise.** Of 1001
@@ -103,19 +103,18 @@ images in `phone_backup\Download\Ttg`:
 is still correct to keep — `None` must not be read as sRGB — it is simply not
 where the remaining gap is.
 
-So the real remaining work is two formats, and it is smaller than this item was:
+So the remaining work is one format:
 
-- **WebP (13 files).** A WebP carries its profile in a RIFF `ICCP` chunk, and
+- **WebP.** A WebP carries its profile in a RIFF `ICCP` chunk, and
   nothing here parses it. This is the same shape as the JPEG `APP2` chunk
   reassembly that already exists, ~20 lines of RIFF walking. There is a fixture
   in `test-images` (`color-webp-uninspected.webp`) and 13 real files to check
   against.
-- **GIF (7 files).** A GIF has no colour profile chunk at all — its colours come
-  from a palette. The honest answer is `UntaggedSrgb` by the same convention
-  untagged PNG and JPEG already get, not `NotInspected`. That is a one-line
-  change plus a test.
 
-Neither is on the conversion path (§1): both only make the report honest.
+(Done: GIF reports `UntaggedSrgb` — a GIF has no colour profile chunk, so by
+the same convention untagged PNG and JPEG get. Landed with its test.)
+
+It is not on the conversion path (§1): it only makes the report honest.
 
 ---
 
@@ -149,9 +148,11 @@ list and is not**: it was assumed absent and is in fact implemented and careful
 (`main.rs` keeps the point under the cursor fixed, asking `spread_centre` at two
 different scales so a turn's anchor holds as the layout moves). Do not "add" it.
 
-Shipped from this survey, or in progress: **undo** (`Ctrl+Z`/`Ctrl+Shift+Z`, view
-transforms only) and **ratings/tags** (XMP sidecars, 0-5 stars + flag + keywords,
-with `stars:`/`flagged`/`tag:` in the filter box). Both specced in
+Shipped from this survey: **undo** (`Ctrl+Z`/`Ctrl+Shift+Z`, view
+transforms only), **ratings/tags** (XMP sidecars, 0-5 stars + flag + keywords,
+with `stars:`/`flagged`/`tag:` in the filter box), **grid cell size** (setting,
+150pt default) and **slideshow shuffle** (reshuffled every show, folder order
+restored on stop). Both specced in
 `docs/superpowers/specs/2026-10-09-undo-and-ratings-design.md`.
 
 - **Histogram / exposure readout.** Nothing from the pixels themselves — the EXIF
@@ -160,22 +161,13 @@ with `stars:`/`flagged`/`tag:` in the filter box). Both specced in
   also **the cheapest instrument available for §1**: wide-gamut correctness has no
   ground truth, and a per-channel histogram plus black/white clipping counts is
   something that can be *compared* rather than squinted at. It would also inform
-  §7's `Smooth` decision, which is currently made by looking at pages.
+  the `Smooth` low-pass decision, which is currently made by looking at pages.
 
 - **Metadata editing.** Caption, artist, description: all absent, and there is no
   write path at all — `nom-exif` is read-only in this tree. Blocked on the same
   question as the ratings' storage decision (§ ratings above), and if the XMP
   sidecar lands first then most of this is the same parser with more attributes.
   **Do it after, not before.**
-
-- **Grid cell size.** `GRID_CELL` is a hardcoded `const f32 = 150.0` with no
-  setting. Trivial — it is a constant and the layout already derives from it
-  (`GRID_ROW_H`, `grid_cols`) — and the payoff is real on a high-DPI display
-  where 150 pt cells are either wasteful or too small to judge a photo.
-
-- **Slideshow shuffle.** One line: pick a random permutation when the show starts
-  instead of walking in sort order. Everything else about the show exists
-  (`slideshow_secs`, `slideshow_due`, loop).
 
 - **Comparison / light-table.** Declined by the user; recorded here only so it is
   not re-proposed from scratch. The reason is the app's own rule: N images
@@ -418,63 +410,8 @@ in `prev_anchor`'s doc comment, and the walk is the price of not having a wrong 
 
 ---
 
-## 7. ~~1440p photos still moiré at `Fast`~~ — fixed by `MIN_FILTER_SCALE`, and the
-##    hypothesis in this section was **wrong in an interesting way**
 
-**RESOLVED.** The arithmetic below was right; the *hypothesis drawn from it* was
-not, and the way it was wrong is the part worth keeping. Landed as
-`MIN_FILTER_SCALE` in `lib.rs`; measurements in `AGENTS.md`'s resampling section
-and in `.superpowers/sdd/2026-10-02-manga-spread-mode/prefilter-threshold.md`.
-
-**The numbers, which were right.** A 2560x1440 landscape photo is above
-`SPREAD_ASPECT`, so it is a lone spread filling the whole turn and is decoded for
-the **whole** panel. On a 1920-long panel that is **2560 / 1920 = 1.333x**, and
-`prefilter_dim(2560, 1920) = min(2560, 3840) = 2560` — the source, unchanged — so
-the pre-reduction does not fire. The 2.879x manga pages clear the threshold
-comfortably; a 1440p photo on a 1080p-tall panel does not.
-
-**The hypothesis, which was wrong.** "Lower or remove the prefilter's activation
-threshold" cannot work, and the reason is arithmetic rather than taste:
-`contributions` sets `filter_scale = strength / scale` from each stage's *own*
-ratio, so the stages of a split decimation `R` satisfy **`s1 * s2 == R` to f64
-rounding** at every cap from 1.60 to 1.02. The cap redistributes the width
-between two stages; it cannot add any. Sweeping it confirms the arithmetic and
-the ceiling together: 1440p lattice residual 91.9 codes shipped → 70.0 at cap
-1.10 → and no cap goes further.
-
-**What the real defect was, and it is one sentence:** the low-pass width was
-**discontinuous at `PREFILTER_FACTOR`**. Above it the two-stage path lands on
-`filter_scale == 2.0` exactly; below it the single pass drops straight to `R`, so
-a 1440p photo on a 1920 panel was being filtered at 1.333. `MIN_FILTER_SCALE = 2.0`
-closes the gap and is inert everywhere above the threshold.
-
-**Also settled here, and it was the question most likely to change the answer:**
-*how much of the artefact is GPU-side?* **At the reported geometry, none.** On a
-1920×1080 panel a 2560×1440 source is decoded to 1920×1080 and drawn 1:1, so
-`R_gpu` is **1.0000** and the whole artefact is in `linear_resize`. That is not
-true of every panel: a 1920×1000 panel leaves `R_gpu` 1.0799, and a **2560×1080
-panel leaves `R_soft` at 1.000 with 100% of the minification on the GPU**, where
-no software change can help and egui on wgpu cannot make mipmaps. **So a 1440p
-user whose window is wider than 16:9 gets an artefact this crate cannot fix**, and
-that is worth knowing before anyone reports the fix as incomplete.
-
-**Still owed, and not fixable here:**
-
-- **The residual third.** At floor 2.0 the 1440p residual is 55.9 codes where
-  `Smooth` reaches 28.6. The moiré is reduced by about two thirds, not abolished.
-  Floor 2.5 would reach 34.1 at a step rise of 2.020 px and is deliberately not
-  taken, because 2.5 is above the two-stage path's own 2.0 and would change every
-  reduction that works today. **Going further means re-tuning `FAST_STRENGTH`,**
-  which is the axis that owns "how much low-pass" and the one that regressed
-  `12.jpg` / `21.jpg` / `44.jpg`.
-- **A wide-panel 1440p photo is GPU-bound**, per the geometry split above.
-- **`main.rs` is unreachable from every test**, so the panel-shape → artefact
-  mapping is reasoned from `preview_target` and `spread_fit` plus the real
-  geometry table, not asserted end to end.
-
----
-
-## 8. UserCmd `mspaint.exe` freeze — parked, one open question
+## 7. UserCmd `mspaint.exe` freeze — parked, one open question
 
 Ctrl+1 with program `mspaint.exe` (empty args, later `{file}`) froze the whole
 box hard enough to need a reset. Twice. Investigation parked at the reporter's
@@ -515,19 +452,8 @@ request — do not ask them to re-test; the one experiment below can wait.
 
 ---
 
-## 9. Fit window to image (immersive `I`) — shipped as sticky `T`
 
-Shipped: `T` toggles a persisted mode. On fits now at 100%-or-fit, arrivals
-refit through the cursor key (toggles and rescans do not), user zooms re-hug
-without touching the zoom, and every resize centers on the old window —
-JPEGView's rules, minus its startup force-center. Skipped in grid,
-fullscreen, and mid-slideshow. The decisions above answer the open questions:
-the window follows images (arrival-keyed, so no dance without movement),
-minimum 200×120, monitor-clamped. Nothing further filed.
-
----
-
-## 10. Pixel-art mode: no filtering when zoomed
+## 8. Pixel-art mode: no filtering when zoomed
 
 Zooming into sprites smears them: every texture here uploads
 `TextureOptions::LINEAR`, so past 100% the GPU blends neighbouring pixels.
