@@ -179,6 +179,22 @@ fn test_gif_has_no_profile_chunk_so_it_is_untagged_srgb() {
 }
 
 #[test]
+fn test_webp_has_no_profile_chunk_so_it_is_untagged_srgb() {
+    // A WebP has no ICC profile chunk at all — the honest answer is
+    // UntaggedSrgb, by the same convention untagged PNG and JPEG already get,
+    // not NotInspected.
+    for bytes in [&b"RIFF....WEBP"[..], &b"RIFF....WEBPVP8X"[..]] {
+        let info = color_info_from_bytes(bytes, false, false);
+        assert_eq!(
+            info.space,
+            ColorSpace::UntaggedSrgb,
+            "{:?} has no profile to inspect, so it is untagged sRGB",
+            &bytes[..12]
+        );
+    }
+}
+
+#[test]
 fn test_malformed_profiles_never_panic_and_never_claim_srgb() {
     // Offsets, lengths and tag counts come straight out of the file. Every one
     // of these must degrade to Unknown, and must not be mistaken for sRGB.

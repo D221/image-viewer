@@ -2038,6 +2038,12 @@ struct MyApp {
     /// Selection index the grid's scroll offset was last set for. The offset is
     /// written only when this differs, so manual scrolling is never fought.
     grid_sel_scrolled: usize,
+    /// Last frame's grid scroll offset and viewport height, measured from the
+    /// `show_rows` output — not set by us, so wheel and scrollbar drags stay
+    /// in sync for free. The follow decision reads these; unmeasured (grid
+    /// just opened) they are 0 and the selection pins to the top instead.
+    grid_scroll: f32,
+    grid_view_h: f32,
     /// "User intent -> useful pixels" tracking for the perf report.
     lat: Latency,
     /// First frame's timestamp, for startup latency.
@@ -2367,6 +2373,8 @@ impl MyApp {
             history: image_viewer::EditHistory::default(),
             crop_mode: false,
             grid_sel_scrolled: usize::MAX,
+            grid_scroll: 0.0,
+            grid_view_h: 0.0,
             lat: Latency::default(),
             t_boot: perf::boot(),
             t_prev_frame: None,
@@ -6929,8 +6937,11 @@ impl MyApp {
                 self.gallery.index.min(self.gallery.len().saturating_sub(1))
             };
             // Always re-focus on open, even if the selection index happens to
-            // be the same: the offset is per-folder state.
+            // be the same: the offset is per-folder state. The viewport is
+            // unmeasured until the first frame lays out, so the follow
+            // decision pins the row to the top that once, then follows.
             self.grid_sel_scrolled = usize::MAX;
+            self.grid_view_h = 0.0;
             self.lat.t_gallery = Some(Instant::now());
         }
     }
@@ -7212,26 +7223,30 @@ impl MyApp {
         // room left for the bar, so a long folder had no visible way to show
         // where you were.
         let mut sa = egui::ScrollArea::vertical().auto_shrink([false, true]);
-        // Scroll to the selection, but only when the selection actually moved.
+        // Follow the selection the way file pickers do: leave the view alone
+        // while the selected row is visible, scroll the minimum distance when
+        // it is not — never pin the row to the top on every press. The offset
+        // and viewport below are last frame's measurements, so wheel and
+        // scrollbar drags stay in sync for free; unmeasured (just opened)
+        // they are 0 and the selection pins to the top instead, which is
+        // what opening on a deep selection has always done.
         //
-        // Two mechanisms were tried and both had a failure mode:
-        //
-        //  * `Response::scroll_to_me` cannot reach a row that is not laid out,
-        //    and `show_rows` only lays out the viewport — so opening the grid
-        //    on an off-screen image did nothing.
-        //  * Re-issuing it every frame (or forcing the offset every frame) fights
-        //    the user: any small manual scroll kept re-centring the selection.
-        //
-        // Writing the offset once per *selection change* handles opening,
-        // arrows and Home/End uniformly, is deterministic, and leaves manual
-        // scrolling completely alone. show_rows adds vertical item spacing on
-        // top of row_h, hence the pitch.
+        // Written only on a selection change: re-issuing it every frame (or
+        // forcing the offset every frame) fights the user, and any small
+        // manual scroll would snap back.
         if sel != self.grid_sel_scrolled {
             let pitch = row_h + ui.spacing().item_spacing.y;
-            sa = sa.vertical_scroll_offset((sel / cols) as f32 * pitch);
+            if let Some(offset) = image_viewer::grid_follow_offset(
+                sel / cols.max(1),
+                pitch,
+                self.grid_view_h,
+                self.grid_scroll,
+            ) {
+                sa = sa.vertical_scroll_offset(offset);
+            }
             self.grid_sel_scrolled = sel;
         }
-        sa.show_rows(ui, row_h, total_rows, |ui, rows| {
+        let grid_out = sa.show_rows(ui, row_h, total_rows, |ui, rows| {
                 for row in rows {
                     ui.horizontal(|ui| {
                         for col in 0..cols {
@@ -7336,6 +7351,10 @@ impl MyApp {
                     });
                 }
             });
+        // Measure every frame, decide only on selection change: the stored
+        // offset and viewport are what the follow decision reads next frame.
+        self.grid_scroll = grid_out.state.offset.y;
+        self.grid_view_h = grid_out.inner_rect.height();
 
         if let Some(i) = clicked {
             if zip_archive.is_some() && i == 0 {

@@ -103,16 +103,10 @@ images in `phone_backup\Download\Ttg`:
 is still correct to keep — `None` must not be read as sRGB — it is simply not
 where the remaining gap is.
 
-So the remaining work is one format:
-
-- **WebP.** A WebP carries its profile in a RIFF `ICCP` chunk, and
-  nothing here parses it. This is the same shape as the JPEG `APP2` chunk
-  reassembly that already exists, ~20 lines of RIFF walking. There is a fixture
-  in `test-images` (`color-webp-uninspected.webp`) and 13 real files to check
-  against.
-
 (Done: GIF reports `UntaggedSrgb` — a GIF has no colour profile chunk, so by
-the same convention untagged PNG and JPEG get. Landed with its test.)
+the same convention untagged PNG and JPEG get. Landed with its test.
+WebP reports `UntaggedSrgb` — a WebP has no ICC profile chunk, so by the same
+convention untagged PNG and JPEG get. Landed with its test.)
 
 It is not on the conversion path (§1): it only makes the report honest.
 

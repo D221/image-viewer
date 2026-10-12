@@ -3295,6 +3295,40 @@ fn grid_geometry_follows_the_cell_size() {
     assert_eq!(image_viewer::grid_row_h(300.0), 328.0);
 }
 
+/// Grid follow-scroll, the file-picker rule: a visible selection does not
+/// move the view at all, and a selection outside it scrolls the minimum
+/// distance to become visible. `None` means "leave the offset alone".
+#[test]
+fn grid_follow_scroll_leaves_a_visible_selection_alone() {
+    // Rows are 100pt; the view shows 100..600.
+    assert_eq!(image_viewer::grid_follow_offset(3, 100.0, 500.0, 100.0), None);
+    // Edges count as visible: row 1 starts exactly at the top, row 5 ends
+    // exactly at the bottom. Neither scrolls.
+    assert_eq!(image_viewer::grid_follow_offset(1, 100.0, 500.0, 100.0), None);
+    assert_eq!(image_viewer::grid_follow_offset(5, 100.0, 500.0, 100.0), None);
+    // Below the view: align the row's bottom with the view's bottom.
+    assert_eq!(
+        image_viewer::grid_follow_offset(7, 100.0, 500.0, 100.0),
+        Some(300.0)
+    );
+    // Above the view: align the row's top with the view's top.
+    assert_eq!(
+        image_viewer::grid_follow_offset(0, 100.0, 500.0, 100.0),
+        Some(0.0)
+    );
+    // No measurement yet (grid just opened): pin the row to the top, which
+    // is today's open behavior and the only sane thing with no viewport.
+    assert_eq!(
+        image_viewer::grid_follow_offset(9, 100.0, 0.0, 0.0),
+        Some(900.0)
+    );
+    // Never a negative offset, whatever the stored numbers say.
+    assert_eq!(
+        image_viewer::grid_follow_offset(0, 100.0, 500.0, -600.0),
+        Some(0.0)
+    );
+}
+
 /// A shuffled show saves the folder's order on start and both off-ramps
 /// restore it through one funnel. Asserted as counts, because the defect
 /// this guards is a *third* site setting the flag directly: a stop path
@@ -3327,6 +3361,37 @@ fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
         1,
         "stopping the show must go through stop_slideshow alone: every direct \
          write of the flag elsewhere is an off-ramp that skips the restore"
+    );
+}
+
+/// The grid follows the selection through the measured-offset rule, not by
+/// pinning the row to the top: the decision reads last frame's scroll offset
+/// and viewport height, and the frame writes both back for the next one.
+/// Either half missing and the rule silently stops working — an unread
+/// measurement means the decision runs on zeros, an unwritten one means it
+/// runs on last week's folder.
+#[test]
+fn the_grid_follows_through_measured_offsets_not_a_pinned_row() {
+    let src = include_str!("../src/main.rs");
+    let grid = fn_body(src, "fn gallery_grid(&mut self").expect("gallery_grid");
+    assert!(
+        grid.contains("image_viewer::grid_follow_offset("),
+        "the scroll decision must go through grid_follow_offset: pinning the \
+         row to the top on every press is the bug this replaces"
+    );
+    assert!(
+        !grid.contains("(sel / cols) as f32 * pitch"),
+        "the old pin-to-top arithmetic must be gone, not just bypassed"
+    );
+    assert!(
+        grid.contains("self.grid_scroll = grid_out.state.offset.y"),
+        "the frame must write the measured offset back, or the next decision \
+         runs on a stale folder's scroll"
+    );
+    assert!(
+        grid.contains("self.grid_view_h = grid_out.inner_rect.height()"),
+        "and the measured viewport height with it, or the visible-range check \
+         below is against a window that no longer exists"
     );
 }
 /// A shuffle is a permutation: same set in, same set out, in an order that
