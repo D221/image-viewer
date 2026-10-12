@@ -5077,6 +5077,53 @@ fn the_histogram_is_counted_on_the_worker_and_drawn_from_cache() {
     );
 }
 
+/// A grid cell whose thumbnail failed every attempt says so instead of
+/// loading forever: after `THUMB_TRIES` the ellipsis stopped meaning
+/// "decoding" and reads as a hang, so the cell gets the same "?" an
+/// unreadable container does.
+#[test]
+fn a_failed_grid_cell_says_so_instead_of_loading_forever() {
+    let src = include_str!("../src/main.rs");
+    let cell = fn_body(src, "fn grid_cell(").expect("grid_cell");
+    // Anchored on `>=`, not the bare name: the request guard in the same
+    // function also mentions `THUMB_TRIES` (with `<`), so a bare `contains`
+    // passes with the exhausted arm deleted — which is exactly the mutation
+    // that was tried, and exactly what this assertion has to catch.
+    assert!(
+        cell.contains(">= THUMB_TRIES"),
+        "the fallback must branch on exhausted attempts: without it a failed \
+         cell is indistinguishable from a decoding one, forever"
+    );
+    // The "?" has to sit behind that branch, not beside it — an unconditional
+    // "?" would replace the loading mark for cells that are genuinely still
+    // decoding.
+    let tries_at = cell.find(">= THUMB_TRIES").expect("tries check");
+    assert!(
+        cell[tries_at..].contains("\"?\""),
+        "an exhausted cell must show the failed mark after the budget check"
+    );
+}
+
+/// An undecodable file names its container instead of parroting the
+/// guesser — but only when no decoder was even attempted. A corrupt file
+/// of a supported kind keeps the decode error, or every broken JPEG would
+/// gain a wrong explanation.
+#[test]
+fn the_decode_failure_names_unclaimed_bytes_only() {
+    let src = include_str!("../src/lib.rs");
+    let decode = fn_body(src, "fn decode_bytes(").expect("decode_bytes");
+    assert!(
+        decode.contains("looks_like_supported_image(bytes)"),
+        "the remap must be gated on the magic: bytes a decoder claims are \
+         a corrupt file, not an unsupported one"
+    );
+    assert!(
+        decode.contains("unsupported_error(bytes)"),
+        "unclaimed bytes must go through the naming function rather than \
+         the guesser's shrug"
+    );
+}
+
 /// The frame clock survives its move to lib with speed: file timing pins
 /// the old behavior, and 2x halves both the index math and the repaint wait
 /// (which is real time — scheduling an effective-time wait would repaint

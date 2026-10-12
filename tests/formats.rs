@@ -109,6 +109,62 @@ fn a_qoi_survives_a_lying_extension() {
     assert_eq!((d.width, d.height), (96, 48));
 }
 
+/// A renamed video names itself instead of parroting the guesser: an MP4
+/// under a `.gif` name must fail with the container named, not with "the
+/// image format could not be determined" — which answers neither "what is
+/// it" nor "can I do anything about it".
+#[test]
+fn a_renamed_video_names_its_container_instead_of_the_guessers_shrug() {
+    fn mp4_named(dir: &Path, name: &str, brand: &[u8; 4]) -> std::path::PathBuf {
+        let p = dir.join(name);
+        let mut v = Vec::new();
+        v.extend_from_slice(&[0, 0, 0, 0x20]);
+        v.extend_from_slice(b"ftyp");
+        v.extend_from_slice(brand);
+        v.extend_from_slice(&[0; 20]);
+        std::fs::write(&p, &v).unwrap();
+        p
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, brand) in [("clip.gif", b"mp42"), ("movie.jpg", b"isom")] {
+        let p = mp4_named(tmp.path(), name, brand);
+        let err = image_viewer::load_image(&p, 4096).unwrap_err().to_string();
+        assert!(
+            err.contains("MP4") || err.contains("video"),
+            "{name} must name the video container, got: {err}"
+        );
+        assert!(
+            !err.contains("could not be determined"),
+            "the guesser's shrug answers nothing: {err}"
+        );
+    }
+    // Empty is empty, not undetermined either.
+    let p = tmp.path().join("nothing.png");
+    std::fs::write(&p, b"").unwrap();
+    let err = image_viewer::load_image(&p, 4096).unwrap_err().to_string();
+    assert!(
+        err.contains("empty"),
+        "a 0-byte file must say so, got: {err}"
+    );
+}
+
+/// The other direction, and the reason the remap is gated on the magic: a
+/// GIF that *is* a GIF but decodes to nothing is corrupt, not unsupported,
+/// and must keep the decode error rather than gain a wrong explanation.
+#[test]
+fn a_corrupt_gif_keeps_its_decode_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("broken.gif");
+    let mut v = b"GIF89a".to_vec();
+    v.extend(std::iter::repeat(0xFF).take(256));
+    std::fs::write(&p, &v).unwrap();
+    let err = image_viewer::load_image(&p, 4096).unwrap_err().to_string();
+    assert!(
+        !err.contains("unsupported"),
+        "a corrupt GIF is a failed decode, not an unsupported file: {err}"
+    );
+}
+
 #[test]
 fn the_qoi_sniffer_does_not_fire_on_other_formats() {
     // A sniffer that fires on the wrong file picks the wrong decoder and
@@ -211,12 +267,14 @@ fn a_targa_cannot_be_identified_from_its_content() {
     assert_eq!(image_dims_bytes(&bytes), None, "our header probe must not guess either");
 
     // Which is exactly why our own path fails, and must keep failing loudly
-    // rather than guessing from the extension.
+    // rather than guessing from the extension. The message names it
+    // unsupported rather than unknown: nothing identifiable is in the bytes
+    // at all, and "unknown" would suggest something to discover.
     let err = load_image(&p, 4096).expect_err("a Targa should not decode here");
     let msg = format!("{err:?}");
     assert!(
-        msg.to_lowercase().contains("unknown"),
-        "expected an unrecognised-format error, got {msg}"
+        msg.to_lowercase().contains("unsupported"),
+        "expected an unsupported-file error, got {msg}"
     );
 }
 

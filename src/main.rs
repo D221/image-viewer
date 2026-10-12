@@ -7881,11 +7881,21 @@ fn grid_cell(
             // number, and the ellipsis is left for a cell that is genuinely
             // still decoding — which an archive never is, so a reader can tell
             // the two apart without being told.
+            //
+            // A cell whose thumbnail failed all `THUMB_TRIES` attempts gets the
+            // same "?" as an unreadable container, for the same reason: its
+            // ellipsis stopped meaning "decoding" three attempts ago, and a
+            // mark that cannot resolve reads as a hang. `?` is already the
+            // "cannot show this" mark, so no new glyph is introduced — and it
+            // has to be ASCII, because the default font renders anything else
+            // as a blank box.
             let text = if is_archive {
                 match archive_image_count(path) {
                     Some(n) => format!("{n} images"),
                     None => "?".to_string(),
                 }
+            } else if tries.get(path).copied().unwrap_or(0) >= THUMB_TRIES {
+                "?".to_string()
             } else {
                 "\u{2026}".to_string()
             };

@@ -8434,6 +8434,95 @@ fn dynamic_to_image_data(
     data
 }
 
+/// What undecodable bytes actually are, for the failure message — used only
+/// when no decoder was even attempted, so a corrupt file of a supported
+/// kind keeps the decode error instead of gaining a wrong explanation.
+///
+/// Extensions lie routinely (an MP4 renamed `.gif`), and the guesser's
+/// "format could not be determined" answers neither "what is it" nor "can
+/// I do anything about it". Naming the container answers both: nothing here
+/// will ever decode it, and the remedy is a different program.
+fn unsupported_error(bytes: &[u8]) -> LoadError {
+    if bytes.is_empty() {
+        return LoadError::Other("unsupported file: empty (0 bytes)".into());
+    }
+    if let Some(brand) = isobmff_brand(bytes) {
+        // `is_heif_bytes` brands never reach here — they decode above — so a
+        // remaining `ftyp` is something else in the same container family,
+        // overwhelmingly video or audio.
+        let name = match brand {
+            b"isom" | b"iso2" | b"iso3" | b"iso4" | b"iso5" | b"iso6" | b"mp41"
+            | b"mp42" | b"mp4v" | b"avc1" => "MP4 video",
+            b"M4V " | b"M4VH" => "M4V video",
+            b"M4A " => "M4A audio",
+            b"qt  " => "QuickTime video",
+            b"3gp4" | b"3gp5" | b"3gp6" | b"3g2a" => "3GP video",
+            _ => "",
+        };
+        if name.is_empty() {
+            let brand = String::from_utf8_lossy(brand);
+            let brand: String = brand
+                .chars()
+                .map(|c| if c.is_ascii_graphic() { c } else { '?' })
+                .collect();
+            return LoadError::Other(format!(
+                "unsupported file: ISO-BMFF container (brand '{brand}'), not a decodable image"
+            ));
+        }
+        return LoadError::Other(format!(
+            "unsupported file: {name} (ISO-BMFF brand '{}'), not a decodable image",
+            String::from_utf8_lossy(brand)
+        ));
+    }
+    // RIFF with a non-WEBP form: WAV and AVI start the same way, which is
+    // why `looks_like_supported_image` demands the form type — and why the
+    // message can name exactly which one it is.
+    if bytes.starts_with(b"RIFF") && bytes.len() >= 12 {
+        let form = String::from_utf8_lossy(&bytes[8..12]);
+        let name = match &bytes[8..12] {
+            b"WAVE" => "WAV audio",
+            b"AVI " => "AVI video",
+            _ => "",
+        };
+        if !name.is_empty() {
+            return LoadError::Other(format!("unsupported file: {name}, not a decodable image"));
+        }
+        return LoadError::Other(format!(
+            "unsupported file: RIFF container (form '{form}'), not a decodable image"
+        ));
+    }
+    // Short ASCII magics: vector, document and archive containers. Checked
+    // after the binary ones because none of them can overlap.
+    let texty: &[(&[u8], &str)] = &[
+        (b"<svg", "SVG vector image"),
+        (b"%PDF", "PDF document"),
+        (b"PK\x03\x04", "ZIP archive"),
+        (b"Rar!", "RAR archive"),
+        (b"7z\xBC\xAF\x27\x1C", "7z archive"),
+        (b"ID3", "MP3 audio"),
+        (b"OggS", "Ogg audio/video"),
+        (b"MZ", "Windows executable"),
+    ];
+    // Leading whitespace/BOM is skipped: an SVG with an XML prolog is still
+    // an SVG, and the alternative is calling pretty-printed XML unrecognized.
+    let mut head = bytes;
+    while head.starts_with(b"\xEF\xBB\xBF") {
+        head = &head[3..];
+    }
+    while !head.is_empty() && matches!(head[0], b' ' | b'\t' | b'\r' | b'\n') {
+        head = &head[1..];
+    }
+    for (magic, name) in texty {
+        if head.starts_with(magic) {
+            return LoadError::Other(format!("unsupported file: {name}, not a decodable image"));
+        }
+    }
+    LoadError::Other(format!(
+        "unsupported file type (starts with {:02X?})",
+        &bytes[..bytes.len().min(8)]
+    ))
+}
+
 /// Decode bytes to RGBA, capped at `max_dim` on the long side. JPEGs use the
 /// turbojpeg DCT-scaling fast path; everything else goes through the `image` crate
 /// or the dedicated pure-Rust decoders for formats it can't handle.
@@ -8464,7 +8553,19 @@ fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result
         }
     }
 
-    let img = image::load_from_memory(bytes)?;
+    let img = match image::load_from_memory(bytes) {
+        Ok(img) => img,
+        // Bytes no decoder claims: say what they are instead of parroting the
+        // guesser's "could not be determined". Gated on the magic, so a
+        // corrupt file of a supported kind keeps the decode error — which is
+        // the honest message there — rather than gaining a wrong explanation.
+        Err(e) => {
+            if looks_like_supported_image(bytes) || is_jxl_bytes(bytes) || is_heif_bytes(bytes) {
+                return Err(e.into());
+            }
+            return Err(unsupported_error(bytes));
+        }
+    };
     Ok(dynamic_to_image_data(img, max_dim, start))
 }
 
