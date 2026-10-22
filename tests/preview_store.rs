@@ -386,8 +386,7 @@ fn animation() -> image_viewer::Animation {
 /// * the write happens **after** the decode, from the decode's own pixels.
 #[test]
 fn the_store_is_asked_before_the_file_is_read_and_written_off_the_decode() {
-    let src = include_str!("../src/lib.rs");
-    let body = code_only(&fn_body(src, "decode_page"));
+    let body = code_only(&fn_body("decode_page"));
 
     let store = body.find("read_cached_preview").expect("the store is asked");
     let read = body.find("std::fs::read(path)").expect("the file is read");
@@ -401,12 +400,12 @@ fn the_store_is_asked_before_the_file_is_read_and_written_off_the_decode() {
         body.contains("maybe_store_preview("),
         "the decode hands its preview to the store"
     );
-    let store_fn = code_only(&fn_body(src, "maybe_store_preview"));
+    let store_fn = code_only(&fn_body("maybe_store_preview"));
     assert!(
         store_fn.contains("store_preview("),
         "and the store call is a hand-off to the thread, not an encode here"
     );
-    let hand_off = code_only(&fn_body(src, "store_preview"));
+    let hand_off = code_only(&fn_body("store_preview"));
     assert!(
         hand_off.contains("try_send"),
         "the hand-off must not block the worker that decoded the picture"
@@ -414,7 +413,7 @@ fn the_store_is_asked_before_the_file_is_read_and_written_off_the_decode() {
 
     // And the writer's half of the atomicity: the entry is renamed into place,
     // so a reader sees the old one or the new one and never half of one.
-    let write = code_only(&fn_body(src, "write_cached_preview"));
+    let write = code_only(&fn_body("write_cached_preview"));
     let tmp = write.find("png.tmp").expect("the entry is written beside itself");
     let rename = write.find("rename").expect("and renamed into place");
     assert!(tmp < rename, "the rename is what makes the write atomic");
@@ -438,7 +437,29 @@ fn code_only(body: &str) -> String {
         .join("\n")
 }
 
-/// The body of `fn name` in `src`, brace-matched.
+/// The sources a scan may look in.
+///
+/// The store's code is in `src/preview_store.rs` and its caller is in
+/// `src/lib.rs` (the file was over the 1000-line target and growing - see
+/// `AGENTS.md`), so a scan of one file is not enough: **the scan follows the
+/// code**, and the property it checks is about the arrangement, not about where
+/// the text happens to sit.
+const SOURCES: &[&str] = &[
+    include_str!("../src/lib.rs"),
+    include_str!("../src/preview_store.rs"),
+];
+
+/// The body of `fn name`, in whichever source file has it.
+fn fn_body(name: &str) -> String {
+    for src in SOURCES {
+        if let Some(body) = fn_body_in(src, name) {
+            return body;
+        }
+    }
+    panic!("`fn {name}` is not in any source file");
+}
+
+/// The body of `fn name` in `src`, brace-matched, or `None` if it is not there.
 ///
 /// **Anchored on a line start, and that is not fussiness.** A doc comment that
 /// mentions the function by name (`/// ... `fn write_cached_preview` ...`) puts
@@ -446,12 +467,12 @@ fn code_only(body: &str) -> String {
 /// takes the first `{` after it, which is a brace inside the comment. The scan
 /// then reads the comment and passes or fails for the wrong reason. This one
 /// looks for the definition at the start of a line.
-fn fn_body(src: &str, name: &str) -> String {
+fn fn_body_in(src: &str, name: &str) -> Option<String> {
     let needle = format!("\nfn {name}(");
     let start = src
         .find(&needle)
         .or_else(|| src.find(&format!("\npub fn {name}(")))
-        .unwrap_or_else(|| panic!("`fn {name}` is not in the source"));
+        .or_else(|| src.find(&format!("\npub(crate) fn {name}(")))?;
     let open = start + src[start..].find('{').expect("a body");
     let mut depth = 0usize;
     for (i, c) in src[open..].char_indices() {
@@ -460,7 +481,7 @@ fn fn_body(src: &str, name: &str) -> String {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return src[open..=open + i].to_string();
+                    return Some(src[open..=open + i].to_string());
                 }
             }
             _ => {}

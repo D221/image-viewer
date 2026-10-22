@@ -1047,6 +1047,56 @@ fit modes still own the arriving view when they are on.
 
 ---
 
+## 10. The monoliths: four files over the 1000-line target
+
+**Known.** `AGENTS.md` now says a source file should be under 1000 lines, and
+`tests/source_size.rs` holds the teeth: a new file must start under it, a file
+over it may not grow, and a file that comes down under it comes off the list.
+The four files still over the target are:
+
+| file | lines | what is in it |
+|---|---|---|
+| `src/lib.rs` | 13,047 | everything testable: sniffing, the decode pipeline, the transforms, ICC, the caches, the config, the spreads |
+| `src/main.rs` | 10,713 | the binary: `MyApp`, egui, the worker wiring, the dialogs, the clipboard, the wallpaper, the Windows integration |
+| `tests/unit.rs` | 7,613 | the unit suite, one file for everything that does not deserve its own target |
+| `tests/spreads.rs` | 7,384 | the manga-mode suite, same shape |
+
+**One split has already happened, so the mechanism is not theoretical.** The
+preview store (629 lines) moved out of `src/lib.rs` into `src/preview_store.rs`
+in one commit, declared with `pub mod preview_store;` and re-exported with
+`pub use preview_store::*;` so every `image_viewer::name` call site kept
+working untouched. The ceiling in `tests/source_size.rs` came down with it. The
+same shape works for the rest: **move a whole section, declare the module where
+the old code was, re-export it, lower the number.**
+
+**The order, and why.** The two test files are the easy ones and the two
+source files are the ones that matter:
+
+1. `tests/unit.rs` - it is a *test* file, so nothing outside it depends on
+   where its tests live, and the suite's own target list is the only thing to
+   keep straight. Split it by subject (`tests/decode.rs`,
+   `tests/resample.rs`, `tests/config.rs`, ...), keeping `tests/unit.rs` as the
+   part that does not fit a subject.
+2. `tests/spreads.rs` - the same shape, and the manga rules are the most
+   self-contained in the crate (the pairing algebra and the layout functions).
+3. `src/lib.rs` - the sections are already marked with `// ---` banners, so the
+   sections are visible: the decode pipeline, the transforms and crop, the
+   colour and ICC code, the caches, the config, the spreads. **The caches and
+   the preview store go first**: they are the newest, the most self-contained
+   and the least depended on.
+4. `src/main.rs` - the hardest, because `MyApp` is one struct with one state
+   and its methods are the code. Split it by *area* (the panels, the grid, the
+   dialogs, the worker pump) and keep the struct in `main.rs`, with the areas
+   as free functions or as `impl MyApp` blocks in their own modules.
+
+**Not claimed.** Nothing here is measured: the sizes are line counts, and a
+file's length is a proxy for "can a person hold it in their head", not a
+measurement of anything. What *is* true is that the check is enforced, so the
+list above can only get shorter - and that a raise is a visible act with a
+reason in it, which is the point.
+
+---
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several

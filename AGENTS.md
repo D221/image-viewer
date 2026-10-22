@@ -11,13 +11,14 @@ that are already in memory. One crate, no workspace, no CI.
   first failing target, and `--lib` (the in-crate `perf` tests) is a target no
   per-target command below ever runs.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
-- 31 targets, 28 of them the test files `bench`, `bench_browse`, `bench_resize`,
+- 32 targets, 29 of them the test files `bench`, `bench_browse`, `bench_resize`,
   `bench_rotate_save`, `bench_startup`, `bench_variants`, `color_profiles`,
   `drops`, `embedded_thumbs`, `filter_and_paging`, `flip_through`, `formats`,
   `icon`, `integration`, `keybindings`, `multiframe`, `pathological`,
   `preload_budget`, `preview_store`, `property`, `ratings`, `renderer`,
-  `rotate_save`, `spreads`, `standard`, `thumb_cache`, `unit`, `watcher` — the
-  other three are `--lib`, the binary's own target and doc-tests.
+  `rotate_save`, `source_size`, `spreads`, `standard`, `thumb_cache`, `unit`,
+  `watcher` — the other three are `--lib`, the binary's own target and
+  doc-tests.
 - **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
   use `criterion_main!` but are ordinary `{test}` targets with the default
   harness (there is no `[[bench]] harness = false` in `Cargo.toml`), so
@@ -122,15 +123,37 @@ that are already in memory. One crate, no workspace, no CI.
 
 ## Layout
 
-- `src/lib.rs` (~5.9k lines) — everything testable: sniffing, decode, gallery
+- **Keep a source file under a thousand lines.** A file over that is a file
+  nobody can hold in their head, and the sections drift into each other. The
+  rule is enforced by `tests/source_size.rs`, which holds three checks: a
+  **new** file must start under 1000 lines, a file that is **over** the target
+  **may not grow** (the numbers in that test are ceilings, not wishes), and a
+  file that comes down under the target **comes off the list**. So:
+  - **New code goes in a module of its own** — `src/<topic>.rs` or
+    `tests/<topic>.rs` — declared with `pub mod` at the crate root and
+    re-exported (`pub use <topic>::*;`) so `image_viewer::name` keeps working.
+    That is the pattern this crate already uses for `perf`, `icon` and
+    `ratings`.
+  - **To split a file that is over the target**, move a whole section into its
+    own module, declare it where the old code was, and lower its number in
+    `tests/source_size.rs` to the file's new size. The list only ever shortens.
+  - **Raising a number is a decision, not a default.** It is allowed, and it is
+    visible in the diff, but it is the thing the rule exists to make you
+    notice: "I needed 40 more lines in `lib.rs`" is a sentence nobody should
+    be able to say by accident.
+  - The work of splitting the four files that are still over the target is in
+    `TODO.md` §10, with the order.
+- `src/lib.rs` (~13k lines) — everything testable: sniffing, decode, gallery
   and paging, the job planner, the loader queue, the resize policy, the
   transform algebra, ICC, archives, the grid-thumbnail cache, config. **If a rule
   can be a pure function it belongs here** — every bug that could not be tested
   lived in `main.rs`.
-- `src/main.rs` (~4.3k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
+- `src/main.rs` (~10.7k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
   clipboard, wallpaper, Windows integration. Unreachable from a test.
 - `src/perf.rs` (16 latency metrics, 21 always-on counters), `src/fileassoc.rs`
-  (HKCU registration), `src/icon.rs` (generated icon artwork).
+  (HKCU registration), `src/icon.rs` (generated icon artwork),
+  `src/preview_store.rs` (the on-disk preview tier, 645 lines — the first
+  section moved out of `lib.rs` under the rule above).
 - `test-images/` is gitignored. `test-images/JPEGView_L` and
   `test-images/oculante` are reference checkouts, not fixtures.
 - `README.md` is the user-facing document (features, keys, settings, caveats) and
