@@ -1880,6 +1880,131 @@ fn a_config_written_before_smooth_downscale_still_loads_and_stays_off() {
 }
 
 #[test]
+fn a_config_written_before_pixel_art_still_loads_and_stays_off() {
+    // Same two constructions as the Smooth test above: an old file without
+    // the key, and a missing file (`Config::load`'s hand-built struct).
+    // Magnified nearest on a photo is the blocky look nobody wants, so it
+    // ships OFF and neither path may forget the field.
+    let cfg: image_viewer::Config =
+        serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
+            .expect("an old config must load");
+    assert!(
+        !cfg.pixel_art,
+        "an old config without the key must come up with Pixel art OFF"
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
+    assert!(
+        !fresh.pixel_art,
+        "a first run must also come up with Pixel art OFF"
+    );
+}
+
+/// The decision the toggle names: nearest on **magnify**, linear on
+/// **minify** — and linear everywhere when off. The two-axes shape is the
+/// whole point of [`image_viewer::pixel_art_sampling`]: a decision glued to
+/// the zoom level current at upload would have to re-roll a live texture the
+/// moment zoom crossed the boundary — the re-upload hitch TODO §8 recorded
+/// as unmeasured and unpriced. Naming the axes inverts that: one upload
+/// serves both magnifying and minifying draws, and crossing 100% costs
+/// nothing, because egui picks the sampler per axis at draw time.
+#[test]
+fn pixel_art_sampling_is_nearest_on_magnify_linear_on_minify() {
+    use image_viewer::{pixel_art_sampling, Sampling};
+
+    assert_eq!(pixel_art_sampling(false), Sampling::Linear);
+    assert_eq!(pixel_art_sampling(true), Sampling::NearestMagnify);
+}
+
+/// The wiring in the unreachable binary, as a source scan — the established
+/// pattern (`spreads.rs`, `keybindings.rs`, `renderer.rs`, the Smooth scan
+/// above): `main.rs` cannot be run from a test. Four things it checks, each
+/// a way the setting could exist and do nothing: the library owns the
+/// decision, the settings arm **invalidates the previews on change**, the
+/// content uploads all go through the one mapping, and the sites that
+/// deliberately stay linear stay linear.
+#[test]
+fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
+    let main = include_str!("../src/main.rs");
+    let lib = include_str!("../src/lib.rs");
+
+    assert!(
+        lib.contains("#[serde(default)]\n    pub pixel_art: bool,"),
+        "the config field must serde-default, or an old config fails to load \
+         (AGENTS.md: every new Config field needs it)"
+    );
+    assert!(
+        lib.contains("pixel_art: false,"),
+        "Config::load's hand-built default must state the off default, which is \
+         the construction a first run actually takes"
+    );
+    assert!(
+        lib.contains("pub fn pixel_art_sampling("),
+        "the decision belongs in lib.rs, the only place a test can pin it"
+    );
+
+    // The settings arm, located by field name so the panel can be reordered
+    // under the scan.
+    let at = main
+        .find("&mut self.config.pixel_art")
+        .expect("the settings panel must have a checkbox bound to it");
+    let after = &main[at..];
+    let arm_end = after
+        .find("}\n                ")
+        .expect("the changed() arm closes");
+    let arm = &after[..arm_end];
+    assert!(
+        arm.contains("refilter = true"),
+        "the changed arm must set refilter: textures already uploaded keep the \
+         samplers they arrived with, so without it the box flips and nothing \
+         on screen changes — the exact broken-feature shape the Smooth scan \
+         documents"
+    );
+
+    // The four content sites — preview arrival, animation init, the two
+    // in-play animation frame sets, the per-frame tile options — all go
+    // through the one mapping; a site that went around it would sample that
+    // texture linearly for as long as it lives.
+    let uses = main
+        .matches("content_texture_options(self.config.pixel_art)")
+        .count();
+    assert_eq!(
+        uses, 4,
+        "every content upload must consult the toggle at upload time"
+    );
+    assert!(
+        main.contains("options: TextureOptions,")
+            && main.contains("make_tile(&ctx, &tp.data, tx, ty, tile_options);"),
+        "make_tile must take its sampling in from the caller, which is where \
+         the config lives; the tile texture is a content texture too"
+    );
+
+    // The deliberate counter-examples: the grid cell and the checkerboard.
+    let thumb_at = main
+        .find("let texels = p.image.size;")
+        .expect("the thumb upload exists");
+    let thumb_arm_len = main[thumb_at..]
+        .find("self.thumbs.insert")
+        .expect("the thumb arm ends at its insert");
+    let thumb_arm = &main[thumb_at..thumb_at + thumb_arm_len];
+    assert!(
+        !thumb_arm.contains("content_texture_options("),
+        "the grid cell must not call the mapping: 150pt of a \
+         256-texel image, and the grid also browses photos"
+    );
+    assert!(
+        thumb_arm.contains("TextureOptions::LINEAR"),
+        "the grid cell stays linear on purpose, said here so a later edit that \
+         changes it fails loudly instead of silently"
+    );
+    assert!(
+        main.contains("TextureOptions::NEAREST_REPEAT"),
+        "the checkerboard keeps NEAREST_REPEAT: it is artwork, not content, \
+         and pixel art user content sampling is not its reason"
+    );
+}
+
+#[test]
 fn a_config_written_before_grid_cell_size_still_loads_at_150() {
     // Same two constructions as the Smooth test above: an old file without the
     // key (serde default) and a missing file (`Config::load`'s hand-built
@@ -4327,6 +4452,38 @@ fn the_comment_lines_are_wired_into_extract_exif() {
     );
 }
 
+/// The colour line must come from the preview, not from the metadata job, and
+/// `main.rs` is unreachable from every test, so this is a source scan - the
+/// established pattern here.
+/// Colour is classified from the bytes the preview decode already read. The
+/// whole point is that `extract_exif` runs **no** second read of the file — the
+/// old shape called `color_info(path)` there, an 8-12 ms whole-file
+/// `fs::read` on a real photograph, queued ahead of every prefetch. The panel
+/// draws the line from the cached preview, which answers with no read of any
+/// kind.
+#[test]
+fn the_colour_line_rides_on_the_preview_not_the_metadata_read() {
+    let src = include_str!("../src/main.rs");
+    let body = fn_body(src, "fn extract_exif(").expect("extract_exif");
+    assert!(
+        !body.contains("color_info"),
+        "extract_exif must not classify colour: that is the decode's answer now, \
+         and calling color_info here is a second whole-file read of every image"
+    );
+
+    // The panel draws it from the shown image's cached preview.
+    let coloured = src.contains("preview.colour.panel_line()");
+    assert!(
+        coloured,
+        "the metadata panel must draw the colour line from the cached preview"
+    );
+    assert!(
+        src.contains("self.shown.as_ref().and_then(|k| self.previews.get(k))"),
+        "the colour line must be read off `shown`'s cached preview, not re-derived \
+         per frame"
+    );
+}
+
 /// Screen-size save must be **wired**, and `main.rs` is unreachable from every
 /// test, so this is a source scan - the established pattern here.
 #[test]
@@ -4433,17 +4590,34 @@ fn key_overrides_win_and_blanks_fall_back() {
 }
 
 /// Every default chord's key must be a known name: otherwise it can never
-/// match, and the action ships dead.
+/// match, and the action ships dead. The one exception is a *deliberately*
+/// blank default (`next_alt` since Space became the zoom toggle): an
+/// unparseable shipped chord is still a shipped-dead action, so a second
+/// blank row must add itself here, not slip through.
 #[test]
 fn every_default_key_is_a_known_name() {
+    let mut blank: Vec<&str> = Vec::new();
     for (id, chord, _) in image_viewer::KEY_ACTIONS {
-        let (_, _, _, name) = image_viewer::split_chord(chord)
-            .unwrap_or_else(|| panic!("default chord of `{id}` names no key"));
+        let Some((_, _, _, name)) = image_viewer::split_chord(chord) else {
+            assert_eq!(
+                *chord, "",
+                "default chord of `{id}` (`{chord}`) names no key: it must be blank on \
+                 purpose like `next_alt`, or a parseable name like `Space`"
+            );
+            blank.push(id);
+            continue;
+        };
         assert!(
             image_viewer::KEY_NAMES.contains(&name.as_str()),
             "default chord of `{id}` names unknown key `{name}`"
         );
     }
+    assert_eq!(
+        blank,
+        vec!["next_alt"],
+        "the deliberately-unbound actions are exactly `next_alt`; if another row is \
+         blank on purpose, name it here so a typo'd chord never ships unbound"
+    );
 }
 
 /// Capture, totality, and live labels must be wired: the capture state and
@@ -5272,6 +5446,75 @@ fn wallpaper_shown_is_wired() {
     );
 }
 
+/// **A wallpaper request must not decode on the paint thread**, and the last
+/// press must win. Both wallpaper paths do a whole-file read and (converted or
+/// Shift+W) a full decode + re-encode; the "the UI thread never decodes" rule
+/// does not weigh the *reason*, so the work lives on a worker thread like the
+/// drop copy's and the rating read's. `main.rs` is unreachable from every test,
+/// so this is the source-scan pattern, asserting the arrangement by byte order:
+/// the spawn must come **before** every heavy call, and the stale-answer drop
+/// must exist in `pump`.
+///
+/// This lifetime rule is the `drops.rs` shape: presence of a spawn says nothing
+/// about which side of it the decode is on, and the defect this guards was that
+/// arrangement until this moved.
+#[test]
+fn wallpaper_work_is_on_a_worker_and_the_last_press_wins() {
+    let src = include_str!("../src/main.rs");
+
+    for name in ["fn set_wallpaper(", "fn set_wallpaper_shown("] {
+        let at = src
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} must exist"));
+        // Brace-match the body: the functions are adjacent to other methods,
+        // and a substring window drifted past this once and still passed.
+        let body = fn_body(&src[at..], name).expect("balanced braces");
+        let spawn = body
+            .find("std::thread::spawn")
+            .unwrap_or_else(|| panic!("{name} must spawn a worker"));
+        // The heavy half: read, decode, transform, encode, and the shell call
+        // itself — every one of them after the spawn, or the rule is not kept.
+        for heavy in ["load_image(", "load_image_full(", "region_for_save(", "wallpaper::set_from_path("] {
+            if let Some(h) = body.find(heavy) {
+                assert!(
+                    spawn < h,
+                    "{name}: {heavy} must run on the worker, after thread::spawn"
+                );
+            }
+        }
+        // The label: an in-flight wallpaper request is otherwise invisible
+        // until the desktop changes, which reads as a dropped keystroke.
+        assert!(
+            body.contains("\"Setting wallpaper…\""),
+            "{name} must show its in-flight notice"
+        );
+        // The token: the worker must abort at an early check and again at the
+        // set, so a superseded press never points the desktop at a picture the
+        // user's last action replaced.
+        let loads = body.matches("issued.load(").count();
+        assert!(
+            loads >= 2,
+            "{name} must check its issuance token before the work and again at the set, found {loads}"
+        );
+    }
+
+    // The result's stale drop: a superseded answer must be recognised by its
+    // order and silently discarded, not shown over the last press's text.
+    let pump = src
+        .find("fn pump(")
+        .expect("pump must exist");
+    // Brace-match from the signature; pump is long and full of closures.
+    let pb = fn_body(&src[pump..], "fn pump(").expect("pump braces balance");
+    assert!(
+        pb.contains("Msg::Wallpaper { order, result }"),
+        "pump must absorb the wallpaper result"
+    );
+    assert!(
+        pb.contains("self.wallpaper_order.load("),
+        "pump must drop a result whose order is not the counter's now"
+    );
+}
+
 /// Fit window keeps the chrome it measures and clamps to the monitor.
 #[test]
 fn fit_window_hugs_content_and_clamps() {    // 800x600 window, 700x500 central: 100x100 of chrome, kept.
@@ -5294,6 +5537,93 @@ fn fit_window_hugs_content_and_clamps() {    // 800x600 window, 700x500 central:
         image_viewer::fit_window_size((0.0, 0.0), (800.0, 600.0), (800.0, 600.0), None),
         (200.0, 120.0)
     );
+}
+
+/// The title-bar toggle moves only the chrome: hiding puts the frame top on
+/// the client's top (the strip is being reclaimed), showing puts it
+/// `strip_after` above (the strip is about to sit there), and a window with
+/// less headroom than the strip clamps at the virtual screen's top rather
+/// than parking its re-added title bar off-screen.
+#[test]
+fn the_decoration_toggle_lands_the_frame_where_the_client_was() {
+    // Hide: 100-point window, 31-point strip. The client sat at 100; the
+    // frame goes straight there and no strip is re-asserted.
+    assert_eq!(image_viewer::outer_top_for_decoration_toggle(100.0, 0.0), 100.0);
+    // Show it back: the remembered strip is subtracted, so the client stays
+    // at 100 and the frame's top climbs to 69 to make room for the strip.
+    assert_eq!(image_viewer::outer_top_for_decoration_toggle(100.0, 31.0), 69.0);
+    // A toggle with no remembered measurement (first show of a session that
+    // started undecorated) still keeps the client where it was: the window
+    // may grow downward by the strip instead of moving.
+    assert_eq!(image_viewer::outer_top_for_decoration_toggle(100.0, 0.0), 100.0);
+    // Flush against the screen top with a re-added strip: clamped at 0, the
+    // content gives up its top rows instead of the title bar going off-screen.
+    assert_eq!(image_viewer::outer_top_for_decoration_toggle(20.0, 31.0), 0.0);
+    // A negative measurement is never a negative offset.
+    assert_eq!(image_viewer::outer_top_for_decoration_toggle(100.0, -4.0), 100.0);
+}
+
+/// The hide-title-bar checkbox keeps what the user was looking at.
+///
+/// `main.rs` is unreachable from the tests, so the wiring is a scan — the
+/// geometry half it pins: the client area is measured *before* any command is
+/// sent (the commands are applied against this frame's own geometry, so a
+/// read after them would measure a window that has not changed yet), the
+/// outer frame is landed with the library rule above, the client size is
+/// re-asserted so winit's `SWP_NOSIZE` never lets the strip into the client,
+/// and maximized/fullscreen windows are left to the OS's clamping.
+#[test]
+fn the_title_bar_toggle_keeps_the_client_area() {
+    let src = include_str!("../src/main.rs");
+
+    let at = src
+        .find(".checkbox(&mut self.config.hide_title_bar,")
+        .expect("the checkbox exists");
+    let after = &src[at..];
+    let arm_end = after
+        .find("\n                });")
+        .expect("the checkbox's arm closes");
+    let arm = &after[..arm_end];
+
+    let geometry = arm
+        .find(".zip(v.outer_rect)")
+        .expect("the arm measures the client and outer rects");
+    let first_cmd = arm
+        .find("send_viewport_cmd")
+        .expect("the arm sends commands");
+    assert!(
+        geometry < first_cmd,
+        "the client area must be measured before any command is sent"
+    );
+
+    assert!(
+        arm.contains("image_viewer::outer_top_for_decoration_toggle("),
+        "the frame must be landed through the library rule, not by an arm-local \
+         formula"
+    );
+    assert!(
+        arm.contains("ViewportCommand::OuterPosition(")
+            && arm.contains("ViewportCommand::InnerSize("),
+        "the frame must move and the client size must be re-asserted: winit's \
+         SWP_NOSIZE default is what lets the strip into the client area"
+    );
+    assert!(
+        arm.contains("if maximized || fullscreen {"),
+        "maximized and fullscreen windows must be left to the OS, which clamps \
+         their client area to the work area either way"
+    );
+    assert!(
+        arm.contains("ViewportCommand::Decorations(!hiding)"),
+        "the toggle itself must still reach winit in every branch"
+    );
+
+    // The strip is only measurable while decorated: the hide arm is the one
+    // place it is written, and it is persisted next to the setting so a
+    // future show in a fresh session reads it back.
+    let lib = include_str!("../src/lib.rs");
+    for want in ["pub title_strip: f32,", "pub fn outer_top_for_decoration_toggle"] {
+        assert!(lib.contains(want), "lib.rs must carry {want}");
+    }
 }
 
 /// Recursive scan: the whole tree in pre-order, natural within each level,
@@ -5749,7 +6079,10 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
         "`T` must toggle the mode, not fire once"
     );
     let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
-    let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
+    // 9400 and not 8000: the cursor-change block also carries the per-image
+    // remember wiring (`view_memory_is_wired_...`), which grew goto past
+    // this scan's old heuristic window.
+    let goto = &src[goto_at..(goto_at + 9400).min(src.len())];
     assert!(
         goto.contains("self.fit_window_key") && goto.contains("self.fit_arrive_pending = true"),
         "arrivals must refit through the cursor key, so toggles and rescans do not"
@@ -5818,7 +6151,10 @@ fn view_modes_are_exclusive() {
 fn arriving_resets_the_pan_but_stays_do_not() {
     let src = include_str!("../src/main.rs");
     let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
-    let goto = &src[goto_at..(goto_at + 8000).min(src.len())];
+    // 9400 and not 8000: the cursor-change block also carries the per-image
+    // remember wiring (`view_memory_is_wired_...`), which grew goto past
+    // this scan's old heuristic window.
+    let goto = &src[goto_at..(goto_at + 9400).min(src.len())];
     assert!(
         goto.contains("self.pan_key") && goto.contains("self.view.offset = Vec2::ZERO"),
         "goto must zero the pan when the cursor changed"
@@ -5890,9 +6226,11 @@ fn the_animation_keys_presets_and_chrome_are_wired() {
 
 /// The alt-next key resumes a paused animation instead of stepping: the
 /// step branch stands down for it, and it only reroutes the paused case —
-/// playing animations and stills step on as before.
+/// playing animations and stills step on as before. Shipped **unbound** now
+/// (Space left navigation to become the fit/100% toggle — JPEGView parity);
+/// the hook stays rebindable in Settings.
 #[test]
-fn space_resumes_a_paused_animation() {
+fn the_alt_next_key_resumes_a_paused_animation() {
     let src = include_str!("../src/main.rs");
     assert!(
         src.contains("step_dir.filter(|_| !unpause)"),
@@ -6049,6 +6387,132 @@ fn touch_dates_are_wired_to_menu_buttons() {
         src.contains("touch_file_mtime(") && src.contains("parse_exif_datetime("),
         "touching must go through the tested helpers, not inline date math"
     );
+}
+
+/// The bottom bar's four menus carry the actions the old button row did.
+///
+/// `main.rs` is unreachable from the tests, so the wiring is a scan — and a
+/// *positional* one, per the lesson recorded on `shown_partner`: presence of
+/// a handler call proves nothing about which menu it lives in. Each block is
+/// sliced from its `menu_button` label to the next one, so a stray handler
+/// call anywhere else in the bottom panel fails.
+#[test]
+fn the_bottom_bar_menus_carry_the_buttons_actions() {
+    let src = include_str!("../src/main.rs");
+    let at = src
+        .find(r#"egui::Panel::bottom("menu")"#)
+        .expect("the bottom panel exists");
+    // To the end of the panel: the bar is the last pane this section shows,
+    // and the body after it starts a new pane, so slicing to the next
+    // `egui::Panel::` keeps the scan inside the bar.
+    let end = src[at + 1..]
+        .find("egui::Panel::")
+        .map(|i| at + 1 + i)
+        .expect("a later pane closes the scan");
+    let bar = &src[at..end];
+
+    let menus = ["Transform", "Save", "File", "Tools"];
+    for (i, name) in menus.iter().enumerate() {
+        // Prefix match on purpose: the source label carries the "⏷" menu
+        // marker, which is decoration and not part of the scan's contract,
+        // and the needle stops before the label's closing quote.
+        let start = bar
+            .find(&format!("ui.menu_button(\"{name}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the {name} menu exists [bar head: {:?}]",
+                    &bar[..bar.len().min(160)]
+                )
+            });
+        let block_end = menus[i + 1..]
+            .iter()
+            .find_map(|next| {
+                let j = bar[start + 1..]
+                    .find(&format!("ui.menu_button(\"{next}"))
+                    .map(|j| start + 1 + j);
+                j
+            })
+            .unwrap_or_else(|| bar.find(r#"ui.label("keys")"#).unwrap_or(bar.len()));
+        let block = &bar[start..block_end];
+
+        let want: &[&str] = match *name {
+            "Transform" => &[
+                "self.rotate(-1, ctx)",
+                "self.rotate(1, ctx)",
+                "self.mirror(true, ctx)",
+                "self.mirror(false, ctx)",
+                "self.reset_transform(ctx)",
+                "self.undo(ctx)",
+                "self.redo(ctx)",
+                "edits.clear_crop(",
+            ],
+            "Save" => &[
+                "self.save_transformed_copy()",
+                "self.open_save_as()",
+                "self.copy_image_to_clipboard(false)",
+                "self.copy_image_to_clipboard(true)",
+            ],
+            "File" => &[
+                "self.explore_current()",
+                "self.rescan(ctx, true)",
+                "self.transfer_current(ctx, false)",
+                "self.transfer_current(ctx, true)",
+                "self.delete_current(ctx)",
+                "self.print_current()",
+            ],
+            _ => &[
+                "self.set_wallpaper()",
+                "self.set_wallpaper_shown()",
+                "self.touch_current(false)",
+                "self.touch_current(true)",
+                "self.touch_folder_to_exif_dates()",
+            ],
+        };
+        for callee in want {
+            assert!(
+                block.contains(callee),
+                "the {name} menu must own {callee}"
+            );
+            // Close-before-act: the popup must not linger over the picture
+            // the action leaves behind.
+            let call_at = block.find(callee).unwrap();
+            assert!(
+                block[..call_at].contains("ui.close()"),
+                "{callee} must close its menu before acting"
+            );
+        }
+        // Every item closes the popup after acting, so the menu does not
+        // linger over the picture — count them against the items we own.
+        assert_eq!(
+            block.matches("ui.close()").count(),
+            want.len(),
+            "every {name} item closes the menu"
+        );
+    }
+
+    // The one-click top level: browsing, the side-step pair and the five mode
+    // toggles are still on the row, in the bar (not in a menu after it).
+    // Prefix again: the row ends where the first menu begins, and the
+    // label now carries the "⏷" marker, so the find stops before the
+    // label's closing quote.
+    let row = &bar[..bar
+        .find(r#"ui.menu_button("Transform"#)
+        .unwrap_or(bar.len())];
+    for want in [
+        "self.pick_folder(ctx)",
+        "self.pick_file(ctx)",
+        "nav_is_forward(NavInput::Left, rtl)",
+        "nav_is_forward(NavInput::Right, rtl)",
+        "self.toggle_fit_mode()",
+        "self.fit_window_to_image()",
+        "self.toggle_gallery()",
+        "self.toggle_crop_mode(ctx)",
+        "self.toggle_panels_master()",
+        "show_left = !self.show_left",
+        "show_right = !self.show_right",
+    ] {
+        assert!(row.contains(want), "the bottom row must keep {want}");
+    }
 }
 
 /// Portable mode is the marker file: present means beside-the-exe, absent
@@ -6668,3 +7132,381 @@ fn the_grid_reads_ratings_from_a_map_not_the_filesystem() {
         "and it must read a ratings map"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-image view memory (the "Remember zoom and pan per image" setting)
+// ---------------------------------------------------------------------------
+
+/// A remembered view is **the view that was left** — an identity round-trip,
+/// not a rescaling. Every field distinct so a swap in any of them fails.
+#[test]
+fn a_remembered_view_is_the_view_that_was_left() {
+    let key = image_viewer::ImgKey::first(std::path::Path::new("p/manga.tiff"));
+    let left = image_viewer::SavedView {
+        fit: false,
+        scale: 1.3729,
+        offset: (17.25, -9.75),
+    };
+    let mut m = image_viewer::ViewMemory::new();
+    m.remember(key.clone(), left);
+    assert_eq!(m.restore(&key), Some(left));
+}
+
+/// A page of a document is its own picture — the reason this is keyed on
+/// [`image_viewer::ImgKey`] at all. A path-keyed map would hand page 3 back
+/// page 1's pan, silently, and only for multi-page files.
+#[test]
+fn the_next_page_of_a_document_is_not_the_last_page_s_view() {
+    let p = std::path::Path::new("p/vol.tiff");
+    let page0 = image_viewer::ImgKey {
+        path: p.to_path_buf(),
+        page: 0,
+    };
+    let page2 = image_viewer::ImgKey {
+        path: p.to_path_buf(),
+        page: 2,
+    };
+    let mut m = image_viewer::ViewMemory::new();
+    m.remember(
+        page0,
+        image_viewer::SavedView {
+            fit: false,
+            scale: 3.0,
+            offset: (41.0, 0.0),
+        },
+    );
+    assert!(
+        m.restore(&page2).is_none(),
+        "page 2 must not inherit page 0's view"
+    );
+    // And the file that was NOT visited is equally empty.
+    assert!(
+        m.restore(&image_viewer::ImgKey::first(std::path::Path::new("p/other.jpg")))
+            .is_none()
+    );
+}
+
+/// The no-memory arm is **today's behaviour, unchanged**: fit and zoom carried
+/// over, pan reset to the centre. This is what `arriving_view` exists to
+/// guarantee — the setting off is not its arm (the caller decides whether to
+/// ask), so this is the arm that keeps "off by default changes nothing" true
+/// even for images a toggled-on session never touched.
+#[test]
+fn an_unvisited_image_gets_the_carry() {
+    let saved = image_viewer::arriving_view(None, false, 2.1875);
+    assert!(!saved.fit);
+    assert_eq!(saved.scale, 2.1875);
+    assert_eq!(saved.offset, (0.0, 0.0), "the pan does not travel");
+    // A remembered one is handed back whole, so the carry gets nothing mixed in.
+    let left = image_viewer::SavedView {
+        fit: true,
+        scale: 0.75,
+        offset: (-3.5, 12.0),
+    };
+    assert_eq!(
+        image_viewer::arriving_view(Some(left), false, 2.1875),
+        left,
+        "the remembered view wins over the carry, exactly"
+    );
+}
+
+/// `forget_file` drops **every page of the file and nothing of its
+/// neighbours** — the same scope `invalidate_path` gives every other store it
+/// clears.
+#[test]
+fn a_reexport_drops_the_whole_file_but_not_the_neighbours() {
+    let vol1 = std::path::Path::new("p/vol1.cbz"); // archive members share a temp path
+    let k1 = image_viewer::ImgKey {
+        path: vol1.to_path_buf(),
+        page: 0,
+    };
+    let k1b = image_viewer::ImgKey {
+        path: vol1.to_path_buf(),
+        page: 1,
+    };
+    let k2 = image_viewer::ImgKey::first(std::path::Path::new("p/photo.jpg"));
+    let view = image_viewer::SavedView {
+        fit: false,
+        scale: 1.0,
+        offset: (8.0, 8.0),
+    };
+    let mut m = image_viewer::ViewMemory::new();
+    m.remember(k1.clone(), view);
+    m.remember(k1b.clone(), view);
+    m.remember(k2.clone(), view);
+    m.forget_file(vol1);
+    assert!(m.restore(&k1).is_none());
+    assert!(m.restore(&k1b).is_none());
+    assert_eq!(m.restore(&k2), Some(view), "the neighbour keeps its own");
+}/// `#[serde(default)]` is load-bearing here like on every other added
+/// `Config` field — an old config without this key must load and keep the
+/// shipped behaviour off.
+#[test]
+fn an_old_config_without_the_remember_setting_lands_on_the_default() {
+    let old = r#"{"load_all_on_startup": true, "thumbnail_cache": false}"#;
+    let c: image_viewer::Config = serde_json::from_str(old).unwrap();
+    assert!(
+        !c.remember_view,
+        "a config with no remember_view key must get the default, which is off"
+    );
+    let on = r#"{"load_all_on_startup": true, "remember_view": true}"#;
+    let c2: image_viewer::Config = serde_json::from_str(on).unwrap();
+    assert!(c2.remember_view, "an explicit true must be honoured");
+}
+
+/// The wiring: **the save must happen while the outgoing key is still in
+/// hand, and the restore after the key changes** — both inside the
+/// cursor-change block, both gated on the setting. `main.rs` is unreachable
+/// from every test, so this is the source-scan pattern with the position
+/// asserted, because the two defects it guards are both *arrangement* bugs:
+/// saving after `pan_key` is reassigned would store the new image's view
+/// under the new image's name (the map would say "remembered" and hold the
+/// carry), and restoring outside the block would re-derive what the reader
+/// is already looking at.
+#[test]
+fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
+    let src_source = include_str!("../src/main.rs");
+    // `fn_body` is built for signatures *without* a trailing `{`, so the body's
+    // own braces carry the depth. A brace-terminated block needs the `{` left
+    // out of the search instead, or every inner `if` returning to depth 0
+    // looks like the block's end. Small local matcher rather than a second
+    // definition of fn_body.
+    fn span_after<'a>(src: &'a str, trigger: &str) -> Option<&'a str> {
+        let sig = src.find(trigger)?;
+        let open = src[sig..].find('{')? + sig;
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, b) in src.as_bytes()[open..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(&src[open + 1..end?])
+    }
+    let src = src_source;
+    let goto = fn_body(src, "fn goto(").expect("goto");
+    let block = span_after(goto, "if self.cur != self.pan_key {").expect("the cursor-change block");
+    let remember = block
+        .find("self.views.remember(")
+        .unwrap_or_else(|| panic!("the outgoing view must be remembered in the block"));
+    let key_move = block
+        .find("self.pan_key = self.cur.clone();")
+        .expect("the block must still move pan_key");
+    let restore = block
+        .find("self.views.restore(")
+        .unwrap_or_else(|| panic!("the arriving view must be restored in the block"));
+    assert!(
+        remember < key_move,
+        "save BEFORE pan_key is reassigned, or the outgoing key is gone and its \
+         view is stored under the arriving key's name"
+    );
+    assert!(
+        key_move < restore,
+        "restore AFTER the key changes, or it asks about the image being left"
+    );
+    let ones = block.matches("self.config.remember_view").count();
+    assert!(
+        ones >= 2,
+        "both arms must be gated on the setting, found {ones}"
+    );
+    // The arriving view goes through the pure decision, not a hand-rolled arm.
+    assert!(
+        block.contains("image_viewer::arriving_view("),
+        "the restore must ask the pure function, so a second opinion about the \
+         carry cannot form"
+    );
+    // And the forget: a re-export must not leave a view for pixels that no
+    // longer exist, beside the page counts and shapes it already clears.
+    let inv = fn_body(src, "fn invalidate_path(").expect("invalidate_path");
+    assert!(
+        inv.contains("self.views.forget_file(p);"),
+        "invalidate_path must drop the file's remembered views"
+    );
+    assert!(
+        src.contains("Remember zoom and pan per image"),
+        "the settings panel must carry the toggle"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The preload window's byte budget.
+// ---------------------------------------------------------------------------
+
+/// `main.rs` is unreachable from tests, so the wiring is a source scan with
+/// the order asserted. Three things must hold, and each has a plausible
+/// wrong-looking sibling: the lengths come from the **stamp registry the
+/// watcher already keeps** (`self.stamps`) rather than a stat per plan — a
+/// per-emit `metadata()` on the paint thread is the I/O this crate exists not
+/// to do — the slice is built **before** the `Plan` literal that consumes it,
+/// and the planner is configured with the shipped constant rather than a
+/// literal or `u64::MAX` at the call site (a disabled budget is invisible
+/// except in memory).
+#[test]
+fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
+    let src = include_str!("../src/main.rs");
+    let body = fn_body(src, "fn schedule(&mut self)").expect("schedule");
+    let collect = body
+        .find("self.stamps.get(p)")
+        .expect("schedule must read the stamp registry for the file lengths");
+    let plan = body.find("plan_jobs(").expect("schedule must plan");
+    assert!(
+        collect < plan,
+        "the slice is worthless if collected after the plan is built"
+    );
+    assert!(
+        body.contains("file_bytes: &file_bytes,"),
+        "the plan must be handed the collected slice"
+    );
+    assert!(
+        body.contains("preload_budget: PRELOAD_BUDGET_BYTES,"),
+        "the shipped budget is the constant, not a literal or u64::MAX"
+    );
+    assert!(
+        !body.contains("metadata("),
+        "the plan path must not stat: the lengths are the watcher's already"
+    );
+    // And the constant sits with the radius it bounds, so the two knobs that
+    // shape one window are found together.
+    let radius = src
+        .find("const PRELOAD_RADIUS: usize = 3;")
+        .expect("the radius");
+    let budget = src
+        .find("const PRELOAD_BUDGET_BYTES: u64 =")
+        .expect("the budget");
+    assert!(
+        radius < budget && budget - radius < 4000,
+        "the radius and the budget tune the same window and are documented together"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The side-panel master (`I`) is a persisted preference; fullscreen is an
+// overlay on it, and never a re-write of it.
+// ---------------------------------------------------------------------------
+
+/// A config from before the key existed keeps showing panels — the default is
+/// `on` for the same reason `loop_back`'s is: a tolerated older file must not
+/// change what it shows. An explicit `false` must be honoured, of course.
+#[test]
+fn an_old_config_without_the_panel_master_lands_on_the_default() {
+    let old = r#"{"load_all_on_startup": true}"#;
+    let c: image_viewer::Config = serde_json::from_str(old).unwrap();
+    assert!(
+        c.show_panels,
+        "no show_panels key must land on the default, which is on"
+    );
+    let off = r#"{"load_all_on_startup": true, "show_panels": false}"#;
+    let c2: image_viewer::Config = serde_json::from_str(off).unwrap();
+    assert!(!c2.show_panels, "an explicit false must be honoured");
+}
+
+/// The wiring: the master is saved on its toggle and read on startup, and no
+/// site is left that would force it back on — the whole-config save on exit
+/// would then record the force as the user's choice. `main.rs` is unreachable
+/// from tests, so source scans again, with position where the order matters.
+#[test]
+fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
+    fn block_after<'a>(src: &'a str, trigger: &str) -> Option<&'a str> {
+        let sig = src.find(trigger)?;
+        let open = src[sig..].find('{')? + sig;
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, b) in src.as_bytes()[open..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(&src[open + 1..end?])
+    }
+
+    let src = include_str!("../src/main.rs");
+
+    // The funnel: save/restore only through `toggle_panels_master`, and the
+    // save inside it is ordered after the flip.
+    let helper = fn_body(src, "fn toggle_panels_master(").expect("master helper");
+    let flip = helper
+        .find("self.show_panels = !self.show_panels;")
+        .expect("the helper must flip the master");
+    let saved = helper
+        .find("self.config.show_panels = self.show_panels;")
+        .expect("the helper must mirror the flip into the config");
+    let write = helper
+        .find("self.config.save(")
+        .expect("the helper must save on the press");
+    assert!(flip < saved && saved < write, "flip, mirror, save, in order");
+
+    // Both `I` sites (key and Plates row) route through it. A site that
+    // toggles inline would skip the persist, and the first launch would
+    // quietly disagree.
+    let dispatch = fn_body(src, "fn ui(").expect("the event dispatcher");
+    let handlers = src.matches("self.toggle_panels_master();").count();
+    let toggles_inline = src.matches("self.show_panels = !self.show_panels;").count();
+    assert_eq!(
+        toggles_inline, 1 as usize,
+        "only the helper flips the master, inline flips found: {toggles_inline}"
+    );
+    assert!(
+        handlers >= 2,
+        "the key and menu-row sites both call the funnel, found only {handlers}"
+    );
+
+    // Startup honours the saved value — the same capture pattern the
+    // constructor uses for `loop_back`.
+    let ctor = fn_body(src, "fn new_with_renderer(").expect("constructor");
+    let capture = ctor
+        .find("let show_panels = config.show_panels;")
+        .expect("the constructor must read the saved master");
+    let literal = ctor.find("let mut app = Self {").expect("the struct literal");
+    assert!(
+        capture < literal,
+        "the capture happens before `config` moves into the struct"
+    );
+
+    // No site forces the master back on. Both were hardcoded `true` once;
+    // the whole-config save on exit would have recorded the force.
+    assert!(
+        !src.contains("self.show_panels = true"),
+        "a fullscreen exit must restore what the user had, not force the master on"
+    );
+
+    // And the fullscreen overlay pairs against the stash: one entering arm
+    // that stashes, two leaving arms (F11 again, and Esc) that restore.
+    let f11 = block_after(&dispatch, "if f11 {").expect("the F11 block");
+    assert!(
+        !f11.contains("config.save"),
+        "the fullscreen dance must not write the config"
+    );
+    assert!(
+        f11.contains("panels_before_fullscreen = Some(self.show_panels)"),
+        "entering stash the master"
+    );
+    assert!(
+        f11.contains("panels_before_fullscreen.take().unwrap_or(true)"),
+        "F11 exit restores the stash"
+    );
+    let restores = dispatch
+        .matches("panels_before_fullscreen.take().unwrap_or(true)")
+        .count();
+    assert_eq!(
+        restores, 2 as usize,
+        "the Esc exit restores too — one restore, one fullscreen with no way back"
+    );
+}
+
+

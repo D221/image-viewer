@@ -11,12 +11,13 @@ that are already in memory. One crate, no workspace, no CI.
   first failing target, and `--lib` (the in-crate `perf` tests) is a target no
   per-target command below ever runs.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
-- 27 targets, 24 of them the test files `bench`, `bench_browse`, `bench_resize`,
+- 30 targets, 27 of them the test files `bench`, `bench_browse`, `bench_resize`,
   `bench_rotate_save`, `bench_startup`, `bench_variants`, `color_profiles`,
   `drops`, `embedded_thumbs`, `filter_and_paging`, `flip_through`, `formats`,
-  `icon`, `integration`, `keybindings`, `multiframe`, `pathological`, `property`,
-  `renderer`, `rotate_save`, `spreads`, `standard`, `thumb_cache`, `unit` — the
-  other three are `--lib`, the binary's own target and doc-tests.
+  `icon`, `integration`, `keybindings`, `multiframe`, `pathological`,
+  `preload_budget`, `property`, `ratings`, `renderer`, `rotate_save`, `spreads`,
+  `standard`, `thumb_cache`, `unit`, `watcher` — the other three are `--lib`, the
+  binary's own target and doc-tests.
 - **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
   use `criterion_main!` but are ordinary `{test}` targets with the default
   harness (there is no `[[bench]] harness = false` in `Cargo.toml`), so
@@ -44,7 +45,10 @@ that are already in memory. One crate, no workspace, no CI.
     per-cell cost of the large scans in `test-images/`. **It prints the cold
     number on purpose.** A baseline JPEG has no cheaper full-image read, so the
     cold figure is a floor that no amount of caching moves, and a benchmark that
-    printed only the warm one would be how that got forgotten.
+    printed only the warm one would be how that got forgotten. It also prints
+    **the Windows shell cache's rows** for the same real files (miss, hit, both
+    cell sizes, and the mean per-channel distance from our decode), because that
+    is the third source of a cell and its numbers are a property of the files.
     `IV_BENCH_N` (24), `IV_BENCH_RUNS` (5).
   - `bench_browse drop_copy_ab` — the same shape for a dropped file at 5 / 50 /
     500 MB: a cold drop against a repeat of the *same unchanged* file, arms
@@ -82,6 +86,23 @@ that are already in memory. One crate, no workspace, no CI.
     real app, this box: cold 4 misses / 4 entries, warm **4 hits / 0 misses**,
     `worker: thumbnail decode` **1.0 ms p50**, `gallery open -> first thumbs`
     **8.7 ms**, display-gap frames / stalls / worker panics all 0.
+  - `probe_watcher.ps1` — the same shape for the file-change watcher: rewrites
+    the shown file under the running viewer, leaves it as undecodable garbage
+    (a deliberate non-PNG — `image`'s PNG decoder accepts a truncated stream,
+    so a truncation would decode and prove nothing), then completes the write.
+    Verdict is counters, not pixels: watcher-saw-a-change ≥ 3, the final
+    re-decode landing after the failure, display-gap / stalls / panics 0 —
+    **pass on the real app 2026-10-20** (red → yellow → pink on screen, the
+    garbage window failing once and healing). Unlike its siblings it runs on
+    an *active RDP* session too: it presses no key and asserts no timing, and
+    the four wrong-over-RDP conclusions on record all came from benches that
+    did one of those two.
+  - **A `probe_*.ps1` script must be ASCII-only or carry a UTF-8 BOM.**
+    Windows PowerShell 5.1 reads a BOM-less script as ANSI, and a UTF-8 em
+    dash becomes mojibake that can eat a string terminator — one probe
+    executed with a step silently skipped and another threw `len` as a bare
+    command. The syntax check cannot catch this: the mojibake is a legal
+    string body, so parser and run-time read the same damaged text.
 - `cargo run` — the GUI. `-- --register` / `--unregister` (HKCU, no admin, then
   exit). `-- --icc-scan <folder>` classifies every image in a folder and prints
   the tally (it is deliberately **not** in `path_arg`'s `FLAGS_WITH_VALUE`: there
@@ -108,7 +129,7 @@ that are already in memory. One crate, no workspace, no CI.
   lived in `main.rs`.
 - `src/main.rs` (~4.3k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
   clipboard, wallpaper, Windows integration. Unreachable from a test.
-- `src/perf.rs` (16 latency metrics, 13 always-on counters), `src/fileassoc.rs`
+- `src/perf.rs` (16 latency metrics, 19 always-on counters), `src/fileassoc.rs`
   (HKCU registration), `src/icon.rs` (generated icon artwork).
 - `test-images/` is gitignored. `test-images/JPEGView_L` and
   `test-images/oculante` are reference checkouts, not fixtures.
@@ -157,26 +178,66 @@ that are already in memory. One crate, no workspace, no CI.
   re-arm every frame, so they survive a rebuild). `queued jobs dropped by
   rebuild` is the coalescing signal: large values mean the user outran the
   decoder — widen the window, don't add workers.
+- **The window is bounded by bytes before it is bounded by distance, and the
+  budget is `PRELOAD_BUDGET_BYTES` = 256 MB spent nearest-first on
+  *admissions only*.** The unit is **file length**, not decoded bytes, because
+  that is what exists before a decode does — a neighbour nobody has decoded is
+  exactly what a dims slice cannot know — and the lengths come from the
+  watcher's stamp registry (`Stamp.len`), so the plan path stats nothing.
+  `Plan::file_bytes` is parallel to `files` and `Plan::preload_budget` is the
+  number; `main.rs` collects the slice *before* the `Plan` literal
+  (`the_preload_budget_is_wired_from_the_watcher_s_stamp_registry`, red-verified
+  by handing in `u64::MAX`). Four rules, each with a test in
+  `tests/preload_budget.rs`, and each is the kind that looks right when wrong:
+  - **A skip is not a hole and holds nothing.** A priced-out neighbour does not
+    `break` the walk and does not spend the budget, so a small neighbour behind
+    a huge one is still planned. `break` instead of `continue` fails 3 tests.
+  - **A file larger than the *whole* budget is not prefetched at all** — the
+    falls-out-of-the-same-test case, and the one that matters: a 200-500 MB scan
+    is exactly the folder where `MAX_FULL_PIXELS` reaches 1.2 GB.
+  - **Only the window spends.** Current preview, the turn's partner, the full
+    decodes and the EXIF read are what the reader asked for; a zero budget
+    leaves all of them. That test is why the budget cannot be mistaken for a
+    general work limiter.
+  - **An un-stamped file is admitted (`0`, fail-open).** The budget is
+    calibrated to the scan the session has seen; a registry that has not caught
+    up plans exactly the unbounded walk, asserted rather than commented.
+  - **256 MB is not a guess.** Radius 3 = six neighbours, and 6 × 24 MB
+    photographs is the largest ordinary folder — under it, so ordinary folders
+    plan identically (golden arm: `the_budget_changes_nothing_for_small_files`).
+    Measured: `bench_browse browse_baseline` on the 24-fixture folder, **44.5 MB
+    total**, cache-hit **0/4/67/92/96%** at the 0/30/60/150/400 ms holds —
+    identical to the unbounded arm, which is the number the item asked to keep
+    constant. The lever if a 30 MB-folder needs fewer neighbours is the
+    constant, not the policy.
 - **The EXIF job is only wanted while the panel that shows it is drawn**
   (`wants_exif` in `lib.rs`, on `show_panels`). It is the one job per navigation
-  that exists to fill a panel, and it is not cheap: `color_info` does `fs::read`
-  on the **whole file** to find the ICC profile, then `read_exif` seeks the APP1
-  out — 4.4 ms on the 7 MB bench fixture and **7–12 ms on real 17–27 MB
-  photographs** (`bench_browse exif_ab`, three runs) — at priority 5, i.e. *ahead
-  of every prefetch*. It has two halves and both are load-bearing: `schedule`
-  leaves it out of the plan while the panel is hidden, and the panel `push`es it
-  on the frame it reappears.
+  that exists to fill a panel, and it is the cheap half only, now: the colour
+  classification rides on the preview (`PreviewAndFull::colour`, computed from
+  the bytes the decode already read — `color_info`'s whole-file `fs::read`
+  per image is gone, and with the conversion setting on it was paid *again*
+  inside `apply_wide_gamut_conversion`), and what is left is an EXIF seek plus
+  a 256 KiB header read, **0.64–1.19 ms on the real 17–27 MB photographs**
+  against the 7–12 ms the whole-file read cost (`bench_browse exif_ab`). Still
+  queued at priority 5, i.e. *ahead of every prefetch*, because being cheap is
+  not a licence to run unseen. It has two halves and both are load-bearing:
+  `schedule` leaves it out of the plan while the panel is hidden, and the panel
+  `push`es it on the frame it reappears.
   The second half is not belt-and-braces: re-planning from the F11 handler would
   be a frame late at best, and `frame_prelude` sees that toggle on the *next*
-  frame, so on a static photo it can be the 2 s watcher. Asking where the data is
+  frame, so on a static photo the next frame is whenever something wakes the app
+  (the 2 s poll, before the OS watch replaced it). Asking where the data is
   displayed cannot be late. A gate with only the first half leaves the panel
   reading "Loading EXIF…" until the next repaint — a visible bug, which is the
   one outcome worse than the slow path it replaced.
-- **Measured, and it is not a speedup you can feel**: one read is 7–12 ms against
-  a 380–415 ms preview decode on this box, so it is ~2.5% of one decode, and
+- **Measured, and it is not a speedup you can feel**: the old read was 7–12 ms
+  against a 380–415 ms preview decode on this box, ~2.5% of one decode, and
   `exif_ab` cannot separate the two arms at all — the per-run
   time-to-first-pixels distributions overlap in both directions and the sign of
-  the median difference flipped between two runs of the same experiment. Queue
+  the median difference flipped between two runs of the same experiment. That
+  was the argument for the *gating*; after the colour read moved onto the
+  decode's own bytes the job is ~1 ms and the A/B is even further below
+  resolution. Queue
   coalescing already throws most of it away when flipping fast anyway (~1 of 24
   reads survives at a 0 ms hold, ~5 of 24 at 30 ms; the reads are paid for when
   you *dwell*). Keep the change because it is free and it stops doing work whose
@@ -195,8 +256,67 @@ that are already in memory. One crate, no workspace, no CI.
   `invalidate_path` clears the `failed` entry, so a file re-read mid-write fails
   once and succeeds on the next poll. It deliberately does *not* keep the stale
   texture (a re-export can change the dimensions) — it blanks for one decode.
-  Watcher: `maybe_rescan` every 2 s, `Stamp` = mtime + len, deliberately **not**
-  gated on `load_all_on_startup`, both halves skipped while an archive is open.
+  Watcher: OS change notifications (`DirWatcher`, `ReadDirectoryChangesW` on its
+  own thread) with `Stamp` = mtime + len, deliberately **not** gated on
+  `load_all_on_startup`, both halves skipped while an archive is open. See the
+  folder-watch bullet below for the decisions that are load-bearing.
+- **The folder watch is notifications, and the poll is only its fallback.** The
+  app used to stat every file every 2 s and repaint to do it — ~2 fps on a
+  static photo. Now `sync_watcher` derives the wanted watch every frame from
+  `(folder, recursive, archive)` and a running watch **turns the timer off
+  entirely**; the watcher thread calls `ctx.request_repaint()` when it has news,
+  so an idle viewer costs no frames. A value latched at the folder-open site
+  would miss the recursive toggle and the archive open/close, which is why it is
+  derived (`the_app_polls_only_when_no_watch_is_running` brace-matches the
+  fallback below the branch that returns). Decisions that are *not* obvious:
+  - **One save arrives as five records, and the dangerous one comes first.**
+    Measured on this box, a rename-over (what every lossless re-export does) is
+    `ADDED page.jpg.tmp`, `MODIFIED page.jpg.tmp`, **`REMOVED page.jpg`**,
+    `RENAMED_OLD_NAME page.jpg.tmp`, `RENAMED_NEW_NAME page.jpg`. Read one
+    record at a time, the `REMOVED` for a *known* path is a membership change,
+    so every save would scan the whole folder. `coalesce_changes` folds a name
+    that is removed **and** added/renamed-to in the same batch down to the
+    record that says its bytes are new — which is also the right answer for a
+    genuine delete-then-recreate, since the two are indistinguishable and need
+    the same response. A delete with no matching add survives and rescans.
+  - **A content change is settled for 200 ms (`CONTENT_SETTLE`), a listing
+    change is not.** A chunked save emits an event per write; decoding on the
+    first decodes a half-written file and throws it away for the next chunk.
+    The clock restarts per event, the stamp is read when it expires (so the
+    finished bytes are what is decoded), and one save is one decode. The
+    membership rescan is throttled by `RESCAN_MIN_GAP` instead, deferred and
+    scheduled rather than dropped.
+  - **A path with no baseline stamp counts as changed.** An event is the OS
+    saying the bytes moved; the alternative is to miss the first re-export of a
+    session, which is exactly what the old first poll (2 s after open) caught.
+  - **Every way the watch can fail lands on the poll, and each one is a
+    different failure.** `start` is an `Err` for an archive (never watched: the
+    temp dir is rewritten on open and deleted on close), for a path that is not
+    a directory — an explicit `is_dir` check, because `FILE_FLAG_BACKUP_SEMANTICS`
+    happily opens a **file** and the first read on it then fails, i.e. a watch
+    that is dead before it reports anything — and for a share that refuses the
+    handle. A read that fails later (a share without change notification, the
+    folder removed) sets `alive()` false, and the app drops the watch and polls.
+    `watcher_key` is what keeps a folder that refuses a watch from being asked
+    again every frame (a `stat` plus a thread each time).
+  - **`Drop` cancels, it does not abandon.** The thread is blocked in a call
+    that returns only when something changes, so `join` alone would hang the UI
+    on every folder switch; `CancelSynchronousIo` is retried in a loop because
+    the thread may not have entered the call yet, and a detach (leaked thread +
+    open directory handle) is counted by `watchers_detached()` so
+    `tests/watcher.rs` can assert it stays zero — "`Drop` returned quickly" is
+    also true of an implementation that leaks every thread.
+  - **A buffer overflow is `CHANGE_OVERFLOW`, answered with the full pass**,
+    because names were dropped and nothing local knows which. Two counters keep
+    a silent OS distinguishable from an ignored event: `folder-watch events
+    received` moves for both, `files reloaded (watcher saw a change)` only for
+    the ones acted on.
+  - **Not claimed:** a share that accepts the watch and then silently drops
+    events while staying alive is not covered — there is deliberately no
+    periodic sweep while a watch runs, because that sweep *is* the idle tick
+    this replaced. The unverified premises (rename-over produces an event; one
+    recursive handle hears subfolders) are pinned by real OS tests in
+    `tests/watcher.rs`, not by comments.
 - **A drag-and-drop is a hand-off, not a reference, so a dropped file is copied
   before it is opened** (`image_viewer::own_dropped`, `tests/drops.rs`). Explorer
   does not pass a zip member's path: it extracts the member to a transient temp
@@ -453,6 +573,58 @@ that are already in memory. One crate, no workspace, no CI.
     leave one orphan per save; in the header, a re-saved file overwrites its own
     entry. Two-hex fanout because 30 000 files in one NTFS directory is a directory
     big enough to make `read_dir` slow.
+- **A grid cell has three sources, and the order is ours → Explorer's → our
+  decode.** `load_grid_thumbnail` asks the disk cache first (our own decode, the
+  sharpest and the one a warm folder already has), then the Windows shell's
+  thumbnail cache, then decodes. The shell arm is what a folder *the user
+  browsed in Explorer* paints from without decoding; the decode stays the cold
+  floor. Several things about that call are only knowable by making it, and every
+  one of them is a way to ship a plausible-looking failure:
+  * **`SIIGBF_INCACHEONLY` is the whole reason the call is safe.** Without it the
+    call *extracts*, i.e. it starts work behind our back — and the whole point is
+    that a miss may never cause an extraction. It is also the reason the cold
+    path cannot be made slower. `SIIGBF_THUMBNAILONLY` for the other half: a
+    miss that comes back as the file type's *icon* is a picture of the wrong
+    thing.
+  * **A verbatim path (`\\?\C:\...`) is rejected with `E_INVALIDARG`, and
+    `std::fs::canonicalize` produces one.** So the first version returned `None`
+    on *every* file, which reads exactly like "Explorer has never thumbnailed
+    anything" — a clean, silent, total miss. `shell_api_path` uses
+    `std::path::absolute` and drops a verbatim prefix. A mistake here is
+    invisible in a return code, so the test asks for a real thumbnail and checks
+    the *picture*.
+  * **The size argument picks which cache entry to look for; it does not scale
+    one.** Fill the cache at 32 px and a 256 px ask comes back **32x24** — a
+    smear, painted into a 150-point cell. `SHELL_MIN_CELL_UPSCALE` refuses
+    anything under half the target and lets the decode run instead: a smear is
+    worse than the wait it saves.
+  * **A miss is not free** — 8.5-16 ms measured here, against a 595-709 ms
+    decode of a 17-26 MB scan (nothing) but ~7% of a 124 ms small-photo decode,
+    and a folder Explorer never visited misses on *every* cell. So the ask is
+    bounded per folder (`ShellAsk`, give up after 4 consecutive misses) and a hit
+    clears the record, so a partly-cached folder is not abandoned. The counter
+    that shows the tax being paid is `shell cache misses (grid-sized asks)`.
+  * **Extraction needs the file closed.** `GetImage` on a file the caller still
+    holds open fails with `ERROR_SHARING_VIOLATION` — which is a reason the app
+    can never extract, and a trap for any test that writes through a
+    `NamedTempFile`.
+  * The shell's DIB is read top-down (`biHeight` negative) and **its alpha is
+    not trusted**: the shell often draws into a 32-bit bitmap whose fourth byte
+    is left at zero, and honouring that paints the cell blank.
+  * **A shell cell is never written into our own thumb cache.** The entry there
+    has to be the decode it claims to be, and the shell's cell is a different
+    decoder's picture. The wiring test is a *position*, not a presence: one
+    `write_cached_thumbnail`, after the only `load_thumbnail`, with every shell
+    arm returning first. The cache's byte-for-byte claim therefore describes
+    *our* cache and only our cache — a grid cell can be the shell's decode.
+  * The interface (`IShellItemImageFactory`) is declared by hand in `lib.rs`,
+    because `windows-sys` — already a dependency — carries the functions and the
+    flags but not the interface. **A hand-written vtable is the "never
+    transcribe a table" trap again** (same shape as `Xform` and the wgpu backend
+    bits): it compiles, it type-checks, and it is wrong. The tests are what make
+    it trustworthy, and the distance from our decode (1.8-5.4 codes per channel
+    on real files, where a different file scores 36-195) is what says the cell
+    is the same picture and needs no swap.
 - **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
   300 MP = 1.2 GB for one buffer, and every cached preview carries one for free.
   Bounded by count only: `PREVIEW_CACHE_CAP` 16 (LRU), `MAX_TILES` 64 × 1024
@@ -863,6 +1035,41 @@ are wrong in a way that *looks* right.
   crop, keyed by path. Turn and mirror are the same kind of edit and do not
   commute (turn-then-mirror is a diagonal mirror), so the store holds a whole
   `Xform`, not a turn count. Look the edit up *by the path being saved*.
+- **Per-image view memory (`ViewMemory`, the "Remember zoom and pan per image"
+  setting) is keyed by `ImgKey`, and the save lives inside `goto`'s
+  cursor-change block — before `pan_key` is reassigned, because after that the
+  outgoing key is gone and its view would be stored under the arriving key's
+  name: a map that says "remembered" and holds the carry.** That ordering is
+  pinned by position (`view_memory_is_wired_to_the_cursor_change_and_the_setting`,
+  verified red by moving the save). The restore asks the pure `arriving_view` in
+  `lib.rs` — remembered exactly, otherwise the carry (fit and scale carried,
+  pan reset), which is the shipped behaviour byte for byte and the reason the
+  setting can be off by default. The fit modes own the arriving view when they
+  are on, so the setting only ever answers where no mode already has an answer.
+  It is session-only view state, and `invalidate_path` drops a file's entries
+  next to its page counts and shapes — a remembered view for pixels that no
+  longer exist is a value that looks like state and is wrong.
+- **Chrome persists; view state does not — draw the line by taste, not by
+  implementation.** The side-panel master (`I`) is persisted
+  (`Config::show_panels`, default **on** so an old config keeps panels);
+  a hidden-chrome launch is a preference, the successor to
+  `hide_title_bar` — how little sits around the picture is wanted every
+  launch. The per-pane keys (`L`/`P`) stay session-only: fine-tuning of a
+  run, no opinion about the next one. Both `I` sites (key and menu row)
+  funnel through `toggle_panels_master`, which mirrors the field into the
+  config and saves, because **a toggle written only to the field is saved by
+  the next `on_exit` save, or not saved at all — and the mirror-less helper
+  is the mutation-verified shape of that bug.**
+- **The fullscreen dance is an overlay on a persisted value, and the
+  whole-config save on exit makes any stale overlay value into a rewrite.**
+  `on_exit` saves the config with the in-memory field values, so leaving
+  fullscreen must restore the master from `panels_before_fullscreen` rather
+  than hardcode `true` — a hardcoded restore re-acquires chrome the user
+  switched off, and then the exit save records the rewrite as their choice.
+  Entering stashes; both exits (`F11` again, `Esc`) restore; neither writes
+  the config. `the_panel_master_is_saved_and_fullscreen_only_borrows_it`
+  pins the funnel, the no-force ("no `self.show_panels = true` anywhere")
+  rule and both restore arms, red-verified by mutation.
 - **`shown` and `cur` are different images.** `cur` is what is wanted (set by
   `goto`), `shown` is what is painted (set by `sync_shown`). Key the draw path
   off `shown_xform` and everything else off `shown`; `current_xform` is right
@@ -1036,9 +1243,15 @@ Reading a report that already exists is the other half, and it stays here:
   plausible wrong number for a hang that was three steps away.
 - **A frame count does not mean the app is spinning.** Presentation can set the
   cadence; a 20× smaller window produced the same one. Read `frames with input
-  events` (0 while idle) before blaming CPU. On a static photo the only source is
-  the 2 s watcher and ~2 fps is correct — which is why **`ms/frame`, CPU amortised
-  over whatever frames happened, is meaningless**. Use total CPU%.
+  events` (0 while idle) before blaming CPU. A static photo used to tick at ~2
+  fps because the 2 s folder poll was its only wake source; since the OS watch
+  replaced the poll, an idle viewer with a watch running should produce **no**
+  frames of its own, and ~2 fps now means the watch fell back to polling
+  (`folder watches that fell back` in the same report) - which is why
+  **`ms/frame`, CPU amortised over whatever frames happened, is meaningless**.
+  Use total CPU%. The zero-frame half is **unmeasured**: no GUI could be
+  launched in this session, so what to look at is the report's frame counters
+  after a photo sits untouched for a few seconds.
 - `display-gap frames` (wanted to paint, no texture) and `stalls (>5s to first
   pixels)` must stay 0. The watchdog fires only when nothing was painted at all —
   check `recorded_first`, not just age, or it cries wolf on cache hits. Keep a
@@ -1529,16 +1742,47 @@ an edit.
 - Known waste, not worth fixing: `exif_orientation(path)` re-reads the file with
   `nom_exif::read_exif` although the bytes are already in memory. That is
   0.1–0.2 ms against a 10–17 ms `fs::read` — ~0.02% of a preview decode.
-- **The metadata *job* is the one whole-file read left in the pipeline, and it
-  is now gated on the panel being visible** (see Decode pipeline). `color_info`
-  needs the whole file because the ICC profile has to be found in it, so unlike
-  `exif_orientation` above this one is not 0.1 ms: 8–12 ms on a 17–27 MB photo.
-  It is the obvious next thing to fix properly (hand the colour read the bytes
-  the decode already has), and it is deliberately *not* fixed by dropping the
-  panel's colour line — that line is why a screenshot with no EXIF still says
-  something useful.
+- **The colour read left the decode's path, hand-in-hand with the decode's
+  own bytes.** The metadata job's `color_info` whole-file read (8–12 ms on a
+  17–27 MB photo) never re-ran against a decode that had those bytes in
+  memory one worker-call earlier; the classification now happens inside
+  `decode_page` from the bytes it already read and travels as
+  `PreviewAndFull::colour` — filling the panel's colour line *and* gating
+  `apply_wide_gamut_conversion` (which under the setting read the file whole
+  a **second** time, per decode). The job that remains is the EXIF seek plus
+  a 256 KiB `COM` header read, sub-millisecond; the whole-file reads left are
+  the deliberate ones — the wallpaper check (`set_wallpaper`, one user
+  action) and `--icc-scan`. The panel's colour line was deliberately *not*
+  dropped: it comes free with the preview now.
 
 ## Windows integration
+
+- **Both wallpaper actions are worker threads, and the rule did not have an
+  exemption for them until this was found.** `set_wallpaper` and
+  `set_wallpaper_shown` read, decoded, converted, re-encoded and called the
+  shell **on the paint thread** — hundreds of milliseconds on a big
+  photograph with the conversion setting on; a one-off action is not a
+  licence, because the paint thread does not weigh the *reason* (`W` is not
+  quieter than `Ctrl+C`, which spawns). The rating read's shape is the
+  template: one `thread::spawn` on `drop_tx`/`drop_wake` (a wallpaper is not
+  a decode, so it is not in the plan and `Loader::replace` would discard a
+  queued job), the `Setting wallpaper…` notice set **before** the spawn (an
+  invisible action reads as a dropped keystroke — the drop-copy lesson), and
+  the result back as `Msg::Wallpaper`.
+- **A wallpaper press is stamped with an issuance counter, and "the last
+  action wins" is the rule the race gets.** A thread cannot be stopped, so a
+  second `W`/`Shift+W` inside the first's flight leaves the first running;
+  its worker checks the counter before starting and again **at the set**
+  (the decode/encode between the checks is exactly the window a second press
+  arrives in, and only the set must not show the wrong action's picture), and
+  `pump` displays a result only when its order equals the counter *now*. A
+  superseded `Ok(())` — true, the desktop did show it for a moment — is
+  dropped, not shown. Two workers can still write `%APPDATA%`'s
+  `wallpaper.<ext>`/`wallpaper.png` concurrently in the narrow overlap, and
+  the dest file can sit wrong until the next press: **not claimed**, and the
+  same boundary `start_drop_copy` records. The set itself needs no COM
+  apartment: `wallpaper`'s Windows arm is `SystemParametersInfoW` and is
+  safe from any thread — checked in the vendored source, not assumed.
 
 - **`build.rs` is load-bearing.** It passes `/NODEFAULTLIB:LIBCMT(D)` (turbojpeg
   is built with the static CRT, Rust links the dynamic one — delete it and every
@@ -1600,6 +1844,20 @@ an edit.
   "default_true")]`, and the settings panel states the cap and the path next to
   the toggle — a cache that silently takes a quarter of a disk should not be
   enabled quietly.
+- **The cache directories tell Windows Search to leave them alone.**
+  `mark_not_content_indexed` (in `lib.rs`, Windows-gated) ORs
+  `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` onto the thumbs root and every two-hex
+  fanout child, called from `write_cached_thumbnail` where the directories are
+  born. Two load-bearing details: **the attribute is per-directory and a child
+  does not inherit it**, so both levels must be marked (nomacs marks one
+  directory; we have a fanout), and **the mark reads the current attributes and
+  ORs rather than assigns** — `SetFileAttributesW` replaces the whole set, and a
+  round-trip that drops attributes the file system owns is not a mark, it is a
+  different directory. Calling it on the *write* path, not the read path, is a
+  decision: it costs two syscalls beside a PNG encode on a worker, where one
+  `fs::metadata` on the warm read path would touch the number the cache exists
+  to keep small, and an older directory arrives at the attribute on its first
+  new write rather than never.
 - **A dropped file's copy is under `%TEMP%`, not `%LOCALAPPDATA%`, and is not a
   cache.** `drop_copy_dir` writes `%TEMP%\image-viewer\drop\<16 hex>`. It is not
   `%LOCALAPPDATA%` because it is not reusable: it is the picture the app is

@@ -1030,11 +1030,14 @@ fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live()
 /// |---|---|---|
 /// | `→` | `Right` | rightward on screen, the one input with a side |
 /// | `←` | `Left` | leftward on screen |
-/// | `Space` | `Next` | onward, no side |
 /// | `PageDown` | `Next` | onward, no side |
 /// | `PageUp` | `Previous` | back, no side |
 /// | Extra2 | `Next` | the browser's forward button |
 /// | Extra1 | `Previous` | the browser's back button |
+///
+/// `Space` was in this table and is out on purpose: it is the zoom toggle's
+/// second chord (`fit_alt`, JPEGView's own Space binding), not navigation —
+/// pinned by `space_is_the_fit_toggle_and_not_a_navigation_key` below.
 ///
 /// The grid's own reads are excluded, because the grid is a different question — a
 /// highlight moving across a grid has no reading order — and are checked to exist
@@ -1050,7 +1053,6 @@ fn every_navigation_key_is_paired_with_the_input_it_is_supposed_to_mean() {
             &[
                 ("ArrowRight", "Right"),
                 ("ArrowLeft", "Left"),
-                ("Space", "Next"),
                 ("PageDown", "Next"),
                 ("PageUp", "Previous"),
             ][..],
@@ -1241,6 +1243,55 @@ fn the_grid_keeps_its_own_arrows_and_does_not_follow_the_reading_direction() {
             "grid action `{action}` no longer defaults to {key}"
         );
     }
+}
+
+/// Space is the fit ↔ 100% toggle, **not** navigation.
+///
+/// This is a decision, and it is JPEGView-shaped: `Space` is what JPEGView ships on
+/// `IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS` (its `KeyMap.txt.default`), the toggle
+/// between fitted and actual size — which here is the `fit` action's second chord
+/// (`F`'s own toggle: on fits every image, off drops to 100%, so space-space walks
+/// fit → 100% → fit exactly like JPEGView). Navigation never ships it: an "onward"
+/// Space and a zoom Space in one hand is two meanings for one key, and the
+/// alt-navigation row (`next_alt`) ships **unbound** rather than on Space, still
+/// rebindable by anyone who wants Space navigating again.
+///
+/// The grid keeps Space for moving the highlight (`grid_right_alt`) — a separate
+/// read with a separate concern, checked for existence in the grid test above.
+#[test]
+fn space_is_the_fit_toggle_and_not_a_navigation_key() {
+    assert_eq!(
+        default_binding("fit_alt"),
+        "Space",
+        "Space must be the fit toggle's second chord (JPEGView parity), not navigation"
+    );
+    assert_eq!(
+        default_binding("next_alt"),
+        "",
+        "no shipped navigation key may be Space; alt-navigation starts unbound so the \
+         reader's hand cannot be split between a zoom key and a page key"
+    );
+
+    let src = source();
+    // The dispatch reads both chords of the toggle.
+    assert!(
+        src.contains(r#"binding_down(i, &kb, "fit_alt")"#),
+        "the fit dispatch does not read `fit_alt`, so Space would sit in the table \
+         and do nothing (reads-as-working, works-as-nothing)"
+    );
+    // And the navigation table holds no Space pair — the fallback table is the
+    // one place a copy of the old meaning could survive the rebind resolver.
+    let at = src
+        .find("const NAV_KEYS:")
+        .expect("NAV_KEYS is gone; update this test to match");
+    let body = &src[at..src[at..]
+        .find("];")
+        .expect("NAV_KEYS is no longer a bracketed list")
+        + at];
+    assert!(
+        !body.contains("Key::Space"),
+        "NAV_KEYS still binds Space to navigation: `{body}`"
+    );
 }
 
 /// Hold-to-browse resolves to the same direction as the press that started it.

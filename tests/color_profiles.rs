@@ -531,6 +531,37 @@ fn test_the_conversion_is_off_by_default_and_only_touches_wide_gamut_files() {
 }
 
 #[test]
+fn test_the_decode_carries_its_own_colour_classification() {
+    // The rule this change encodes: the colour answer is computed from the bytes
+    // the decode already read, and travels with the result. `color_info(path)`
+    // — a second whole-file `fs::read` of the file, per decode — is what this
+    // replaces, which is why the pin is agreement: whatever the standalone read
+    // would say, the decode's own answer already is.
+    let dir = tempfile::tempdir().unwrap();
+    let p3 = dir.path().join("p3.jpg");
+    std::fs::write(
+        &p3,
+        jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)),
+    )
+    .unwrap();
+    let plain = dir.path().join("plain.jpg");
+    std::fs::write(&plain, jpeg_with_icc(32, 32, &[])).unwrap();
+
+    let r = image_viewer::load_page_preview_full(&p3, 512, 0).unwrap();
+    assert_eq!(
+        r.colour,
+        image_viewer::color_info(&p3),
+        "the decode's colour answer must be the standalone read's answer"
+    );
+    assert_eq!(r.colour.space, image_viewer::ColorSpace::WideGamut);
+
+    // And the same for a file with no profile at all: the answer rides on the
+    // decode every time, not only when something interesting is there.
+    let r = image_viewer::load_page_preview_full(&plain, 512, 0).unwrap();
+    assert_eq!(r.colour, image_viewer::color_info(&plain));
+}
+
+#[test]
 fn test_out_of_gamut_colours_clip_rather_than_wrap() {
     // The honest cost of the conversion, pinned: P3's red and green primaries are
     // outside sRGB, and clipping is the only thing that can be done with them.

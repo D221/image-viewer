@@ -41,7 +41,7 @@ use image_viewer::{
     set_thumbnail_cache,
     spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
     DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
-    SortMode, Xform, GRID_LABEL_H, grid_row_h, MAX_FULL_PIXELS,
+    SavedView, SortMode, Xform, GRID_LABEL_H, grid_row_h, MAX_FULL_PIXELS,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,7 +56,14 @@ const THRESH_WHEEL: f32 = 60.0;
 /// **The pairs are the direction rule's inputs, and this table is where a physical
 /// key becomes one.** `Right` and `Left` are the arrows and they are the only two
 /// entries with a side to preserve, so `manga_rtl` inverts exactly those. `Next` and
-/// `Previous` are the ones that say "onward" without saying which way.
+/// `Previous` are the ones that say "onward" without saying which way; they ship on
+/// `PageDown` (`PageUp` for `Previous`), the mouse's forward/back buttons, and
+/// nothing else — **`Space` is deliberately not navigation.** It is the zoom
+/// toggle's second chord (`fit_alt`: fit ↔ 100%, JPEGView's own Space binding,
+/// its `KeyMap.txt.default` line 49 `IDM_TOGGLE_FIT_TO_SCREEN_100_PERCENTS`), and
+/// it moving the grid highlight is the other hand it already has. Shipping it as
+/// a third "onward" key would have it holding two meanings in one hand, and the
+/// alt-navigation slot (`next_alt`) ships unbound precisely so it is free.
 ///
 /// They are one table, in one place, rather than a boolean per key read in the
 /// dispatch, because "which key means what" is a decision with a failure mode and no
@@ -67,7 +74,6 @@ const THRESH_WHEEL: f32 = 60.0;
 const NAV_KEYS: &[(egui::Key, NavInput)] = &[
     (egui::Key::ArrowRight, NavInput::Right),
     (egui::Key::ArrowLeft, NavInput::Left),
-    (egui::Key::Space, NavInput::Next),
     (egui::Key::PageDown, NavInput::Next),
     (egui::Key::PageUp, NavInput::Previous),
 ];
@@ -546,6 +552,19 @@ fn effective_nav_keys() -> Vec<(ResolvedBinding, NavInput)> {
 /// How many images on each side of the current one get their preview preloaded.
 const PRELOAD_RADIUS: usize = 3;
 
+/// The preload window's whole budget in **file bytes** — what the watcher's
+/// stamp registry already holds, so the cost is known before any decode.
+/// Chosen so that every ordinary folder spends nothing new: radius 3 plans
+/// six neighbours, and 6 × 24 MB photographs — the largest folder a photo
+/// library brings — sits under the budget, so the walk on it plans exactly
+/// what it always did. What it removes is the tail: a 200-500 MB scan is past
+/// the whole budget, is never preloaded, and costs its decode the moment it
+/// is looked at instead. Notes: the current image takes no part in the
+/// budget, so the budget never removes the picture the reader sees; and a
+/// skip is not a hole — smaller neighbours behind a large one are still
+/// planned, by distance first.
+const PRELOAD_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+
 /// How long to wait for a follow-up frame after the display size changed, to
 /// decide whether a drag has stopped. One frame is enough — the test is whether
 /// the size is unchanged since the previous frame, not how long it has been.
@@ -574,8 +593,25 @@ const FULL_DWELL: Duration = Duration::from_millis(120);
 /// spawn path ever fires repeatedly again. Legitimate use never notices —
 /// nobody runs two external programs within a second on purpose.
 const SPAWN_COOLDOWN: Duration = Duration::from_secs(1);
-/// Poll the folder for new/deleted files this often (watcher).
+/// The **fallback** folder poll: used only when the OS folder watch could not
+/// be started (an archive's temp dir, a network share that refuses
+/// notifications). With a watch running, notifications are the only source and
+/// this timer does not tick at all — see `maybe_rescan`.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
+/// Minimum time between two notification-driven rescans. One bulk copy emits
+/// one event per file; they are coalesced per frame, but a folder being written
+/// continuously would still ask for a scan every frame, which is worse than the
+/// poll this replaced. A rescan that is owed is never dropped - it is deferred
+/// and a repaint is scheduled for it - so the listing cannot end up stale.
+const RESCAN_MIN_GAP: Duration = Duration::from_secs(1);
+/// How long a file has to stop changing before it is re-decoded. A save is
+/// often several writes, and the OS reports each one: acting on the first would
+/// start a decode of a half-written file, then throw it away for the next
+/// chunk, repeatedly. The clock restarts on every event for the path, so the
+/// decode happens once, when the writer has finished - the same reasoning as
+/// `FULL_DWELL`, and the same cost, which is a reload a fifth of a second after
+/// the save rather than during it.
+const CONTENT_SETTLE: Duration = Duration::from_millis(200);
 /// Highest zoom, in screen points per source pixel.
 const MAX_SCALE: f32 = 32.0;
 
@@ -1279,6 +1315,12 @@ struct PreviewData {
     // walked once per decode, never per frame. Carried rather than recomputed
     // because the CPU pixels are dropped after upload.
     hist: image_viewer::Histogram,
+    // The file's colour classification, classified on the worker from the bytes
+    // the decode already had in hand. It fills the metadata panel's colour line —
+    // which used to be the metadata read's own second whole-file read of the
+    // file, on the worker, per image — and it rides on the preview, so it is
+    // cached alongside the texture and costs nothing to re-show.
+    colour: image_viewer::ColorInfo,
 }
 
 /// What one grid cell needs, and nothing else.
@@ -1356,6 +1398,19 @@ enum Msg {
     DropCopy {
         src: PathBuf,
         result: Result<image_viewer::DropCopy, String>,
+    },
+    /// A wallpaper set-complete, from its worker.
+    ///
+    /// A wallpaper request reads, decodes, converts and re-encodes **off the
+    /// paint thread**, and this is its answer — a notice or an error, nothing
+    /// else is needed because the desktop itself is the output. `order` is the
+    /// issuance token the press stamped, so a **stale** answer — a second
+    /// press's worker landed after this one's — is recognised in `pump` and
+    /// silently dropped: the desktop must end on the user's *last* action,
+    /// which may have landed first.
+    Wallpaper {
+        order: u64,
+        result: Result<(), String>,
     },
     }
 
@@ -1464,6 +1519,7 @@ fn decode_preview(path: &Path, target_dim: u32, page: u32) -> Result<PreviewData
         exif_tag: r.exif_tag,
         crop_grid: r.crop_grid,
         hist: image_viewer::histogram_rgba(&r.preview.rgba, r.preview.width, r.preview.height),
+        colour: r.colour,
     })
 }
 
@@ -1480,28 +1536,19 @@ fn decode_thumb(path: &Path, target_dim: u32) -> Result<ThumbData, String> {
     })
 }
 
-/// Metadata panel text for `path`, or `None` when there is nothing worth saying.
+/// EXIF panel text for `path`, or `None` when there is nothing worth saying.
 ///
-/// EXIF and the colour profile are gathered **independently**. They used to be
-/// one function with `read_exif(path).ok()?` at the top, which meant a file
-/// with an ICC profile but no EXIF block — which is exactly what a screenshot or
-/// a downloaded/forwarded phone photo is — showed a completely empty panel and
-/// hid the only interesting thing about it.
+/// The colour line is **not** one of these any more: it is classified on the
+/// worker from the bytes the decode already read and travels with the preview,
+/// so asking here would be a second whole-file read of the file for a fact the
+/// decode already established. What is left is the cheap half — `read_exif`
+/// seeks the APP1 block out rather than reading the file, 0.1–0.2 ms on a real
+/// photograph against the 8–12 ms `color_info`'s `fs::read` cost.
 fn extract_exif(path: &Path) -> Option<String> {
     let mut info = Vec::new();
 
-    // Colour first: it is independent of EXIF, and often the only thing there is.
-    if let Some(line) = image_viewer::color_info(path).panel_line() {
-        info.push(line);
-    }
-
-    // Everything below needs an EXIF block; absent one just means fewer lines.
     let Ok(exif) = read_exif(path) else {
-        return if info.is_empty() {
-            None
-        } else {
-            Some(info.join("\n"))
-        };
+        return None;
     };
 
     if let Some(entry) = exif.get(ExifTag::Make) {
@@ -1728,6 +1775,10 @@ struct Preview {
     // *stored* coordinates, and that composition needs the tag.
     exif_tag: u16,
     crop_grid: (u32, u32),
+    // The file's colour classification, from the preview decode's own bytes.
+    // The panel's colour line reads this directly, so a cached preview answers
+    // it with no read of any kind.
+    colour: image_viewer::ColorInfo,
     // Levels and clipped-pixel counts from the decode worker: 3KB that rides
     // the preview for free, so the panel draws numbers rather than pixels.
     hist: image_viewer::Histogram,
@@ -1964,15 +2015,33 @@ struct MyApp {
     /// cleared in `goto` beside `exif_info`, so a stale rating is never shown
     /// for the wrong image.
     rating_for: Option<PathBuf>,
+    /// The side-panel master (`I`), **persisted in the config**
+    /// (`Config::show_panels`); this field is its in-memory copy, read on
+    /// startup so a launch with chrome off opens with chrome off.
     show_panels: bool,
     /// Left (EXIF) and right (settings) panes individually. `show_panels`
     /// (`I`) is the master: a pane paints only when both its flag and the
     /// master are on. Toggled by `L` and `P`, view-only like every other
-    /// bare letter. Session state, like the master — a restart re-shows both.
+    /// bare letter. Session state — deliberately not like the master any
+    /// more: the master persists between launches, the per-pane fine-tuning
+    /// does not, and a restart re-shows both panes.
     show_left: bool,
     show_right: bool,
+    /// The side-panel master as it stood **before entering fullscreen**, so
+    /// leaving can restore it: the master is a persisted preference and the
+    /// fullscreen dance is a transient overlay, and `on_exit` saves the whole
+    /// config with whatever the field holds — a hardcoded "panels come back"
+    /// on exit would silently rewrite the user's minimal state.
+    panels_before_fullscreen: Option<bool>,
     /// Cursor whose pan the view holds: see the reset in `goto`.
     pan_key: Option<ImgKey>,
+    /// What each visited image's view was when the user left it, for the
+    /// per-image remembering setting. Filled in `goto`'s cursor-change block
+    /// and read by nobody else; `invalidate_path` drops a file's entries, for
+    /// the same reason it drops the pages' shapes — a remembered view for
+    /// pixels that no longer exist is a value that looks like state and is
+    /// wrong. Session-only, one entry per visited image, kilobytes.
+    views: image_viewer::ViewMemory,
     /// Fit-window-to-image armed (`T`): consumed by `central` on its next
     /// frame, where the drawn size is known. A flag rather than doing it in
     /// the dispatch, because the dispatch cannot see the laid-out content.
@@ -2015,7 +2084,38 @@ struct MyApp {
     /// show puts it back. `None` whenever no shuffled show is running — the
     /// flag and the saved order are set and cleared together, never apart.
     slideshow_saved: Option<Vec<PathBuf>>,
-    next_scan: Instant, // periodic folder rescan (watcher)
+    next_scan: Instant, // fallback folder poll (only when no OS watch runs)
+    /// The OS notification watch for the folder on screen, when the platform
+    /// gave us one. **`Some` is what turns the 2 s poll off**: with a watch
+    /// running, the watcher thread is the only thing that can tell us a file
+    /// changed, and it calls `request_repaint` when it has news — which is why
+    /// an idle photo now costs no frames at all.
+    ///
+    /// Derived every frame from `(folder, recursive, archive)` by
+    /// `sync_watcher`, never set at a call site: folder opens, the recursive
+    /// toggle and archive open/close all have to restart it, and deriving the
+    /// answer is the only way none of them can be forgotten.
+    watcher: Option<image_viewer::DirWatcher>,
+    /// What `watcher` (or the decision not to have one) refers to. Compared
+    /// against the wanted key so the start is attempted **once per folder** —
+    /// a share that refuses a watch would otherwise be asked again on every
+    /// frame, and each ask is a `stat` plus a thread. A watch that dies keeps
+    /// its key, so a folder that cannot hold one polls instead of thrashing.
+    watcher_key: Option<(PathBuf, bool)>,
+    /// A membership change (a file appeared, vanished or was renamed away) is
+    /// owed a rescan. Set by the event drain, cleared when the rescan runs;
+    /// deferred rather than dropped by `RESCAN_MIN_GAP`.
+    pending_rescan: bool,
+    /// Earliest time the next notification-driven rescan may run.
+    next_rescan_allowed: Instant,
+    /// Content changes waiting for their writer to go quiet, and the last
+    /// event seen for each. A path leaves this map when it is re-decoded; the
+    /// deadline is `CONTENT_SETTLE` after the most recent event, so a save in
+    /// several chunks is one decode of the finished file.
+    pending_content: std::collections::HashMap<PathBuf, Instant>,
+    /// `DirWatcher::events()` as of the last frame, so the perf counter counts
+    /// what this session *received*.
+    watch_events_seen: u64,
     /// When an external process was last spawned (user command, Explorer).
     /// Rate-limits spawns so a repeating chord can never fork-bomb the
     /// machine again — see `SPAWN_COOLDOWN`.
@@ -2124,6 +2224,16 @@ struct MyApp {
     /// copy is ever outstanding.
     drop_tx: Sender<Msg>,
     drop_wake: Context,
+    /// The wallpaper presses' issuance token, Arc'd for its workers.
+    ///
+    /// A wallpaper press increments this and stamps its message with the value
+    /// it got; `pump` only displays a result **equal to the counter now**, and
+    /// a worker that notices the counter has moved past its stamp aborts
+    /// early. That is the "last action wins" rule `pending_drop` encodes,
+    /// without trying to stop a thread (it cannot be stopped — see
+    /// `drop_tx`). One press at a time is the shape of the action, so one
+    /// counter, not a queue, is enough.
+    wallpaper_order: Arc<std::sync::atomic::AtomicU64>,
     /// The user's own pairing decisions for the gallery on screen: which pages take
     /// a whole turn, and how many leading pages stand alone. Loaded when a gallery
     /// is opened, and one file's entries are dropped by `invalidate_path`, because
@@ -2330,6 +2440,10 @@ impl MyApp {
         // Taken before `gallery` is moved into the struct below.
         let all_files = gallery.files.clone();
         gallery.loop_back = config.loop_back;
+        // In-memory copy of the persisted master; the field in the config is
+        // the one `I` writes to. Owned by the session only in the sense that
+        // fullscreen borrows it (see `panels_before_fullscreen`).
+        let show_panels = config.show_panels;
         let mut app = Self {
             folder,
             gallery,
@@ -2359,10 +2473,12 @@ impl MyApp {
             exif_loading: false,
             rating: image_viewer::Ratings::default(),
             rating_for: None,
-            show_panels: true,
+            show_panels,
             show_left: true,
             show_right: true,
+            panels_before_fullscreen: None,
             pan_key: None,
+            views: image_viewer::ViewMemory::new(),
             fit_window_pending: false,
             fit_wrap_pending: false,
             fit_window_key: None,
@@ -2375,6 +2491,12 @@ impl MyApp {
             slideshow_last: Instant::now(),
             slideshow_saved: None,
             next_scan: Instant::now() + RESCAN_INTERVAL,
+            watcher: None,
+            watcher_key: None,
+            pending_rescan: false,
+            next_rescan_allowed: Instant::now(),
+            pending_content: std::collections::HashMap::new(),
+            watch_events_seen: 0,
             last_external_spawn: None,
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
@@ -2413,6 +2535,7 @@ impl MyApp {
             pending_drop: None,
             drop_tx: tx,
             drop_wake: ctx.clone(),
+            wallpaper_order: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             spreads: GallerySpreads::default(),
             spreads_key: None,
             wheel_acc: 0.0,
@@ -2569,8 +2692,40 @@ impl MyApp {
         // the cursor (not every goto: toggles and rescans must not steal
         // the pan).
         if self.cur != self.pan_key {
+            // **With per-image remembering on, the whole view is what a
+            // cursor change trades**: leaving remembers the outgoing image's
+            // view as it was, arriving restores a remembered view exactly, and
+            // the un-remembered case answers the carry — `arriving_view`'s
+            // whole job, left pure in `lib.rs` so the two rules stay testable
+            // side by side. The fit modes are respected upstream of this
+            // (their own arrival rules run after), so this only ever answers
+            // where no mode already does.
+            if self.config.remember_view {
+                if let Some(out) = self.pan_key.clone() {
+                    self.views.remember(
+                        out,
+                        SavedView {
+                            fit: self.view.fit,
+                            scale: self.view.scale,
+                            offset: self.view.offset.into(),
+                        },
+                    );
+                }
+            }
             self.pan_key = self.cur.clone();
             self.view.offset = Vec2::ZERO;
+            if self.config.remember_view {
+                if let Some(key) = self.cur.clone() {
+                    let arriving = image_viewer::arriving_view(
+                        self.views.restore(&key),
+                        self.view.fit,
+                        self.view.scale,
+                    );
+                    self.view.fit = arriving.fit;
+                    self.view.scale = arriving.scale;
+                    self.view.offset = arriving.offset.into();
+                }
+            }
         }
         // Preloading hit rate: the new image already had a preview, so the
         // first pixel is free. If this counter stays low, the preload window
@@ -3240,6 +3395,18 @@ impl MyApp {
         // The turn's second half, when there is one. `None` with manga mode off,
         // so every plan below is the one this function has always produced.
         let partner = self.turn_partner();
+        // The preload budget spends **file lengths**, and the watcher's stamp
+        // registry is where they already live: one lookup per file in the
+        // plan, no stat on a path that runs per frame. A file the scanner has
+        // not stamped yet (just appeared, or a fresh filter) costs `0` —
+        // admitted — which is the fail-open reading: the budget is calibrated
+        // to what the session has seen, not to a guess.
+        let file_bytes: Vec<u64> = self
+            .gallery
+            .files
+            .iter()
+            .map(|p| self.stamps.get(p).map_or(0, |s| s.len))
+            .collect();
         // The plan is computed by the library so it can be tested; all this does
         // is describe the current state to it.
         //
@@ -3278,6 +3445,8 @@ impl MyApp {
                 current_stale: self.resize.pending(),
                 target_dim,
                 radius: PRELOAD_RADIUS,
+                file_bytes: &file_bytes,
+                preload_budget: PRELOAD_BUDGET_BYTES,
             }),
         };
         self.loader.replace(jobs);
@@ -3326,7 +3495,15 @@ impl MyApp {
                             .unwrap_or_default()
                             .to_string_lossy();
                         let px = (p.image.size[0] as u32, p.image.size[1] as u32);
-                        let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
+                        // Sampling is decided **at upload**, naming the two
+                        // sampler axes rather than a zoom level, so the arrival
+                        // moment does not freeze a choice that zooming later
+                        // changes — see `image_viewer::pixel_art_sampling`.
+                        let tex = ctx.load_texture(
+                            name.as_ref(),
+                            p.image,
+                            content_texture_options(self.config.pixel_art),
+                        );
                         perf::count(perf::C_TEXTURE_UPLOADS, 1);
                         perf::record(perf::JOB_PREVIEW_MS, p.load_ms * 1000);
                         if Some(&key) == self.cur.as_ref() {
@@ -3359,6 +3536,7 @@ impl MyApp {
                                 target: p.target,
                                 exif_tag: p.exif_tag,
                                 crop_grid: p.crop_grid,
+                                colour: p.colour,
                                 hist: p.hist,
                                 px,
                                 tiles: HashMap::new(),
@@ -3433,7 +3611,10 @@ impl MyApp {
                         }
                         // Failed is per *image*, not per file: a document whose
                         // page 3 is an unsupported colour type must not poison its
-                        // other 199 pages for the session.
+                        // other 199 pages for the session. Counted before the
+                        // insert for the same reason the message above it exists:
+                        // a poisoned entry otherwise looks like nothing at all.
+                        perf::count(perf::C_LOAD_FAILED, 1);
                         self.failed.insert((key, Kind::Preview));
                     }
                 },
@@ -3441,6 +3622,11 @@ impl MyApp {
                     Ok(p) => {
                         let name = path.file_name().unwrap_or_default().to_string_lossy();
                         let texels = p.image.size;
+                        // A grid cell keeps LINEAR whatever Pixel art is set
+                        // to: a cell is 150 pt of a 256-texel image drawn at
+                        // most upscale by the display factor, and the grid also
+                        // browses photos — the toggle is for the viewer, not
+                        // the picker (`content_texture_options`).
                         let tex = ctx.load_texture(name.as_ref(), p.image, TextureOptions::LINEAR);
                         perf::count(perf::C_TEXTURE_UPLOADS, 1);
                         perf::record(perf::JOB_THUMB_MS, p.load_ms * 1000);
@@ -3518,6 +3704,9 @@ impl MyApp {
                     }
                     Err(e) => {
                         eprintln!("Full-res load failed for {}: {}", key, e);
+                        // The counter, not the message: a poisoned `failed`
+                        // entry otherwise looks like nothing at all.
+                        perf::count(perf::C_LOAD_FAILED, 1);
                         self.failed.insert((key, Kind::Full));
                     }
                 },
@@ -3536,6 +3725,22 @@ impl MyApp {
                     if self.cur.as_ref().is_some_and(|c| c.path == path) {
                         self.rating = result.unwrap_or_default();
                         self.rating_for = Some(path);
+                    }
+                }
+                Msg::Wallpaper { order, result } => {
+                    // **Stale answers are dropped, not shown.** A second press
+                    // while the first is still flying is "the last action
+                    // wins": the result stamped with the counter's *current*
+                    // value is the only one worth displaying, and the superseded
+                    // one's Ok(()) — true, the desktop did show it for a
+                    // moment — is not that action any more. Its worker also
+                    // aborts at its own checks before ever reaching the set, so
+                    // a superseded result usually never arrives at all.
+                    if order == self.wallpaper_order.load(std::sync::atomic::Ordering::SeqCst) {
+                        match result {
+                            Ok(()) => self.notice = Some("Set as wallpaper".into()),
+                            Err(e) => self.error = Some(format!("Wallpaper failed: {e}")),
+                        }
                     }
                 }
                 Msg::GridRating { path, result } => {
@@ -3746,7 +3951,11 @@ impl MyApp {
                         [f0.width as usize, f0.height as usize],
                         &f0.rgba,
                     );
-                    let tex = ctx.load_texture("anim", image, TextureOptions::LINEAR);
+                    let tex = ctx.load_texture(
+                        "anim",
+                        image,
+                        content_texture_options(self.config.pixel_art),
+                    );
                     self.anim = Some(AnimView {
                         path: cur.path.clone(),
                         anim: Arc::clone(anim),
@@ -4280,9 +4489,50 @@ impl MyApp {
 
     // ---- folder watcher ----------------------------------------------------
 
-    /// Poll the folder on a timer so files that appear/disappear while the
-    /// viewer is open (e.g. an active download folder) show up automatically.
+    /// Keep the OS folder watch pointed at what is being browsed, and feed its
+    /// events to the change machinery.
+    ///
+    /// Two sources, one rule each:
+    /// - **With a watch running, events are the truth.** No timer, no stat
+    ///   pass, and no idle repaint — the watcher thread wakes the app when it
+    ///   has news, which is why a static photo now costs no frames at all
+    ///   (the 2 s poll used to be its only wake source, ~2 fps).
+    /// - **With no watch** — an archive's temp dir, or a share that refused
+    ///   one — the 2 s poll runs exactly as it always did.
+    ///
+    /// Which applies is derived every frame by `sync_watcher`, so folder
+    /// opens, the recursive toggle and opening an archive need no bookkeeping
+    /// of their own: a value latched at one of those events and read later is
+    /// how every wrong-screen bug in this file has happened.
     fn maybe_rescan(&mut self, ctx: &Context) {
+        self.sync_watcher(ctx);
+        // A watch that stopped delivering (a share that refused the read while
+        // the handle stayed open) reports nothing forever: drop it and let the
+        // poll take over, or the viewer silently stops noticing changes.
+        if self.watcher.as_ref().is_some_and(|w| !w.alive()) {
+            perf::count(perf::C_WATCHER_FALLBACK, 1);
+            self.watcher = None;
+            self.pending_content.clear();
+            self.next_scan = Instant::now();
+        }
+        if self.watcher.is_some() {
+            self.drain_watch_events(ctx);
+            self.flush_content_changes(ctx);
+            if self.pending_rescan {
+                let now = Instant::now();
+                if now >= self.next_rescan_allowed {
+                    self.pending_rescan = false;
+                    self.next_rescan_allowed = now + RESCAN_MIN_GAP;
+                    self.rescan(ctx, false);
+                } else {
+                    // Owed but throttled, and the writer may have just
+                    // stopped — there is no further event to wake us, so ask
+                    // for the frame the rescan is due.
+                    ctx.request_repaint_after(self.next_rescan_allowed - now);
+                }
+            }
+            return;
+        }
         let now = Instant::now();
         if now >= self.next_scan {
             self.next_scan = now + RESCAN_INTERVAL;
@@ -4296,8 +4546,179 @@ impl MyApp {
         ctx.request_repaint_after(self.next_scan.saturating_duration_since(Instant::now()));
     }
 
+    /// Start, restart or stop the folder watch so it matches what is on
+    /// screen.
+    ///
+    /// The wanted key is `(folder, recursive)`, and `None` for an archive.
+    /// Archives are excluded for the reason `check_changed` early-returns on
+    /// them: the extracted temp dir is rewritten on every open and deleted on
+    /// close (`AGENTS.md`), so watching it would report the app's own work.
+    fn sync_watcher(&mut self, ctx: &Context) {
+        let want: Option<(PathBuf, bool)> = if self.zip_archive.is_some() {
+            None
+        } else {
+            Some((self.folder.clone(), self.config.recursive_folders))
+        };
+        if self.watcher_key.as_ref() == want.as_ref() {
+            return;
+        }
+        // Dropping the old watch is what cancels its blocking call; see
+        // `DirWatcher`'s `Drop`. So a folder switch costs one cancellation,
+        // not a leaked thread and handle.
+        self.watcher = None;
+        self.watcher_key = want.clone();
+        // A change owed for the folder being left must not be flushed against
+        // the folder being entered.
+        self.pending_content.clear();
+        let Some((dir, recursive)) = want else {
+            return;
+        };
+        let wake_ctx = ctx.clone();
+        match image_viewer::DirWatcher::start(dir, recursive, move || wake_ctx.request_repaint()) {
+            Ok(w) => {
+                // A fresh watch knows nothing, and `stamps` may be empty or
+                // about a different folder: one full comparison now gives the
+                // first event a baseline. It is the pass the first 2 s poll
+                // would have done, moved to the moment the folder opens.
+                self.stamps.clear();
+                self.next_scan = Instant::now() + RESCAN_INTERVAL;
+                self.watcher = Some(w);
+                self.check_changed(ctx);
+            }
+            Err(_) => {
+                // No watch: the poll is the fallback. The counter is why a
+                // folder that is still polled can be explained instead of
+                // looking like the feature simply not working.
+                perf::count(perf::C_WATCHER_FALLBACK, 1);
+                self.next_scan = Instant::now();
+            }
+        }
+    }
+
+    /// Act on the events the OS sent since the last frame.
+    ///
+    /// Per-event work here is a **map insert**; the `stat` and the re-decode
+    /// happen in `flush_content_changes` once the writer has gone quiet.
+    /// Anything about the *listing* is coalesced into one rescan — one
+    /// directory walk for a whole bulk copy, where acting per event would be
+    /// one walk per file.
+    fn drain_watch_events(&mut self, ctx: &Context) {
+        // Scoped so the immutable borrow of `watcher` ends before anything
+        // below wants `&mut self`.
+        let (batches, fresh) = {
+            let Some(w) = &self.watcher else {
+                return;
+            };
+            let total = w.events();
+            let fresh = total.saturating_sub(self.watch_events_seen);
+            let mut b: Vec<image_viewer::FsChange> = Vec::new();
+            while let Some(batch) = w.try_recv() {
+                b.extend(batch);
+            }
+            (b, fresh)
+        };
+        // Count what arrived, not what is acted on: a probe has to be able to
+        // tell a silent OS from an ignored event.
+        if fresh > 0 {
+            perf::count(perf::C_WATCH_EVENTS, fresh);
+            self.watch_events_seen += fresh;
+        }
+        if batches.is_empty() {
+            return;
+        }
+        let mut overflow = false;
+        {
+            // The **unfiltered** listing, so a file hidden by the filter still
+            // counts as known: its save is a content change, not an excuse to
+            // rescan the folder. Scoped because the full comparison below
+            // needs `&mut self`.
+            let known: HashSet<&PathBuf> = self.all_files.iter().collect();
+            let now = Instant::now();
+            for ev in image_viewer::coalesce_changes(batches) {
+                let p = self.folder.join(&ev.name);
+                let image_name = p
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .is_some_and(|e| image_viewer::SUPPORTED_EXTENSIONS.contains(&e.as_str()));
+                match image_viewer::classify_change(ev.action, known.contains(&p), image_name) {
+                    // Refreshing the deadline is the debounce: a save that is
+                    // still being written keeps pushing it, and the decode
+                    // happens once, on the finished file.
+                    image_viewer::ChangeKind::Content => {
+                        self.pending_content.insert(p, now);
+                    }
+                    image_viewer::ChangeKind::Membership => self.pending_rescan = true,
+                    image_viewer::ChangeKind::Overflow => {
+                        // The OS dropped names, so nothing else knows what
+                        // changed: do the full pass the timer used to do. This
+                        // is the one case where a watch has to pay a poll's
+                        // work, and it is the alternative to silently missing a
+                        // change.
+                        overflow = true;
+                        self.pending_rescan = true;
+                    }
+                    image_viewer::ChangeKind::Ignore => {}
+                }
+            }
+        }
+        if overflow {
+            self.check_changed(ctx);
+        }
+    }
+
+    /// Re-decode the files whose writer has gone quiet.
+    ///
+    /// **The settle is not politeness, it is the difference between one decode
+    /// and a storm**: a chunked save emits an event per write, and decoding on
+    /// the first one decodes a half-written file, which the next chunk throws
+    /// away. The stamp is read *now*, not when the event arrived, so what is
+    /// decoded is the finished bytes.
+    fn flush_content_changes(&mut self, ctx: &Context) {
+        if self.pending_content.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut due: Vec<PathBuf> = Vec::new();
+        self.pending_content.retain(|p, last| {
+            if now.duration_since(*last) >= CONTENT_SETTLE {
+                due.push(p.clone());
+                false
+            } else {
+                true
+            }
+        });
+        due.sort();
+        for p in due {
+            let stamp = Stamp::of(&p);
+            // **No baseline counts as changed.** An event is the OS saying the
+            // bytes moved; the alternative is to miss the first re-export of
+            // the session, which is exactly the one the old first poll (2 s
+            // after open) would have caught.
+            let moved = self.stamps.get(&p).is_none_or(|old| *old != stamp);
+            self.stamps.insert(p.clone(), stamp);
+            if moved && self.has_cached_state_for(&p) {
+                // One per reload the machinery actually acts on, so a probe
+                // that mutates a file under the running viewer can assert the
+                // watcher both saw and served the change - see
+                // tests/probe_watcher.ps1.
+                perf::count(perf::C_WATCHED_CHANGES, 1);
+                self.invalidate_path(&p, ctx);
+            }
+        }
+        if let Some(earliest) = self.pending_content.values().min() {
+            ctx.request_repaint_after(
+                (*earliest + CONTENT_SETTLE).saturating_duration_since(Instant::now()),
+            );
+        }
+    }
+
     /// Re-stat every file and invalidate anything whose contents changed since
     /// the last poll.
+    ///
+    /// **The fallback path**, used only while no OS watch is running. The
+    /// per-event path in `drain_watch_events` does the same comparison for one
+    /// named file.
     ///
     /// Only files we hold state for are worth reloading, so the common case
     /// (a big folder, one image on screen) costs a metadata call per file and
@@ -4314,6 +4735,11 @@ impl MyApp {
             let moved = self.stamps.get(p).is_some_and(|old| *old != now);
             fresh.insert(p.clone(), now);
             if moved && self.has_cached_state_for(p) {
+                // One per reload the machinery actually acts on, so a probe
+                // that mutates a file under the running viewer can assert the
+                // watcher both saw and served the change — see
+                // tests/probe_watcher.ps1.
+                perf::count(perf::C_WATCHED_CHANGES, 1);
                 changed.push(p.clone());
             }
         }
@@ -4378,6 +4804,13 @@ impl MyApp {
         // no longer exist — and because an override beats the detector, keeping it
         // holds that page a spread whatever the file now contains.
         self.spreads.forget_file(p);
+        // ...and the remembered view of each of its pages, for the same family
+        // of reason: a view saved standing on the old pixels may restore a
+        // scale or an offset that no longer answers anything about the new
+        // file — a surface remembered at 100% for a 4000 px scan now framing a
+        // 600 px re-export at a zoom nobody chose. Session-only state, so the
+        // cost is one line and no save.
+        self.views.forget_file(p);
         // Saved, not just dropped: a store that still holds the stale entry hands it
         // back on the next launch, so dropping it in memory only would make "a
         // re-export clears the override" true for one session and false across a
@@ -4741,6 +5174,24 @@ impl MyApp {
             }
             .into(),
         );
+    }
+
+    /// The side-panel master (`I`), **persisted**: chrome is a preference, the
+    /// way `hide_title_bar` is — how little sits around the picture is what
+    /// the user wants on every launch, not what they wanted once. Saved on
+    /// the press like every other config-backed toggle; the per-pane keys
+    /// (`L`/`P`) stay session-only, fine-tuning a run without an opinion
+    /// about the next one. The one dispatcher, so the key and the menu row
+    /// cannot disagree.
+    ///
+    /// Not fullscreen's: there the master is an overlay (see
+    /// `panels_before_fullscreen`), and writing the config from the dance
+    /// would turn a fullscreen detour into a re-formed preference.
+    fn toggle_panels_master(&mut self) {
+        self.suppress_resize_redecode = true;
+        self.show_panels = !self.show_panels;
+        self.config.show_panels = self.show_panels;
+        self.config.save(&self.config_path);
     }
 
     /// Step the on-screen animation one frame (`,` back, `.` forward,
@@ -5221,55 +5672,114 @@ impl MyApp {
         self.notice = Some("Copying image to clipboard…".into());
     }
 
+    /// Stamp a wallpaper press.
+    ///
+    /// Returns the value this press got, plus the Arc the worker checks against:
+    /// the token moves when a **second** press lands, and the first press's
+    /// worker — a thread that cannot be stopped — then aborts at its own checks
+    /// instead of writing a file the desktop is about to be pointed at. The
+    /// same "the last action wins" rule `pending_drop` records.
+    fn next_wallpaper_order(&mut self) -> (u64, Arc<std::sync::atomic::AtomicU64>) {
+        let order =
+            self.wallpaper_order
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        (order, self.wallpaper_order.clone())
+    }
+
     /// Set the current image as the desktop wallpaper.
+    ///
+    /// **All of the work is on a worker**, despite being a one-off action,
+    /// because the reason a paste or a save is off-thread weighs for wallpaper
+    /// too: with the conversion setting on this reads the file whole (the
+    /// colour check is wallpaper's own read), decodes at texture size,
+    /// converts every pixel and re-encodes — hundreds of milliseconds on a big
+    /// photograph and seconds on a network file, all of it on the paint thread
+    /// before this moved. The shape is the rating read's: one thread, the
+    /// shared channel, a notice while in flight (a wallpaper request is
+    /// otherwise invisible until the desktop changes), and the result back as
+    /// a message.
     fn set_wallpaper(&mut self) {
         let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
             return;
         };
-        let converted = image_viewer::wide_gamut_conversion()
-            && image_viewer::color_info(&p).space == image_viewer::ColorSpace::WideGamut;
-        // Two reasons the wallpaper cannot always be the original file: an archive
-        // member only exists in a temp dir that dies with the app, and a converted
-        // picture has to exist as a file at all, because the shell reads the file
-        // and never goes near our decode path.
-        let target: PathBuf = if self.zip_archive.is_some() || converted {
-            let ext = p
-                .extension()
-                .map(|e| e.to_string_lossy().to_string())
-                .unwrap_or_else(|| "jpg".into());
-            let dest = self
-                .config_path
-                .parent()
-                .map(|d| d.to_path_buf())
-                .unwrap_or_else(std::env::temp_dir)
-                .join(format!("wallpaper.{ext}"));
-            let wrote = if converted {
-                match image_viewer::load_image(&p, image_viewer::MAX_TEXTURE_DIM) {
-                    Ok(mut d) => {
-                        image_viewer::convert_wide_gamut_rgba(&mut d.rgba);
-                        let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba)
-                            .unwrap_or_else(|| image::RgbaImage::new(d.width, d.height));
-                        image::DynamicImage::ImageRgba8(img)
-                            .save(&dest)
-                            .map_err(|e| std::io::Error::other(e.to_string()))
-                    }
-                    Err(e) => Err(std::io::Error::other(e.to_string())),
+        // The two cheap UI facts, decided here: an archive member only exists
+        // in a temp dir that dies with the app, and the destination folder
+        // comes from the config.
+        let in_archive = self.zip_archive.is_some();
+        let folder = self
+            .config_path
+            .parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(std::env::temp_dir);
+        let (order, issued) = self.next_wallpaper_order();
+        self.notice = Some("Setting wallpaper…".into());
+        let tx = self.drop_tx.clone();
+        let wake = self.drop_wake.clone();
+        std::thread::spawn(move || {
+            // An immediately-called closure keeps the body one phrasing over
+            // the two early-abort checks and the fall-through set.
+            let result: Result<(), String> = (|| {
+                // Superseded before the first read: a press that arrived
+                // while this was queued does none of the work.
+                if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
+                    return Err("superseded".into());
                 }
-            } else {
-                std::fs::copy(&p, &dest).map(|_| ())
-            };
-            if let Err(e) = wrote {
-                self.error = Some(format!("Wallpaper failed: {e}"));
-                return;
-            }
-            dest
-        } else {
-            p
-        };
-        match wallpaper::set_from_path(&target.to_string_lossy()) {
-            Ok(()) => self.notice = Some("Set as wallpaper".into()),
-            Err(e) => self.error = Some(format!("Wallpaper failed: {e}")),
-        }
+                // The conversion question is part of the *worker's* work now:
+                // `color_info` reads the whole file, and that read belongs
+                // wherever the rest of the decode lives.
+                let converted = image_viewer::wide_gamut_conversion()
+                    && image_viewer::color_info(&p).space
+                        == image_viewer::ColorSpace::WideGamut;
+                // Two reasons the wallpaper cannot always be the original
+                // file, recorded here because the UI decision above decided
+                // one of them for it: an archive member only exists in a
+                // temp dir that dies with the app — the UI side already decided
+                // that as `in_archive` — and a converted picture has to exist
+                // as a file at all, because the shell reads the file and never
+                // goes near our decode path.
+                let target: PathBuf = if in_archive || converted {
+                    let ext = p
+                        .extension()
+                        .map(|e| e.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "jpg".into());
+                    let dest = folder.join(format!("wallpaper.{ext}"));
+                    let wrote = if converted {
+                        match image_viewer::load_image(&p, image_viewer::MAX_TEXTURE_DIM) {
+                            Ok(mut d) => {
+                                image_viewer::convert_wide_gamut_rgba(&mut d.rgba);
+                                let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba)
+                                    .unwrap_or_else(|| image::RgbaImage::new(d.width, d.height));
+                                image::DynamicImage::ImageRgba8(img)
+                                    .save(&dest)
+                                    .map_err(|e| std::io::Error::other(e.to_string()))
+                            }
+                            Err(e) => Err(std::io::Error::other(e.to_string())),
+                        }
+                    } else {
+                        std::fs::copy(&p, &dest).map(|_| ())
+                    };
+                    if let Err(e) = wrote {
+                        return Err(e.to_string());
+                    }
+                    // Superseded again **at the set**: the decode, conversion
+                    // and encode above are exactly the window a second press
+                    // can arrive in, and the set is the half that must not
+                    // show the wrong action's picture.
+                    if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
+                        return Err("superseded".into());
+                    }
+                    dest
+                } else {
+                    p
+                };
+                match wallpaper::set_from_path(&target.to_string_lossy()) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                }
+            })();
+            let _ = tx.send(Msg::Wallpaper { order, result });
+            wake.request_repaint();
+        });
     }
 
     /// Wallpaper from the picture as displayed (Shift+W): the crop and the
@@ -5304,54 +5814,63 @@ impl MyApp {
         // Same composition the save uses (stored pixels, EXIF part folded
         // in), re-encoded losslessly: the desktop is display-only, so a
         // second JPEG generation would be pure loss for nothing.
+        //
+        // And **the whole composition is on a worker**, like `set_wallpaper`:
+        // it is one whole-file read, one full decode, a lossless transform
+        // and one PNG encode of a multi-megapixel picture, none of which the
+        // paint thread does. `edit` is cloned out; `self.edits` would be
+        // borrowed across the thread. The same notice, token and message
+        // shape as the plain path — the two run through one mechanism so a
+        // `W`-then-`Shift+W` race resolves by the same rule.
         let dest = self
             .config_path
             .parent()
             .map(|d| d.to_path_buf())
             .unwrap_or_else(std::env::temp_dir)
             .join("wallpaper.png");
-        let fail = |e: String| format!("Wallpaper failed: {e}");
-        let bytes = match std::fs::read(&p) {
-            Ok(b) => b,
-            Err(e) => {
-                self.error = Some(fail(e.to_string()));
-                return;
-            }
-        };
-        let tag = if image_viewer::is_jpeg_bytes(&bytes) {
-            image_viewer::exif_orientation(&p)
-        } else {
-            0
-        };
-        let data = match image_viewer::load_image_full(&p, 0) {
-            Ok(d) => d,
-            Err(e) => {
-                self.error = Some(fail(e.to_string()));
-                return;
-            }
-        };
-        let out = match image_viewer::region_for_save(&data, tag, edit.xform, edit.crop) {
-            Some(o) => o,
-            None => {
-                self.error = Some(fail("the crop fell outside the image".into()));
-                return;
-            }
-        };
-        let img = match image::RgbaImage::from_raw(out.width, out.height, out.rgba) {
-            Some(i) => i,
-            None => {
-                self.error = Some(fail("transformed buffer was malformed".into()));
-                return;
-            }
-        };
-        if let Err(e) = image::DynamicImage::ImageRgba8(img).save(&dest) {
-            self.error = Some(fail(e.to_string()));
-            return;
-        }
-        match wallpaper::set_from_path(&dest.to_string_lossy()) {
-            Ok(()) => self.notice = Some("Set processed image as wallpaper".into()),
-            Err(e) => self.error = Some(fail(e.to_string())),
-        }
+        let (order, issued) = self.next_wallpaper_order();
+        self.notice = Some("Setting wallpaper…".into());
+        let tx = self.drop_tx.clone();
+        let wake = self.drop_wake.clone();
+        std::thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                // Superseded before the first read, like the plain path.
+                if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
+                    return Err("superseded".into());
+                }
+                let result = (|| {
+                    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+                    let tag = if image_viewer::is_jpeg_bytes(&bytes) {
+                        image_viewer::exif_orientation(&p)
+                    } else {
+                        0
+                    };
+                    let data = image_viewer::load_image_full(&p, 0).map_err(|e| e.to_string())?;
+                    let out = image_viewer::region_for_save(&data, tag, edit.xform, edit.crop)
+                        .ok_or_else(|| "the crop fell outside the image".to_string())?;
+                    let img = image::RgbaImage::from_raw(out.width, out.height, out.rgba)
+                        .ok_or_else(|| "transformed buffer was malformed".to_string())?;
+                    image::DynamicImage::ImageRgba8(img)
+                        .save(&dest)
+                        .map_err(|e| e.to_string())
+                })();
+                match result {
+                    Ok(()) => {}
+                    Err(e) => return Err(e),
+                }
+                // Superseded again **at the set**: the read, decode, transform
+                // and encode above are the window a second press can arrive
+                // in, and the set is the half that must not show the wrong
+                // action's picture.
+                if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
+                    return Err("superseded".into());
+                }
+                wallpaper::set_from_path(&dest.to_string_lossy())
+                    .map_err(|e| e.to_string())
+            })();
+            let _ = tx.send(Msg::Wallpaper { order, result });
+            wake.request_repaint();
+        });
     }
 
     /// The turn's pages — **cursor first** — as `(key, stored dimensions, xform)`.
@@ -5848,7 +6367,7 @@ impl MyApp {
                                 [f.width as usize, f.height as usize],
                                 &f.rgba,
                             ),
-                            TextureOptions::LINEAR,
+                            content_texture_options(self.config.pixel_art),
                         );
                         av.last_index = held;
                     }
@@ -6088,7 +6607,7 @@ impl MyApp {
             (
                 i.smooth_scroll_delta.y,
                 i.zoom_delta(),
-                binding_down(i, &kb, "fit"),
+                binding_down(i, &kb, "fit") || binding_down(i, &kb, "fit_alt"),
                 binding_down(i, &kb, "fill"),
                 ["preset_1", "preset_2", "preset_3", "preset_4"]
                     .iter()
@@ -6128,7 +6647,7 @@ impl MyApp {
         let mut target_scale = scale * factor;
         let anchor = hover.unwrap_or(panel.center());
         // `1` toggles the 1:1 mode (sticky); `2`–`4` stay one-shot jumps.
-        // `F` toggles fit-view; double-click still fits once without
+        // `F`/`Space` toggle fit-view; double-click still fits once without
         // touching any flag. Keyboard shortcuts stand down while typing
         // (filter box) like the ui() dispatch does — typing "1" must not
         // toggle anything.
@@ -6685,6 +7204,10 @@ impl MyApp {
         let mut budget = TILES_PER_FRAME;
         let mut pending = false;
         let mut sharpened = false;
+        // Decided once per frame, not per tile: every tile this frame cuts
+        // should carry the same sampling, and reading the config once keeps
+        // that true even if a settings arm ran between two `make_tile` calls.
+        let tile_options = content_texture_options(self.config.pixel_art);
         for (tp, (tiles, _owner)) in tile_pages.iter().zip(maps.iter_mut()) {
             let Some(tp) = tp else { continue };
             let preview_density = tp.preview_density;
@@ -6718,7 +7241,7 @@ impl MyApp {
                                         continue;
                                     }
                                     budget -= 1;
-                                    let tex = make_tile(&ctx, &tp.data, tx, ty);
+                                    let tex = make_tile(&ctx, &tp.data, tx, ty, tile_options);
                                     perf::count(perf::C_TILES_CREATED, 1);
                                     tiles.insert(
                                         (tx, ty),
@@ -8086,8 +8609,41 @@ fn paint_tex(
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Copy one tile out of the full-res RGBA buffer and upload it.
-fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle {
+/// `TextureOptions` for a viewer content texture — the preview, the zoom
+/// tiles, the animation frames: linear until Pixel art is on, then
+/// nearest-on-magnify, the binary's spelling of the decision
+/// [`image_viewer::pixel_art_sampling`] returns. The choice names the two
+/// sampler axes, so a picture magnified by zooming past 100% (or simply by
+/// being a sprite fitted on the panel) samples nearest, and the same texture
+/// minified by fitting a photo samples linear — one upload serves both.
+///
+/// Deliberately **not** handed to the grid thumbnails: a cell is 150 pt of a
+/// 256-texel image and the grid also browses photos, nearest-at-anything
+/// buys a photo nothing there. The checkerboard keeps `NEAREST_REPEAT` for
+/// the same class of reason: it is artwork, not content.
+fn content_texture_options(pixel_art: bool) -> TextureOptions {
+    match image_viewer::pixel_art_sampling(pixel_art) {
+        image_viewer::Sampling::Linear => TextureOptions::LINEAR,
+        image_viewer::Sampling::NearestMagnify => TextureOptions {
+            magnification: egui::TextureFilter::Nearest,
+            minification: egui::TextureFilter::Linear,
+            wrap_mode: egui::TextureWrapMode::ClampToEdge,
+            mipmap_mode: None,
+        },
+    }
+}
+
+/// Copy one tile out of the full-res RGBA buffer and upload it. Tiles are cut
+/// only where the on-screen density outruns the preview's — the tile is
+/// itself magnified where it is drawn — so `options` is decided once per
+/// frame by the caller and carries whatever the pixel-art toggle asked for.
+fn make_tile(
+    ctx: &Context,
+    data: &ImageData,
+    tx: u32,
+    ty: u32,
+    options: TextureOptions,
+) -> TextureHandle {
     let (fw, fh) = (data.width as usize, data.height as usize);
     let (x0, y0) = ((tx * TILE) as usize, (ty * TILE) as usize);
     let (w, h) = ((TILE as usize).min(fw - x0), (TILE as usize).min(fh - y0));
@@ -8106,7 +8662,7 @@ fn make_tile(ctx: &Context, data: &ImageData, tx: u32, ty: u32) -> TextureHandle
         source_size: egui::vec2(w as f32, h as f32),
         pixels,
     };
-    ctx.load_texture(format!("tile {tx},{ty}"), img, TextureOptions::LINEAR)
+    ctx.load_texture(format!("tile {tx},{ty}"), img, options)
 }
 
 // ---------------------------------------------------------------------------
@@ -8248,7 +8804,21 @@ impl eframe::App for MyApp {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
             self.suppress_resize_redecode = true;
-            self.show_panels = fs; // entering fullscreen hides panels; leaving restores
+            // **Entered fullscreen hides the panels; leaving restores what the
+            // user had — not hard `true`.** The master is a persisted
+            // preference (`Config::show_panels`), and the fullscreen dance is
+            // a transient overlay: entering stashes the pre-fullscreen value,
+            // leaving hands it back, so minimal-state users keep their
+            // minimal state across a fullscreen detour instead of reacquiring
+            // chrome they switched off. The stash also protects `on_exit`'s
+            // whole-config save: with a hardcoded restore, one fullscreen
+            // detour would rewrite the saved "off" at close.
+            if fs {
+                self.show_panels = self.panels_before_fullscreen.take().unwrap_or(true);
+            } else {
+                self.panels_before_fullscreen = Some(self.show_panels);
+                self.show_panels = false;
+            }
         }
         if esc {
             // **The save-as panel is above everything, `typing` included.**
@@ -8308,7 +8878,12 @@ impl eframe::App for MyApp {
                     .input(|i| i.viewport().fullscreen.unwrap_or(false));
                 if in_fullscreen {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
-                    self.show_panels = true;
+                    // What the master stood at *before this fullscreen*, not
+                    // hard `true` — same reason the `F11` exit restores the
+                    // stash: the value is the user's persisted choice, and a
+                    // hardcoded restore rewrites it (and then `on_exit`
+                    // saves the rewrite).
+                    self.show_panels = self.panels_before_fullscreen.take().unwrap_or(true);
                     self.suppress_resize_redecode = true;
                 } else if self.config.esc_closes_app {
                     self.close_transients();
@@ -8461,6 +9036,8 @@ impl eframe::App for MyApp {
             // `,`/`.` pause onto a frame, and this is the handiest way back
             // to motion (YouTube parity with the stepping keys). Only the
             // paused case reroutes — playing animations and stills step on.
+            // Shipped **unbound** since Space became the fit/100% toggle —
+            // the hook survives for anyone who rebinds it in Settings.
             // Computed up front so the step branch below can stand down for it.
             let unpause = !self.gallery_view
                 && action_pressed(ctx, &kb, "next_alt")
@@ -8502,14 +9079,15 @@ impl eframe::App for MyApp {
             // `,`/`.` pause onto a frame, and this is the handiest way back
             // to motion (YouTube parity with the stepping keys). Only the
             // paused case reroutes — playing animations and stills step on.
+            // Shipped **unbound** since Space became the fit/100% toggle —
+            // the hook survives for anyone who rebinds it in Settings.
             // Placed after the step branch so it never runs together with it
             // (the branch above already stood down for it).
             if unpause {
                 self.toggle_animation_play();
             }
             if toggle {
-                self.suppress_resize_redecode = true;
-                self.show_panels = !self.show_panels;
+                self.toggle_panels_master();
             }
             // Individual panes. `suppress_resize_redecode` like the master:
             // removing a side pane grows the central panel, which must not
@@ -8676,8 +9254,17 @@ impl eframe::App for MyApp {
 
         if self.show_panels {
             egui::Panel::bottom("menu").show(ui, |ui| {
-                // Wrapped: a single row of buttons overflows a narrow
-                // window and the tail (incl. the hints) gets clipped.
+                // Wrapped: even with the actions in menus, a very narrow
+                // window can still overflow one row, and without wrapping
+                // the tail gets clipped.
+                //
+                // **The shape**: the picture the user looks at *next* is one
+                // click (browsing, stepping, the five mode toggles); the
+                // rest is four menus, whose items keep the exact handlers,
+                // enable/disable rules, hover texts and live-chord suffixes
+                // the old row of buttons had. A menu item calls `ui.close()`
+                // after acting, so the popup does not linger over the
+                // picture.
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Browse Folder…").clicked() {
                         self.pick_folder(ctx);
@@ -8685,6 +9272,7 @@ impl eframe::App for MyApp {
                     if ui.button("Browse File…").clicked() {
                         self.pick_file(ctx);
                     }
+                    ui.separator();
                     // "Left"/"Right" rather than the arrow glyphs: the default
                     // egui font has no U+2190/U+2192, so the arrows rendered as
                     // blank boxes, and the name of the key is clearer anyway.
@@ -8709,79 +9297,18 @@ impl eframe::App for MyApp {
                     {
                         self.toggle_fit_mode();
                     }
+                    if ui
+                        .selectable_label(
+                            self.config.fit_window_mode,
+                            action_button_text(&self.config, "Fit window", "fit_window"),
+                        )
+                        .on_hover_text("Shrink the window to the picture; follows images and zooms while on")
+                        .clicked()
+                    {
+                        self.fit_window_to_image();
+                    }
                     if ui.button(action_button_text(&self.config, "Gallery", "grid")).clicked() {
                         self.toggle_gallery();
-                    }
-                    if ui.button("Rotate ⟲").clicked() {
-                        self.rotate(-1, ctx);
-                    }
-                    if ui.button("Rotate ⟳").clicked() {
-                        self.rotate(1, ctx);
-                    }
-                    // Mirrors are here for the same reason the rotate buttons are:
-                    // a photo shot with a wrong orientation tag, or a scan that
-                    // came out the wrong way round, is a one-press fix and there is
-                    // no other way to get it. They compose with the turns rather
-                    // than replacing them, so turn-then-mirror is a diagonal
-                    // mirror and mirror-twice is back to where it started.
-                    //
-                    // "H" and "V" rather than ⇋ and ⇅: the default egui font has
-                    // neither, and a missing glyph is a blank box, not a subtle
-                    // omission. `no_ui_text_uses_a_glyph_the_font_lacks` is what
-                    // stops that coming back.
-                    let xform = self.current_xform();
-                    let any = xform != Xform::Identity;
-                    if ui
-                        .add_enabled(
-                            self.cur.is_some(),
-                            egui::Button::new("Mirror H").shortcut_text(""),
-                        )
-                        .on_hover_text("Mirror left-to-right")
-                        .clicked()
-                    {
-                        self.mirror(true, ctx);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.cur.is_some(),
-                            egui::Button::new("Mirror V").shortcut_text(""),
-                        )
-                        .on_hover_text("Mirror top-to-bottom")
-                        .clicked()
-                    {
-                        self.mirror(false, ctx);
-                    }
-                    if ui
-                        .add_enabled(
-                            any,
-                            egui::Button::new("Reset turn")
-                                .shortcut_text("")
-                                .min_size(Vec2::new(74.0, 0.0)),
-                        )
-                        .on_hover_text("Back to the file's own orientation, and drop any crop")
-                        .clicked()
-                    {
-                        self.reset_transform(ctx);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.can_undo_current(),
-                            egui::Button::new("Undo").shortcut_text(""),
-                        )
-                        .on_hover_text("Undo the last turn, mirror or crop on this image")
-                        .clicked()
-                    {
-                        self.undo(ctx);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.can_redo_current(),
-                            egui::Button::new("Redo").shortcut_text(""),
-                        )
-                        .on_hover_text("Redo the last undone transform")
-                        .clicked()
-                    {
-                        self.redo(ctx);
                     }
                     // Crop is a mode, not an action: the frame stays after the drag
                     // so it can be adjusted, and the mode says so. The hover text
@@ -8794,114 +9321,236 @@ impl eframe::App for MyApp {
                     {
                         self.toggle_crop_mode(ctx);
                     }
-                    let has_crop = self.cur.as_ref().is_some_and(|k| self.edits.crop(&k.path).is_some());
-                    if ui
-                        .add_enabled(
-                            has_crop,
-                            egui::Button::new("Clear crop")
-                                .shortcut_text("")
-                                .min_size(Vec2::new(74.0, 0.0)),
-                        )
-                        .on_hover_text("Remove the crop, keeping any rotation or mirroring")
-                        .clicked()
-                    {
-                        if let Some(p) = self.cur.clone() {
-                            self.history.record(&p.path, self.edits.get(&p.path));
-                            self.edits.clear_crop(&p.path);
-                        }
-                        ctx.request_repaint();
-                    }
-                    // Sits with the transform buttons because that is the only
-                    // thing it saves: without this the app's one writing action
-                    // was reachable only by remembering a chord.
-                    if ui
-                        .add_enabled(
-                            self.cur.is_some(),
-                            egui::Button::new(action_button_text(&self.config, "Save transformed…", "save")),
-                        )
-                        .on_hover_text("New file beside this one, original untouched")
-                        .clicked()
-                    {
-                        self.save_transformed_copy();
-                    }
-                    // Sits beside it because it is the same action with a
-                    // destination attached, and a save you cannot choose the
-                    // name of is not a save-as.
-                    if ui
-                        .add_enabled(
-                            self.cur.is_some(),
-                            egui::Button::new(action_button_text(&self.config, "Save as…", "save_as")),
-                        )
-                        .on_hover_text("Choose file, format, quality and size")
-                        .clicked()
-                    {
-                        self.open_save_as();
-                    }
                     if ui.button(action_button_text(&self.config, "Panels", "panels")).clicked() {
-                        self.suppress_resize_redecode = true;
-                        self.show_panels = !self.show_panels;
+                        self.toggle_panels_master();
                     }
-                    if ui.button(action_button_text(&self.config, "Left", "pane_left")).clicked() {
+                    // Individual panes, beside the master, as glowing toggles like
+                    // Crop — they are modes of the layout, not actions. The
+                    // filled state is the pane's own visibility.
+                    if ui
+                        .selectable_label(
+                            self.show_left,
+                            action_button_text(&self.config, "Left pane", "pane_left"),
+                        )
+                        .clicked()
+                    {
                         self.suppress_resize_redecode = true;
                         self.show_left = !self.show_left;
                     }
-                    if ui.button(action_button_text(&self.config, "Right", "pane_right")).clicked() {
+                    if ui
+                        .selectable_label(
+                            self.show_right,
+                            action_button_text(&self.config, "Right pane", "pane_right"),
+                        )
+                        .clicked()
+                    {
                         self.suppress_resize_redecode = true;
                         self.show_right = !self.show_right;
                     }
-                    if ui
-                        .selectable_label(
-                            self.config.fit_window_mode,
-                            action_button_text(&self.config, "Fit window", "fit_window"),
-                        )
-                        .on_hover_text("Shrink the window to the picture; follows images and zooms while on")
-                        .clicked()
-                    {
-                        self.fit_window_to_image();
-                    }
-                    if ui.button(action_button_text(&self.config, "Delete", "del")).clicked() {
-                        self.delete_current(ctx);
-                    }
-                    // No key advertised, because there is none: Move and Copy write
-                    // to the filesystem and are not on a bare keystroke. See the
-                    // note where the bindings are read.
-                    if ui.button("Move…").clicked() {
-                        self.transfer_current(ctx, false);
-                    }
-                    if ui.button("Copy…").clicked() {
-                        self.transfer_current(ctx, true);
-                    }
-                    if ui.button(action_button_text(&self.config, "Explore", "explore")).clicked() {
-                        self.explore_current();
-                    }
-                    if ui.button(action_button_text(&self.config, "Reload", "reload")).clicked() {
-                        self.rescan(ctx, true);
-                    }
-                    if ui.button(action_button_text(&self.config, "Copy IMG", "copy")).clicked() {
-                        self.copy_image_to_clipboard(false);
-                    }
-                    if ui.button("Copy original").clicked() {
-                        self.copy_image_to_clipboard(true);
-                    }
-                    if ui.button(action_button_text(&self.config, "Wallpaper", "wall")).clicked() {
-                        self.set_wallpaper();
-                    }
-                    if ui.button(action_button_text(&self.config, "Wallpaper shown", "wall_shown")).clicked() {
-                        self.set_wallpaper_shown();
-                    }
-                    if ui.button(action_button_text(&self.config, "Print…", "print")).clicked() {
-                        self.print_current();
-                    }
-                    if ui.button("Touch now").clicked() {
-                        self.touch_current(false);
-                    }
-                    if ui.button("Touch EXIF date").clicked() {
-                        self.touch_current(true);
-                    }
-                    if ui.button("Touch folder EXIF dates").clicked() {
-                        self.touch_folder_to_exif_dates();
-                    }
-                    ui.label("wheel: zoom · drag: pan · 1: 100% · double-click: fit");
+                    ui.separator();
+                    // Everything below is touched too rarely to spend row width on:
+                    // four menus with the same handlers the buttons had. The
+                    // "⏷" says this opens a menu rather than acting on click —
+                    // pending the font check: a missing glyph is a blank box,
+                    // and `no_ui_text_uses_a_glyph_the_font_lacks` is what
+                    // stops that shipping.
+                    ui.menu_button("Transform ⏷", |ui| {
+                        if ui.button("Rotate ⟲").clicked() {
+                            ui.close();
+                            self.rotate(-1, ctx);
+                        }
+                        if ui.button("Rotate ⟳").clicked() {
+                            ui.close();
+                            self.rotate(1, ctx);
+                        }
+                        // Mirrors are here for the same reason the rotate buttons are:
+                        // a photo shot with a wrong orientation tag, or a scan that
+                        // came out the wrong way round, is a one-press fix and there is
+                        // no other way to get it. They compose with the turns rather
+                        // than replacing them, so turn-then-mirror is a diagonal
+                        // mirror and mirror-twice is back to where it started.
+                        //
+                        // "H" and "V" rather than ⇋ and ⇅: the default egui font has
+                        // neither, and a missing glyph is a blank box, not a subtle
+                        // omission. `no_ui_text_uses_a_glyph_the_font_lacks` is what
+                        // stops that coming back.
+                        let xform = self.current_xform();
+                        let any = xform != Xform::Identity;
+                        if ui
+                            .add_enabled(
+                                self.cur.is_some(),
+                                egui::Button::new("Mirror H").shortcut_text(""),
+                            )
+                            .on_hover_text("Mirror left-to-right")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.mirror(true, ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.cur.is_some(),
+                                egui::Button::new("Mirror V").shortcut_text(""),
+                            )
+                            .on_hover_text("Mirror top-to-bottom")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.mirror(false, ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                any,
+                                egui::Button::new("Reset turn").shortcut_text(""),
+                            )
+                            .on_hover_text("Back to the file's own orientation, and drop any crop")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.reset_transform(ctx);
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                self.can_undo_current(),
+                                egui::Button::new("Undo").shortcut_text(""),
+                            )
+                            .on_hover_text("Undo the last turn, mirror or crop on this image")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.undo(ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                self.can_redo_current(),
+                                egui::Button::new("Redo").shortcut_text(""),
+                            )
+                            .on_hover_text("Redo the last undone transform")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.redo(ctx);
+                        }
+                        ui.separator();
+                        let has_crop = self.cur.as_ref().is_some_and(|k| self.edits.crop(&k.path).is_some());
+                        if ui
+                            .add_enabled(
+                                has_crop,
+                                egui::Button::new("Clear crop").shortcut_text(""),
+                            )
+                            .on_hover_text("Remove the crop, keeping any rotation or mirroring")
+                            .clicked()
+                        {
+                            ui.close();
+                            if let Some(p) = self.cur.clone() {
+                                self.history.record(&p.path, self.edits.get(&p.path));
+                                self.edits.clear_crop(&p.path);
+                            }
+                            ctx.request_repaint();
+                        }
+                    });
+                    // One writing action per group, headed by the only one that
+                    // app-side is a plain save; without this the app's one writing
+                    // action was reachable only by remembering a chord. Save-as sits
+                    // beside it because it is the same action with a destination
+                    // attached, and a save you cannot choose the name of is not a
+                    // save-as.
+                    ui.menu_button("Save ⏷", |ui| {
+                        if ui
+                            .add_enabled(
+                                self.cur.is_some(),
+                                egui::Button::new(action_button_text(&self.config, "Save transformed…", "save")),
+                            )
+                            .on_hover_text("New file beside this one, original untouched")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.save_transformed_copy();
+                        }
+                        if ui
+                            .add_enabled(
+                                self.cur.is_some(),
+                                egui::Button::new(action_button_text(&self.config, "Save as…", "save_as")),
+                            )
+                            .on_hover_text("Choose file, format, quality and size")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.open_save_as();
+                        }
+                        ui.separator();
+                        if ui.button(action_button_text(&self.config, "Copy IMG", "copy")).clicked() {
+                            ui.close();
+                            self.copy_image_to_clipboard(false);
+                        }
+                        if ui.button("Copy original").clicked() {
+                            ui.close();
+                            self.copy_image_to_clipboard(true);
+                        }
+                    });
+                    ui.menu_button("File ⏷", |ui| {
+                        if ui.button(action_button_text(&self.config, "Explore", "explore")).clicked() {
+                            ui.close();
+                            self.explore_current();
+                        }
+                        if ui.button(action_button_text(&self.config, "Reload", "reload")).clicked() {
+                            ui.close();
+                            self.rescan(ctx, true);
+                        }
+                        ui.separator();
+                        // No key advertised, because there is none: Move and Copy write
+                        // to the filesystem and are not on a bare keystroke. See the
+                        // note where the bindings are read.
+                        if ui.button("Move…").clicked() {
+                            ui.close();
+                            self.transfer_current(ctx, false);
+                        }
+                        if ui.button("Copy…").clicked() {
+                            ui.close();
+                            self.transfer_current(ctx, true);
+                        }
+                        if ui.button(action_button_text(&self.config, "Delete", "del")).clicked() {
+                            ui.close();
+                            self.delete_current(ctx);
+                        }
+                        ui.separator();
+                        if ui.button(action_button_text(&self.config, "Print…", "print")).clicked() {
+                            ui.close();
+                            self.print_current();
+                        }
+                    });
+                    ui.menu_button("Tools ⏷", |ui| {
+                        if ui.button(action_button_text(&self.config, "Wallpaper", "wall")).clicked() {
+                            ui.close();
+                            self.set_wallpaper();
+                        }
+                        if ui
+                            .button(action_button_text(&self.config, "Wallpaper shown", "wall_shown"))
+                            .clicked()
+                        {
+                            ui.close();
+                            self.set_wallpaper_shown();
+                        }
+                        ui.separator();
+                        if ui.button("Touch now").clicked() {
+                            ui.close();
+                            self.touch_current(false);
+                        }
+                        if ui.button("Touch EXIF date").clicked() {
+                            ui.close();
+                            self.touch_current(true);
+                        }
+                        if ui.button("Touch folder EXIF dates").clicked() {
+                            ui.close();
+                            self.touch_folder_to_exif_dates();
+                        }
+                    });
+                    // The hints moved off the row: a hover tooltip costs no width,
+                    // and the row they used to sit in would grow by a line.
+                    ui.label("keys").on_hover_text(
+                        "wheel: zoom · drag: pan · 1/F/Space: 100%/fit · double-click: fit",
+                    );
                 });
             });
         }
@@ -8948,6 +9597,19 @@ impl eframe::App for MyApp {
                     ui.label("No image.");
                 }
                 ui.heading("EXIF");
+                // The colour line comes with the preview, not with the metadata
+                // read: it is classified on the worker from the bytes the decode
+                // already had in hand — the read this replaces was `color_info`'s
+                // whole-file `fs::read`, 8–12 ms on a real photograph, paid once
+                // per navigation at a priority ahead of every prefetch. It is
+                // cached on the preview like `exif_tag`, so a re-shown image
+                // answers with no read of any kind, and it can appear while the
+                // EXIF block below is still loading.
+                if let Some(preview) = self.shown.as_ref().and_then(|k| self.previews.get(k)) {
+                    if let Some(line) = preview.colour.panel_line() {
+                        ui.label(line);
+                    }
+                }
                 // The panel is the only thing that shows this, so it is also the
                 // only thing that should ask for it. The gate is the *effective*
                 // visibility — master and left flag — so hiding the pane stops
@@ -8964,9 +9626,9 @@ impl eframe::App for MyApp {
                 ) {
                     // The panel pushes this rather than waiting for the plan, so
                     // it is the one metadata path `plan_jobs`' archive guard does
-                    // not cover. An archive has no EXIF and `color_info` reads
-                    // the *whole file* to find out — a 200 MB read for a fact
-                    // that is false before the read starts.
+                    // not cover. An archive path names a container, not a
+                    // picture, and has no EXIF of its own to read — the members
+                    // show their own through this same block.
                     if let Some(path) = self
                         .cur
                         .as_ref()
@@ -9090,321 +9752,565 @@ impl eframe::App for MyApp {
                 // the content scrolls instead of running off the bottom.
                 egui::ScrollArea::vertical().show(ui, |ui| {
 
-                // ---- renderer ------------------------------------------------
-                // Deliberately the first row: it is the only setting that can
-                // make the app fail to start at all, so it should not be
-                // something you have to go looking for.
-                ui.horizontal(|ui| {
-                    ui.label("Graphics:");
-                    let mut choice = self.config.renderer.choice;
-                    let mut changed = false;
-                    egui::ComboBox::from_id_salt("renderer")
-                        .selected_text(choice.label())
-                        .show_ui(ui, |ui| {
-                            for b in [
-                                image_viewer::WgpuBackend::Auto,
-                                image_viewer::WgpuBackend::Dx12,
-                                image_viewer::WgpuBackend::Gl,
-                                image_viewer::WgpuBackend::Vulkan,
-                            ] {
-                                changed |= ui
-                                    .selectable_value(&mut choice, b, b.label())
-                                    .clicked();
-                            }
+                egui::CollapsingHeader::new("Graphics & window")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                    // ---- renderer ------------------------------------------------
+                    // Deliberately the first group: it is the only setting that can
+                    // make the app fail to start at all, so it should not be
+                    // something you have to go looking for.
+                    ui.horizontal(|ui| {
+                        ui.label("Graphics:")
+                            .on_hover_text(
+                                "Automatic probes each backend in its own process and keeps the \
+                                 first that starts, because a driver that fails does so by \
+                                 crashing rather than by returning an error.",
+                            );
+                        let mut choice = self.config.renderer.choice;
+                        let mut changed = false;
+                        egui::ComboBox::from_id_salt("renderer")
+                            .selected_text(choice.label())
+                            .show_ui(ui, |ui| {
+                                for b in [
+                                    image_viewer::WgpuBackend::Auto,
+                                    image_viewer::WgpuBackend::Dx12,
+                                    image_viewer::WgpuBackend::Gl,
+                                    image_viewer::WgpuBackend::Vulkan,
+                                ] {
+                                    changed |= ui
+                                        .selectable_value(&mut choice, b, b.label())
+                                        .clicked();
+                                }
+                            });
+                        if changed {
+                            self.request_renderer_restart(ui.ctx(), choice);
+                        }
+                    });
+                    ui.small(format!("In use: {}", self.renderer.label()));
+                    if ui.button("Probe backends now").clicked() {
+                        self.probe_renderer_now(ui.ctx());
+                    }
+                    if ui
+                        .checkbox(&mut self.config.esc_closes_app, "Esc closes the app")
+                        .on_hover_text("Off: Esc still leaves crop mode, the grid and fullscreen, but never quits.")
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Worker threads (0 = auto):")
+                            .on_hover_text("0 picks 2-4 from your CPU. Applies on restart.");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.config.workers)
+                                    .range(0..=8),
+                            )
+                            .changed()
+                        {
+                            // The pool is built once at startup, so this takes
+                            // effect on restart rather than rebuilding it live.
+                            self.config.save(&self.config_path);
+                        }
+                    });
+                    if ui
+                        .checkbox(&mut self.config.single_instance, "Allow only one window")
+                        .changed()
+                    {
+                        // Takes effect on next launch: the running process already
+                        // holds the mutex, so flipping this cannot open or close one.
+                        self.config.save(&self.config_path);
+                        self.notice = Some(if self.config.single_instance {
+                            "Single-instance on — takes effect on restart"
+                        } else {
+                            "Single-instance off — multiple windows allowed"
+                        }.into());
+                    }
+                    // Window chrome, applied live: decorations have a viewport
+                    // command, and always-on-top goes straight to Win32
+                    // (`set_topmost`) because egui 0.36 only offers a builder for
+                    // it. The launch loop reads the same flags, so a restart
+                    // keeps whatever is set here.
+                    if ui
+                        .checkbox(&mut self.config.always_on_top, "Always on top")
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                        if !image_viewer::set_topmost(self.config.always_on_top) {
+                            self.error = Some("Could not change window order".into());
+                        }
+                    }
+                    if ui
+                        .checkbox(&mut self.config.hide_title_bar, "Hide title bar")
+                        .on_hover_text("Without a title bar there is no drag handle — Win+arrows still move the window.")
+                        .changed()
+                    {
+                        // Left alone, winit keeps a decorations change's outer
+                        // rect and lets the client area absorb (hide) or give
+                        // up (show) the title strip: the picture jumps and
+                        // re-fits, and in fit-window mode the window's hug
+                        // breaks — "the option doesn't reset the window."
+                        // Keep the client instead: it is re-asserted at its
+                        // pre-toggle size, and the outer frame is put where
+                        // [`image_viewer::outer_top_for_decoration_toggle`]
+                        // computes, so only the chrome arrives or leaves.
+                        let hiding = self.config.hide_title_bar;
+                        let vp = ui.input(|i| {
+                            let v = i.viewport();
+                            v.inner_rect.zip(v.outer_rect).map(|(inner, outer)| {
+                                (
+                                    inner,
+                                    outer,
+                                    v.maximized.unwrap_or(false),
+                                    v.fullscreen.unwrap_or(false),
+                                )
+                            })
                         });
-                    if changed {
-                        self.request_renderer_restart(ui.ctx(), choice);
+                        match vp {
+                            Some((inner, outer, maximized, fullscreen)) => {
+                                // The strip is measurable only while the
+                                // window is decorated, so a hide is the one
+                                // moment to remember it; the reverse toggle
+                                // reads it back. Measured even maximized — the
+                                // clamped work area shifts `outer.top` by
+                                // little more than the strip either way.
+                                let strip = (inner.top() - outer.top()).max(0.0);
+                                if hiding {
+                                    self.config.title_strip = strip;
+                                }
+                                self.config.save(&self.config_path);
+                                // Maximized and fullscreen windows are the
+                                // monitor's work area before, during and
+                                // after: WM_NCCALCSIZE clamps them, so moving
+                                // or re-sizing would only put a maximized
+                                // window in half measures. Leave those alone.
+                                if maximized || fullscreen {
+                                    ctx.send_viewport_cmd(
+                                        egui::ViewportCommand::Decorations(!hiding),
+                                    );
+                                } else {
+                                    let strip_after =
+                                        if hiding { 0.0 } else { self.config.title_strip };
+                                    let top = image_viewer::outer_top_for_decoration_toggle(
+                                        inner.top(),
+                                        strip_after,
+                                    );
+                                    // Enqueue order is settle order, and both
+                                    // application orders converge: the size
+                                    // re-assert anchors at the top-left it
+                                    // sees, so whichever arrives first — the
+                                    // frame already moved there, or the frame
+                                    // moved after — ends with the frame at
+                                    // `top` and the client's size and screen
+                                    // position unchanged.
+                                    ctx.send_viewport_cmd(
+                                        egui::ViewportCommand::Decorations(!hiding),
+                                    );
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                                        egui::Pos2::new(inner.left(), top),
+                                    ));
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                                        inner.size(),
+                                    ));
+                                }
+                            }
+                            // No geometry measured (the rects here are filled
+                            // by eframe on Windows, but never say never): the
+                            // toggle still applies, at yesterday's cost.
+                            None => ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!hiding)),
+                        }
                     }
                 });
-                ui.small(format!("In use: {}", self.renderer.label()));
-                if self.config.renderer.choice == image_viewer::WgpuBackend::Auto {
-                    ui.small(
-                        "Automatic probes each backend in its own process and keeps the \
-                         first that starts, because a driver that fails does so by \
-                         crashing rather than by returning an error.",
-                    );
-                }
-                if ui.button("Probe backends now").clicked() {
-                    self.probe_renderer_now(ui.ctx());
-                }
-                ui.add_space(6.0);
 
-                if ui
-                    .checkbox(
-                        &mut self.config.load_all_on_startup,
-                        "Load all images in folder",
-                    )
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    if self.config.load_all_on_startup {
-                        Self::load_folder_into(
-                            &self.folder,
-                            self.config.recursive_folders && self.zip_archive.is_none(),
-                            &mut self.gallery,
-                        );
-                    }
-                    self.goto(ctx);
-                }
-                if ui
-                    .checkbox(
-                        &mut self.config.recursive_folders,
-                        "Include subfolders",
-                    )
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    // New files, possibly a new position: rescan rather than
-                    // patching the list in place (`set_files` re-`goto`s when
-                    // the cursor moved, so no explicit one here).
-                    self.rescan(ctx, true);
-                }
-                ui.small("One gallery over the whole tree. The 2 s watcher walks it every poll, so this costs a walk per level.");
-                if ui
-                    .checkbox(&mut self.config.show_archives, "Show archives (zip, cbz, 7z, rar)")
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    // The library reads this through `is_browsable`, so nothing is
-                    // rescanned until it is told — and a listing rebuilt before
-                    // the setter ran would keep the old answer.
-                    image_viewer::set_show_archives(self.config.show_archives);
-                    self.rescan(ctx, true);
-                }
-                ui.add_space(6.0);
-                if ui
-                    .checkbox(
-                        &mut self.config.linear_resample,
-                        "Linear-light downsampling",
-                    )
-                    .changed()
-                {
-                    set_linear_resample(self.config.linear_resample);
-                    self.config.save(&self.config_path);
-                }
-                // Off by default: this changes how photos look, so it is opt-in
-                // rather than a correction. Like the toggle above it applies at
-                // decode time and does not re-decode what is already cached — move
-                // to another image, or restart, to see it everywhere.
-                if ui
-                    .checkbox(
-                        &mut self.config.convert_wide_gamut,
-                        "Convert Display P3 photos to sRGB",
-                    )
-                    .changed()
-                {
-                    image_viewer::set_wide_gamut_conversion(self.config.convert_wide_gamut);
-                    self.config.save(&self.config_path);
-                }
-                if self.config.convert_wide_gamut {
-                    ui.small("Colours outside sRGB are clipped to fit, which is lossy.");
-                }
-                if ui
-                    .checkbox(
-                        &mut self.config.thumbnail_cache,
-                        "Cache grid thumbnails on disk",
-                    )
-                    .changed()
-                {
-                    // Nothing to invalidate. The cells in `thumbs` are decoded
-                    // pictures and stay correct whichever way this goes; only
-                    // whether *new* ones are written changes. Dropping them here
-                    // would cost a re-decode of every visible cell — up to 50 of
-                    // them at ~700 ms each on a folder of large scans — to buy
-                    // nothing at all.
-                    set_thumbnail_cache(self.config.thumbnail_cache);
-                    self.config.save(&self.config_path);
-                }
-                ui.small(format!(
-                    "Up to {} of cells, so a folder of large scans opens once at full \
-                     speed. Stored in {}.",
-                    human_bytes(image_viewer::THUMB_CACHE_MAX_BYTES),
-                    thumb_cache_root().display()
-                ));
-                // Sits with the thumbnail cache because it is the same surface:
-                // what a grid cell looks like. Applies live — the grid reads
-                // the value every frame, so no invalidation or re-decode.
-                ui.horizontal(|ui| {
-                    ui.label("Grid cell size:");
+                egui::CollapsingHeader::new("Folders & files")
+                    .default_open(true)
+                    .show(ui, |ui| {
                     if ui
-                        .add(
-                            egui::DragValue::new(&mut self.config.grid_cell)
-                                .range(64.0..=400.0)
-                                .speed(1.0),
+                        .checkbox(
+                            &mut self.config.load_all_on_startup,
+                            "Load all images in folder",
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                        if self.config.load_all_on_startup {
+                            Self::load_folder_into(
+                                &self.folder,
+                                self.config.recursive_folders && self.zip_archive.is_none(),
+                                &mut self.gallery,
+                            );
+                        }
+                        self.goto(ctx);
+                    }
+                    if ui
+                        .checkbox(
+                            &mut self.config.recursive_folders,
+                            "Include subfolders",
+                        )
+                        .on_hover_text("One gallery over the whole tree. The 2 s watcher walks it every poll, so this costs a walk per level.")
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                        // New files, possibly a new position: rescan rather than
+                        // patching the list in place (`set_files` re-`goto`s when
+                        // the cursor moved, so no explicit one here).
+                        self.rescan(ctx, true);
+                    }
+                    if ui
+                        .checkbox(&mut self.config.show_archives, "Show archives (zip, cbz, 7z, rar)")
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                        // The library reads this through `is_browsable`, so nothing is
+                        // rescanned until it is told — and a listing rebuilt before
+                        // the setter ran would keep the old answer.
+                        image_viewer::set_show_archives(self.config.show_archives);
+                        self.rescan(ctx, true);
+                    }
+                    if ui
+                        .checkbox(
+                            &mut self.config.thumbnail_cache,
+                            "Cache grid thumbnails on disk",
+                        )
+                        .on_hover_text(format!(
+                            "Up to {} of cells, so a folder of large scans opens once at full \
+                             speed. Stored in {}.",
+                            human_bytes(image_viewer::THUMB_CACHE_MAX_BYTES),
+                            thumb_cache_root().display()
+                        ))
+                        .changed()
+                    {
+                        // Nothing to invalidate. The cells in `thumbs` are decoded
+                        // pictures and stay correct whichever way this goes; only
+                        // whether *new* ones are written changes. Dropping them here
+                        // would cost a re-decode of every visible cell — up to 50 of
+                        // them at ~700 ms each on a folder of large scans — to buy
+                        // nothing at all.
+                        set_thumbnail_cache(self.config.thumbnail_cache);
+                        self.config.save(&self.config_path);
+                    }
+                    let mut new_sort = self.config.sort;
+                    ui.horizontal(|ui| {
+                        ui.label("Sort:");
+                        egui::ComboBox::from_id_salt("sort_mode")
+                            .selected_text(format!("{new_sort:?}"))
+                            .show_ui(ui, |ui| {
+                                for m in [
+                                    SortMode::Name,
+                                    SortMode::Date,
+                                    SortMode::Size,
+                                    SortMode::Random,
+                                ] {
+                                    ui.selectable_value(&mut new_sort, m, format!("{m:?}"));
+                                }
+                            });
+                    });
+                    if new_sort != self.config.sort {
+                        self.config.sort = new_sort;
+                        self.config.save(&self.config_path);
+                        resort = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.config.sort_descending, "Descending sort order")
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                        resort = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.config.loop_back, "Loop back at folder ends")
+                        .changed()
+                    {
+                        // Apply straight away; the gallery owns the wrap behaviour,
+                        // so it has to be told.
+                        self.gallery.loop_back = self.config.loop_back;
+                        self.config.save(&self.config_path);
+                    }
+                });
+
+                egui::CollapsingHeader::new("View & zoom")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                    if ui
+                        .checkbox(
+                            &mut self.config.linear_resample,
+                            "Linear-light downsampling",
+                        )
+                        .changed()
+                    {
+                        set_linear_resample(self.config.linear_resample);
+                        self.config.save(&self.config_path);
+                    }
+                    // Off by default: this changes how photos look, so it is opt-in
+                    // rather than a correction. Like the toggle above it applies at
+                    // decode time and does not re-decode what is already cached — move
+                    // to another image, or restart, to see it everywhere.
+                    if ui
+                        .checkbox(
+                            &mut self.config.convert_wide_gamut,
+                            "Convert Display P3 photos to sRGB",
+                        )
+                        .on_hover_text("Colours outside sRGB are clipped to fit, which is lossy.")
+                        .changed()
+                    {
+                        image_viewer::set_wide_gamut_conversion(self.config.convert_wide_gamut);
+                        self.config.save(&self.config_path);
+                    }
+                    // The same surface as the thumbnail cache — what a grid cell
+                    // looks like. Applies live — the grid reads
+                    // the value every frame, so no invalidation or re-decode.
+                    ui.horizontal(|ui| {
+                        ui.label("Grid cell size:");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.config.grid_cell)
+                                    .range(64.0..=400.0)
+                                    .speed(1.0),
+                            )
+                            .changed()
+                        {
+                            self.config.save(&self.config_path);
+                        }
+                        ui.label("pt");
+                    });
+                    let mut new_filter = self.config.downscale_filter;
+                    ui.horizontal(|ui| {
+                        ui.label("Filter:");
+                        egui::ComboBox::from_id_salt("ds_filter")
+                            .selected_text(format!("{:?}", self.config.downscale_filter))
+                            .show_ui(ui, |ui| {
+                                for f in [
+                                    DownscaleFilter::Hermite,
+                                    DownscaleFilter::Catrom,
+                                    DownscaleFilter::Lanczos3,
+                                ] {
+                                    ui.selectable_value(&mut new_filter, f, format!("{f:?}"));
+                                }
+                            });
+                    });
+                    if new_filter != self.config.downscale_filter {
+                        self.config.downscale_filter = new_filter;
+                        set_downscale_filter(new_filter);
+                        self.config.save(&self.config_path);
+                        refilter = true;
+                    }
+                    // Sits with the shape dropdown rather than under it because it is
+                    // the same decision — how a downscaled page is resampled — and
+                    // the two axes have to be read together to make sense of either.
+                    // The label says what it *does*, not that a `filter_scale` is
+                    // multiplied: the user is choosing between a clean tone field
+                    // and a crisp line, and neither word describes the mechanism.
+                    //
+                    // **Labelled for the effect, because the effect is what the user
+                    // can see.** "Low-pass strength" is a true description and a
+                    // useless one; nobody looking at a page with a lattice in it is
+                    // going to find a checkbox that says "low-pass strength".
+                    if ui
+                        .checkbox(
+                            &mut self.config.smooth_downscale,
+                            "Smooth: soften the downscale to hide a dot grid",
+                        )
+                        .on_hover_text(
+                            "Off by default. A downscaled page's fine detail can fold back \
+                             on itself into a grid of dark and light. Smooth low-passes \
+                             harder: it hides that grid on a page screened at a single \
+                             pitch, and can bring one out on a page whose tones use more \
+                             than one, and edges come out noticeably softer. Fast is \
+                             crisper.",
+                        )
+                        .changed()
+                    {
+                        // Apply straight away. Nothing re-queues a decode on its own,
+                        // so the alternative is "looks like it worked after a
+                        // restart", which is the same failure as not applying it.
+                        set_downscale_smoothing(self.config.smooth_downscale);
+                        self.config.save(&self.config_path);
+                        // **Invalidate, or this reads as a broken setting.** The
+                        // previews already in `previews` were decoded by the *other*
+                        // kernel, and nothing else would ever re-queue them: the
+                        // filter dropdown has carried `refilter` for exactly this
+                        // reason, and `linear_resample` a few rows up is the
+                        // documented counter-example of what happens without it.
+                        refilter = true;
+                    }
+                    // **Says the cost is real, and says it is not a clear win.** The
+                    // label used to claim Smooth keeps a grid from forming, which is
+                    // only half of what it does: on pages whose greys are screened at
+                    // more than one pitch it can bring a grid *out* instead. It is
+                    // off by default for exactly that reason, so the hover text is
+                    // what a reader has to go on when they turn it on, and promising a
+                    // one-sided win here would be the same defect as hiding the cost.
+                    // The 1.71x figure is the measured step-edge softening and is
+                    // still true; it is quoted so the trade's size is on the screen.
+
+                    // Pixel art is a **sampling** choice, made when each content
+                    // texture is uploaded: nearest on magnify, linear on minify.
+                    // Nearest is for the *magnification* axis only, because
+                    // minifying nearest is what drops pixel rows and reads as a
+                    // broken picture — so the shipped linear minification stays
+                    // for every fit and zoomed-out view, photo or sprite.
+                    if ui
+                        .checkbox(
+                            &mut self.config.pixel_art,
+                            "Pixel art: sharp pixels when zoomed in",
+                        )
+                        .on_hover_text(
+                            "Off by default. For pixel drawings: the magnifying filter samples \
+                             nearest, so a sprite zoomed past 100% stays squares of its own \
+                             pixels instead of smearing; zoomed out on anything, the averaging \
+                             filter still runs, so a downscaled picture does not lose rows. \
+                             Applies to the picture, its zoom tiles and animation frames, not \
+                             the grid. Flipping it re-requests the previews; the old picture \
+                             stays until the replacement arrives.",
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                        // **Invalidate the same frame.** The sampling was baked
+                        // into the textures already in `previews` and `full`'s
+                        // tiles, and nothing else would re-ask: the box flips and
+                        // the picture keeps the samplers it arrived with, which is
+                        // exactly the broken-feature shape the refilter walk below
+                        // (and `the_smooth_toggle_is_wired...` in tests/unit.rs)
+                        // documents for a toggle whose work is not re-done. The
+                        // replacements arrive into the same slot, so the old
+                        // picture stays up until then — no blank flash.
+                        refilter = true;
+                    }
+                    if ui
+                        .checkbox(
+                            &mut self.config.block_while_loading,
+                            "Wait for image when holding arrows",
                         )
                         .changed()
                     {
                         self.config.save(&self.config_path);
                     }
-                    ui.label("pt");
+                    // Fixed zoom ratios on `1`–`4`, as source-pixel multiples
+                    // (`1` is 100%). `zoom_preset` clamps on read, so anything
+                    // typed here stays sane.
+                    ui.horizontal(|ui| {
+                        ui.label("Zoom keys 1-4:");
+                        let mut changed = false;
+                        for (n, z) in self.config.zoom_presets.iter_mut().enumerate() {
+                            ui.label(format!("{}:", n + 1));
+                            changed |= ui
+                                .add(egui::DragValue::new(z).range(0.1..=32.0).speed(0.1))
+                                .changed();
+                        }
+                        if changed {
+                            self.config.save(&self.config_path);
+                        }
+                    });
+                    if ui
+                        .checkbox(
+                            &mut self.config.wheel_navigation,
+                            "Mouse wheel flips images (Ctrl+wheel zooms)",
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
+                    // Session view state — memory that exists nowhere but this
+                    // run — so the flip needs no invalidation: it changes what a
+                    // future arrival restores, not anything on screen or in a
+                    // decode. The false arm is exactly the shipped behaviour,
+                    // and both arms are `arriving_view`'s recorded answer.
+                    if ui
+                        .checkbox(
+                            &mut self.config.remember_view,
+                            "Remember zoom and pan per image",
+                        )
+                        .on_hover_text(
+                            "An image you zoomed or panned comes back the way you left it, while \
+                             you are browsing; others keep the zoom carried over. Per page of a \
+                             document. Lost when the app closes.",
+                        )
+                        .changed()
+                    {
+                        self.config.save(&self.config_path);
+                    }
+                    // A property of the *gesture*, not of the app: it changes what
+                    // a drag does, and nothing about it applies until somebody drags.
+                    ui.horizontal(|ui| {
+                        ui.label("Crop shape:")
+                            .on_hover_text(
+                                "Frames a new crop to this shape; Shift forces a square for \
+                                 one drag. A frame already drawn keeps the shape it has.",
+                            );
+                        let mut choice = self.config.crop_aspect;
+                        egui::ComboBox::from_id_salt("crop_aspect")
+                            .selected_text(choice.label())
+                            .show_ui(ui, |ui| {
+                                for a in image_viewer::CropAspect::ALL {
+                                    ui.selectable_value(&mut choice, a, a.label());
+                                }
+                            });
+                        if choice != self.config.crop_aspect {
+                            self.config.crop_aspect = choice;
+                            self.config.save(&self.config_path);
+                        }
+                    });
                 });
-                                let mut new_filter = self.config.downscale_filter;
-                ui.horizontal(|ui| {
-                    ui.label("Filter:");
-                    egui::ComboBox::from_id_salt("ds_filter")
-                        .selected_text(format!("{:?}", self.config.downscale_filter))
-                        .show_ui(ui, |ui| {
-                            for f in [
-                                DownscaleFilter::Hermite,
-                                DownscaleFilter::Catrom,
-                                DownscaleFilter::Lanczos3,
-                            ] {
-                                ui.selectable_value(&mut new_filter, f, format!("{f:?}"));
+
+                ui.collapsing("Slideshow & animation", |ui| {
+                    // Slideshow: one picture per interval until toggled off, or
+                    // until the end with looping off. The pace persists; running
+                    // does not survive a restart.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(if self.slideshow {
+                                "Stop slideshow"
+                            } else {
+                                "Start slideshow"
+                            })
+                            .clicked()
+                        {
+                            if self.slideshow {
+                                self.stop_slideshow();
+                            } else {
+                                self.start_slideshow();
                             }
-                        });
+                        }
+                        ui.label("every");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.config.slideshow_secs)
+                                    .range(1..=60),
+                            )
+                            .changed()
+                        {
+                            self.config.save(&self.config_path);
+                        }
+                        ui.label("s");
+                        // Beside the pace because it is the same decision — how a
+                        // show walks — and a shuffle buried in a submenu is a
+                        // setting nobody finds. Session-only like the show itself:
+                        // reshuffled every start, folder order restored on stop.
+                        if ui
+                            .checkbox(&mut self.config.slideshow_shuffle, "Shuffle")
+                            .changed()
+                        {
+                            self.config.save(&self.config_path);
+                        }
+                    });
+                    // Animation playback speed, next to the slideshow for the
+                    // same reason it sits there: both are time-based playback,
+                    // and both apply live with no re-decode.
+                    ui.horizontal(|ui| {
+                        ui.label("Animation speed (1 = file timing):");
+                        if ui
+                            .add(
+                                egui::DragValue::new(&mut self.config.anim_speed)
+                                    .range(0.1..=8.0)
+                                    .speed(0.25),
+                            )
+                            .changed()
+                        {
+                            self.config.save(&self.config_path);
+                        }
+                    });
                 });
-                // Sits with the shape dropdown rather than under it because it is
-                // the same decision — how a downscaled page is resampled — and
-                // the two axes have to be read together to make sense of either.
-                // The label says what it *does*, not that a `filter_scale` is
-                // multiplied: the user is choosing between a clean tone field
-                // and a crisp line, and neither word describes the mechanism.
-                //
-                // **Labelled for the effect, because the effect is what the user
-                // can see.** "Low-pass strength" is a true description and a
-                // useless one; nobody looking at a page with a lattice in it is
-                // going to find a checkbox that says "low-pass strength".
-                if ui
-                    .checkbox(
-                        &mut self.config.smooth_downscale,
-                        "Smooth: soften the downscale to hide a dot grid",
-                    )
-                    .changed()
-                {
-                    // Apply straight away. Nothing re-queues a decode on its own,
-                    // so the alternative is "looks like it worked after a
-                    // restart", which is the same failure as not applying it.
-                    set_downscale_smoothing(self.config.smooth_downscale);
-                    self.config.save(&self.config_path);
-                    // **Invalidate, or this reads as a broken setting.** The
-                    // previews already in `previews` were decoded by the *other*
-                    // kernel, and nothing else would ever re-queue them: the
-                    // filter dropdown has carried `refilter` for exactly this
-                    // reason, and `linear_resample` a few rows up is the
-                    // documented counter-example of what happens without it.
-                    refilter = true;
-                }
-                // **Says the cost is real, and says it is not a clear win.** The
-                // label used to claim Smooth keeps a grid from forming, which is
-                // only half of what it does: on pages whose greys are screened at
-                // more than one pitch it can bring a grid *out* instead. It is
-                // off by default for exactly that reason, so this text is what a
-                // reader has to go on when they turn it on, and promising a
-                // one-sided win here would be the same defect as hiding the cost.
-                // The 1.71x figure is the measured step-edge softening and is
-                // still true; it is quoted so the trade's size is on the screen.
-                ui.small(
-                    "Off by default. A downscaled page's fine detail can fold back \
-                     on itself into a grid of dark and light. Smooth low-passes \
-                     harder: it hides that grid on a page screened at a single \
-                     pitch, and can bring one out on a page whose tones use more \
-                     than one, and edges come out noticeably softer. Fast is \
-                     crisper.",
-                );
-                if ui
-                    .checkbox(
-                        &mut self.config.block_while_loading,
-                        "Wait for image when holding arrows",
-                    )
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                }
-                // Fixed zoom ratios on `1`–`4`, as source-pixel multiples
-                // (`1` is 100%). `zoom_preset` clamps on read, so anything
-                // typed here stays sane.
-                ui.horizontal(|ui| {
-                    ui.label("Zoom keys 1-4:");
-                    let mut changed = false;
-                    for (n, z) in self.config.zoom_presets.iter_mut().enumerate() {
-                        ui.label(format!("{}:", n + 1));
-                        changed |= ui
-                            .add(egui::DragValue::new(z).range(0.1..=32.0).speed(0.1))
-                            .changed();
-                    }
-                    if changed {
-                        self.config.save(&self.config_path);
-                    }
-                });
-                if ui
-                    .checkbox(
-                        &mut self.config.wheel_navigation,
-                        "Mouse wheel flips images (Ctrl+wheel zooms)",
-                    )
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                }
-                if ui
-                    .checkbox(&mut self.config.loop_back, "Loop back at folder ends")
-                    .changed()
-                {
-                    // Apply straight away; the gallery owns the wrap behaviour,
-                    // so it has to be told.
-                    self.gallery.loop_back = self.config.loop_back;
-                    self.config.save(&self.config_path);
-                }
-                if ui
-                    .checkbox(&mut self.config.esc_closes_app, "Esc closes the app")
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                }
-                ui.small("Off: Esc still leaves crop mode, the grid and fullscreen, but never quits.");
-                ui.horizontal(|ui| {
-                    ui.label("Worker threads (0 = auto):");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut self.config.workers)
-                                .range(0..=8),
-                        )
-                        .changed()
-                    {
-                        // The pool is built once at startup, so this takes
-                        // effect on restart rather than rebuilding it live.
-                        self.config.save(&self.config_path);
-                    }
-                });
-                ui.small("0 picks 2-4 from your CPU. Applies on restart.");
-                if ui
-                    .checkbox(&mut self.config.single_instance, "Allow only one window")
-                    .changed()
-                {
-                    // Takes effect on next launch: the running process already
-                    // holds the mutex, so flipping this cannot open or close one.
-                    self.config.save(&self.config_path);
-                    self.notice = Some(if self.config.single_instance {
-                        "Single-instance on — takes effect on restart"
-                    } else {
-                        "Single-instance off — multiple windows allowed"
-                    }.into());
-                }
-                ui.small("On: a second launch exits instead of fighting over the archive temp dir. Applies on restart.");
-                // Window chrome, applied live: decorations have a viewport
-                // command, and always-on-top goes straight to Win32
-                // (`set_topmost`) because egui 0.36 only offers a builder for
-                // it. The launch loop reads the same flags, so a restart
-                // keeps whatever is set here.
-                if ui
-                    .checkbox(&mut self.config.always_on_top, "Always on top")
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    if !image_viewer::set_topmost(self.config.always_on_top) {
-                        self.error = Some("Could not change window order".into());
-                    }
-                }
-                if ui
-                    .checkbox(&mut self.config.hide_title_bar, "Hide title bar")
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(
-                        !self.config.hide_title_bar,
-                    ));
-                }
-                ui.small("Without a title bar there is no drag handle — Win+arrows still move the window.");
-                ui.add_space(6.0);
+
                 // ---- keys ---------------------------------------------------
                 //
                 // Every action rebindable: click a chord, press keys. Meanings
@@ -9412,13 +10318,6 @@ impl eframe::App for MyApp {
                 // the chords. While one waits, the dispatch stands down so the
                 // capture press cannot act — deleting a photo by rebinding
                 // Delete is exactly the accident this gate exists to prevent.
-                ui.label("Keys:");
-                if ui.button("Reset keys").clicked() {
-                    self.config.keybindings.clear();
-                    set_nav_overrides(&self.config.keybindings);
-                    self.config.save(&self.config_path);
-                    self.notice = Some("Keys reset to defaults".into());
-                }
                 // Capture: fresh (non-repeat) key presses become the chord.
                 // Bare Escape cancels (so Escape is not bindable — it already
                 // owns the typing/grid/fullscreen/quit chain, which is
@@ -9511,318 +10410,221 @@ impl eframe::App for MyApp {
                         }
                     }
                 }
-                egui::ScrollArea::vertical()
-                    .id_salt("key_list")
-                    .max_height(300.0)
-                    .show(ui, |ui| {
-                        for (id, _, label) in image_viewer::KEY_ACTIONS {
-                            ui.horizontal(|ui| {
-                                ui.label(*label);
-                                let current = image_viewer::resolve_binding(&self.config.keybindings, id);
-                                let text = if self.capturing.as_deref() == Some(*id) {
-                                    "press keys… (Esc cancels)".to_owned()
-                                } else {
-                                    current.clone()
-                                };
-                                if ui.button(text).clicked() {
-                                    self.capturing = Some((*id).to_owned());
-                                }
-                                // Conflict marker: every other action on this
-                                // exact chord, in red. Duplicates fire
-                                // together — this row is where that reads as
-                                // intentional rather than mysterious.
-                                let others: Vec<&str> = image_viewer::KEY_ACTIONS
-                                    .iter()
-                                    .filter(|(other, _, _)| {
-                                        *other != *id
-                                            && image_viewer::resolve_binding(
-                                                &self.config.keybindings,
-                                                other,
-                                            ) == current
-                                    })
-                                    .map(|(_, _, other_label)| *other_label)
+                ui.collapsing("Keys", |ui| {
+                    if ui.button("Reset keys").clicked() {
+                        self.config.keybindings.clear();
+                        set_nav_overrides(&self.config.keybindings);
+                        self.config.save(&self.config_path);
+                        self.notice = Some("Keys reset to defaults".into());
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("key_list")
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            for (id, _, label) in image_viewer::KEY_ACTIONS {
+                                ui.horizontal(|ui| {
+                                    ui.label(*label);
+                                    let current = image_viewer::resolve_binding(&self.config.keybindings, id);
+                                    let text = if self.capturing.as_deref() == Some(*id) {
+                                        "press keys… (Esc cancels)".to_owned()
+                                    } else if current.is_empty() {
+                                        // The one blank shipped row (`next_alt`):
+                                        // deliberately unbound, so say so rather
+                                        // than drawing a button with no name.
+                                        "(unbound)".to_owned()
+                                    } else {
+                                        current.clone()
+                                    };
+                                    if ui.button(text).clicked() {
+                                        self.capturing = Some((*id).to_owned());
+                                    }
+                                    // Conflict marker: every other action on this
+                                    // exact chord, in red. Duplicates fire
+                                    // together — this row is where that reads as
+                                    // intentional rather than mysterious.
+                                    let others: Vec<&str> = image_viewer::KEY_ACTIONS
+                                        .iter()
+                                        .filter(|(other, _, _)| {
+                                            *other != *id
+                                                && image_viewer::resolve_binding(
+                                                    &self.config.keybindings,
+                                                    other,
+                                                ) == current
+                                        })
+                                        .map(|(_, _, other_label)| *other_label)
+                                        .collect();
+                                    if !others.is_empty() {
+                                        ui.colored_label(
+                                            ui.visuals().warn_fg_color,
+                                            format!("also: {}", others.join(", ")),
+                                        );
+                                    }
+                                });
+                            }
+                        });
+                    ui.small("Esc quits the app chain and is not bindable; Ctrl+C keeps its platform meaning alongside any alternative you set.");
+                });
+
+                ui.collapsing("User commands", |ui| {
+                    // ---- user commands ------------------------------------------
+                    //
+                    // External programs run against the current file (Tier 1 #2):
+                    // Ctrl+1..9 in list order. `{file}`, `{dir}` and `{name}`
+                    // expand in the program and in every arg, so
+                    // `mspaint.exe "{file}"` opens the picture on screen in Paint.
+                    // Spawned detached — the viewer never waits — so this is an
+                    // "open with", not scripting with results.
+                    ui.horizontal(|ui| {
+                        ui.label("User commands (Ctrl+1..9):");
+                        ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
+                    });
+                    let mut cmds_changed = false;
+                    let mut remove_at: Option<usize> = None;
+                    for (n, cmd) in self.config.user_commands.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("{}:", n + 1));
+                            if ui.text_edit_singleline(&mut cmd.name).changed() {
+                                cmds_changed = true;
+                            }
+                            if ui.small_button("x").clicked() {
+                                remove_at = Some(n);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("program");
+                            if ui.text_edit_singleline(&mut cmd.program).changed() {
+                                cmds_changed = true;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("args");
+                            let mut joined = cmd.args.join(" ");
+                            if ui.text_edit_singleline(&mut joined).changed() {
+                                // Space-separated; quote nothing. Args with real
+                                // spaces in them need their program to take one
+                                // `{file}` and split it itself — documented below.
+                                cmd.args = joined
+                                    .split_whitespace()
+                                    .map(|s| s.to_owned())
                                     .collect();
-                                if !others.is_empty() {
-                                    ui.colored_label(
-                                        ui.visuals().warn_fg_color,
-                                        format!("also: {}", others.join(", ")),
-                                    );
-                                }
-                            });
-                        }
-                    });
-                ui.small("Esc quits the app chain and is not bindable; Ctrl+C keeps its platform meaning alongside any alternative you set.");
-                ui.add_space(6.0);
-                // ---- user commands ------------------------------------------
-                //
-                // External programs run against the current file (Tier 1 #2):
-                // Ctrl+1..9 in list order. `{file}`, `{dir}` and `{name}`
-                // expand in the program and in every arg, so
-                // `mspaint.exe "{file}"` opens the picture on screen in Paint.
-                // Spawned detached — the viewer never waits — so this is an
-                // "open with", not scripting with results.
-                ui.horizontal(|ui| {
-                    ui.label("User commands (Ctrl+1..9):");
-                    ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
-                });
-                let mut cmds_changed = false;
-                let mut remove_at: Option<usize> = None;
-                for (n, cmd) in self.config.user_commands.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{}:", n + 1));
-                        if ui.text_edit_singleline(&mut cmd.name).changed() {
-                            cmds_changed = true;
-                        }
-                        if ui.small_button("x").clicked() {
-                            remove_at = Some(n);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("program");
-                        if ui.text_edit_singleline(&mut cmd.program).changed() {
-                            cmds_changed = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("args");
-                        let mut joined = cmd.args.join(" ");
-                        if ui.text_edit_singleline(&mut joined).changed() {
-                            // Space-separated; quote nothing. Args with real
-                            // spaces in them need their program to take one
-                            // `{file}` and split it itself — documented below.
-                            cmd.args = joined
-                                .split_whitespace()
-                                .map(|s| s.to_owned())
-                                .collect();
-                            cmds_changed = true;
-                        }
-                    });
-                }
-                if let Some(n) = remove_at {
-                    self.config.user_commands.remove(n);
-                    cmds_changed = true;
-                }
-                if ui.button("Add command").clicked() {
-                    self.config.user_commands.push(image_viewer::UserCommand {
-                        name: String::new(),
-                        program: String::new(),
-                        args: Vec::new(),
-                    });
-                    cmds_changed = true;
-                }
-                if cmds_changed {
-                    // Saved on edit, not per frame: the flag above is only set
-                    // by a field that reported `changed()`. Empty rows are
-                    // kept, not pruned: pruning while typing deletes the row
-                    // being typed in.
-                    self.config.save(&self.config_path);
-                }
-                ui.small("One arg per space. {file} {dir} {name} expand. Empty args just passes {file}.");
-                ui.add_space(6.0);
-                // ---- manga mode -------------------------------------------
-                //
-                // `M` and `D` reach these same two fields, so this panel and the
-                // keyboard cannot drift: both flip the bool and save.
-                //
-                // **`Manga mode` re-`goto`s and `Right-to-left` does not**, the same
-                // asymmetry the key handlers have and for the same reason - see
-                // `toggle_manga_mode` and `toggle_manga_rtl`. With the mode off the
-                // second box is a setting for nothing, so it says so rather than
-                // sitting there looking live.
-                //
-                // Both beta features carry a red marker, the same one: this is
-                // the promise that the rough edges are known and written down
-                // (README's beta sections), not that the setting is dangerous.
-                let mut mode_changed = false;
-                let manga_label = action_button_text(&self.config, "Double page mode", "manga");
-                let rtl_label = action_button_text(&self.config, "Right-to-left pages", "rtl");
-                ui.horizontal(|ui| {
-                    mode_changed = ui
-                        .checkbox(&mut self.config.manga_mode, manga_label)
-                        .changed();
-                    ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
-                });
-                if mode_changed {
-                    self.config.save(&self.config_path);
-                    self.goto(ctx);
-                }
-                if ui
-                    .checkbox(&mut self.config.manga_rtl, rtl_label)
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    ctx.request_repaint();
-                }
-                if !self.config.manga_mode {
-                    ui.small("Both are for double page mode, which is off.");
-                } else {
-                    ui.small("A turn opens on the right, so Left reads forwards. \
-                              Right-to-left off makes it match Left-to-right.");
-                    // The disclosure `AGENTS.md` requires beside any cache: a file
-                    // that silently re-pairs a library must not be enabled quietly.
-                    // Deleting it costs nothing but the decisions in it.
-                    match spreads_root() {
-                        Some(store) => {
-                            ui.small(format!(
-                                "Pairing overrides live in {}. Delete that file to clear \
-                                 every override and go back to the detected shapes.",
-                                store.display()
-                            ));
-                        }
-                        None => {
-                            ui.small(
-                                "No local app-data folder, so pairing overrides are kept in \
-                                 memory only and are forgotten at exit.",
-                            );
-                        }
-                    }
-                }
-                // Sits with the crop button's own row rather than under Graphics
-                // because it is a property of the *gesture*, not of the app: it
-                // changes what a drag does, and nothing about it applies until
-                // somebody drags.
-                ui.horizontal(|ui| {
-                    ui.label("Crop shape:");
-                    let mut choice = self.config.crop_aspect;
-                    egui::ComboBox::from_id_salt("crop_aspect")
-                        .selected_text(choice.label())
-                        .show_ui(ui, |ui| {
-                            for a in image_viewer::CropAspect::ALL {
-                                ui.selectable_value(&mut choice, a, a.label());
+                                cmds_changed = true;
                             }
                         });
-                    if choice != self.config.crop_aspect {
-                        self.config.crop_aspect = choice;
-                        self.config.save(&self.config_path);
                     }
-                });
-                if self.config.crop_aspect != image_viewer::CropAspect::Free {
-                    ui.small(
-                        "Frames a new crop to this shape; Shift forces a square for one drag. \
-                         A frame already drawn keeps the shape it has.",
-                    );
-                }
-                if new_filter != self.config.downscale_filter {
-                    self.config.downscale_filter = new_filter;
-                    set_downscale_filter(new_filter);
-                    self.config.save(&self.config_path);
-                    refilter = true;
-                }
-                let mut new_sort = self.config.sort;
-                ui.horizontal(|ui| {
-                    ui.label("Sort:");
-                    egui::ComboBox::from_id_salt("sort_mode")
-                        .selected_text(format!("{new_sort:?}"))
-                        .show_ui(ui, |ui| {
-                            for m in [
-                                SortMode::Name,
-                                SortMode::Date,
-                                SortMode::Size,
-                                SortMode::Random,
-                            ] {
-                                ui.selectable_value(&mut new_sort, m, format!("{m:?}"));
-                            }
+                    if let Some(n) = remove_at {
+                        self.config.user_commands.remove(n);
+                        cmds_changed = true;
+                    }
+                    if ui.button("Add command").clicked() {
+                        self.config.user_commands.push(image_viewer::UserCommand {
+                            name: String::new(),
+                            program: String::new(),
+                            args: Vec::new(),
                         });
-                });
-                if new_sort != self.config.sort {
-                    self.config.sort = new_sort;
-                    self.config.save(&self.config_path);
-                    resort = true;
-                }
-                if ui
-                    .checkbox(&mut self.config.sort_descending, "Descending sort order")
-                    .changed()
-                {
-                    self.config.save(&self.config_path);
-                    resort = true;
-                }
-                // Slideshow: one picture per interval until toggled off, or
-                // until the end with looping off. The pace persists; running
-                // does not survive a restart.
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(if self.slideshow {
-                            "Stop slideshow"
-                        } else {
-                            "Start slideshow"
-                        })
-                        .clicked()
-                    {
-                        if self.slideshow {
-                            self.stop_slideshow();
-                        } else {
-                            self.start_slideshow();
-                        }
+                        cmds_changed = true;
                     }
-                    ui.label("every");
+                    if cmds_changed {
+                        // Saved on edit, not per frame: the flag above is only set
+                        // by a field that reported `changed()`. Empty rows are
+                        // kept, not pruned: pruning while typing deletes the row
+                        // being typed in.
+                        self.config.save(&self.config_path);
+                    }
+                    ui.small("One arg per space. {file} {dir} {name} expand. Empty args just passes {file}.");
+                });
+
+                ui.collapsing("Manga", |ui| {
+                    // ---- manga mode -------------------------------------------
+                    //
+                    // `M` and `D` reach these same two fields, so this panel and the
+                    // keyboard cannot drift: both flip the bool and save.
+                    //
+                    // **`Manga mode` re-`goto`s and `Right-to-left` does not**, the same
+                    // asymmetry the key handlers have and for the same reason - see
+                    // `toggle_manga_mode` and `toggle_manga_rtl`. With the mode off the
+                    // second box is a setting for nothing, so it says so rather than
+                    // sitting there looking live.
+                    //
+                    // Both beta features carry a red marker, the same one: this is
+                    // the promise that the rough edges are known and written down
+                    // (README's beta sections), not that the setting is dangerous.
+                    let mut mode_changed = false;
+                    let manga_label = action_button_text(&self.config, "Double page mode", "manga");
+                    let rtl_label = action_button_text(&self.config, "Right-to-left pages", "rtl");
+                    ui.horizontal(|ui| {
+                        mode_changed = ui
+                            .checkbox(&mut self.config.manga_mode, manga_label)
+                            .changed();
+                        ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
+                    });
+                    if mode_changed {
+                        self.config.save(&self.config_path);
+                        self.goto(ctx);
+                    }
                     if ui
-                        .add(
-                            egui::DragValue::new(&mut self.config.slideshow_secs)
-                                .range(1..=60),
-                        )
+                        .checkbox(&mut self.config.manga_rtl, rtl_label)
                         .changed()
                     {
                         self.config.save(&self.config_path);
+                        ctx.request_repaint();
                     }
-                    ui.label("s");
-                    // Beside the pace because it is the same decision — how a
-                    // show walks — and a shuffle buried in a submenu is a
-                    // setting nobody finds. Session-only like the show itself:
-                    // reshuffled every start, folder order restored on stop.
-                    if ui
-                        .checkbox(&mut self.config.slideshow_shuffle, "Shuffle")
-                        .changed()
-                    {
-                        self.config.save(&self.config_path);
+                    if !self.config.manga_mode {
+                        ui.small("Both are for double page mode, which is off.");
+                    } else {
+                        ui.small("A turn opens on the right, so Left reads forwards. \
+                                  Right-to-left off makes it match Left-to-right.");
+                        // The disclosure `AGENTS.md` requires beside any cache: a file
+                        // that silently re-pairs a library must not be enabled quietly.
+                        // Deleting it costs nothing but the decisions in it.
+                        match spreads_root() {
+                            Some(store) => {
+                                ui.small(format!(
+                                    "Pairing overrides live in {}. Delete that file to clear \
+                                     every override and go back to the detected shapes.",
+                                    store.display()
+                                ));
+                            }
+                            None => {
+                                ui.small(
+                                    "No local app-data folder, so pairing overrides are kept in \
+                                     memory only and are forgotten at exit.",
+                                );
+                            }
+                        }
                     }
                 });
-                // Animation playback speed, next to the slideshow for the
-                // same reason it sits there: both are time-based playback,
-                // and both apply live with no re-decode.
-                ui.horizontal(|ui| {
-                    ui.label("Animation speed (1 = file timing):");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut self.config.anim_speed)
-                                .range(0.1..=8.0)
-                                .speed(0.25),
-                        )
-                        .changed()
-                    {
-                        self.config.save(&self.config_path);
+
+                ui.collapsing("File associations", |ui| {
+                    let registered = fileassoc::is_registered();
+                    if registered {
+                        ui.label(format!("Registered as '{}'", fileassoc::progid()));
+                        // A missing icon is invisible here and only shows up as a
+                        // generic application icon in a file list, so say so.
+                        match fileassoc::default_icon() {
+                            Some(icon) => {
+                                ui.small(format!("Icon: {icon}"));
+                            }
+                            None => {
+                                ui.colored_label(
+                                    ui.visuals().warn_fg_color,
+                                    "No icon registered — files will show a generic icon",
+                                );
+                            }
+                        }
+                        if ui.button("Unregister file types").clicked() {
+                            match fileassoc::unregister() {
+                                Ok(_) => self.notice = Some("File associations removed".into()),
+                                Err(e) => self.error = Some(format!("Unregister failed: {e}")),
+                            }
+                        }
+                    } else if ui.button("Register as image viewer…").clicked() {
+                        match fileassoc::register() {
+                            Ok(_) => self.notice = Some("Registered — set default via Explorer's 'Open with'".into()),
+                            Err(e) => self.error = Some(format!("Register failed: {e}")),
+                        }
                     }
+                    ui.small("Registers in the user registry (no admin). To make it the default, right-click an image > Open with > Choose another app > Image Viewer > Always.");
                 });
-                ui.add_space(6.0);
-                ui.heading("File associations");
-                let registered = fileassoc::is_registered();
-                if registered {
-                    ui.label(format!("Registered as '{}'", fileassoc::progid()));
-                    // A missing icon is invisible here and only shows up as a
-                    // generic application icon in a file list, so say so.
-                    match fileassoc::default_icon() {
-                        Some(icon) => {
-                            ui.small(format!("Icon: {icon}"));
-                        }
-                        None => {
-                            ui.colored_label(
-                                ui.visuals().warn_fg_color,
-                                "No icon registered — files will show a generic icon",
-                            );
-                        }
-                    }
-                    if ui.button("Unregister file types").clicked() {
-                        match fileassoc::unregister() {
-                            Ok(_) => self.notice = Some("File associations removed".into()),
-                            Err(e) => self.error = Some(format!("Unregister failed: {e}")),
-                        }
-                    }
-                } else if ui.button("Register as image viewer…").clicked() {
-                    match fileassoc::register() {
-                        Ok(_) => self.notice = Some("Registered — set default via Explorer's 'Open with'".into()),
-                        Err(e) => self.error = Some(format!("Register failed: {e}")),
-                    }
-                }
-                ui.small("Registers in the user registry (no admin). To make it the default, right-click an image > Open with > Choose another app > Image Viewer > Always.");
                 ui.label(format!("Config: {}", self.config_path.display()));
                 // Which checkout this binary came from, so a copy sitting in
                 // Downloads can be told apart from the current build.

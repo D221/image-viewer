@@ -262,6 +262,28 @@ pub struct Config {
     #[serde(default)]
     pub smooth_downscale: bool,
 
+    /// **Pixel-art sampling**: content textures are uploaded with **nearest
+    /// on magnify, linear on minify**, so a sprite drawn larger than its own
+    /// pixels shows squares of its texels instead of a smear, and a zoomed-out
+    /// picture (fit or smaller) keeps the averaging filter — a minifying
+    /// nearest sample drops pixel rows and shears straight lines, which is a
+    /// worse look than the smoothing it replaces. Off by default: magnified
+    /// nearest on a photo is exactly the blocky look nobody wants as the
+    /// shipped filter.
+    ///
+    /// The choice names the **two sampler axes and not a zoom level**, so it
+    /// is made once when a texture is uploaded and never has to be un-done
+    /// when the zoom later crosses 100% — egui picks the sampler per axis at
+    /// draw time. What a flip *does* have to touch is textures already
+    /// uploaded (they keep the samplers they arrived with), and the settings
+    /// arm walks the same `refilter` shape the Smooth toggle does.
+    ///
+    /// This is the decision and its mapping lives in the binary
+    /// ([`pixel_art_sampling`], which returns a plain enum: this module keeps
+    /// no egui dependency on purpose).
+    #[serde(default)]
+    pub pixel_art: bool,
+
     /// Hold-to-browse: arrow keys advance only as fast as images decode.
     #[serde(default)]
     pub block_while_loading: bool,
@@ -446,6 +468,16 @@ pub struct Config {
     #[serde(default)]
     pub hide_title_bar: bool,
 
+    /// The title strip's height (ui points) as measured when the title bar
+    /// was last hidden. The strip exists only while the window is decorated,
+    /// so a hide is the one moment it can be measured — and showing it back
+    /// needs it, to put the outer frame where the client area the user was
+    /// looking at stays put ([`outer_top_for_decoration_toggle`]). Persisted
+    /// like `RendererPref.probed`'s measured number is: it is machine
+    /// geometry, not a preference.
+    #[serde(default)]
+    pub title_strip: f32,
+
     /// Fit window to image as a mode (`T`): while on, every newly shown
     /// image gets the 100%-or-fit treatment and the window follows user
     /// zooms, centered each time. JPEGView's sticky rule, including its
@@ -459,6 +491,47 @@ pub struct Config {
     /// in a stable window instead of maximized.
     #[serde(default)]
     pub fit_mode: bool,
+
+    /// **Remember the view per image**: an image you zoomed or panned comes
+    /// back the way you left it — zoom **and** pan restored — while an image
+    /// never touched keeps today's behaviour (zoom carried, pan reset), for
+    /// the same reason carrying is the shipped rule: a carried offset shifts
+    /// the next picture by the old one's drag.
+    ///
+    /// Memory is **per `(file, page)`** like every cache that holds decoded
+    /// pixels, and lasts only for the session — it is view state, not a
+    /// preference: chrome (`show_panels`, `hide_title_bar`) persists because
+    /// it is a taste about how much sits around the picture, a remembered
+    /// zoom is not, it ends with the run. The two fit modes own the arriving
+    /// view absolutely when they are on (their own arrival rules run after
+    /// the restore), so this changes behaviour exactly where no mode already
+    /// has an answer. Off by default: remembering is opt-in, and every plan
+    /// the app makes out of the box is pinned against the behaviour it
+    /// shipped with.
+    ///
+    /// `#[serde(default)]` for the reason every added field here carries it:
+    /// a config written before this key existed still has to load.
+    #[serde(default)]
+    pub remember_view: bool,
+
+    /// **The side-panel master, persisted.** `I` hides or shows both panes
+    /// and remembers the choice between launches — the JPEGView-style
+    /// minimal state: chrome off because the photo is enough. Unlike the
+    /// per-image view memory above, this is a *preference*: how much chrome
+    /// a person keeps around them is a taste, and `hide_title_bar` set the
+    /// precedent that such a taste belongs in the config.
+    ///
+    /// Fullscreen is the one pattern that does **not** persist it, and that
+    /// boundary is load-bearing: in fullscreen the master is an overlay the
+    /// binary owns without saving — entering stashes the value, leaving
+    /// restores the stash — so a session with a fullscreen detour cannot
+    /// rewrite what the user chose, even though the exit path saves the
+    /// config with the in-memory value and would otherwise stomp it.
+    ///
+    /// Default **on**, so a config from before this key existed keeps showing
+    /// panels: `#[serde(default = "default_true")]`.
+    #[serde(default = "default_true")]
+    pub show_panels: bool,
 }
 
 /// `1` keeps the shipped meaning (100%), then doubling to 8×.
@@ -505,7 +578,12 @@ pub struct UserCommand {
 pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("next", "ArrowRight", "Next image"),
     ("prev", "ArrowLeft", "Previous image"),
-    ("next_alt", "Space", "Next image (alt)"),
+    // Shipped unbound on purpose: Space is the fit/100% toggle (`fit_alt`,
+    // JPEGView's own Space key), and a bare navigation-Space would fight it in
+    // the same hand. The action stays rebindable — and is the hook for anyone
+    // who wants Space navigating again — but nothing shipped reads it, so a
+    // blank override here resolves to *unbound*, not to the shipped chord.
+    ("next_alt", "", "Next image (alt)"),
     ("page_next", "PageDown", "Next image (page)"),
     ("page_prev", "PageUp", "Previous image (page)"),
     ("first", "Home", "First image"),
@@ -515,6 +593,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("pane_left", "L", "Toggle left pane"),
     ("pane_right", "P", "Toggle right pane"),
     ("fit", "F", "Fit view mode"),
+    ("fit_alt", "Space", "Fit view mode (alt)"),
     ("fill", "Shift+F", "Fill window"),
     ("preset_1", "1", "Zoom preset 1"),
     ("preset_2", "2", "Zoom preset 2"),
@@ -599,7 +678,10 @@ pub fn default_binding(action: &str) -> &'static str {
 /// Effective chord for `action`: the user's override when present and
 /// non-blank, else the shipped default. A blank override unbinds nothing —
 /// it falls back, so a typo leaves the shipped chord working rather than
-/// deleting the action.
+/// deleting the action — *unless the shipped default is itself blank*
+/// (`next_alt`: deliberately unbound so Space can be the zoom toggle), in
+/// which case the chain ends at *unbound*, because there is no shipped chord
+/// for a typo to fall back to.
 pub fn resolve_binding(bindings: &std::collections::HashMap<String, String>, action: &str) -> String {
     match bindings.get(action).map(|s| s.trim()) {
         Some(s) if !s.is_empty() => s.to_owned(),
@@ -852,6 +934,7 @@ impl Config {
             linear_resample: true,
             downscale_filter: DownscaleFilter::Hermite,
             smooth_downscale: false,
+            pixel_art: false,
             block_while_loading: false,
             wheel_navigation: false,
             loop_back: true,
@@ -876,8 +959,11 @@ impl Config {
             zoom_presets: default_zoom_presets(),
             always_on_top: false,
             hide_title_bar: false,
+            title_strip: 0.0,
             fit_window_mode: false,
             fit_mode: false,
+            remember_view: false,
+            show_panels: true,
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {
@@ -2321,6 +2407,100 @@ impl ImgKey {
     }
 }
 
+/// A view remembered for one image: where the user left it.
+///
+/// Every field is what was on screen, not a policy. `fit` is remembered rather
+/// than converted to a scale, because "fitted" is what the user saw — a
+/// remembered fit re-fits to whoever looks at it next, with a different panel,
+/// and that is correct rather than approximate (a numeral would have been).
+/// `scale` is points per source pixel and `offset` is the image centre
+/// relative to the panel centre, in points — the same units `View` in the
+/// binary holds, so a save/restore round-trip is an identity rather than a
+/// conversion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SavedView {
+    pub fit: bool,
+    pub scale: f32,
+    pub offset: (f32, f32),
+}
+
+impl SavedView {
+    /// The no-memory answer: today's carry, unchanged.
+    ///
+    /// An image that was never visited goes back to the behaviour the setting
+    /// exists beside — zoom carried over, pan owned by the picture it
+    /// panned rather than dragged into the next one. Writing `0.0` here rather
+    /// than calling it "default" is the point: this is the rule, stated.
+    pub fn carried(fit: bool, scale: f32) -> Self {
+        Self {
+            fit,
+            scale,
+            offset: (0.0, 0.0),
+        }
+    }
+}
+
+/// Per-image view memory, one entry per `(file, page)` the user has visited.
+///
+/// Keyed on [`ImgKey`] and *not* on a path, for the reason the pixel caches
+/// are: page 1 and page 3 of a document are different pictures, and returning
+/// to page 3 with page 1's pan is a view that looks like a bug — offset by
+/// someone else's drag.
+///
+/// The map is bounded by what the user has visited, not by the folder: one
+/// visit adds one entry of sixteen bytes, so a whole session of browsing is
+/// kilobytes. It is deliberately not persisted and deliberately not capped —
+/// the shapes to prove otherwise would both have to beat the tiny alternative.
+pub struct ViewMemory {
+    map: HashMap<ImgKey, SavedView>,
+}
+
+impl Default for ViewMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ViewMemory {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    /// Record what the view of `key` was when the user left it.
+    pub fn remember(&mut self, key: ImgKey, view: SavedView) {
+        self.map.insert(key, view);
+    }
+
+    /// What `key` was remembered as, or `None` for never visited this session.
+    pub fn restore(&self, key: &ImgKey) -> Option<SavedView> {
+        self.map.get(key).copied()
+    }
+
+    /// Drop every page of one file: the caller does this when the file's
+    /// pixels are gone (`invalidate_path`'s funnel), because a view remembered
+    /// for an image that no longer exists is exactly the ladder-shaped value a
+    /// latch produces — present, plausible, wrong.
+    pub fn forget_file(&mut self, path: &Path) {
+        self.map.retain(|k, _| k.path != path);
+    }
+}
+
+/// The view an arriving image starts from, asked once in `goto` when the
+/// setting is on: the remembered one when there is one, otherwise the carry.
+///
+/// A pure function rather than a branch in the caller, so the two rules are
+/// testable side by side: **a remembered view is restored exactly** (round-trip
+/// with [`ViewMemory::remember`]), and **no memory means today's behaviour,
+/// byte for byte** — fit and scale carried, pan reset. Nothing here reads a
+/// config; the caller decides whether to ask at all, which is why the setting
+/// being off is not an arm of this function.
+pub fn arriving_view(saved: Option<SavedView>, fit: bool, scale: f32) -> SavedView {
+    saved.unwrap_or_else(|| SavedView::carried(fit, scale))
+}
+
+
 impl std::fmt::Display for ImgKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.page == 0 {
@@ -2474,15 +2654,23 @@ impl Loader {
                 let mut q = lock.lock().unwrap();
                 let key = (job.key.clone(), job.kind);
                 q.busy.remove(&key);
-                if !delivered {
+                if delivered {
+                    // Delivered: the wanted entry was *for* this job and is
+                    // satisfied; keeping it would leave `wanted_but_idle` > 0
+                    // with the loader idle — the strand signal that map's doc
+                    // defines, fired permanently for a job that is actually
+                    // done (invisible while a schedule keeps recomposing
+                    // `wanted`, and exactly what a test that stops replacing
+                    // sees). A fresh decode asks for itself: the next plan
+                    // that wants the key re-inserts it.
+                    q.wanted.remove(&key);
+                } else if let Some(wanted) = q.wanted.get(&key).cloned() {
                     // Gave up without producing anything. If it is still wanted,
                     // ask again — this is the whole safety property, and it is
                     // why the wanted set is kept rather than inferred.
-                    if let Some(wanted) = q.wanted.get(&key).cloned() {
-                        if !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == key) {
-                            q.jobs.push(wanted);
-                            cv.notify_all();
-                        }
+                    if !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == key) {
+                        q.jobs.push(wanted);
+                        cv.notify_all();
                     }
                 }
                 drop(q);
@@ -2627,6 +2815,26 @@ pub struct Plan<'a> {
     /// Preview texture long side, physical pixels.
     pub target_dim: u32,
     pub radius: usize,
+    /// File lengths **parallel to [`Plan::files`]** — what the watcher's stamp
+    /// registry already holds (`Stamp.len`), so the planner never stats. The
+    /// budget is a *file-size* budget because that is what is observable
+    /// before a decode exists: the decoded footprint of a neighbour that has
+    /// never been decoded is exactly the thing a dims slice cannot know.
+    /// `0` means unknown — a file the scanner has not stamped yet — and an
+    /// unknown is admitted, the fail-open reading: the budget is calibrated
+    /// to the scan the session has seen, not a guess.
+    pub file_bytes: &'a [u64],
+    /// The preload window's whole budget in file bytes. The window spends it
+    /// outward from the cursor, nearest-first, so a closer neighbour is
+    /// admitted before a farther one; a file larger than the *whole* budget
+    /// is therefore not preloaded at all — the rule that keeps a 300 MP scan
+    /// (1.2 GB decoded) from ever being prefetched — and skipping an
+    /// oversized file opens room for its smaller contrary, because the walk
+    /// continues past a skip rather than breaking. Only the window spends:
+    /// the current image, its partner, the full decodes and the EXIF read are
+    /// how the reader sees what they asked for, and the budget never touches
+    /// those.
+    pub preload_budget: u64,
 }
 
 /// Priority of the current image's preview. Every prefetch is >= 10, so
@@ -2648,6 +2856,15 @@ pub const PRIO_THUMB_BASE: u32 = 45;
 /// "Next" is queued slightly ahead of "previous" at each distance, so a step
 /// forward is favoured — that is the fixed asymmetric window, not
 /// direction-aware, which is a later change and must be measured separately.
+///
+/// And the window is **bounded by bytes** before it is bounded by distance:
+/// [`Plan::preload_budget`] is spent outward nearest-first over the file
+/// lengths the caller already holds, so a folder of large scans preloads
+/// fewer of them while a manga folder's identical radius plans identically.
+/// The budget spends on **admissions only** — a skipped oversized neighbour
+/// neither consumes nor blocks a window position, and the current image, its
+/// partner and the full decodes never spend it (they are why the reader is
+/// here, not an optimisation on top of that).
 pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     let mut jobs = Vec::new();
     let n = p.files.len();
@@ -2754,6 +2971,14 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     }
 
     let mut seen: HashSet<usize> = HashSet::from([i]);
+    // The window's byte budget, spent nearest-first. Note what a skip does
+    // **not** do: it does not break the walk and it does not hold the budget.
+    // An oversized next-neighbour followed by a tiny previous-then neighbour
+    // plans the tiny one — each candidate is checked on its own against what
+    // the window has *actually admitted* so far, which is the reading that
+    // keeps "one huge file" from punching a hole through the rest of the
+    // window as well.
+    let mut spent: u64 = 0;
     for d in 1..=p.radius {
         for (idx, prio) in [
             ((i + d) % n, 10 + 2 * d as u32),
@@ -2784,6 +3009,17 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
             // partner on page 2 is a different image from that document's page-0
             // neighbour, so neither job duplicates the other and both are wanted.
             if seen.insert(idx) && need_preview(&key) && p.partner.as_ref() != Some(&key) {
+                // **The budget is spent nearest-first and only by admissions.**
+                // `spent + len > budget` skips the candidate without spending
+                // anything: a skip is a decision about this window's shape,
+                // never a standing charge. The alone case falls out without a
+                // branch — an unbudgeted first candidate (`spent` 0) with a
+                // length past the whole budget is over before it can spend.
+                let len = p.file_bytes.get(idx).copied().unwrap_or(0);
+                if spent.saturating_add(len) > p.preload_budget {
+                    continue;
+                }
+                spent += len;
                 jobs.push(Job {
                     key,
                     kind: Kind::Preview,
@@ -2802,12 +3038,15 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
 
 /// Whether the viewer wants the current image's metadata read.
 ///
-/// The metadata panel is the **only** thing in the app that displays EXIF, and
-/// the read is not small: `color_info` calls `fs::read` on the whole file to
-/// find the ICC profile, and `nom_exif` then seeks out the APP1 segment. It runs
-/// on a worker that a preview decode is waiting on, and it is queued at priority
-/// 5 — ahead of *every* prefetch — so a panel nobody is looking at is time
-/// taken away from the picture the user is looking at.
+/// The metadata panel is the **only** thing in the app that displays EXIF. The
+/// read is *cheap* now — the EXIF seek plus a bounded header read for the
+/// `COM` segment — but it was not when the gate was written, and it is still
+/// the one job per navigation that exists only to fill a panel, so it is queued
+/// at priority 5 — ahead of *every* prefetch — on a worker that a preview
+/// decode may be waiting on. A panel nobody is looking at is time taken away
+/// from the picture the user is looking at, whatever the job's size. (The
+/// colour line is no longer part of this job: it is classified from the bytes
+/// the preview decode already read and rides on the preview.)
 ///
 /// The condition is "the panel is visible", not "we are in fullscreen". The two
 /// are the same today (fullscreen sets `show_panels` false, and so does the
@@ -4812,7 +5051,7 @@ impl ColorSpace {
 }
 
 /// Everything the detector found out about one file's colour.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColorInfo {
     pub space: ColorSpace,
     /// Profile description when the file carried one ("sRGB IEC61966-2.1").
@@ -5525,13 +5764,17 @@ pub fn convert_wide_gamut_rgba(rgba: &mut [u8]) {
 /// all: no second read of the file, no classification, no arithmetic. `color_info`
 /// reads the file again, which is free against the page cache but not free, and
 /// there is no reason for an opt-in feature to pay that when it is off.
-pub(crate) fn apply_wide_gamut_conversion(path: &Path, out: &mut PreviewAndFull) {
+pub(crate) fn apply_wide_gamut_conversion(out: &mut PreviewAndFull) {
     if !wide_gamut_conversion() {
         return;
     }
     // `WideGamut` and nothing else. A profile we could not classify must not be
     // pushed through a matrix on a guess, and an untagged file is already sRGB.
-    if color_info(path).space != ColorSpace::WideGamut {
+    //
+    // The answer is `out.colour`, classified by this decode from its own bytes —
+    // the old shape asked `color_info(path)`, which re-read the **whole file**
+    // here, per decode, behind a setting most users never turn on.
+    if out.colour.space != ColorSpace::WideGamut {
         return;
     }
     convert_wide_gamut_rgba(&mut out.preview.rgba);
@@ -6173,6 +6416,16 @@ pub struct PreviewAndFull {
     /// draws to this, so that what is on screen is what the save cuts — see
     /// [`Crop::snapped_to_mcu`].
     pub crop_grid: (u32, u32),
+    /// The file's colour classification, classified **in this decode** from the
+    /// bytes it already read.
+    ///
+    /// This is the answer [`color_info`] would give, computed from memory rather
+    /// than from a second `fs::read` of the whole file — the file is in hand here,
+    /// and one extra marker walk is microseconds against a 10–17 ms read of a real
+    /// photograph. It travels with the result for two consumers: the metadata
+    /// panel's colour line (which would otherwise wait on a separate job) and
+    /// [`apply_wide_gamut_conversion`]'s own gate.
+    pub colour: ColorInfo,
 }
 
 
@@ -6855,6 +7108,27 @@ pub fn fit_window_size(
     (out.0.max(200.0), out.1.max(120.0))
 }
 
+/// Where the outer frame must sit so a hide/show-title-bar toggle moves only
+/// the chrome, never the picture. Left alone, winit keeps a decorations
+/// change's *outer* rect and lets the client area absorb (hide) or give up
+/// (show) the title strip — the picture jumps, re-fits, and in fit-window
+/// mode the window's hug breaks. The caller keeps the client where it was by
+/// re-asserting its size and putting the frame at the returned top:
+///
+/// - hiding (`strip_after` 0): the frame top lands where the client's top
+///   was, so the strip the frame is losing can simply be reclaimed by it;
+/// - showing: the frame sits `strip_after` ([`Config::title_strip`], the
+///   remembered measurement) above the client's top, because that strip is
+///   about to appear in front of it and the bottom edge must not move.
+///
+/// Clamped at 0 — the top of the *virtual screen*, not of the current
+/// monitor, the same naive assumption the fit-window centring makes — so a
+/// window with less headroom than the strip gives its top rows up to the
+/// re-added chrome instead of parking the title bar off-screen.
+pub fn outer_top_for_decoration_toggle(inner_top: f32, strip_after: f32) -> f32 {
+    (inner_top - strip_after.max(0.0)).max(0.0)
+}
+
 /// Decode an animation into composited frames, capped at the limits above.
 ///
 /// Dispatch is on [`AnimatedFormat`], not on the extension, and the `image` crate
@@ -7309,6 +7583,491 @@ fn decode_thumb_header(bytes: &[u8]) -> Option<(ThumbHeader, &[u8])> {
 /// The two-hex fanout is not cosmetic either: a library of 30 000 files in one
 /// directory is a single NTFS directory big enough to make `read_dir` and every
 /// `create_dir` in it measurably slower.
+/// Announce a cache directory to Windows Search.
+///
+/// `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` is the one lever the other-viewers
+/// survey (§9.8 in `TODO.md`) found anyone pulling for a cache directory —
+/// nomacs sets it — and it matches what this directory is: potentially
+/// thousands of small PNGs that no search service should spend a crawl on.
+/// The attribute is per-directory, so the **root and every two-hex fanout
+/// child** get it — a child does not inherit it from its parent. Existing
+/// attributes are read and OR'd rather than replaced, because
+/// `SetFileAttributesW` assigns the whole set and a fresh directory's
+/// `FILE_ATTRIBUTE_DIRECTORY` belongs to the file system anyway; carrying it
+/// through is the documented round-trip.
+///
+/// Best effort like everything on this path: a failure returns `false` and
+/// none may affect the caller's write.
+#[cfg(windows)]
+pub fn mark_not_content_indexed(dir: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::fs::MetadataExt as _;
+    let current = match std::fs::metadata(dir) {
+        Ok(m) => m.file_attributes(),
+        Err(_) => return false,
+    };
+    let wide = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<u16>>();
+    unsafe {
+        windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(
+            wide.as_ptr(),
+            current
+                | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+        ) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn mark_not_content_indexed(_dir: &Path) -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Folder watching
+// ---------------------------------------------------------------------------
+
+// `FILE_ACTION_*` as `ReadDirectoryChangesW` reports them. Spelled out rather
+// than imported so `parse_notify_buffer` and `classify_change` are testable on
+// a buffer a test can hand-write; the values are the OS's, and the `windows-sys`
+// constants carry the same numbers (checked by the watcher's own use of both).
+pub const FILE_ACTION_ADDED: u32 = 1;
+pub const FILE_ACTION_REMOVED: u32 = 2;
+pub const FILE_ACTION_MODIFIED: u32 = 3;
+pub const FILE_ACTION_RENAMED_OLD_NAME: u32 = 4;
+pub const FILE_ACTION_RENAMED_NEW_NAME: u32 = 5;
+
+/// Not a `FILE_ACTION_*`: the OS buffer overflowed and names were lost
+/// (`ERROR_NOTIFY_ENUM_DIR`). Synthesised by the watcher so the app can answer
+/// with the full pass the timer used to do, instead of silently missing the
+/// change it was never told about — which is the one failure mode a
+/// notification-based watcher has that a poll does not.
+pub const CHANGE_OVERFLOW: u32 = 0;
+
+/// What one OS change means to the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// A file the app holds state for, whose bytes may have changed.
+    Content,
+    /// The folder listing changed: a file appeared, vanished, or left.
+    Membership,
+    /// Nothing the app can act on.
+    Ignore,
+    /// Events were lost; only a full comparison knows what changed.
+    Overflow,
+}
+
+/// The decision table, as a pure function, because it is the one part of the
+/// watcher that is easy to get subtly wrong and impossible to see: every arm
+/// here is silent — a wrong `Ignore` is a file that never reloads, and a wrong
+/// `Membership` is a full folder scan per keystroke of a program's save.
+///
+/// `known` is "this path is in the folder listing the app holds" — the
+/// *unfiltered* list, so a file hidden by the filter still counts and its save
+/// does not turn into a rescan. `looks_like_image` is the extension test, used
+/// for names the app has never seen: it is what tells a new picture (`a.jpg`)
+/// apart from a temporary write (`a.jpg.tmp`, `thumbs.db`, `~$doc.docx`).
+pub fn classify_change(action: u32, known: bool, looks_like_image: bool) -> ChangeKind {
+    match action {
+        CHANGE_OVERFLOW => ChangeKind::Overflow,
+        FILE_ACTION_ADDED => {
+            if looks_like_image {
+                ChangeKind::Membership
+            } else {
+                ChangeKind::Ignore
+            }
+        }
+        FILE_ACTION_REMOVED | FILE_ACTION_RENAMED_OLD_NAME => {
+            if known {
+                ChangeKind::Membership
+            } else {
+                ChangeKind::Ignore
+            }
+        }
+        // A rename **to** a name we already list is a rename-over: the bytes
+        // under that path are new, so it is a content change, not a listing
+        // change. That is the re-export case, and treating it as membership
+        // would scan the whole folder once per save.
+        FILE_ACTION_MODIFIED | FILE_ACTION_RENAMED_NEW_NAME => {
+            if known {
+                ChangeKind::Content
+            } else if looks_like_image {
+                ChangeKind::Membership
+            } else {
+                ChangeKind::Ignore
+            }
+        }
+        _ => ChangeKind::Ignore,
+    }
+}
+
+/// Fold one batch of OS records down to the changes worth acting on.
+///
+/// **A single re-export arrives as five records**, measured on this box:
+/// `ADDED page.jpg.tmp`, `MODIFIED page.jpg.tmp`, `REMOVED page.jpg`,
+/// `RENAMED_OLD_NAME page.jpg.tmp`, `RENAMED_NEW_NAME page.jpg`. The `REMOVED`
+/// is the replace target being unlinked, not a file leaving the gallery — the
+/// same name is back in the same batch. Acted on naively it is one full folder
+/// rescan *per save*, which is the cost this whole feature exists to remove, so
+/// a name that is removed **and** added/renamed-to within one batch keeps only
+/// the record that says its bytes are new. That is also the right answer for a
+/// genuine delete-then-recreate of the same name (the file is there with new
+/// bytes) — the two cases are indistinguishable, and need the same response.
+///
+/// Exact duplicate records are dropped too; the OS is free to repeat itself and
+/// each repeat would otherwise cost another `stat`.
+pub fn coalesce_changes(changes: Vec<FsChange>) -> Vec<FsChange> {
+    let returns: HashSet<String> = changes
+        .iter()
+        .filter(|c| c.action == FILE_ACTION_ADDED || c.action == FILE_ACTION_RENAMED_NEW_NAME)
+        .map(|c| c.name.clone())
+        .collect();
+    let mut out: Vec<FsChange> = Vec::with_capacity(changes.len());
+    for c in changes {
+        if c.action == FILE_ACTION_REMOVED && returns.contains(&c.name) {
+            continue;
+        }
+        if out.iter().any(|o| o.action == c.action && o.name == c.name) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// One parsed `FILE_NOTIFY_INFORMATION` record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsChange {
+    /// A `FILE_ACTION_*` above, or [`CHANGE_OVERFLOW`].
+    pub action: u32,
+    /// Name relative to the watched directory (with subdirectories, when the
+    /// watch is recursive). UTF-16 lossily decoded: a name Windows cannot
+    /// represent in UTF-8 is still a name, and dropping the whole event over
+    /// one is worse than a name that does not round-trip.
+    pub name: String,
+}
+
+/// Parse the buffer `ReadDirectoryChangesW` filled.
+///
+/// The records are `NextEntryOffset: u32, Action: u32, FileNameLength: u32`
+/// followed by that many bytes of UTF-16LE, chained by the offset. Every read
+/// is bounds-checked: this parses what the OS wrote into a fixed-size buffer,
+/// so a truncated or malformed tail is a decoding condition, not a panic — the
+/// same rule `find_embedded_thumbnail` follows on untrusted input, applied
+/// here because a worker panic costs a restart.
+pub fn parse_notify_buffer(buf: &[u8]) -> Vec<FsChange> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while let Some(header) = buf.get(off..off + 12) {
+        let u32_at = |i: usize| {
+            u32::from_le_bytes([header[i], header[i + 1], header[i + 2], header[i + 3]])
+        };
+        let next = u32_at(0) as usize;
+        let action = u32_at(4);
+        let name_len = u32_at(8) as usize;
+        let Some(name_bytes) = buf.get(off + 12..off + 12 + name_len) else {
+            break;
+        };
+        let units: Vec<u16> = name_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        out.push(FsChange {
+            action,
+            name: String::from_utf16_lossy(&units),
+        });
+        // `NextEntryOffset == 0` marks the last record; anything that cannot
+        // advance the cursor ends the walk rather than looping forever.
+        if next == 0 || next < 12 {
+            break;
+        }
+        off += next;
+    }
+    out
+}
+
+/// A `ReadDirectoryChangesW` loop on its own thread.
+///
+/// **Notifications, not a timer**: the app used to stat every file every 2 s
+/// (and repainted to do it, which is why a static photo sat at ~2 fps). One
+/// blocking call replaces all of that — the OS wakes this thread when something
+/// changes, the thread wakes the app, and an idle viewer costs nothing.
+///
+/// The wake is a **closure** (the app passes `ctx.request_repaint`) rather than
+/// an `egui` type here, so this stays a library of OS plumbing. The messages
+/// are batches of [`FsChange`], and the app is free to drain several at once —
+/// which it must, because one `save` commonly produces three.
+#[cfg(windows)]
+pub struct DirWatcher {
+    rx: std::sync::mpsc::Receiver<Vec<FsChange>>,
+    events: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl DirWatcher {
+    /// Watch `dir`, recursively when `recursive`. `wake` runs on the watcher
+    /// thread after every non-empty batch.
+    ///
+    /// **Every way this can fail is an `Err` on the calling thread**, because
+    /// the app's answer to `Err` is the 2 s poll and its answer to a watch that
+    /// silently never fires is nothing at all. Two of those failures are not
+    /// obvious:
+    ///
+    /// - The directory check is a `stat` and not only the `CreateFileW` result,
+    ///   because `FILE_FLAG_BACKUP_SEMANTICS` happily opens a *file* as this
+    ///   handle — the call then succeeds and the first
+    ///   `ReadDirectoryChangesW` on it fails, which is a watch that is dead
+    ///   before it reports anything.
+    /// - A backend that refuses the read (a share without change
+    ///   notification) breaks the loop later, which `alive()` reports; the app
+    ///   drops the watch and polls instead.
+    pub fn start(
+        dir: PathBuf,
+        recursive: bool,
+        wake: impl Fn() + Send + 'static,
+    ) -> std::io::Result<DirWatcher> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+
+        let meta = std::fs::metadata(&dir)?;
+        if !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                "a folder watch needs a folder",
+            ));
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<FsChange>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::io::Result<()>>();
+        let events = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let ev = events.clone();
+        let st = stop.clone();
+        let fin = finished.clone();
+        let liv = alive.clone();
+        let thread = std::thread::Builder::new()
+            .name("folder-watch".into())
+            .spawn(move || {
+                use std::sync::atomic::Ordering::Relaxed;
+                let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+                wide.push(0);
+                // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a *directory* be
+                // opened as a file handle; the share mode is everything,
+                // because the app keeps reading and writing these files.
+                let handle: HANDLE = unsafe {
+                    CreateFileW(
+                        wide.as_ptr(),
+                        FILE_LIST_DIRECTORY,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        std::ptr::null(),
+                        OPEN_EXISTING,
+                        FILE_FLAG_BACKUP_SEMANTICS,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if handle == INVALID_HANDLE_VALUE {
+                    let _ = ready_tx.send(Err(std::io::Error::last_os_error()));
+                    fin.store(true, Relaxed);
+                    liv.store(false, Relaxed);
+                    return;
+                }
+                let _ = ready_tx.send(Ok(()));
+                // 32 KiB: one bulk copy can emit an event per file, and an
+                // overflow is the one failure that loses information — the
+                // backend is required to report it as `ERROR_NOTIFY_ENUM_DIR`,
+                // which becomes `CHANGE_OVERFLOW` below.
+                let mut buf = vec![0u8; 32 * 1024];
+                loop {
+                    if st.load(Relaxed) {
+                        break;
+                    }
+                    let mut bytes = 0u32;
+                    let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+                        | FILE_NOTIFY_CHANGE_SIZE
+                        | FILE_NOTIFY_CHANGE_LAST_WRITE;
+                    let ok = unsafe {
+                        ReadDirectoryChangesW(
+                            handle,
+                            buf.as_mut_ptr().cast(),
+                            buf.len() as u32,
+                            recursive as i32,
+                            filter,
+                            &mut bytes,
+                            std::ptr::null_mut(),
+                            None,
+                        )
+                    };
+                    if st.load(Relaxed) {
+                        break; // the blocking call was cancelled by `Drop`
+                    }
+                    if ok == 0 {
+                        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                        if err == 1022 {
+                            // ERROR_NOTIFY_ENUM_DIR: events were dropped.
+                            let _ = tx.send(vec![FsChange {
+                                action: CHANGE_OVERFLOW,
+                                name: String::new(),
+                            }]);
+                            wake();
+                            continue;
+                        }
+                        break; // the handle or the watch is gone
+                    }
+                    let changes = parse_notify_buffer(&buf[..bytes as usize]);
+                    if !changes.is_empty() {
+                        ev.fetch_add(changes.len() as u64, Relaxed);
+                        if tx.send(changes).is_err() {
+                            break; // the app dropped the receiver
+                        }
+                        wake();
+                    }
+                }
+                unsafe { CloseHandle(handle) };
+                fin.store(true, Relaxed);
+                liv.store(false, Relaxed);
+            })?;
+
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(DirWatcher {
+                rx,
+                events,
+                stop,
+                finished,
+                alive,
+                thread: Some(thread),
+            }),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                Err(e)
+            }
+            Err(_) => {
+                let _ = thread.join();
+                Err(std::io::Error::other("folder watcher thread exited"))
+            }
+        }
+    }
+
+    /// One batch of changes, if the thread has finished one.
+    pub fn try_recv(&self) -> Option<Vec<FsChange>> {
+        self.rx.try_recv().ok()
+    }
+
+    /// How many change records the OS has delivered, ever. A probe needs this
+    /// to tell "the OS sent nothing" from "the app ignored what it sent".
+    pub fn events(&self) -> u64 {
+        self.events.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// `false` once the watcher thread has given up — the read failed on a
+    /// handle that is still open, which is how a share that does not support
+    /// change notification presents. A watch that is `Some` but not alive
+    /// reports nothing forever, so the app must drop it and poll instead.
+    pub fn alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DirWatcher {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
+        std::sync::atomic::AtomicBool::store(
+            &self.stop,
+            true,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        // **Cancel, don't just abandon.** The thread is blocked in a
+        // `ReadDirectoryChangesW` that returns when something changes — which,
+        // on a quiet folder, is never. Dropping without cancelling would leak
+        // one blocked thread *and one open directory handle per folder the
+        // user visits*, and `join` would hang the UI thread.
+        //
+        // Retried in a loop because the thread may not have entered the
+        // blocking call yet when the first cancel lands (`ERROR_NOT_FOUND`);
+        // one millisecond later it will have.
+        if let Some(t) = &self.thread {
+            let h = t.as_raw_handle();
+            for _ in 0..1000 {
+                if self.finished.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                unsafe { CancelSynchronousIo(h) };
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        // Join only when the thread really is out: joining a thread that never
+        // woke from the blocking call is the hang this whole dance avoids, so
+        // the last resort is to detach it (the handle closes when it exits).
+        if self.finished.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(t) = self.thread.take() {
+                let _ = t.join();
+            }
+        } else {
+            // Counted rather than swallowed: a detach is a leaked thread and an
+            // open directory handle, one per folder the user visits, and it is
+            // invisible from outside. The test asserts this stays at zero.
+            WATCHERS_DETACHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// How many watcher threads `Drop` had to abandon. Should be 0 always; a test
+/// asserts it, because "`Drop` returned quickly" is also true of an
+/// implementation that leaks every thread.
+#[cfg(windows)]
+static WATCHERS_DETACHED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// See [`WATCHERS_DETACHED`].
+#[cfg(windows)]
+pub fn watchers_detached() -> u64 {
+    WATCHERS_DETACHED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Non-Windows stub: `Err`, so the app runs the fallback poll and the library
+/// stays compilable off the one platform this viewer ships on.
+#[cfg(not(windows))]
+pub struct DirWatcher;
+
+#[cfg(not(windows))]
+impl DirWatcher {
+    pub fn start(
+        _dir: PathBuf,
+        _recursive: bool,
+        _wake: impl Fn() + Send + 'static,
+    ) -> std::io::Result<DirWatcher> {
+        Err(std::io::Error::other("folder watching is Windows-only"))
+    }
+
+    pub fn try_recv(&self) -> Option<Vec<FsChange>> {
+        None
+    }
+
+    pub fn events(&self) -> u64 {
+        0
+    }
+
+    pub fn alive(&self) -> bool {
+        false
+    }
+}
+
+
 pub fn thumb_cache_entry(root: &Path, path: &Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -7389,6 +8148,15 @@ pub fn write_cached_thumbnail(root: &Path, path: &Path, target: u32, data: &Imag
     };
     if std::fs::create_dir_all(parent).is_err() {
         return;
+    }
+    // **The cache announces itself to Windows Search.** `create_dir_all` may
+    // have made both levels just now, and the attribute is per-directory, so
+    // both the fanout leaf and the root get it on every write — two
+    // `SetFileAttributesW` calls beside a PNG encode, and they also bring any
+    // directory created by an older build up to date on the first new write.
+    let _ = mark_not_content_indexed(parent);
+    if let Some(root) = parent.parent() {
+        let _ = mark_not_content_indexed(root);
     }
     let mut bytes = encode_thumb_header(&header);
     bytes.extend_from_slice(&png);
@@ -7563,15 +8331,581 @@ pub fn forget_thumbnail(path: &Path) {
     let _ = std::fs::remove_file(thumb_cache_entry(&thumb_cache_root(), path));
 }
 
+// ---------------------------------------------------------------------------
+// Grid cells from Explorer's thumbnail cache
+// ---------------------------------------------------------------------------
+//
+// Explorer keeps a thumbnail of every picture it has ever shown, and a folder
+// the user has browsed in File Explorer therefore already holds most of the
+// cells this grid is about to decode. `IShellItemImageFactory::GetImage` with
+// `SIIGBF_INCACHEONLY` reads that cache and **never causes an extraction**: a
+// miss is a miss, so this cannot make the cold case slower, cannot start a
+// decode behind our back, and cannot write anything into Explorer's cache.
+//
+// What it is for is the *first* visit to a folder of large scans: the decode's
+// floor is 700-900 ms per cell and nothing in this crate can move it (a baseline
+// JPEG's
+// entropy decode is the floor for any conformant decoder). If Explorer already
+// has the cell, that wait is not paid at all. A folder *we* have visited is
+// served by our own cache first, so the shell is only asked on a miss — see
+// `load_grid_thumbnail`.
+//
+// **A shell cell is never written into our thumbnail cache.** An entry there has
+// to be the decode it claims to be (see `tests/thumb_cache.rs`), and the shell's
+// picture is a different decode by a different decoder; a "cache hit" that is
+// sometimes the shell's bytes and sometimes ours would make that claim false.
+
+/// Convert the 32-bit DIB `GetImage` hands back into the RGBA this crate speaks.
+///
+/// The buffer is BGRA in memory order. **Its alpha channel is not trustworthy**:
+/// a shell thumbnail is often drawn into a 32-bit bitmap whose fourth byte is
+/// left at zero, and honouring that paints the whole cell invisible. An image
+/// whose alpha is *entirely* zero is treated as opaque; one with any real alpha
+/// keeps it.
+///
+/// Whether the shell's alpha is straight or premultiplied is **not settled here**
+/// — it makes no difference to an opaque photograph, which is what a grid cell
+/// is, and un-premultiplying on a guess would darken or blow out the transparent
+/// edge of the few cells that are not.
+pub fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
+    let mut any_alpha = false;
+    for px in bgra.chunks_exact(4) {
+        if px[3] != 0 {
+            any_alpha = true;
+            break;
+        }
+    }
+    let mut out = Vec::with_capacity(bgra.len());
+    for px in bgra.chunks_exact(4) {
+        out.push(px[2]);
+        out.push(px[1]);
+        out.push(px[0]);
+        out.push(if any_alpha { px[3] } else { 255 });
+    }
+    out
+}
+
+/// The path form the shell accepts, from one that may carry the verbatim prefix.
+///
+/// Two things this is *not*. It is not `canonicalize`, which is the obvious way
+/// to make a path absolute and the wrong one here: it returns a verbatim
+/// (`\\?\C:\...`) path, and `SHCreateItemFromParsingName` rejects those with
+/// `E_INVALIDARG`, so every file misses, which reads exactly like "Explorer has
+/// never thumbnailed anything". And it is not a string round-trip: the prefix is
+/// matched as a path *prefix*, so a file name that is not valid UTF-8 survives.
+///
+/// Verbatim paths exist to say "do not parse this"; the shell is a component that
+/// parses it anyway, so the prefix is dropped to the ordinary form: `\\?\C:\a`
+/// becomes `C:\a`, and `\\?\UNC\srv\share\a` becomes `\\srv\share\a`.
+pub fn shell_api_path(path: &Path) -> Option<PathBuf> {
+    // The prefix is reduced to an owned description first: `PrefixComponent`
+    // borrows the path it came from, and the arms below return that path.
+    enum Verbatim {
+        Disk(char),
+        Unc(std::ffi::OsString, std::ffi::OsString),
+    }
+    let abs = std::path::absolute(path).ok()?;
+    let verbatim = match abs.components().next() {
+        Some(std::path::Component::Prefix(p)) => match p.kind() {
+            std::path::Prefix::VerbatimDisk(letter) => Some(Verbatim::Disk(letter as char)),
+            std::path::Prefix::VerbatimUNC(server, share) => {
+                Some(Verbatim::Unc(server.to_os_string(), share.to_os_string()))
+            }
+            // `Disk`, `UNC` and `DeviceNS` are already what the shell wants, and
+            // `Verbatim` (`\\?\Volume{...}`) has no shell-friendly form at all:
+            // both are left alone, and a device path fails into a decode.
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut out = match verbatim {
+        None => return Some(abs),
+        Some(Verbatim::Disk(letter)) => PathBuf::from(format!("{letter}:\\")),
+        Some(Verbatim::Unc(server, share)) => {
+            let mut root = PathBuf::from(r"\\");
+            root.push(server);
+            root.push(share);
+            root
+        }
+    };
+    // Everything that remains is an ordinary name. The old prefix and root are
+    // replaced by the one just built, and a verbatim path cannot contain `..`.
+    for c in abs.components() {
+        if let std::path::Component::Normal(name) = c {
+            out.push(name);
+        }
+    }
+    Some(out)
+}
+
+/// How much larger than its own pixels a shell thumbnail may be painted.
+///
+/// **The shell returns what its cache holds, not what was asked for.** Measured on
+/// this box: after an extract at 32, an ask for 256 comes back 32x24 — the size
+/// argument is a hint about which entry to look for, not a scale. Painted into a
+/// 150-point cell that is a smear, and a smear is worse than the decode it saved,
+/// so a cell smaller than half the target is refused and the decode runs.
+///
+/// Half is the line and not a guess: Explorer's 256 entry is exact, 96 gives a
+/// 1.6x upscale and is under the line, and 32/48 are the entries a folder browsed
+/// in Small-icons view has — a folder whose cache cannot serve a grid cell anyway.
+pub const SHELL_MIN_CELL_UPSCALE: u32 = 2;
+
+/// Is a shell thumbnail of `dims` worth painting into a `target`-sized cell?
+///
+/// Pure, and tested without the shell in the loop: the interesting inputs are the
+/// sizes Explorer's cache actually holds (32, 48, 96, 256) against a 256 target,
+/// and a rule that only ever saw its own 256 would pass on any threshold at all.
+pub fn shell_cell_is_usable(dims: (u32, u32), target: u32) -> bool {
+    dims.0.max(dims.1).saturating_mul(SHELL_MIN_CELL_UPSCALE) >= target
+}
+
+/// Read the thumbnail Explorer already has for `path`, at most `target` pixels
+/// on the long side.
+///
+/// **Cache-only, always.** The app never asks the shell to make a thumbnail:
+/// that is an extraction, it would run a decoder we do not control on the paint
+/// path's behalf, and it is the cold case's job to decode for itself.
+#[cfg(windows)]
+pub fn shell_thumbnail(path: &Path, target: u32) -> Option<ImageData> {
+    shell_thumbnail_flagged(path, target, true)
+}
+
+/// The same call with the cache-only flag under the caller's control.
+///
+/// `cache_only: false` **causes an extraction**, which is the one thing the app
+/// must never do — it exists for a test that has to put a file into Explorer's
+/// cache before it can prove the cache-only read works. A test that could not
+/// make an entry could only assert that the function returns `None`, which is
+/// also true of a function that is broken in every possible way.
+#[cfg(windows)]
+pub fn shell_thumbnail_allowing_extraction(path: &Path, target: u32) -> Option<ImageData> {
+    shell_thumbnail_flagged(path, target, false)
+}
+
+#[cfg(windows)]
+fn shell_thumbnail_flagged(path: &Path, target: u32, cache_only: bool) -> Option<ImageData> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Foundation::SIZE;
+    use windows_sys::Win32::UI::Shell::{
+        SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_INCACHEONLY, SIIGBF_THUMBNAILONLY,
+    };
+
+    if !grid_target(target) {
+        return None;
+    }
+    let start = std::time::Instant::now();
+    // The shell resolves names against *its* current directory, which is not
+    // necessarily ours, so the path has to be absolute — and **not**
+    // `canonicalize`'d: that returns a verbatim (`\\?\C:\...`) path, which
+    // `SHCreateItemFromParsingName` rejects with `E_INVALIDARG` (0x80070057).
+    // Every file then "misses", which is indistinguishable from Explorer having
+    // thumbnailed nothing at all — measured, and the first version of this code
+    // did exactly that. `std::path::absolute` makes the path absolute without
+    // the prefix and without touching the file system, so it is also cheaper
+    // (no syscall per cell).
+    let abs = shell_api_path(path)?;
+    let wide: Vec<u16> = abs
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let _com = ComApartment::init()?;
+    let mut factory: *mut std::ffi::c_void = std::ptr::null_mut();
+    let hr = unsafe {
+        SHCreateItemFromParsingName(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            &IID_SHELL_ITEM_IMAGE_FACTORY,
+            &mut factory,
+        )
+    };
+    if hr < 0 || factory.is_null() {
+        return None;
+    }
+
+    // `THUMBNAILONLY` matters: without it the shell may hand back the file
+    // type's *icon*, which is a picture of the wrong thing. A miss must be a
+    // miss, so the caller falls back to its own decode.
+    let mut flags = SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK;
+    if cache_only {
+        flags |= SIIGBF_INCACHEONLY;
+    }
+    let mut hbm: HBITMAP = std::ptr::null_mut();
+    let hr = unsafe {
+        get_image(
+            factory,
+            SIZE {
+                cx: target as i32,
+                cy: target as i32,
+            },
+            flags,
+            &mut hbm,
+        )
+    };
+    unsafe { release(factory) };
+    if hr < 0 || hbm.is_null() {
+        return None;
+    }
+    let data = unsafe { shell_bitmap_to_image(hbm, target, start) }?;
+    // The size argument is a hint about which cache entry to look for, not a
+    // scale: what comes back is what Explorer holds. See
+    // `SHELL_MIN_CELL_UPSCALE`.
+    if !shell_cell_is_usable((data.width, data.height), target) {
+        return None;
+    }
+    Some(data)
+}
+
+/// Non-Windows stub: there is no shell cache to read, so the caller decodes.
+#[cfg(not(windows))]
+pub fn shell_thumbnail(_path: &Path, _target: u32) -> Option<ImageData> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn shell_thumbnail_allowing_extraction(_path: &Path, _target: u32) -> Option<ImageData> {
+    None
+}
+
+/// COM, initialised for the calling thread.
+///
+/// The shell's image factory lives in an apartment, and the worker threads that
+/// call this are plain `std::thread`s with none. `CoInitializeEx` is refcounted
+/// per thread, so the guard releases exactly the reference it took.
+///
+/// `RPC_E_CHANGED_MODE` is **not** a failure: it means the thread is already in
+/// an apartment (a host that initialised MTA for itself), the call works through
+/// COM's proxy from there, and the reference is not ours to release.
+#[cfg(windows)]
+struct ComApartment {
+    uninit: bool,
+}
+
+#[cfg(windows)]
+impl ComApartment {
+    fn init() -> Option<Self> {
+        use windows_sys::Win32::Foundation::RPC_E_CHANGED_MODE;
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        if hr >= 0 {
+            Some(ComApartment { uninit: true })
+        } else if hr == RPC_E_CHANGED_MODE {
+            Some(ComApartment { uninit: false })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        if self.uninit {
+            unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+        }
+    }
+}
+
+/// `IShellItemImageFactory`'s ABI, declared here instead of taking on the
+/// `windows` crate's COM wrappers for one call.
+///
+/// `windows-sys` — already a dependency — has every function and type this
+/// needs; the one thing it does not carry is this interface, which is three
+/// `IUnknown` slots and one `GetImage`. The IID and the slot order are the SDK's
+/// and not ours, and **the way to be sure they are right is a test that asks the
+/// shell for a real thumbnail and gets one**, not a comment: a wrong IID is
+/// `E_NOINTERFACE` and a wrong slot order is a crash, and both are visible the
+/// first time `tests/thumb_cache.rs` runs. Do not "simplify" this into a
+/// hand-counted pointer offset.
+#[cfg(windows)]
+const IID_SHELL_ITEM_IMAGE_FACTORY: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0xbcc1_8b79,
+    data2: 0xba16,
+    data3: 0x442f,
+    data4: [0x80, 0xc4, 0x8a, 0x59, 0xc3, 0x0c, 0x46, 0x3b],
+};
+
+/// `HBITMAP` is `windows-sys`'s own type, not one written here: the one thing
+/// this interface needs that the crate does not carry is the *interface*, and
+/// everything else — the bitmap handle, `SIZE`, the flags — comes from the
+/// crate so there is nothing to transcribe.
+#[cfg(windows)]
+use windows_sys::Win32::Graphics::Gdi::HBITMAP;
+
+#[cfg(windows)]
+#[repr(C)]
+struct ImageFactoryVtbl {
+    query_interface: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        *const windows_sys::core::GUID,
+        *mut *mut std::ffi::c_void,
+    ) -> i32,
+    add_ref: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32,
+    get_image: unsafe extern "system" fn(
+        *mut std::ffi::c_void,
+        windows_sys::Win32::Foundation::SIZE,
+        i32,
+        *mut HBITMAP,
+    ) -> i32,
+}
+
+#[cfg(windows)]
+unsafe fn get_image(
+    factory: *mut std::ffi::c_void,
+    size: windows_sys::Win32::Foundation::SIZE,
+    flags: i32,
+    out: *mut HBITMAP,
+) -> i32 {
+    let vtbl = *(factory as *mut *const ImageFactoryVtbl);
+    ((*vtbl).get_image)(factory, size, flags, out)
+}
+
+#[cfg(windows)]
+unsafe fn release(factory: *mut std::ffi::c_void) {
+    let vtbl = *(factory as *mut *const ImageFactoryVtbl);
+    ((*vtbl).release)(factory);
+}
+
+/// Turn the shell's `HBITMAP` into pixels, and destroy it.
+///
+/// The bitmap is read as a top-down 32bpp DIB. A *negative* `biHeight` is what
+/// makes it top-down: with a positive one the rows arrive bottom-up and the cell
+/// is upside down — a bug that shows only on the cells, which nobody compared
+/// against the file.
+#[cfg(windows)]
+unsafe fn shell_bitmap_to_image(
+    hbm: HBITMAP,
+    target: u32,
+    start: std::time::Instant,
+) -> Option<ImageData> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    };
+
+    let mut bm: BITMAP = std::mem::zeroed();
+    let got = GetObjectW(
+        hbm as HGDIOBJ,
+        std::mem::size_of::<BITMAP>() as i32,
+        &mut bm as *mut BITMAP as *mut std::ffi::c_void,
+    );
+    // The size cap is hygiene, not paranoia: `SIIGBF_BIGGERSIZEOK` lets the
+    // shell return any cached size, and a corrupt or hostile cache entry must
+    // not become a multi-gigabyte allocation on a worker.
+    if got == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+        DeleteObject(hbm as HGDIOBJ);
+        return None;
+    }
+    let (w, h) = (bm.bmWidth as u32, bm.bmHeight as u32);
+    if u64::from(w) * u64::from(h) > 16 * 1024 * 1024 {
+        DeleteObject(hbm as HGDIOBJ);
+        return None;
+    }
+
+    let mut bi: BITMAPINFO = std::mem::zeroed();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = w as i32;
+    bi.bmiHeader.biHeight = -(h as i32);
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    let mut bgra = vec![0u8; w as usize * h as usize * 4];
+    let dc = GetDC(std::ptr::null_mut());
+    let lines = GetDIBits(
+        dc,
+        hbm,
+        0,
+        h,
+        bgra.as_mut_ptr() as *mut std::ffi::c_void,
+        &mut bi,
+        DIB_RGB_COLORS,
+    );
+    ReleaseDC(std::ptr::null_mut(), dc);
+    DeleteObject(hbm as HGDIOBJ);
+    if lines == 0 {
+        return None;
+    }
+
+    let mut data = ImageData {
+        width: w,
+        height: h,
+        rgba: bgra_to_rgba(&bgra),
+        load_time: start.elapsed(),
+    };
+    // The same rule the decode path follows: whatever the decoder produced, the
+    // cell is never larger than its target. A cached 1024px thumbnail would
+    // otherwise cost 4 MB of texture per cell against the 512-entry cap.
+    if data.width.max(data.height) > target {
+        data = downscale_image(&data, target);
+    }
+    Some(data)
+}
+
+/// How many consecutive misses on one folder before Explorer is left alone.
+///
+/// **A miss is not free**, and this number is what bounds the damage: measured on
+/// this box, a cache-only miss is ~9 ms p50 (24 cells, one thread) against the
+/// 700-900 ms decode of a large scan — nothing — and against the 124 ms decode of
+/// a small photograph it is 7%, which on a 5000-file folder is a minute of worker
+/// time spent to be told "no". A folder Explorer has never visited misses on
+/// *every* cell, so an unlimited ask is a per-cell tax on exactly the folders this
+/// cannot help.
+///
+/// Four asks is enough to tell "not thumbnailed" from "not thumbnailed *yet*":
+/// Explorer fills a folder in one pass, so a folder that has any cell in its
+/// cache hits on the first ask. The lever if a real folder needs more slack is
+/// this constant, not the policy.
+pub const SHELL_MISS_GIVEUP: u32 = 4;
+
+/// Per-folder record of what the shell has answered, so the asking can stop.
+///
+/// Keyed by **folder**, not by file, because that is the granularity Explorer's
+/// cache works at: it thumbnails a folder, not a file, so a folder that missed
+/// four times is a folder that will keep missing. A hit clears the record — a
+/// folder with one thumbnail in it is a folder worth asking about, which is also
+/// what makes a partially-cached folder behave.
+///
+/// Pure, and tested as a policy rather than through the shell call: "give up,
+/// but not on a folder that has answered" is the kind of rule that looks right
+/// while being wrong in a direction no measurement covers.
+#[derive(Debug)]
+pub struct ShellAsk {
+    folders: Vec<(PathBuf, u32)>,
+}
+
+impl ShellAsk {
+    /// Folders remembered at once. A grid works through one folder at a time and
+    /// an archive is one folder, so this is slack for a folder switch that is
+    /// still draining; an unbounded map of every folder ever browsed is not
+    /// worth the memory for a policy this coarse.
+    pub const MAX_FOLDERS: usize = 8;
+
+    /// The empty record: nothing asked, nothing given up on.
+    pub const fn new() -> Self {
+        ShellAsk {
+            folders: Vec::new(),
+        }
+    }
+
+    /// Is the shell still worth asking about `path`?
+    pub fn wants(&self, path: &Path) -> bool {
+        match self.entry(path) {
+            Some((_, misses)) => *misses < SHELL_MISS_GIVEUP,
+            None => true,
+        }
+    }
+
+    /// Record what the shell answered for `path`.
+    pub fn record(&mut self, path: &Path, hit: bool) {
+        let folder = folder_of(path);
+        if let Some(i) = self.folders.iter().position(|(f, _)| *f == folder) {
+            let misses = &mut self.folders[i].1;
+            *misses = if hit { 0 } else { *misses + 1 };
+            return;
+        }
+        if self.folders.len() >= Self::MAX_FOLDERS {
+            // Oldest first: the least recently *added* folder is the one whose
+            // record matters least, and this is a policy about the folder being
+            // read right now.
+            self.folders.remove(0);
+        }
+        self.folders.push((folder, u32::from(!hit)));
+    }
+
+    fn entry(&self, path: &Path) -> Option<&(PathBuf, u32)> {
+        let folder = folder_of(path);
+        self.folders.iter().find(|(f, _)| *f == folder)
+    }
+}
+
+impl Default for ShellAsk {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The folder a cell belongs to — what the shell's cache is keyed by.
+fn folder_of(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(path).to_path_buf()
+}
+
+/// What the shell has said about each folder this session (see [`ShellAsk`]).
+static SHELL_ASK: std::sync::Mutex<ShellAsk> = std::sync::Mutex::new(ShellAsk::new());
+
+/// A poisoned lock is a worker that panicked with the record in hand; the policy
+/// it holds is an optimisation, so the answer is "ask" (fail-open) rather than
+/// "stop".
+fn shell_ask_wants(path: &Path) -> bool {
+    SHELL_ASK.lock().map(|g| g.wants(path)).unwrap_or(true)
+}
+
+fn shell_ask_record(path: &Path, hit: bool) {
+    if let Ok(mut g) = SHELL_ASK.lock() {
+        g.record(path, hit);
+    }
+}
+
+/// Ask Explorer first, then decode, for a grid-sized target.
+///
+/// The shell is a *cache* read, so a miss costs a call and nothing else — but a
+/// call is not nothing, so the ask is bounded per folder by [`ShellAsk`]. What
+/// the call must never do is make the miss path more expensive than the decode it
+/// stands in front of, which is why only grid-sized targets reach it at all.
+///
+/// The count of what happened lives here rather than in `load_grid_thumbnail`, so
+/// there is one place that can say "the shell was asked" and one that says "it
+/// answered".
+fn shell_cell(path: &Path, target: u32) -> Option<ImageData> {
+    if !grid_target(target) {
+        return None;
+    }
+    if !shell_ask_wants(path) {
+        return None;
+    }
+    let answer = shell_thumbnail(path, target);
+    shell_ask_record(path, answer.is_some());
+    match answer {
+        Some(data) => {
+            perf::count(perf::C_SHELL_THUMB, 1);
+            Some(data)
+        }
+        None => {
+            perf::count(perf::C_SHELL_MISS, 1);
+            None
+        }
+    }
+}
+
+/// Grid-sized targets only: the same gate as the embedded EXIF thumbnail, and for
+/// the same reason. A 256px picture is a cell; handing one to the main view would
+/// be a soft full-screen image. Spelled once so the call and the bookkeeping
+/// around it cannot disagree about which targets reach the shell.
+fn grid_target(target: u32) -> bool {
+    target > 0 && target <= EMBEDDED_THUMB_MAX_TARGET
+}
+
 /// The picture one grid cell shows, from the cache when it can be.
 ///
 /// This is the whole grid-thumbnail entry point: a cache hit is a small file read,
 /// a miss is [`load_thumbnail`] plus a write. Both are best-effort around the
 /// edges — if the cache cannot be used the result is exactly what it was before
 /// this existed.
+///
+/// Order is **our cache, then Explorer's, then our decode**. Ours first because
+/// it is our own decode (the sharpest, and the one a warm folder already has);
+/// Explorer's second because it is free when it hits and it is the only thing
+/// that can serve a folder's *first* visit without paying the decode; decoding
+/// last because it is the cold floor. A shell cell is returned without being
+/// written to our cache — see the section comment above.
 pub fn load_grid_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadError> {
     if !thumbnail_cache_enabled() {
-        return load_thumbnail(path, target);
+        return match shell_cell(path, target) {
+            Some(data) => Ok(data),
+            None => load_thumbnail(path, target),
+        };
     }
     let root = thumb_cache_root();
     match read_cached_thumbnail(&root, path, target) {
@@ -7581,6 +8915,9 @@ pub fn load_grid_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadEr
         }
         None => {
             perf::count(perf::C_THUMB_CACHE_MISS, 1);
+            if let Some(data) = shell_cell(path, target) {
+                return Ok(data);
+            }
             let data = load_thumbnail(path, target)?;
             write_cached_thumbnail(&root, path, target, &data);
             Ok(data)
@@ -8128,7 +9465,7 @@ pub fn load_page_preview_full(
     page: u32,
 ) -> Result<PreviewAndFull, LoadError> {
     let mut out = decode_page(path, preview_max_dim, page, Purpose::View)?;
-    apply_wide_gamut_conversion(path, &mut out);
+    apply_wide_gamut_conversion(&mut out);
     Ok(out)
 }
 
@@ -8156,7 +9493,7 @@ pub fn load_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadError> 
     if out.preview.width.max(out.preview.height) > target {
         out.preview = downscale_image(&out.preview, target);
     }
-    apply_wide_gamut_conversion(path, &mut out);
+    apply_wide_gamut_conversion(&mut out);
     Ok(out.preview)
 }
 
@@ -8190,6 +9527,12 @@ fn decode_page(
     };
     let stored = image_dims_bytes(&bytes);
     let orig = stored.map(|(w, h)| if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
+    // Colour is classified **here**, from the bytes the decode already has in
+    // hand, and travels with every branch below. This is the one whole-file read
+    // per job left (`color_info(path)` re-reads the file where it runs), so going
+    // through the bytes is what keeps the colour line and the wide-gamut gate
+    // free of their own reads.
+    let colour = color_info_from_bytes(&bytes, jpeg, bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
 
     // A page after the first, of a multi-page TIFF. Ahead of everything else
     // because no other format has pages, and a TIFF is not animated, so the
@@ -8211,6 +9554,7 @@ fn decode_page(
             below_target: false,
             exif_tag: tag,
             crop_grid,
+            colour,
         });
     }
 
@@ -8243,6 +9587,7 @@ fn decode_page(
                     below_target: true,
                     exif_tag: tag,
                     crop_grid,
+                    colour,
                 });
             }
         } else if is_animated(&bytes, fmt) {
@@ -8257,6 +9602,7 @@ fn decode_page(
                         below_target: false,
                         exif_tag: tag,
                         crop_grid,
+                        colour,
                     });
                 }
             }
@@ -8280,6 +9626,7 @@ fn decode_page(
                 below_target: true,
                 exif_tag: tag,
                 crop_grid,
+                colour,
             });
         }
     }
@@ -8304,6 +9651,7 @@ fn decode_page(
                 below_target: true,
                 exif_tag: tag,
                 crop_grid,
+                colour,
             });
         }
         eprintln!("turbojpeg failed, falling back to image crate");
@@ -8355,6 +9703,7 @@ fn decode_page(
         below_target,
         exif_tag: tag,
         crop_grid,
+        colour,
     })
 }
 
@@ -8626,6 +9975,39 @@ fn downscale_filter() -> DownscaleFilter {
         1 => DownscaleFilter::Catrom,
         2 => DownscaleFilter::Lanczos3,
         _ => DownscaleFilter::Hermite,
+    }
+}
+
+/// What sampling a **viewer content texture** is uploaded with: the preview,
+/// the zoom tiles and the animation frames. A plain enum because this module
+/// has no egui dependency on purpose — the binary maps each value onto
+/// `TextureOptions`, and that mapping is the only place that names egui.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sampling {
+    /// Linear in both directions — what every texture did before this axis
+    /// existed, and what grid thumbnails and the checkerboard keep regardless.
+    #[default]
+    Linear,
+    /// Nearest when texels are **magnified** (the drawing is bigger than the
+    /// texels it samples), linear when minified. The sprites this setting
+    /// exists for are magnified already at fit on this box's panels, because
+    /// a small source is decoded at its own size and the GPU stretches it to
+    /// the panel — which is exactly the smear the toggle removes.
+    NearestMagnify,
+}
+
+/// The sampling the pixel-art toggle asks for, decided once per texture
+/// upload. It names the two sampler axes and **not** a zoom level, so the
+/// choice does not depend on where the user was when the decode finished and
+/// never has to flip a texture that is already live: egui carries
+/// `magnification` and `minification` separately and the draw reads each.
+/// Nothing re-uploads as the zoom changes; the flip's own cost is previews
+/// re-requested (`refilter` in the settings arm), which re-upload under the
+/// new sampling when they arrive.
+pub fn pixel_art_sampling(pixel_art: bool) -> Sampling {
+    match pixel_art {
+        true => Sampling::NearestMagnify,
+        false => Sampling::Linear,
     }
 }
 

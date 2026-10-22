@@ -43,6 +43,24 @@ sevenz-rust2 = "0.23"
 rar = "0.4"
 
 
+[target.'cfg(windows)'.dependencies]
+# `Win32_Security` and `Win32_System_IO` are not incidental: windows-sys gates
+# functions on the features their *parameters* need, and `CreateFileW` takes a
+# `SECURITY_ATTRIBUTES` while `ReadDirectoryChangesW` takes an `OVERLAPPED` —
+# even though this code passes null for both. The same rule for the three below:
+# `CoInitializeEx` lives in `Win32_System_Com`, `GetDIBits`/`GetObjectW` in
+# `Win32_Graphics_Gdi`, and `SHCreateItemFromParsingName` in `Win32_UI_Shell` —
+# the call that reads Explorer's thumbnail cache.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_UI_Shell",
+] }
+
 [dev-dependencies]
 criterion = "0.5"
 proptest = "1"

@@ -26,6 +26,9 @@ still looks wrong to an eye.
 has two P3 JPEGs and JPEGView_L (also in `test-images`) converts; the open
 question is whether the viewer and JPEGView_L agree *by eye* on the same file, and
 what the reference is for a photo whose correct rendering nobody has recorded.
+§9.5 records a reason that may be more than a comparison: on a P3 display the
+conversion is the wrong operation to begin with, and the same eyeball settles
+both.
 
 Also unverified, and cheap to check by hand: the **wallpaper** path. It is the one
 consumer that reads the *file* rather than our buffers, so with the setting on it
@@ -37,10 +40,14 @@ preview and ~145 ms for a 24 MP full decode.
 
 ### Known, verified
 
-- **200 of 1001** images in `phone_backup\Download\Ttg` were Display P3 when this
-  was first measured; a re-run after HEIC support landed says **229**, the
-  library having grown. Another 111 are sRGB-profiled, 641 untagged sRGB, 0
-  unreadable. Re-measure with `--icc-scan` rather than trusting these.
+- **229 wide gamut, 111 sRGB-profiled, 661 sRGB-untagged, 0 unknown, 0
+  unreadable, 0 not inspected** — re-measured 2026-10-19 over the same 1001
+  images in `phone_backup\Download\Ttg`. Against the previous tally the only
+  movement is the **20 files that were `not inspected` (13 WebP + 7 GIF) are
+  now `sRGB (untagged)`**, which is exactly what §2's landed convention
+  predicted (641 + 20 = 661); the wide-gamut and profiled counts are
+  unchanged. The convention is at equilibrium in this library; re-measure
+  with `--icc-scan` rather than trusting these.
 - The primaries never mix: **192 files at exactly `(33759,15807,-69)`** (P3) and
   111 at `(28578,14581,912)` (sRGB), both D50-adapted. These are *measured* —
   do not "correct" them from memory, a guessed P3 value was wrong once already.
@@ -169,11 +176,24 @@ restored on stop). Both specced in
 
 ## 4a. Smaller queued items
 
-- **The file-change watcher is unverified** (`check_changed`, `invalidate_path` —
-  both in `main.rs`, so no test can reach them). Worth one manual pass: change a
-  file on disk, confirm it reloads within a few seconds, *including while it is
-  mid-write* — that is the case which would poison the file if `invalidate_path`
-  ever stopped clearing `failed`.
+- **The 2026-10-20 pane rework has never been seen in the running app.** The
+  right settings pane was restructured into collapsible groups with the small
+  print moved into hover tooltips, and the bottom button row became four menus
+  (Transform / Save / File / Tools) with `Left pane` / `Right pane` glowing
+  toggles beside `Panels`. Everything that *can* be tested is: handlers,
+  enable/disable rules and live-chord suffixes are pinned by source scans
+  (`tests/unit.rs::the_bottom_bar_menus_carry_the_buttons_actions` and friends),
+  and the `⏷` menu marker is glyph-checked by the font test. What a scan
+  cannot say — this session's own recorded lesson — is whether any of it
+  *works*: that a menu opens and closes where you expect, that a disabled
+  item reads as disabled, and that nothing past the first menu item lands
+  invisible on a short window. (The groups' open/closed state is egui memory
+  keyed by the group's title, so it is remembered across a `Panels` toggle
+  within the session and forgotten on restart — that much is how the widget
+  works, not a claim to verify.) **One release-build pass over both panes
+  closes it** — the same shape of
+  pass §6 records for the spreads, and unpaid since the screen capture on this
+  box cannot see the swapchain anyway.
 - **Colour correctness has no ground truth** — blocked on decision 2 in §1.
 
 ---
@@ -236,7 +256,8 @@ What did **not** work, recorded so nobody re-derives it:
   decodes at source size and resizes for every format with no reduced-size read
   (PNG, HEIC, JXL, TIFF). What the thumb path removed is the *retention* and the
   *second* downscale, not the allocation. Fixing that needs a row-streaming decode
-  per format.
+  per format. §9.7 is the one candidate route on Windows (WIC), and it is a
+  measurement before it is a dependency.
 
 **Known gap, stated rather than hidden:** the first visit to a folder of large
 scans is exactly as slow as it was — 24 cells at ~700 ms over 4 workers is still
@@ -297,7 +318,16 @@ entropy decoder (there isn't one) or a thumbnail the file already carries
 
 ---
 
-## 6. Manga mode: verified by arithmetic, and nobody has looked at a spread
+## 6. Manga mode: verified by arithmetic, and nobody has looked at a spread — SHELVED (2026-10-19)
+
+**Parked at the user's request; do not resume without being asked.** The
+feature itself is shipped, test-guarded and **default-off**
+(`Config::manga_mode: false`), so shelving required no code change — nothing
+was deleted, nothing is broken, and `M` still works if anyone reaches for it.
+What is parked is the *unfinished* part: the console-session look at a real
+spread (below), the three checklist items the visual checks would have missed,
+and the deferred anchor list. This section's investigation stays intact so it
+does not have to be repeated if the feature is picked up again.
 
 Shipped. The pairing rules and the layout geometry are pure functions in
 `lib.rs` and are pinned behaviourally in `tests/spreads.rs`; the traps are in
@@ -444,21 +474,510 @@ request — do not ask them to re-test; the one experiment below can wait.
 ---
 
 
-## 8. Pixel-art mode: no filtering when zoomed
+## 8. Pixel-art mode: shipped
 
-Zooming into sprites smears them: every texture here uploads
-`TextureOptions::LINEAR`, so past 100% the GPU blends neighbouring pixels.
-A pixel-art mode would sample `NEAREST` instead — crisp squares, no blur.
+Shipped: the **Pixel art** toggle in Settings, **off by default**. When on,
+every content texture — the preview, the zoom tiles, the animation frames — is
+uploaded with a **nearest magnifier and a linear minifier**, so a sprite drawn
+larger than its own texels samples its own pixels, while a zoomed-out fit
+still gets the averaging filter (a minifying nearest sample is what *drops*
+pixel rows, so the minification axis keeps linear). The decision is
+`pixel_art_sampling` in `lib.rs`, pinned behaviourally; the wiring is a source
+scan in `tests/unit.rs` mirroring the Smooth-toggle scan, including the
+`refilter` walk that catches textures already uploaded when the toggle flips.
 
-What is *known*: `TextureHandle::set` takes options per upload, so the
-mechanism is one flag at the three upload sites (preview, tiles, animation
-frames) rather than a pipeline change. What is *undecided* (needs a human):
-toggle or automatic — auto-detecting ("source under N px *and* zoomed past
-100%") would also catch small photos and thumbnails, where nearest looks
-broken rather than crisp, so the heuristic needs a shape that excludes them
-or it has to be a per-image/per-session switch. What is *unverified*: that
-flipping options on a live texture is free of a re-upload hitch on the
-esoteric backends (GL is the shipped path; DX12/Vulkan unmeasured).
+The shape decision, taken with the user: explicit toggle, **not**
+auto-detect — an "under N px and zoomed past 100%" rule would also catch small
+photos and thumbnails, where nearest looks broken, and no shape excludes them
+without another measured threshold.
+
+And one trap fell out of reading `TextureOptions` itself: it names
+`magnification` and `minification` **separately**. A decision glued to the
+zoom level current at upload time would have had to re-roll a live texture
+the moment zoom crossed 100% — the "is the re-upload hitch free?" question
+this item was left with. Naming the sampler axes instead means one upload
+serves both draw directions and **nothing ever flips live**, so that
+unverified hitch no longer has a door to arrive through.
+
+Grid thumbnails deliberately stay linear whatever the toggle says: a cell is
+150 pt of a 256-texel image and the grid also browses photos. The
+`the_pixel_art_toggle_is_wired...` scan names that site as the deliberate
+counter-example; if a pixel-art library ever reports otherwise, that is the
+call to revisit, with the scan to extend.
+
+Still unverified, of the kind a test cannot reach: that the result **looks**
+right on a real sprite zoomed past 100% (a mouse-eye check, not a
+measurement — how the zoomed pixel grid should look is a decision the stage
+reader has already made by asking for the toggle). Sampling at draw time
+follows the same options the texture was uploaded with on every backend the
+app runs; nothing here touches the GL/DX12 gap recorded elsewhere.
+
+---
+
+## 9. Twelve other viewers, read not run — surveyed 2026-10-20
+
+Twelve checkouts in `test-images\projects`, each at its own HEAD (2026-01-19 to
+2026-10-20), **read, not built and not run**. Every figure below is either a
+constant quoted from their source or a number this repo already recorded; none
+of their runtime behaviour was reproduced, and nothing here says "faster" — that
+word belongs to a measurement.
+
+**The finding is a division of labour.** Their speed comes from *not decoding*;
+ours comes from decoding well. The decode core here — one pass serving preview
+and full, the DCT preview then a dwell, the linear-light prefilter, tiles cut on
+demand — is better than anything in that folder. The gap is in **what we keep
+between visits** and in **what we listen to**, and that is what 9.1-9.4 are
+about.
+
+### 9.1 Grid cells from the Windows shell cache - done
+
+**Known.** PicView tries the shell first for common formats (`GetThumbAsync` →
+`GetShellThumb`, `PicView.Avalonia\ImageHandling\GetThumbnails.cs`); ImageGlass
+exposes it with an explicit cache-only flag (`Win32ShellThumbnailApi.GetThumbnail`
+→ `IShellItemImageFactory::GetImage` + `SIIGBF_INCACHEONLY`). The flag is the
+whole reason this is cheap: a miss is a miss, the call never *causes* an
+extraction, so it cannot make the cold case slower or start a decode behind our
+back.
+
+**What it buys, and it is not the cold case.** A folder Explorer has already
+visited paints its cells from the shell's cache instead of decoding. Against
+§5's floor (700-900 ms per large scan, 24 of them over 4 workers, ~4 s) that is
+the difference between a wait and a frame. A folder Explorer has never visited
+gets nothing, and a folder *we* have visited is already served by §5's cache -
+so the only folders this helps are ones browsed elsewhere first, which on
+Windows is most of them. This is a second chance at a warm grid, not a faster
+cold one.
+
+**Decided, and by measurement: cache-only, with no swap.** The shell's cell is
+painted and our decode is never asked for that cell. The doubt was whether what
+is then on screen is close enough to our decode for §5's "a hit is byte for byte
+the decode it replaced" to keep describing the grid; on real files it is 1.8-5.4
+codes out of 255 per channel, where a *different* file scores 36-195 on the same
+comparison - the same picture, not a placeholder. A provisional-then-sharpen arm
+would buy nothing and cost a cell that moves under the reader. Either way the
+shell's result is **never written into the thumb cache**: the entry has to stay
+the decode it claims to be.
+
+**Delivered.** `load_grid_thumbnail` asks, in order, our own disk cache, then
+Explorer's (`shell_thumbnail`), then `load_thumbnail`. The interface
+(`IShellItemImageFactory`) is declared by hand in `lib.rs`, because
+`windows-sys` - already a dependency - carries `SHCreateItemFromParsingName` and
+the `SIIGBF_*` flags but not the interface, and the `windows` crate would be a
+second binding set for one method. Six decisions, each with a test in
+`tests/thumb_cache.rs` (`mod shell_cache`):
+
+- **`SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY | SIIGBF_BIGGERSIZEOK`**, always.
+  Without `INCACHEONLY` the call extracts, which is the one thing it may never
+  do (red-verified: the miss "succeeds" and the test's first round extracts);
+  without `THUMBNAILONLY` a miss can come back as the file type's *icon*, i.e. a
+  picture of the wrong thing.
+- **The ask is bounded per folder.** A miss is not free - 8.5-16 ms measured
+  here, against a 595-709 ms decode of a 17-26 MB scan (nothing) but ~7% of a
+  124 ms small-photo decode, and a folder Explorer never visited misses on
+  *every* cell. `ShellAsk` stops asking after `SHELL_MISS_GIVEUP` (4) consecutive
+  misses on one folder, a hit clears the record so a partly cached folder is not
+  abandoned, and the record is capped at `ShellAsk::MAX_FOLDERS` (8).
+- **A cell too small to be a cell is refused.** Measured: the size argument picks
+  which entry to look for, it does not scale one - fill the cache at 32 px and a
+  256 px ask comes back 32x24. `SHELL_MIN_CELL_UPSCALE` (2) refuses anything
+  under half the target and the decode runs instead, because a smear is worse
+  than the wait it saved.
+- **Grid-sized targets only**, the same gate as the embedded EXIF thumbnail, so a
+  256 px picture can never reach the main view. Red-verified, and not
+  theoretically: with the gate removed a target of `0` came back as a
+  *default-sized* thumbnail.
+- **The DIB is read top-down** (`biHeight` negative) or every cell is upside
+  down, and **its alpha channel is not trusted**: the shell often draws into a
+  32-bit bitmap whose fourth byte is left at zero, and honouring that paints the
+  cell blank. An all-zero alpha becomes opaque; a real one is kept.
+- **Two counters**, `grid cells from the Windows shell cache` and `shell cache
+  misses (grid-sized asks)`, because a probe otherwise cannot tell a
+  shell-served grid from a decoded one.
+
+**Measured** - `cargo test --release --test bench_browse thumb_cache_ab --
+--ignored --nocapture`, which now prints the real-file rows beside the fixture's:
+
+| file | size | cold miss | hit | shell | ours | mean abs diff |
+|---|---|---|---|---|---|---|
+| FFA02639.jpg | 17.2 MB | 16.13 ms | 7.09 ms | 171x256 | 107x160 | 2.18 codes |
+| 1_booklet_front.jpg | 24.4 MB | 8.49 ms | 6.10 ms | 256x84 | 256x84 | 4.45 codes |
+| 1_acover.jpg | 26.0 MB | 8.72 ms | 6.97 ms | 256x256 | 256x256 | 1.81 codes |
+| image001.jpg | 26.4 MB | (cached) | 7.49 ms | 256x125 | 159x78 | 5.35 codes |
+
+The same files' own decodes are 595-709 ms (`real_scan_cells`, in the same
+benchmark), so a hit is 80-100x cheaper. The first row also shows the two
+sources disagreeing about size and not about the picture: our DCT pass stopped at
+107x160 where the shell had upscaled that file's entry to 171x256, 2.18 codes
+apart. On the synthetic 3000x2000 fixtures the same benchmark gives a miss p50 of
+8.7 ms, a hit p50 of 11.3 ms, and 3.8 codes against our decode (a *different*
+file scores 36).
+
+**Two bugs the tests were needed for, because neither is visible in a return
+code.** `canonicalize` returns a verbatim `\\?\C:\...` path and the shell answers
+`E_INVALIDARG` for it, so the first version returned `None` on *every* file -
+indistinguishable from "Explorer has never thumbnailed anything".
+`shell_api_path` now uses `std::path::absolute` and strips a verbatim prefix
+(`\\?\C:\a` → `C:\a`, `\\?\UNC\srv\share\a` → `\\srv\share\a`). And `GetImage`
+needs the file **closed**: extracting a file the caller still holds open fails
+with `ERROR_SHARING_VIOLATION`, which is why the tests write with
+`std::fs::write` and hold no handle.
+
+**Red-verified**, each mutation reintroduced and the named test failing:
+`canonicalize` at the call site fails 4 shell tests; dropping `INCACHEONLY` fails
+`a_cache_only_miss_stays_a_miss`; removing the size rule fails
+`a_cached_entry_too_small_is_refused_rather_than_painted`; removing the target
+gate fails `a_missing_file_or_a_target_that_is_not_a_cell_is_a_clean_none`; and
+writing the shell's cell into our own cache fails the wiring scan, which is a
+byte-offset test (one `write_cached_thumbnail`, after the only `load_thumbnail`,
+with every shell arm returning first) rather than a search for a call.
+
+**Not claimed.** The case the item is *for* - a grid painting from the shell's
+cache in the running app, on a folder browsed in Explorer first - is **not run**:
+no GUI can be launched from this session (`AGENTS.md`), and the tests have to
+manufacture the cache entry with one extraction. What is proven is that the
+cache-only read returns that entry afterwards, in 6-7 ms; the end-to-end half
+belongs to `tests/probe_thumb_cache.ps1`, which now has the two counters to read
+and is still owed. Also unmeasured: whether `INCACHEONLY` misses for archive
+members (`%TEMP%`) and network paths - both plausible, both the safe direction
+(a decode). EXIF-rotated JPEGs go to the shell as they are and Explorer applies
+the tag itself, which is its own contract and is not tested here.
+
+### 9.2 A persisted preview tier — the thing Turbo is missing
+
+**Known.** FlyPhotos keeps an **800 px preview** as a JPEG blob in SQLite,
+`MaxItemCount = 20_000`, LRU with batch eviction
+(`Services\DiskCacherWithSqliteFaster.cs`), and that is what its hold-to-browse
+rides on; the HQ tier is separate and parks during a burst. Ours is
+`PREVIEW_CACHE_CAP` 16 in memory and nothing on disk. **The browse mode itself
+is not missing** — `block_while_loading` off is ImageGlass's "Turbo" under
+another name (advance at key rate and let `replace()` drop the skipped decodes),
+on is "Sequential". What is missing is the cheap source that makes Turbo *show*
+something instead of holding the previous frame for a decode.
+
+**What it buys.** A revisit, a slideshow loop, or flipping back through a
+chapter stops decoding the file again: against this repo's own 380-415 ms preview
+decode on a 27 MB photo, a 2-3 ms read is the whole difference.
+
+**Four decisions, and the first one is the design.**
+
+- *The key.* A preview is sized to the panel (`decode_target`), so either it is
+  stored at a fixed bucket (1600 or 2048 long side) and resampled to the panel on
+  arrival — one entry serves every window size — or the key includes the target,
+  and then every resize invalidates the cache it exists to save.
+- *Lossless or not.* At this repo's own measured 1.5 bytes/pixel a 1600x1067
+  lossless entry is ~2.5 MB, so 2 GB is ~800 photos against FlyPhotos' 20 000,
+  which is why it uses JPEG. This is a **different decision from §5's**: the cell
+  rule exists because a *hit* must be the decode it replaced, while a preview is
+  on screen for a moment and then replaced by the full image. Defensible there,
+  rejected here — do not inherit either answer.
+- *What `full` means.* Today one decode yields both. A disk hit has no full
+  buffer, which is the existing `full: None` + `below_target` shape (grid
+  thumbs, JPEG over 12 MP) and `needs_full` already handles it. What changes is
+  the accounting: a cached preview no longer implies a cached full, so the
+  memory ceiling `PREVIEW_CACHE_CAP x MAX_FULL_PIXELS` describes stops applying
+  to hits and has to be re-stated rather than assumed.
+- *Where the encode is paid.* Milliseconds at 1600 px, but it must land **after**
+  the preview is on screen, on a worker, or it becomes a tax on the first visit —
+  the one regression this feature is not allowed to cause (§5's cold floor).
+
+**Unverified:** the per-entry encode cost, and the cold-visit delta if it is paid
+inline. Measure with `bench_browse`'s time-to-first-pixels before building the
+store. The four cache guards in `tests/thumb_cache.rs` transfer unchanged,
+including the stamp being mtime **and** length.
+
+### 9.3 Preload bounded by bytes — done (256 MB)
+
+**Known.** ImageGlass bounds preload four ways at once — `CacheMaxFiles` 10,
+`CacheMaxMemoryInMb` 1000, `CacheMaxFileSizeInMb` 100, `CacheMaxDimension` 8000
+— walking outward from the cursor (`PhotoManager_Caching.cs`). qView refuses to
+preload any file larger than half its own cost budget (`qvimagecore.cpp`), so one
+huge file cannot evict the neighbours. Ours is `PRELOAD_RADIUS` 3 symmetric and
+`PREVIEW_CACHE_CAP` 16 **by count**; `AGENTS.md` already says to re-check every
+memory ceiling if the radius is raised. On a manga page (~7 MP) the count is
+fine; on 24 MP photographs the same radius holds 7 x 96 MB of RGBA plus whatever
+`Preview.full` retains.
+
+**The work is small and it is subtraction.** Priorities are already nearest-first
+(`10 + 2d` / `11 + 2d`), so a budget only *removes* jobs the plan already emits —
+but it needs the sizes: `Plan` carries no dimensions today, so a dims slice (or
+the byte estimate itself) joins the struct and is handed in, keeping `plan_jobs`
+pure for the same reason the stranding fix made it pure.
+
+**Delivered.** `Plan` gained `file_bytes` (parallel to `files`) and
+`preload_budget`; `plan_jobs` spends the budget outward, **nearest-first and
+only on admissions**. Decisions, each with a test in `tests/preload_budget.rs`:
+- **The unit is file length, not decoded bytes**, because that is what is
+  observable before a decode exists — a neighbour that has never been decoded is
+  exactly the thing a dims slice cannot know. The lengths come from the
+  watcher's stamp registry (`Stamp.len`) which already covers every scanned
+  file, so the plan path stats nothing; `schedule` collects the slice and the
+  scan test (`the_preload_budget_is_wired_from_the_watcher_s_stamp_registry`)
+  pins that, the order (collected before the `Plan` literal) and that
+  `PRELOAD_BUDGET_BYTES` — not `u64::MAX` — is what is handed in.
+- **The number is 256 MB.** Radius 3 plans six neighbours; 6 x 24 MB
+  photographs is the largest ordinary folder a photo library brings and sits
+  under it, so ordinary folders plan exactly what they always did. Measured, not
+  assumed: `bench_browse browse_baseline` (24 fixtures, real lengths and the
+  shipped budget in the `Plan`) reports the folder at **44.5 MB total** and the
+  cache-hit column at **0 / 4 / 67 / 92 / 96%** across the 0/30/60/150/400 ms
+  holds — identical to the unbounded arm, which is the "keep the hit rate
+  constant" number this item asked for. The **real** library dump agrees: the
+  whole of `test-images` is 645 images / 287.2 MB, and at the first, middle and
+  last cursor the window admitted **53.3 / 8.2 / 77.6 MB** — byte-identical to
+  the unbounded plan at all three, because the budget bounds one *window*, not
+  the folder. What it removes is the tail: a 200-500 MB scan is past the whole
+  budget and is never prefetched, which is the reachable half of the
+  `MAX_FULL_PIXELS` ceiling. **That arm is not exercised by this library** — its
+  biggest file is 47.6 MB — so the skip rule's evidence is the policy test with
+  a 500 MB neighbour, not a real file.
+- **A file larger than the whole budget is not preloaded at all** (the item's
+  own preference: 1.2 GB decoded is past any sensible budget), and that falls
+  out of the same test rather than a branch.
+- **A skip is not a hole and holds nothing.** A priced-out neighbour does not
+  break the walk and does not spend the budget, so a small neighbour behind a
+  huge one is still planned (pinned by
+  `the_budget_spends_nearest_first_and_a_skip_is_not_a_hole`).
+- **Only the window spends.** The current preview, the turn's partner, the full
+  decodes and the EXIF read are what the reader asked for; a zero budget leaves
+  every one of them planned (`a_zero_budget_never_touches_current_partner_full_or_exif`).
+- **An un-stamped file is admitted** (`0`, the fail-open reading): the budget is
+  calibrated to the scan the session has seen, and a registry that has not
+  caught up plans exactly the unbounded walk — asserted, not commented.
+
+Both central guards verified red by mutation: with the budget check disabled 4
+of the 5 policy tests fail; with the skip turned into a `break` 3 fail.
+`the_budget_changes_nothing_for_small_files` is the golden arm — a 7 MB folder
+must plan identically under 256 MB and `u64::MAX`.
+
+Still open, and deliberately: the **shape** knob ImageGlass has (a per-file
+dimension cap) is not modelled, because dimensions are not observable before
+the decode; and a *decoded*-byte budget would need dims the planner does not
+have. If a folder of 30 MB files turns out to need fewer neighbours than six,
+the lever is the constant, not the policy.
+
+### 9.4 OS file-change notifications instead of the 2 s poll - done
+
+**Known.** Five of the twelve were verified to take OS notifications: qimgv
+(`components\directorymanager\watchers\windows\windowsworker.cpp`,
+`ReadDirectoryChangesW`), ImageGlass (`FileWatcherEx`), nomacs and qView
+(`QFileSystemWatcher`), PicView (`FileSystemWatcher`). None of the twelve was
+found polling the folder on a timer, and this app did (`RESCAN_INTERVAL` 2 s,
+`maybe_rescan`); that timer was also the only wake source on a static photo -
+which is why idle was ~2 fps.
+
+**Delivered.** `DirWatcher` in `lib.rs` (`ReadDirectoryChangesW` on its own
+thread, one 32 KiB buffer, `bWatchSubtree` only for the recursive listing) and
+`sync_watcher` in `main.rs`, which **derives** the wanted watch from
+`(folder, recursive, archive)` every frame instead of being set at each open.
+With a watch running the timer does not tick at all and the thread's
+`ctx.request_repaint()` is the only wake source; with none, the poll runs
+exactly as it always did. Decisions, each with a test in `tests/watcher.rs`
+unless noted:
+
+- **The poll is the fallback, and every way a watch can fail lands on it.**
+  `start` returns `Err` for a path that is not a directory - an explicit
+  `is_dir` check, because `FILE_FLAG_BACKUP_SEMANTICS` happily opens a **file**
+  and the first read on that handle then fails, i.e. a watch dead before it
+  reports anything - and for a share that refuses the handle. A read that fails
+  later (a share without change notification, the folder removed) clears
+  `alive()`, and the app drops the watch and polls. `watcher_key` stops a folder
+  that refuses a watch from being asked again on every frame.
+- **One save arrives as five records and the dangerous one comes first.**
+  Measured here, a rename-over is `ADDED page.jpg.tmp`, `MODIFIED page.jpg.tmp`,
+  **`REMOVED page.jpg`**, `RENAMED_OLD_NAME page.jpg.tmp`,
+  `RENAMED_NEW_NAME page.jpg`. Acted on record by record, that `REMOVED` for a
+  known path is a membership change and every save scans the whole folder.
+  `coalesce_changes` folds a name that is removed **and** added/renamed-to in
+  one batch to the record that says its bytes are new; a real delete has no
+  matching add and survives.
+- **A content change settles for 200 ms (`CONTENT_SETTLE`); a listing change is
+  throttled at 1 s (`RESCAN_MIN_GAP`) and never dropped.** A chunked save emits
+  an event per write, so decoding the first decodes a half-written file; the
+  clock restarts per event and the stamp is read when it expires. One save is
+  one decode, of the finished bytes.
+- **A path with no baseline stamp counts as changed**: an event is the OS saying
+  the bytes moved, and the alternative is to miss the first re-export of a
+  session - exactly what the old first poll caught.
+- **`Drop` cancels the blocking read** (`CancelSynchronousIo`, retried because
+  the thread may not have entered the call yet) rather than abandoning it, and
+  a detach is counted by `watchers_detached()` so the test can assert zero:
+  "`Drop` returned quickly" is also true of a version that leaks one thread and
+  one directory handle per folder visited.
+- **A buffer overflow is `CHANGE_OVERFLOW` and is answered with the full pass**,
+  because names were dropped. `folder-watch events received` versus
+  `files reloaded (watcher saw a change)` is what tells a silent OS from an
+  ignored event in a perf report.
+
+**Both premises the item listed as unverified are now measured**, not assumed: a
+rename-over produces events (the sequence above, read from a real watch on a
+real `tempfile::tempdir()`), and one recursive handle hears a change in a
+subfolder (`a_recursive_watch_hears_a_change_in_a_subfolder`). The suite also
+pins that a quiet folder sends nothing (the negative control - otherwise
+"events arrived" could mean "events always arrive"), that a deleted folder makes
+the watch report itself dead, that a file path is refused, and that stopping on
+a quiet folder neither hangs nor leaks.
+
+**Red-verified** (each mutation reintroduced, the named test failing, then
+restored): removing the `is_dir` check fails the start test; not folding the
+replace-target `REMOVED` fails both the pure fold test and the real rename-over
+test; `RENAMED_NEW` on a known path classified as membership fails the table and
+the rename-over test; dropping the `CancelSynchronousIo` call fails the
+"stopping cancels" test (5 s, 3 detached); not clearing `alive` on thread exit
+fails the deleted-folder test; and moving the fallback poll above the watch
+branch fails the wiring scan.
+
+**Not claimed.** A share that accepts the watch and then silently drops events
+while staying alive is uncovered: there is deliberately no periodic sweep while
+a watch runs, because that sweep *is* the idle tick this replaced. The archive
+exclusion is a one-line guard plus a source-scan assertion, not a behavioural
+test (an archive's temp dir cannot be watched without the app reporting its own
+rewrites). The end-to-end "the running app re-decodes the changed picture" is
+`tests/probe_watcher.ps1`'s job and was **not** re-run this round (GUI launches
+from this session fail at adapter selection, see `AGENTS.md`), so that half
+rests on the same counters the probe reads rather than on a run of it now.
+
+### 9.5 Convert to the display's profile, not to sRGB
+
+**Known.** qView converts to `getTargetColorSpace()`, where mode 1 is
+`detectDisplayColorSpace()` (`qvimagecore.cpp`), **and it puts the MD5 of that
+profile into the pixmap cache key**, so another monitor invalidates
+automatically. gthumb reads the profile through colord. Ours converts P3 → sRGB,
+full stop: right on an sRGB panel, *lossy on the panel the feature exists for*.
+
+**The cheap version.** Read the window's monitor profile once (`GetICMProfile` /
+`WcsGetDefaultColorProfile`), classify it with the code that already classifies
+files (`icc_tags_valid` + primaries), and skip the conversion when the display's
+gamut contains the source's. No lcms2, no 3D LUT — the same primaries question,
+asked of a second profile.
+
+**Settle this before building it:** whether the surface is colour-managed at all.
+If the compositor already applies the monitor profile to the window, then on a P3
+display "do nothing" is correct and the current conversion is a **double**
+correction — which makes this a bug in §1 rather than a new feature. If it is not
+managed, the conversion is needed and the display check is an improvement.
+Nothing in the tree answers that today, and it is the same eyeball §1 owes.
+
+**Consequence if built:** the target space joins what a cached preview is keyed
+on, the way qView's is, or moving the window between two monitors keeps showing
+the old conversion. That is `refilter`'s problem shape, and `refilter` is the
+existing answer.
+
+### 9.6 SVG
+
+**Known.** Seven list SVG in their README (FlyPhotos via `ResvgWrap`, gthumb,
+gwenview, ImageGlass, nomacs, oculante, pix); PicView and PhoXo have it in source
+(`Avalonia.Svg.Skia`, nanosvg); qView's depends on a Qt plugin this checkout does
+not prove. It is one of the two formats the field has and this app does not
+(RAW is the other, §9.7), and `resvg` is pure Rust with no C build.
+
+**Shape.** Sniff it by content like the rest — `<?xml` with an `<svg` root, or a
+bare `<svg` — and render at the **panel target** the preview path already
+computes — not a fixed 1024, because a vector has no natural size. There is no
+`full` and no `below_target`: a re-render on resize is milliseconds, so the
+honest model is "the preview *is* the decode" and a target change is a
+`needs_refine`.
+
+**The trap, and it is this file's kind.** `dims()` for an SVG is the viewport or
+`None`, and `pairable` treats unknown dimensions optimistically — so a wide SVG
+in manga mode is planned as a turn's partner and collapses the turn when the
+shape is learned. Same failure as a wide page arriving late
+(`arrival_reschedules`), which means an SVG wants an explicit shape rather than a
+guess.
+
+**Unverified:** that `resvg`'s XML parser bounds entity/expansion work on an
+untrusted file — check, do not assume; and whether anyone using this app has SVGs
+at all (a photo and manga library has none). It is a generality item and should
+be argued on that, not on speed.
+
+### 9.7 WIC, as an experiment behind a flag
+
+**Known.** FlyPhotos decodes through WIC with `ScaledWidth`/`ScaledHeight`, which
+gives EXIF orientation, colour and a reduced-size read for every installed
+codec, plus RAW through the OS extension (`WicReader.cs`); ImageGlass and PicView
+lean the same way. §5 records the gap this addresses: PNG, HEIC, JXL and TIFF
+still decode at source size and shrink afterwards.
+
+**Why it is not a port.** Colour classification and the wide-gamut conversion are
+ours — a WIC decode that colour-manages internally would double-apply — the tests
+assert decoded pixels, and the one format that dominates a photo library already
+has a decoder here with DCT-domain scaling, i.e. the case where the current path
+is *not* the problem. The only defensible scope is a **fallback for formats with
+no reduced-size read**, behind a flag, and only if a measurement says the
+transient buffer is the cost worth removing.
+
+**The measurement:** a 60 MP PNG (the `pathological` generator makes 40/60 MP
+fixtures), time-to-first-pixels with and without, interleaved and warmed, under
+the `measuring-runtime` preconditions. If the difference is inside one decode's
+noise, do not build it. `--icc-scan` and the decode must also still agree about
+colour, which is a test to write before the path, not after.
+
+### 9.8 Cache-directory hygiene — done
+
+Landed: the cache root **and every two-hex fanout child** carry
+`FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`, set in `write_cached_thumbnail` where the
+directories are born (and on the first new write into an older directory, which
+brings existing caches up to date). The test
+(`the_cache_dirs_announce_themselves_to_windows_search`) is the probe this item
+called for: first write, the attribute read back via std's `MetadataExt`, and
+one cache read proving the contents are unchanged. Verified red with the
+`SetFileAttributesW` call disabled. **The unverified** half-claim below stays
+unverified by the test — it cannot — but the real root on this box had 0 of 10
+fanout dirs marked before the change, so the gap was real, and Windows Search's
+actual crawl behaviour is the OS's to decide.
+
+**Known.** nomacs sets `FILE_ATTRIBUTE_NOT_CONTENT_INDEXED` on its cache
+directory on Windows (`disableContentIndexing`, `DkCachedThumb.cpp`) — the only
+one of the twelve that does anything about it. Our thumbs dir holds 3 000-19 000
+small PNGs (§5) in `%LOCALAPPDATA%`.
+
+### 9.9 Per-image view state — DONE (this round, behind a setting)
+
+**Known.** FlyPhotos offers three modes - reset, remember per photo, carry over
+(`PerPhotoViewStore`). Ours carries the scale and **resets the pan** on a cursor
+change (`pan_key`), deliberately and documented: a carried offset shifts the next
+picture by the old one's drag.
+
+**The missing mode** is "remember": a second per-image map beside `ImageEdits`,
+keyed by `ImgKey` (so a page of a document gets its own - `ImageEdits` is
+path-keyed because a crop is an edit to the document, which is the distinction
+`AGENTS.md` already draws). ~~**Undecided:** persisted (a config key, and it must
+survive a restart to be worth having) or session-only, which is the smaller
+change and the one matching `show_panels`' precedent for view state.~~
+
+**Delivered.** New setting **Remember zoom and pan per image** (`remember_view`,
+off by default), session-only per the `show_panels` precedent; a remembered view
+is zoom **and** pan restored exactly; an un-remembered image answers the carry,
+so the shipped behaviour is byte for byte reachable. The rules live in
+`lib.rs` (`ViewMemory`, `SavedView`, the pure `arriving_view` decision, keyed by
+`ImgKey`) and the wiring is in `goto`'s cursor-change block — the save happens
+while the outgoing key is still in hand, before `pan_key` is reassigned, pinned
+by position with `view_memory_is_wired_to_the_cursor_change_and_the_setting`
+(verified red by moving the save after the reassignment). `invalidate_path`
+drops a re-exported file's entries alongside its page counts and shapes. The two
+fit modes still own the arriving view when they are on.
+
+### Not taking these, and why
+
+- **Cancelling decodes on navigation.** FlyPhotos has `_centreCts`, qimgv clears
+  its pool on a priority load, ImageGlass drops queued work. This app proved that
+  cancelling strands images, and `AGENTS.md` records why; the 120 ms dwell is the
+  substitute and it is cheaper. Do not reopen it because three viewers do it.
+- **Lossy grid cells.** ImageGlass writes WebP q80, FlyPhotos JPEG blobs. §5
+  rejected this for a stated reason; the exception, if one is ever wanted, is a
+  *preview* tier (§9.2), where the pixel is on screen for a moment — not a cell.
+- **Tile mipmaps and gutters.** FlyPhotos' 1024 px tiles carry a 2 px gutter and
+  a level pyramid because a level is drawn at fractional scale. Ours are 1:1
+  crops drawn at >= 1:1, so a gutter is duplicated pixels and a pyramid is work
+  for a case that cannot occur.
+- **Cache staleness, simplified.** qView and oculante key on file *size*;
+  ImageGlass compares the cache's mtime to the source's. Ours — mtime + length,
+  path stored in the entry, tmp+rename, `IEND` — is stricter than all twelve. Do
+  not move toward theirs.
+- **The rest of their surface area:** comparison/split view (declined, §4),
+  multi-instance sync (nomacs), plugin SDKs, video, DICOM, network listeners
+  (oculante). Most of the twelve are editors or organisers as much as viewers,
+  and qView — 22 source files — is the useful counterweight: that folder is a
+  menu, not a checklist.
 
 ---
 

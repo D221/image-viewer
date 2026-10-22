@@ -83,7 +83,9 @@ fn cropped_save_is_still_lossless() {
         let both_bytes = std::fs::metadata(&both).unwrap().len();
 
         let t = Instant::now();
-        let turn_only = save_transformed(&p, Xform::Rot90, None).unwrap();
+        // Only its running time is reported here; the bytes are the crop+turn
+        // pair's, which is what the ratio column uses.
+        let _turn_only = save_transformed(&p, Xform::Rot90, None).unwrap();
         let turn_ms = t.elapsed().as_secs_f64() * 1000.0;
 
         eprintln!(

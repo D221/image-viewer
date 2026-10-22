@@ -43,14 +43,18 @@
 //!     column read 0.00. **It is larger now, and correct**; a `decode s` of 0
 //!     against a non-zero time-to-first-pixels was never possible to be right.
 //!
-//! The EXIF arm (`exif_ab`) exists because the metadata read is not free and not
-//! small: `color_info` calls `fs::read` on the **whole file** to find the ICC
-//! profile, and `nom_exif` then seeks out the APP1 segment. That is the app's
-//! `Kind::Exif` job, modelled here with the same two calls rather than as a
-//! no-op — the question "does not probing metadata while the panel is hidden
-//! make navigation faster" has no answer if the benchmark pretends the job
-//! costs nothing. It is the one job per navigation that exists only to fill a
-//! panel, and it is queued *ahead* of every prefetch.
+//! The EXIF arm (`exif_ab`) exists because the metadata job is not free and was
+//! not small: it used to call `color_info`, whose `fs::read` pulls the **whole
+//! file**, and `nom_exif` then seeks out the APP1 segment. That read is gone
+//! now — the colour profile is classified from the bytes the preview decode
+//! already read (`PreviewAndFull::colour`), so the job's shape here mirrors the
+//! app's: the EXIF seek plus the 256 KiB header read for the JPEG `COM`
+//! segment. Modelled with the same calls rather than as a no-op — the question
+//! "does not probing metadata while the panel is hidden make navigation
+//! faster" has no answer if the benchmark pretends the job costs nothing —
+//! but expect the per-read numbers an order of magnitude under the old ones.
+//! It is the one job per navigation that exists only to fill a panel, and it
+//! is queued *ahead* of every prefetch.
 //!
 //! The thumbnail arm (`thumb_cache_ab`) is the third kind of measurement here: not
 //! a scheduling question but a **"can this be made faster at all"** one. A 95 MP
@@ -61,7 +65,8 @@
 //! would be how the limit of the change got forgotten.
 
 use image::ImageEncoder as _;
-use image_viewer::{color_info, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
+use std::io::Read;
+use image_viewer::{jpeg_comment, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -256,11 +261,19 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
                     })
                     .map_err(|e| e.to_string()),
                 // Exactly what `run_job` does for `Kind::Exif` in the app: the
-                // colour profile, which reads the whole file, then the EXIF
-                // block, which seeks. No pixels come back, hence `bytes: 0`.
+                // EXIF block, which seeks, plus a 256 KiB header read for the
+                // JPEG `COM` segment. The colour profiling is **not** here any
+                // more: it is classified from the bytes the preview decode
+                // already read and rides on the preview (`PreviewAndFull::colour`),
+                // which removed the second whole-file read per navigation.
+                // No pixels come back, hence `bytes: 0`.
                 Kind::Exif => {
-                    let _ = color_info(job.path()).panel_line();
                     let _ = nom_exif::read_exif(job.path());
+                    if let Ok(mut f) = std::fs::File::open(job.path()) {
+                        let mut head = Vec::new();
+                        let _ = f.by_ref().take(262144).read_to_end(&mut head);
+                        let _ = jpeg_comment(&head);
+                    }
                     Ok(Decoded {
                         bytes: 0,
                         below_target: false,
@@ -391,6 +404,13 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
             current_stale: false,
             target_dim: PREVIEW_DIM,
             radius: RADIUS,
+            // These fixtures sit under any sane budget, so this benchmark
+            // faces the planner the production plan would too — lengths
+            // unknown `[]` (the fail-open reading) and an unlimited budget:
+            // the budget policy has policy tests of its own, and a stat per
+            // emitted job here would only re-derive `0`.
+            file_bytes: &[],
+            preload_budget: u64::MAX,
         });
         wanted = jobs.iter().map(|j| j.path().to_path_buf()).collect();
         loader.replace(jobs);
@@ -601,8 +621,14 @@ fn real_photo_reads() {
         let mut each = Vec::new();
         for _ in 0..5 {
             let t0 = Instant::now();
-            let _ = color_info(p).panel_line();
+            // The metadata job's own reads, exactly as the app runs them: the
+            // EXIF seek, plus the bounded header read for the `COM` segment.
             let _ = nom_exif::read_exif(p);
+            if let Ok(mut f) = std::fs::File::open(p) {
+                let mut head = Vec::new();
+                let _ = f.by_ref().take(262144).read_to_end(&mut head);
+                let _ = jpeg_comment(&head);
+            }
             each.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
         eprintln!(
@@ -936,7 +962,107 @@ fn thumb_cache_ab() {
          to a folder of large scans faster, and that is the honest limit of the change."
     );
     real_scan_cells();
+    shell_cache_cells();
     eprintln!();
+}
+
+/// The mean absolute difference per colour channel between two cells, at 64x64
+/// so two decodes of different sizes can be compared at all.
+fn cell_distance(a: &image_viewer::ImageData, b: &image_viewer::ImageData) -> f64 {
+    let at = |d: &image_viewer::ImageData| {
+        let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba.clone()).expect("rgba");
+        image::imageops::resize(&img, 64, 64, image::imageops::FilterType::Triangle)
+    };
+    let (a, b) = (at(a), at(b));
+    let mut sum = 0f64;
+    for (pa, pb) in a.pixels().zip(b.pixels()) {
+        for c in 0..3 {
+            sum += (pa.0[c] as f64 - pb.0[c] as f64).abs();
+        }
+    }
+    sum / (64.0 * 64.0 * 3.0)
+}
+
+/// What Explorer's cache has for the real large files, and what its cell is worth.
+///
+/// The three questions this feature left unverified, answered on real photographs
+/// rather than on a synthetic gradient: does a cache-only ask hit, what does a hit
+/// cost, and is the shell's cell the same picture? The distance is printed next to
+/// our own decode's, because "close enough" only means something against a scale —
+/// `tests/thumb_cache.rs` uses a different file for that, here it is the same file.
+///
+/// **The entry is made with one extraction**, because this box has no Explorer
+/// session filling the cache and the app itself never extracts. The side effect is
+/// the point of the measurement: those files get the Explorer thumbnail entries
+/// browsing the folder would have given them, so a *second* run reports the first
+/// ask as already cached rather than as a miss, and the miss figure is only
+/// meaningful on the first run after the cache forgets the file.
+fn shell_cache_cells() {
+    let dir = std::path::Path::new("test-images");
+    if !dir.exists() {
+        eprintln!("  (no test-images/ - skipping the shell-cache figures)");
+        return;
+    }
+    let mut big: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && std::fs::metadata(p)
+                    .map(|m| m.len() > 8_000_000)
+                    .unwrap_or(false)
+        })
+        .collect();
+    big.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+    // Four of the largest: each row costs a full decode of the file, and the
+    // shape of the answer does not change after the first few.
+    big.truncate(4);
+    if big.is_empty() {
+        eprintln!("  (no files over 8 MB in test-images/ - skipping)");
+        return;
+    }
+    eprintln!("  Explorer's thumbnail cache, real files in test-images (256px cells):");
+    for p in &big {
+        let mb = std::fs::metadata(p).map(|m| m.len() as f64 / (1024.0 * 1024.0)).unwrap_or(0.0);
+        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+        // The ask the app makes, before this run has extracted anything.
+        let t = Instant::now();
+        let cached = image_viewer::shell_thumbnail(p, 256);
+        let ask_ms = t.elapsed().as_secs_f64() * 1000.0;
+        match &cached {
+            None => eprintln!("    {:<40.40} {:>6.1} MB  cold miss {ask_ms:>6.2} ms", name, mb),
+            Some(d) => eprintln!(
+                "    {:<40.40} {:>6.1} MB  already in the cache ({}x{})",
+                name, mb, d.width, d.height
+            ),
+        }
+
+        // The entry Explorer would have made; the hit below is what a folder the
+        // user browsed in Explorer first looks like.
+        let extract = image_viewer::shell_thumbnail_allowing_extraction(p, 256);
+        let t = Instant::now();
+        let hit = image_viewer::shell_thumbnail(p, 256);
+        let hit_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let ours = image_viewer::load_thumbnail(p, 256).expect("cell");
+        match &hit {
+            Some(cell) => eprintln!(
+                "      hit {:>6.2} ms  shell {}x{}  ours {}x{}  mean|d| {:.2} codes",
+                hit_ms,
+                cell.width,
+                cell.height,
+                ours.width,
+                ours.height,
+                cell_distance(cell, &ours)
+            ),
+            None => eprintln!(
+                "      no hit after extraction {:?} - the shell refused this one",
+                extract.as_ref().map(|d| (d.width, d.height))
+            ),
+        }
+    }
 }
 
 /// Sizes the drop-copy arm measures, in megabytes. Synthetic files in a

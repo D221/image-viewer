@@ -1,9 +1,9 @@
 # Image Viewer
   image stays sharp, which briefly costs some CPU.
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
 # Image Viewer
   image stays sharp, which briefly costs some CPU.
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
 # Image Viewer
 
 A fast desktop image viewer for Windows, written in Rust with
@@ -72,8 +72,8 @@ double-rotate).
   Turn and mirror *compose* rather than living in separate counters, because they
   do not commute: turning then mirroring is a diagonal mirror, which is neither
   operation. Mirroring twice gets you back where you started. A view transform by
-  default: nothing is written to the file. **Save transformed…** (next to the
-  buttons, or `Ctrl+S`) writes a new file beside the original with the transform
+  default: nothing is written to the file. **Save transformed…** (bottom bar's
+  Save menu, or `Ctrl+S`) writes a new file beside the original with the transform
   baked in, losslessly (see below)
 
 **Undo (`Ctrl+Z`/`Ctrl+Shift+Z`)** covers the view transforms only - turn, mirror, reset-turn, crop and clear-crop. It is a per-image history (undo means "undo on this picture"), and it never writes to disk. Zoom, pan, settings changes and ratings are not undoable.
@@ -92,7 +92,8 @@ double-rotate).
   so a 3:2 photo you have turned on its side gets a 2:3 frame. The default is
   Free, and an existing frame keeps whatever shape it has
 
-- Folder watcher: new and deleted files are picked up automatically (every 2s)
+- Folder watcher: new, deleted and re-saved files are picked up immediately
+  (OS notifications; a folder that refuses a watch falls back to a 2 s check)
 
 ### Gallery grid (`G`)
 
@@ -106,6 +107,12 @@ A scrollable thumbnail grid of everything in the current folder or archive.
   than a real decode, which is the trade every photo browser makes. Files whose
   thumbnail rotation can't be determined from the aspect ratio just decode
   normally, rather than risk showing sideways photos
+- **If you have already browsed the folder in Explorer, its cells come from
+  Explorer's own thumbnail cache** — 6–7 ms each against 595–709 ms to decode the
+  same photographs. The app only *reads* that cache: it never asks Windows to
+  make a thumbnail, so a folder Explorer has never seen simply falls back to
+  decoding (after a few quick misses, so the fallback costs nothing). A cached
+  cell that is too small for the cell is refused rather than stretched
 - **Arrows** move a selection (Left/Right by one cell, Up/Down by one row,
   Home/End to the ends); **Enter** opens the highlighted image; a click opens
   whatever you clicked
@@ -258,7 +265,7 @@ Probing for a working graphics backend...
 ```
 
 ### Saving as (`Ctrl+Shift+A`)
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
 
 `Ctrl+S` always picks the name and the size. `Ctrl+Shift+A` lets you choose
 them: a **file** path, a **format** (`.jpg`, `.png`, `.webp`, `.bmp`, `.tiff`),
@@ -350,19 +357,20 @@ should not quietly do that.
 
 | Key | Action (shipped default — every row rebindable in Settings → Keys) |
 |---|---|
-| `←` `→` | Previous / next image, or previous / next **page** of a document (also `PgUp` / `PgDn` / `Space`) — in **manga mode**, previous / next **turn**, and right-to-left flips the arrows |
+| `←` `→` | Previous / next image, or previous / next **page** of a document (also `PgUp` / `PgDn`) — in **manga mode**, previous / next **turn**, and right-to-left flips the arrows |
 | `↑` `↓` | In the grid: move the selection by a row |
 | `Enter` | In the grid: open the selected image |
 | `Home` / `End` | First / last image (in the grid: first / last cell) |
 | `G` | Toggle the gallery grid |
-| `F` | Toggle fit-view mode (every image fitted; mutually exclusive with `T`) |
+| `F` | Toggle fit-view mode (every image fitted; mutually exclusive with `T`) — also `Space`, which is JPEGView's own Space binding |
 | `Shift+F` | Fill window (crop overflow, single image only) |
+| `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
 | `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
 | `2`-`4` | Zoom presets 2-4 (2x, 4x, 8x by default; one-shot jumps) |
 | `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor). On fits now, arrivals refit, zooms re-hug |
 | `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
 | `K` | Pause / resume the animation |
-| `Space` | Next image — resumes instead, while an animation is paused |
+| `Space` | Toggle 100% (actual size) ↔ fit, like `F` (JPEGView's Space key) — in the grid: move the selection right |
 | `I` | Toggle the side and bottom panels |
 | `L` / `P` | Toggle the left (EXIF) / right (settings) pane alone |
 | `/` | Focus the filter box |
@@ -380,7 +388,7 @@ should not quietly do that.
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
 | `Ctrl+Shift+C` | Copy the current file's path as text |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. Buttons beside *Reset turn* disable themselves when there is nothing to undo |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
 | `Ctrl+Shift+A` | Save as — a panel to pick the file, format, JPEG quality and a maximum long side. Opens pre-filled with exactly what `Ctrl+S` would write, so pressing Save without touching anything gives the same file |
 
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
@@ -389,7 +397,7 @@ should not quietly do that.
 | Touch buttons | Set the file date to now, its EXIF date, or the whole visible folder to EXIF dates |
 | Copy original | The stored picture EXIF-oriented, no crop or turn (Ctrl+C copies framed) |
 | Portable mode | Empty `portable.txt` beside the exe keeps config, thumbs, spreads and wallpaper there |
-| Arrow keys / `Space` / `PgDn` / `PgUp` | Navigate (all rebindable like every other key) |
+| Arrow keys / `PgDn` / `PgUp` | Navigate (all rebindable like every other key) |
 | Mouse wheel | Zoom — or flip images, if that setting is on (`Ctrl`+wheel always zooms) |
 | Mouse side buttons | Same as `←` / `→` (still hardcoded — mouse is not rebindable yet) |
 | Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
@@ -453,7 +461,7 @@ not, the pairing is what changed, and the notice line will say so. A lone
 **spread** is not in this class at all: it fills the width, so it never leaves a
 half empty.
 
-**Every navigation key moves as one unit.** The arrows, `Space`, `PgUp` / `PgDn` and
+**Every navigation key moves as one unit.** The arrows, `PgUp` / `PgDn` and
 both mouse side buttons are all resolved through one rule, so under right-to-left a
 rightward press is *backwards* and nothing can disagree with anything else. The wheel
 is the one exception and always moves forward: it has no side to preserve.
@@ -527,6 +535,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Linear-light downsampling | on | Resample in linear light instead of gamma space — noticeably cleaner on line art |
 | Downscale filter | Hermite | Hermite / Catrom / Lanczos3, applied live |
 | Smooth | off | Low-passes a downscaled page harder than the minimum, which hides a dot grid on some pages and costs edge sharpness. **Off by default** — it depends on the page. See the note below |
+| Pixel art | off | Magnified drawing samples nearest, so a sprite zoomed past 100% stays squares of its own pixels instead of smearing. Zoomed out, the averaging filter still runs (fit a photo and it is unchanged), so the minification never drops pixel rows. Applies to the picture, its zoom tiles and animation frames — grid cells stay as they are. Flipping it re-requests the previews |
 | Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
 | Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB. See the note below |
 | Grid cell size | 150 pt | Side of one gallery-grid thumbnail (64–400 pt). Applies live, no re-decode |
@@ -543,9 +552,11 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
 | Zoom keys 1-4 | 1× toggles 1:1 mode, 2×-8× one-shot jumps (all configurable) |
 | Fit view | off | Sticky fit-to-window (`F`); mutually exclusive with `T`. Photos open at 100% with everything off |
+| Remember zoom and pan per image | off | An image you zoomed or panned comes back the way you left it while you browse; others keep the zoom carried over. Per page of a document, and the memory is session-only — it is gone when the app closes |
+| Show panels | on | Side panels (`I` to hide/show, `L`/`P` per pane). **Remembered between launches**: hide once with `I` and every launch opens chrome-free, JPEGView's minimal state. A fullscreen detour does not touch it — leaving fullscreen restores what you had |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
 | Show archives | on | Lists `.zip`/`.cbz`/`.7z`/`.rar` in a folder beside the images. Off hides them from every scan and the grid |
-| Include subfolders | off | One gallery over the whole tree (sorts apply globally); the 2 s watcher walks it every poll |
+| Include subfolders | off | One gallery over the whole tree (sorts apply globally); the watcher covers it too |
 
 ## Archives
 
@@ -579,7 +590,7 @@ To pick and choose without turning them off, the filter box matches on file name
   skipped rather than shown as broken images. RAR4 is not supported and says so.
   Archives are extracted to `%TEMP%\image-viewer`, released on leaving and on exit.
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
-| Hide title bar | off | No title bar or borders (move with Win+arrows; applies live, kept on restart) |
+| Hide title bar | off | No title bar or borders; the window's picture stays in place through the toggle and only the chrome arrives or leaves (move with Win+arrows; applies live, kept on restart) |
 | Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords show red `also:` markers instead of refusing. `Esc` and mouse buttons are not rebindable |
 | User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
 
@@ -653,6 +664,13 @@ Each entry is checked against the file's modification time and length on every
 read, so a file edited on disk is re-decoded even if nothing remembered to
 invalidate it, and entries are trimmed oldest-first once the cache reaches its cap.
 Turning the setting off stops it being written at all; nothing else changes.
+
+There is a second cache in the picture, one this app does not own: Windows'
+own thumbnail cache, which Explorer fills as you browse. A cell may come from
+there, and it is only ever *read* — the app never asks Windows to make a
+thumbnail, so asking can never make the cold case slower. Cells from that cache
+are never written into this app's own cache, because an entry there has to be the
+decode it claims to be.
 
 ---
 

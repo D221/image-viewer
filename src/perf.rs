@@ -105,8 +105,47 @@ pub const C_FRAMES_WITH_EVENTS: usize = 10;
 /// happily report 100% hits forever.
 pub const C_THUMB_CACHE_HIT: usize = 11;
 pub const C_THUMB_CACHE_MISS: usize = 12;
+/// Files the 2 s watcher saw change on disk *while the app holds state for
+/// them* — the funnel `invalidate_path` clears everything through. This is the
+/// counter that says "the reload machinery fired", to be set against
+/// `C_LOAD_FAILED` and the decode counts: a probe that mutates a file under a
+/// running viewer can assert the machinery acted on it, without a screenshot.
+pub const C_WATCHED_CHANGES: usize = 13;
+/// Decodes that landed in `failed` (Preview or Full). A permanently poisoned
+/// image shows only here — a session-long failure otherwise looks identical to
+/// a slow file. The self-healing rule is: the next stamp change clears the
+/// entry, so this counter may tick up mid-write (a half-written file is a
+/// legitimate failure) but a *healed* change keeps moving; a file that failed
+/// once on a toe and gets no further transaction is a `failed` entry that
+/// never leaves.
+pub const C_LOAD_FAILED: usize = 14;
 
-const N_COUNTERS: usize = 13;
+/// `ReadDirectoryChangesW` records the OS delivered, ever — **including the
+/// ones the app chose to ignore**. It is the other half of
+/// `C_WATCHED_CHANGES`: a probe that mutates a file can tell "the OS never
+/// told us" (this stays 0) from "we were told and did nothing" (this moved,
+/// `C_WATCHED_CHANGES` did not). A watcher that is silently broken otherwise
+/// looks exactly like a quiet folder.
+pub const C_WATCH_EVENTS: usize = 15;
+/// Folder watches that could not be started, so the 2 s poll is standing in.
+/// One per folder open in the normal case is 0; a non-zero value on a
+/// particular folder (a network share) is the explanation for why that folder
+/// is still polled.
+pub const C_WATCHER_FALLBACK: usize = 16;
+/// Grid cells painted from **Explorer's** thumbnail cache instead of decoded
+/// here (`SIIGBF_INCACHEONLY`, so no extraction is ever caused). The one counter
+/// that can tell where a cell came from: without it, a grid served by the shell
+/// and a grid served by our own cache look identical in a perf report, and
+/// `tests/probe_thumb_cache.ps1` could not tell them apart either.
+pub const C_SHELL_THUMB: usize = 17;
+/// Grid-sized asks that the shell's cache did not have.
+///
+/// Two counters and not one because they answer different questions: the hits are
+/// the win, and the misses are what a folder pays for the chance at one — and,
+/// with `SHELL_MISS_GIVEUP`, how far the asking went before it stopped.
+pub const C_SHELL_MISS: usize = 18;
+
+const N_COUNTERS: usize = 19;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
@@ -122,6 +161,12 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "frames with input events",
     "grid thumbnails from cache",
     "grid thumbnails decoded (cache miss)",
+    "files reloaded (watcher saw a change)",
+    "loads failed into `failed`",
+    "folder-watch events received",
+    "folder watches that fell back to polling",
+    "grid cells from the Windows shell cache",
+    "shell cache misses (grid-sized asks)",
 ];
 
 struct Metric {

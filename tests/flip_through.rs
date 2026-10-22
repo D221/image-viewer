@@ -7,7 +7,7 @@
 //! never load" report. Neither half was reachable from a test, because both
 //! lived in a binary.
 
-use image_viewer::{decode_panel_px, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
+use image_viewer::{plan_jobs, ImgKey, Job, Kind, Loader, Plan};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -160,6 +160,11 @@ fn plan<'a>(
         current_stale: false,
         target_dim: 1024,
         radius: 3,
+        // These tests pin the *window's* behaviour, not its budget: no file
+        // lengths, unlimited spend, so every walked neighbour is planned
+        // exactly as the plan always did.
+        file_bytes: &[],
+        preload_budget: u64::MAX,
     }
 }
 
@@ -282,9 +287,25 @@ fn a_wanted_job_that_delivered_is_not_run_again() {
 fn a_re_queued_job_keeps_its_priority_and_target_size() {
     // A re-request that loses `target_dim` silently decodes at the wrong size,
     // which shows up as a soft image much later than the bug that caused it.
+    //
+    // The first attempt is **latched mid-run until the second `replace` has
+    // gone through** — the same mechanism the Harness spells `hold_ms`: a job
+    // held in flight long enough to be caught mid-run. The precondition is a
+    // *mid-flight* re-request, and the earlier version of this test only
+    // hoped for one: it pulsed through a 2 ms poll, and whenever the whole
+    // first attempt delivered inside that window (its cold cost here is a few
+    // tenths of a millisecond, and slower still under the parallel suite)
+    // the second `replace` arrived after delivery. By `replace`'s own
+    // contract that is a *new* request for a fresh decode — correct loader
+    // behaviour, wrong test — and the run count came back three against an
+    // assert about re-queueing. Reproduced at 1-in-12 by looping the target;
+    // the instrumented trace on the loss: replace#2 at t=2.214 ms, the job
+    // already finished and delivered at t=0.087 ms.
     let f = files(4);
     let seen: Arc<Mutex<Vec<(u32, u32)>>> = Arc::new(Mutex::new(Vec::new()));
     let seen2 = seen.clone();
+    let go = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let go2 = go.clone();
     let (tx, rx) = channel::<(PathBuf, Kind, Done)>();
     let loader = Loader::spawn(
         1,
@@ -292,6 +313,10 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
         move |job: &Job| {
             seen2.lock().unwrap().push((job.prio, job.target_dim));
             let abandon = seen2.lock().unwrap().len() == 1;
+            // Held only by the first attempt; the re-queued retry runs free.
+            while abandon && !go2.load(std::sync::atomic::Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
             (
                 (job.path().to_path_buf(), job.kind, Done::Delivered),
                 !abandon,
@@ -310,17 +335,27 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
     while seen.lock().unwrap().is_empty() {
         std::thread::sleep(Duration::from_millis(2));
     }
-    // Same job wanted again while in flight; it abandons, so it re-queues.
+    // Same job wanted again while the latch holds it in flight; it abandons
+    // on release, so it re-queues. Released **after** this `replace` — the
+    // replace is the precondition, not the payload.
     loader.replace(vec![Job {
         key: ImgKey::first(&f[0]),
         kind: Kind::Preview,
         prio: 12,
         target_dim: 2048,
     }]);
+    go.store(true, std::sync::atomic::Ordering::Release);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while seen.lock().unwrap().len() < 2 {
         assert!(Instant::now() < deadline, "re-queued job never ran");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Settle the whole queue before reading, not just the seen count: the
+    // re-queued attempt must have finished its own bookkeeping, or what the
+    // strand test pins below would be read mid-flight.
+    while loader.outstanding() > 0 {
+        assert!(Instant::now() < deadline, "re-queued job never finished");
         std::thread::sleep(Duration::from_millis(2));
     }
     while rx.try_iter().next().is_some() {}
@@ -331,6 +366,38 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
         (12, 2048),
         "re-queued job must keep its priority and target size, got {:?}",
         seen[1]
+    );
+    drop(rx);
+}
+
+/// `wanted` stores the viewer's desired job while it decodes; a delivery
+/// satisfies it, and must **clear it**. `wanted_but_idle` is the strand
+/// signal — "the viewer wants a picture nobody is going to fetch" — and a
+/// delivered job is not a strand: nobody needs to fetch it again. Keeping
+/// the entry past its own delivery fired the signal permanently whenever the
+/// loader actually idled, which the app never sees (every `schedule`
+/// recomposes `wanted`, so the stale entry washes out between plans) and a
+/// test that stops replacing saw for good: measured on the instrumented
+/// flake above, outstanding 0 / queued 0 / busy 0 / `wanted_but_idle` 1.
+#[test]
+fn a_delivered_job_is_not_left_in_the_wanted_map() {
+    let f = files(4);
+    let mut h = Harness::new(1, delivered_always, 30u64);
+
+    h.loader.replace(vec![Job {
+        key: ImgKey::first(&f[0]),
+        kind: Kind::Preview,
+        prio: 0,
+        target_dim: 1024,
+    }]);
+    h.wait_finished(1, "delivery");
+    while h.loader.outstanding() > 0 {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        h.loader.wanted_but_idle(),
+        0,
+        "a delivered job must not read as a strand after the loader goes idle"
     );
 }
 
@@ -404,7 +471,7 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
     let final_index = N - 6; // window is N-9..=N-3, clear of everything above
     steps.push(final_index);
 
-    let mut plan_at = |h: &mut Harness, cached: &mut HashSet<ImgKey>| {
+    let plan_at = |h: &mut Harness, cached: &mut HashSet<ImgKey>| {
         h.drain();
         for p in h.delivered.iter().filter(|(_, k)| *k == Kind::Preview).map(|(p, _)| p) {
             cached.insert(ImgKey::first(p));
@@ -592,6 +659,8 @@ fn the_plan_wraps_around_a_short_folder() {
         current_stale: false,
         target_dim: 1024,
         radius: 3,
+        file_bytes: &[],
+        preload_budget: u64::MAX,
     });
     let mut seen = HashSet::new();
     for j in &jobs {
@@ -1529,6 +1598,8 @@ fn stale_current_is_planned_even_though_it_is_cached() {
         current_stale: stale,
         target_dim: 2400,
         radius: 0,
+        file_bytes: &[],
+        preload_budget: u64::MAX,
     };
 
     assert!(
@@ -1569,6 +1640,8 @@ fn a_stale_current_is_not_planned_when_it_failed() {
         current_stale: true,
         target_dim: 2400,
         radius: 0,
+        file_bytes: &[],
+        preload_budget: u64::MAX,
     });
     assert!(jobs.is_empty(), "a failed image is not retried by a resize");
 }

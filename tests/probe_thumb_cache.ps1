@@ -12,6 +12,8 @@ param(
 #   G pressed        -> cells painted            (screenshot of the window)
 #   first open       -> entries on disk          (%LOCALAPPDATA%\image-viewer\thumbs)
 #   second open      -> cache HITS in the report (%TEMP%\image-viewer-perf.txt)
+#   shell counters   -> misses, and no hits      (the Windows shell cache was
+#                       asked, found nothing, and did not extract)
 #
 # The report is written by `on_exit`, so the window has to be *closed* and not
 # killed; a killed process reports nothing and looks like a broken feature.
@@ -152,6 +154,14 @@ function Report-Field([string]$Label) {
     if (-not $line) { return "ABSENT" }
     ($line.Line -replace '\s+', ' ').Trim()
 }
+# The same, as a number. -1 means the counter was not in the report at all, which
+# is a failure of its own and not a value of zero.
+function Report-Counter([string]$Label) {
+    $line = Report-Field $Label
+    if ($line -eq "NO-REPORT" -or $line -eq "ABSENT") { return -1 }
+    if ($line -match "(\d+)\s*$") { return [int]$Matches[1] }
+    return -1
+}
 
 # ---- scratch folder: the *residue*, which is the whole point -----------------
 # Large scans with no embedded EXIF thumbnail (12-20 ms if they had one, ~700 ms
@@ -163,6 +173,13 @@ $big = Get-ChildItem "test-images\*" -File |
        Where-Object { $_.Length -gt 15MB -and $_.Extension -match '^\.(jpg|jpeg|png)$' } |
        Select-Object -First 3
 foreach ($f in $big) { Copy-Item $f.FullName (Join-Path $scratch $f.Name) }
+# Six more cells, so the Windows shell cache's *give-up* rule is observable: with
+# three files, "stop asking after four misses" and "ask once per cell" look the
+# same, and the difference between them is the whole point of the rule.
+foreach ($f in $big) {
+    Copy-Item $f.FullName (Join-Path $scratch ("copy1-" + $f.Name))
+    Copy-Item $f.FullName (Join-Path $scratch ("copy2-" + $f.Name))
+}
 if (@(Get-ChildItem $scratch -File).Count -eq 0) {
     Write-Host "REFUSING: no large files in test-images/ to probe with." -ForegroundColor Red
     Write-Host "The residue - files with no embedded thumbnail - is the whole point here." -ForegroundColor Red
@@ -238,6 +255,13 @@ function Open-Grid([string]$Tag) {
         Hits      = (Report-Field "grid thumbnails from cache")
         Misses    = (Report-Field "grid thumbnails decoded")
         ToThumbs  = (Report-Field "gallery open")
+        # The Windows shell cache's own counters. The shell is asked for a cell
+        # between our disk cache and the decode, so a folder Explorer has never
+        # seen must show *misses* (the ask was made and found nothing) and *no
+        # hits* (there was nothing to hit) - and the misses are bounded, because
+        # the app stops asking a folder that keeps answering nothing.
+        ShellHits   = (Report-Counter "grid cells from the Windows shell cache")
+        ShellMisses = (Report-Counter "shell cache misses (grid-sized asks)")
     }
 }
 
@@ -262,6 +286,9 @@ Write-Host "  warm : $($warm.Misses)"
 Write-Host "  cold : $($cold.ToThumbs)"
 Write-Host "  warm : $($warm.ToThumbs)"
 Write-Host ""
+Write-Host "  shell cache, cold: hits $($cold.ShellHits), misses $($cold.ShellMisses)"
+Write-Host "  shell cache, warm: hits $($warm.ShellHits), misses $($warm.ShellMisses)"
+Write-Host ""
 Write-Host "  shots: $($cold.Shot)  $($warm.Shot)"
 
 $ok = $true
@@ -272,6 +299,30 @@ if ($warm.Hits -eq "ABSENT" -or $warm.Hits -eq "NO-REPORT") {
     Write-Host "  FAIL the report has no cache-hit counter" -ForegroundColor Red; $ok = $false
 } elseif ($warm.Hits -match "\s0(\s|$)") {
     Write-Host "  FAIL the warm run reported 0 cache hits" -ForegroundColor Red; $ok = $false
+}
+# The shell's counters. A miss must never have become a hit, because a hit means
+# something extracted - and the app must never extract, since the whole point of
+# the call is that it cannot make the cold case slower by starting work behind
+# our back. And the misses are bounded per folder: the app stops asking a folder
+# that keeps answering nothing, so ten cells cost at most four asks.
+if ($cold.ShellHits -lt 0 -or $warm.ShellHits -lt 0) {
+    Write-Host "  FAIL the report has no Windows-shell-cache counters" -ForegroundColor Red; $ok = $false
+} else {
+    if ($cold.ShellHits -ne 0) {
+        Write-Host "  FAIL the cold run reported $($cold.ShellHits) shell hits; a hit means something extracted" -ForegroundColor Red; $ok = $false
+    }
+    if ($warm.ShellHits -ne 0) {
+        Write-Host "  FAIL the warm run reported $($warm.ShellHits) shell hits; a hit means something extracted" -ForegroundColor Red; $ok = $false
+    }
+    if ($cold.ShellMisses -lt 1) {
+        Write-Host "  FAIL the cold run never asked the shell cache" -ForegroundColor Red; $ok = $false
+    }
+    if ($cold.ShellMisses -gt 4) {
+        Write-Host "  FAIL the cold run asked the shell $($cold.ShellMisses) times; the give-up bound is 4 per folder" -ForegroundColor Red; $ok = $false
+    }
+    if ($warm.ShellMisses -gt 4) {
+        Write-Host "  FAIL the warm run asked the shell $($warm.ShellMisses) times; the give-up bound is 4 per folder" -ForegroundColor Red; $ok = $false
+    }
 }
 Write-Host ""
 Write-Host $(if ($ok) { "VERDICT: PASS" } else { "VERDICT: FAIL" }) -ForegroundColor $(if ($ok) { "Green" } else { "Red" })
