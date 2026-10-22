@@ -24,7 +24,7 @@
 mod exif_fixtures;
 use exif_fixtures::{jpeg, jpeg_with_thumbnail, Endian};
 use image_viewer::{
-    load_image_preview_full, load_thumbnail, prune_thumb_cache, read_cached_thumbnail,
+    load_image_preview_full, load_thumbnail, prune_cache, read_cached_thumbnail,
     set_thumbnail_cache, thumb_cache_entry, thumb_stamp, write_cached_thumbnail, ImageData,
 };
 use std::path::{Path, PathBuf};
@@ -635,11 +635,11 @@ fn a_trim_removes_the_oldest_entries_and_stops_under_the_cap() {
         made.push((entry, len));
     }
     assert!(total > 0);
-    let all = prune_thumb_cache(&root, u64::MAX);
+    let all = prune_cache(&root, u64::MAX);
     assert_eq!(all, total, "a cap that is never reached must delete nothing");
 
     // A cap whose target (4/5 of it) is comfortably under half of what is there.
-    let left = prune_thumb_cache(&root, total / 4);
+    let left = prune_cache(&root, total / 4);
     assert!(left <= total / 4, "left {left} of {total}, cap was {}", total / 4);
     assert!(left < total, "a trim under its cap must delete something");
     let survivors: u64 = made.iter().filter(|(p, _)| p.exists()).map(|(_, l)| *l).sum();
@@ -669,7 +669,7 @@ fn a_trim_removes_the_oldest_entries_and_stops_under_the_cap() {
 #[test]
 fn a_trim_of_a_cache_that_does_not_exist_is_a_no_op() {
     let f = Fixture::new();
-    assert_eq!(prune_thumb_cache(&f.dir.path().join("nope"), 1024), 0);
+    assert_eq!(prune_cache(&f.dir.path().join("nope"), 1024), 0);
 }
 
 // ---------------------------------------------------------------------------

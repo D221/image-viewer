@@ -530,6 +530,7 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Pixel art | off | Magnified drawing samples nearest, so a sprite zoomed past 100% stays squares of its own pixels instead of smearing. Zoomed out, the averaging filter still runs (fit a photo and it is unchanged), so the minification never drops pixel rows. Applies to the picture, its zoom tiles and animation frames — grid cells stay as they are. Flipping it re-requests the previews |
 | Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
 | Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB. See the note below |
+| Cache previews of large pictures on disk | on | Keep the picture itself in `%LOCALAPPDATA%\image-viewer\previews`, capped at 512 MB, so showing a large scan again does not decode it again. See the note below |
 | Grid cell size | 150 pt | Side of one gallery-grid thumbnail (64–400 pt). Applies live, no re-decode |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
 | Mouse wheel flips images | off | Wheel pages instead of zooming (`Ctrl`+wheel still zooms) |
@@ -663,6 +664,31 @@ there, and it is only ever *read* — the app never asks Windows to make a
 thumbnail, so asking can never make the cold case slower. Cells from that cache
 are never written into this app's own cache, because an entry there has to be the
 decode it claims to be.
+
+### Why the preview cache exists
+
+Decoding a large scan is the floor of this viewer: a 28 MB JPEG takes **690 ms**
+here before the first pixels, and no amount of cleverness moves that — every
+pixel needs every DCT coefficient, so the entropy decode is the floor for any
+conformant decoder. That is fine the first time. It is not fine for a revisit,
+a slideshow, or flipping back through a chapter, where the same file is decoded
+again for nothing.
+
+So the previews of large pictures are kept on disk, and showing one again costs
+**22-50 ms** instead of 690 — measured, release build, real photographs. Two
+things worth knowing:
+
+- **Only large pictures are kept.** A small picture is decoded in one pass that
+  produces the picture *and* the full-resolution version together, so keeping
+  the picture alone would mean decoding the file twice — slower than not
+  caching at all. Large pictures are decoded in two steps anyway, so the kept
+  copy is exactly what the decoder produced.
+- **Turning it off frees the space.** The setting is a promise about the disk,
+  not only about the writing: switching it off deletes what it wrote. The next
+  visit to those pictures decodes them again, which is what "off" means.
+
+The cells' cache and this one are different caches on purpose: a grid cell is
+256 px and 13-80 KB, a preview is the size of the window and 1.8-3.2 MB.
 
 ---
 

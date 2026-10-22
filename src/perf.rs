@@ -144,8 +144,18 @@ pub const C_SHELL_THUMB: usize = 17;
 /// the win, and the misses are what a folder pays for the chance at one — and,
 /// with `SHELL_MISS_GIVEUP`, how far the asking went before it stopped.
 pub const C_SHELL_MISS: usize = 18;
+/// Previews served from the **preview store on disk** instead of decoded.
+///
+/// The counter that says whether the store is doing anything at all: without it
+/// a report cannot tell "the store is empty" from "the store is never asked".
+pub const C_PREVIEW_STORE_HIT: usize = 19;
+/// Times the store was asked and did not have the picture.
+///
+/// Counted even for a source too small to be stored, because that is the shape
+/// of the tax: every preview decode asks.
+pub const C_PREVIEW_STORE_MISS: usize = 20;
 
-const N_COUNTERS: usize = 19;
+const N_COUNTERS: usize = 21;
 const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "display-gap frames (regression guard)",
     "queued jobs dropped by rebuild",
@@ -167,6 +177,8 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "folder watches that fell back to polling",
     "grid cells from the Windows shell cache",
     "shell cache misses (grid-sized asks)",
+    "previews served from the on-disk store",
+    "store asks that did not have the picture",
 ];
 
 struct Metric {

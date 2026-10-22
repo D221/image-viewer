@@ -2425,6 +2425,13 @@ impl MyApp {
         set_downscale_smoothing(config.smooth_downscale);
         image_viewer::set_wide_gamut_conversion(config.convert_wide_gamut);
         set_thumbnail_cache(config.thumbnail_cache);
+        image_viewer::set_preview_store(config.preview_store);
+        // The preview store's thread, started once and only when the store is
+        // on: the encode it does must not land in front of the first pixels, so
+        // it cannot happen on the worker that decoded the picture.
+        if config.preview_store {
+            image_viewer::start_preview_store();
+        }
         set_nav_overrides(&config.keybindings);
 
         if !config_path.exists() {
@@ -9985,6 +9992,40 @@ impl eframe::App for MyApp {
                         // them at ~700 ms each on a folder of large scans — to buy
                         // nothing at all.
                         set_thumbnail_cache(self.config.thumbnail_cache);
+                        self.config.save(&self.config_path);
+                    }
+                    if ui
+                        .checkbox(
+                            &mut self.config.preview_store,
+                            "Cache previews of large pictures on disk",
+                        )
+                        .on_hover_text(format!(
+                            "Up to {} of previews, so showing a large scan again does not \
+                             decode it again (690 ms to decode, 22-50 ms to read back, \
+                             measured). Stored in {}.",
+                            human_bytes(image_viewer::PREVIEW_STORE_MAX_BYTES),
+                            image_viewer::preview_store_root().display()
+                        ))
+                        .changed()
+                    {
+                        // Nothing to invalidate, for the same reason the cell cache
+                        // has nothing to invalidate: a stored preview is the
+                        // decode's own pixels, so it stays correct whichever way
+                        // this goes, and dropping them would cost a re-decode of
+                        // every large picture for nothing.
+                        image_viewer::set_preview_store(self.config.preview_store);
+                        if self.config.preview_store {
+                            // Turning it **on** has to start the thread that does
+                            // the encoding: the store is written by a thread of
+                            // its own so the encode never lands in front of the
+                            // first pixels.
+                            image_viewer::start_preview_store();
+                        } else {
+                            // Turning it **off** means off, disk included: a
+                            // setting that stops the writing but leaves 512 MB
+                            // behind is a promise kept in letter only.
+                            image_viewer::clear_preview_store();
+                        }
                         self.config.save(&self.config_path);
                     }
                     let mut new_sort = self.config.sort;

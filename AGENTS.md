@@ -11,13 +11,13 @@ that are already in memory. One crate, no workspace, no CI.
   first failing target, and `--lib` (the in-crate `perf` tests) is a target no
   per-target command below ever runs.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
-- 30 targets, 27 of them the test files `bench`, `bench_browse`, `bench_resize`,
+- 31 targets, 28 of them the test files `bench`, `bench_browse`, `bench_resize`,
   `bench_rotate_save`, `bench_startup`, `bench_variants`, `color_profiles`,
   `drops`, `embedded_thumbs`, `filter_and_paging`, `flip_through`, `formats`,
   `icon`, `integration`, `keybindings`, `multiframe`, `pathological`,
-  `preload_budget`, `property`, `ratings`, `renderer`, `rotate_save`, `spreads`,
-  `standard`, `thumb_cache`, `unit`, `watcher` — the other three are `--lib`, the
-  binary's own target and doc-tests.
+  `preload_budget`, `preview_store`, `property`, `ratings`, `renderer`,
+  `rotate_save`, `spreads`, `standard`, `thumb_cache`, `unit`, `watcher` — the
+  other three are `--lib`, the binary's own target and doc-tests.
 - **`cargo bench` runs nothing.** `tests/bench.rs` and `tests/bench_variants.rs`
   use `criterion_main!` but are ordinary `{test}` targets with the default
   harness (there is no `[[bench]] harness = false` in `Cargo.toml`), so
@@ -129,7 +129,7 @@ that are already in memory. One crate, no workspace, no CI.
   lived in `main.rs`.
 - `src/main.rs` (~4.3k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
   clipboard, wallpaper, Windows integration. Unreachable from a test.
-- `src/perf.rs` (16 latency metrics, 19 always-on counters), `src/fileassoc.rs`
+- `src/perf.rs` (16 latency metrics, 21 always-on counters), `src/fileassoc.rs`
   (HKCU registration), `src/icon.rs` (generated icon artwork).
 - `test-images/` is gitignored. `test-images/JPEGView_L` and
   `test-images/oculante` are reference checkouts, not fixtures.
@@ -625,6 +625,49 @@ that are already in memory. One crate, no workspace, no CI.
     it trustworthy, and the distance from our decode (1.8-5.4 codes per channel
     on real files, where a different file scores 36-195) is what says the cell
     is the same picture and needs no swap.
+- **A cache that stands in for a decode must BE the decode, or it is a different
+  picture.** The preview store on disk (`preview_store` in `lib.rs`,
+  `%LOCALAPPDATA%\image-viewer\previews`) answers the one question the cell
+  cache cannot: showing a large picture again without decoding the file again
+  (the decode is 547-726 ms measured; the store is 22-50 ms). Five decisions
+  that are not obvious, and the first one is the design:
+  * **What may be stored is decided by the shape of the decode, not by its
+    cost.** Only a preview that came *without* a full-resolution buffer beside
+    it may be stored, because a stored preview is used **instead of** a decode
+    and so has to be exactly what the decode produced. A smaller source is
+    decoded in one pass that yields the preview *and* the full together, so
+    storing its preview alone would mean decoding the file a second time for
+    the other half: the store would make that file **slower**. This is why the
+    threshold is 12 MP and not "anything big": the DCT path and the
+    too-big-to-hold path are the two that qualify.
+  * **The key is neither a bucket nor the target.** A preview is decoded *for
+    the panel*, so a fixed bucket has to be resampled to the panel on arrival
+    (20-30 ms in this crate, which is most of what the store saves), and a key
+    that includes the target is thrown away by every resize. So the entry
+    carries **the target it was decoded for** and the existing `needs_refine`
+    rule judges it — the same rule, the same inputs, as the in-memory cache.
+    One entry per picture, and a resize behaves the way it already does.
+  * **The lossy option is not automatically the small one, and the fast one is
+    not automatically the big one.** Measured here: a preview encode is
+    **14-33 ms as PNG** against **39-77 ms as JPEG q90**, and the decode is
+    faster as PNG too, because the `image` crate's JPEG encoder is the slow
+    pure-Rust one. JPEG's only win is size (0.4-0.7 MB against 1.8-3.2 MB) and
+    its loss is small (0.08-0.14 codes per channel) — so PNG wins on time *and*
+    fidelity and loses only on disk, and the disk is capped at 512 MB.
+  * **A hit is a read *and a decode*, not a read.** The item's "2-3 ms" was the
+    raw file read; an entry is a compressed picture, and getting the pixels back
+    out of it costs 12-24 ms. The honest number for a revisit is 22-50 ms, and
+    it is still fifteen to thirty times sooner than the decode.
+  * **The store holds the source's pixels, not a rendering of them.** The
+    wide-gamut conversion is applied by the wrapper around the decode, so an
+    entry written before it is converted on the way out exactly as a decode
+    would be, and toggling the setting changes the stored picture the way it
+    changes a decoded one. The cell cache has the *other* shape (its cells are
+    written after their conversion), and the two must not be confused.
+  * **The encode must not land in front of the first pixels**, which is the one
+    regression this feature is not allowed to cause (§5's cold floor). The
+    decode hands its pixels to a store thread and returns; the encode happens
+    there, off the critical path and off the worker that decoded the picture.
 - **Memory is the failure mode that looks like a hang.** `MAX_FULL_PIXELS` is
   300 MP = 1.2 GB for one buffer, and every cached preview carries one for free.
   Bounded by count only: `PREVIEW_CACHE_CAP` 16 (LRU), `MAX_TILES` 64 × 1024
@@ -1962,6 +2005,17 @@ an edit.
   byte-offset check that the call really is after the block — and it was verified
   by moving the call back inside, where it fails. **When the defect is a value
   computed at the wrong time, presence is not the property; position is.**
+- **A source scan that searches for a *word* finds the word in a comment**, and
+  a comment that explains the code tends to quote the very call the scan is
+  looking for — in the wrong order. Two scans written this round failed on
+  *correct* code for that reason: the write's own comment says "renamed into
+  place: `fs::rename` replaces on Windows", which is before the code that
+  renames; and a doc comment that mentions a function by name puts the same
+  text in the file, so a search for `fn name(` finds the **comment** first and
+  then takes the first `{` after it, which is a brace inside the comment.
+  `tests/preview_store.rs` therefore strips comments before searching and
+  anchors its function search on a line start. **A scan that cannot tell code
+  from prose is a scan of the prose.**
 - **A paste can land at the wrong anchor, and nothing in the file says so.**
   `README.md` carried **three** `# Image Viewer` headings, a stray keyboard row at
   the top of the "Saving as" section, and one table row twice in a row — all from

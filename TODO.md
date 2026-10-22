@@ -642,50 +642,116 @@ members (`%TEMP%`) and network paths - both plausible, both the safe direction
 (a decode). EXIF-rotated JPEGs go to the shell as they are and Explorer applies
 the tag itself, which is its own contract and is not tested here.
 
-### 9.2 A persisted preview tier — the thing Turbo is missing
+### 9.2 A persisted preview tier - done
 
 **Known.** FlyPhotos keeps an **800 px preview** as a JPEG blob in SQLite,
 `MaxItemCount = 20_000`, LRU with batch eviction
 (`Services\DiskCacherWithSqliteFaster.cs`), and that is what its hold-to-browse
-rides on; the HQ tier is separate and parks during a burst. Ours is
+rides on; the HQ tier is separate and parks during a burst. Ours was
 `PREVIEW_CACHE_CAP` 16 in memory and nothing on disk. **The browse mode itself
-is not missing** — `block_while_loading` off is ImageGlass's "Turbo" under
+is not missing** - `block_while_loading` off is ImageGlass's "Turbo" under
 another name (advance at key rate and let `replace()` drop the skipped decodes),
-on is "Sequential". What is missing is the cheap source that makes Turbo *show*
+on is "Sequential". What was missing is the cheap source that makes Turbo *show*
 something instead of holding the previous frame for a decode.
 
 **What it buys.** A revisit, a slideshow loop, or flipping back through a
-chapter stops decoding the file again: against this repo's own 380-415 ms preview
-decode on a 27 MB photo, a 2-3 ms read is the whole difference.
+chapter stops decoding the file again. Measured here, the decode of a large scan
+is **547-726 ms** and the same picture from the store is on screen in **22-50 ms**
+- fifteen to thirty times sooner - and the whole-file read it skips is 5-60 ms
+more on a slow disk.
 
-**Four decisions, and the first one is the design.**
+**Delivered.** `preview_store` in `lib.rs`: `%LOCALAPPDATA%\image-viewer\previews`,
+one entry per picture, a PNG payload behind a small binary header. It is asked
+by the decode path **before the file is read** and written by a **thread of its
+own** after the picture is on screen. A setting (`Cache previews of large
+pictures on disk`, on by default) turns it off, and turning it off deletes what
+it wrote: a setting that stops the writing but leaves 512 MB behind is a
+promise kept in letter only.
 
-- *The key.* A preview is sized to the panel (`decode_target`), so either it is
-  stored at a fixed bucket (1600 or 2048 long side) and resampled to the panel on
-  arrival — one entry serves every window size — or the key includes the target,
-  and then every resize invalidates the cache it exists to save.
-- *Lossless or not.* At this repo's own measured 1.5 bytes/pixel a 1600x1067
-  lossless entry is ~2.5 MB, so 2 GB is ~800 photos against FlyPhotos' 20 000,
-  which is why it uses JPEG. This is a **different decision from §5's**: the cell
-  rule exists because a *hit* must be the decode it replaced, while a preview is
-  on screen for a moment and then replaced by the full image. Defensible there,
-  rejected here — do not inherit either answer.
-- *What `full` means.* Today one decode yields both. A disk hit has no full
-  buffer, which is the existing `full: None` + `below_target` shape (grid
-  thumbs, JPEG over 12 MP) and `needs_full` already handles it. What changes is
-  the accounting: a cached preview no longer implies a cached full, so the
-  memory ceiling `PREVIEW_CACHE_CAP x MAX_FULL_PIXELS` describes stops applying
-  to hits and has to be re-stated rather than assumed.
-- *Where the encode is paid.* Milliseconds at 1600 px, but it must land **after**
-  the preview is on screen, on a worker, or it becomes a tax on the first visit —
-  the one regression this feature is not allowed to cause (§5's cold floor).
+**The four decisions, as taken.** The first one is the design.
 
-**Unverified:** the per-entry encode cost, and the cold-visit delta if it is paid
-inline. Measure with `bench_browse`'s time-to-first-pixels before building the
-store. The four cache guards in `tests/thumb_cache.rs` transfer unchanged,
-including the stamp being mtime **and** length.
+- *The key.* Neither of the two shapes the item offered. A preview is decoded
+  **for the panel**, so a fixed bucket would have to be resampled to the panel
+  on arrival - and this crate's own resample is 20-30 ms, which is most of what
+  the store saves. A key that includes the target would be thrown away by every
+  resize. So the key is the **path and the page**, and the entry carries the
+  target it was decoded for; the existing [`needs_refine`] rule then judges
+  whether it may still be used, exactly as it judges the in-memory cache's
+  preview. One entry per picture, and a resize behaves the way it already does.
+- *Lossless or not.* **Lossless**, and not because the item's rule was inherited:
+  measured, PNG is *also the faster of the two* here. The `image` crate's JPEG
+  encoder is the slow pure-Rust one - a preview encode is **14-33 ms** as PNG
+  against **39-77 ms** as JPEG q90 - and the decode is faster too (12-24 ms
+  against 12-26 ms). JPEG's only win is size (0.4-0.7 MB against 1.8-3.2 MB),
+  and its loss is small (mean 0.08-0.14 codes per channel), so the trade the
+  item anticipated - fidelity against disk - does not arise: PNG wins on time
+  *and* fidelity and loses only on disk. The disk is capped at 512 MB, which is
+  about 170 of them.
+- *What `full` means.* A stored preview carries **no full-resolution buffer**,
+  which is the shape a large source's decode already has (it is decoded
+  DCT-scaled), so the app asks for the full separately, as it already does for
+  a big JPEG, and nothing downstream changes. **This is why only sources over
+  12 MP are stored**: a smaller source is decoded in one pass that yields the
+  preview *and* the full together, so storing its preview alone would mean
+  decoding the file a second time for the other half - the store would make
+  that file slower, not faster. The memory ceiling `PREVIEW_CACHE_CAP x
+  MAX_FULL_PIXELS` therefore describes the in-memory cache only, and a hit
+  never carries a full buffer at all.
+- *Where the encode is paid.* **After the picture is on screen, on a thread of
+  its own.** The decode hands its pixels to a store thread and returns; the
+  encode (14-33 ms) happens there. It cannot land in front of the first
+  pixels, which is the one regression this feature is not allowed to cause
+  (the cold floor), and it cannot delay the next job on the worker that
+  decoded the picture.
 
-### 9.3 Preload bounded by bytes — done (256 MB)
+**Measured** - release, this box, real photographs in `test-images/`, the
+panel target 957 px:
+
+| file | size | preview | decode | PNG encode | PNG on disk | PNG hit |
+|---|---|---|---|---|---|---|
+| 0_booklet_inside.jpg | 28.4 MB | 2131x703 | 691 ms | 19.7 ms | 3.2 MB | 31.5 ms |
+| 1_acover.jpg | 27.3 MB | 1024x1024 | 706 ms | 14.3 ms | 1.76 MB | 21.9 ms |
+| FFA02639.jpg | 18.1 MB | 1265x1896 | 547 ms | 33.1 ms | 3.09 MB | 49.5 ms |
+| image001.jpg | 27.7 MB | 1910x936 | 726 ms | 23.3 ms | 3.07 MB | 36.4 ms |
+
+"PNG hit" is the whole cost of showing it again: read the entry (0.5-2.1 ms of
+raw read) and decode the PNG (12-24 ms). **The item's "2-3 ms read" is the raw
+read, not the hit**: an entry is a compressed picture, and getting the pixels
+back out of it is a decode. The honest number is 22-50 ms, and it is still
+fifteen to thirty times sooner than the decode.
+
+**The four cache guards in `tests/thumb_cache.rs` transfer unchanged**, including
+the stamp being mtime **and** length, and two more were needed: the entry is
+keyed by path *and* page (a multi-page document's pages are different pictures),
+and the entry carries the source's size, the EXIF tag, the crop grid and the
+colour, because a hit that could not answer what the app asks of a preview
+would be a different picture wearing the same pixels.
+
+**Red-verified**, each mutation reintroduced and the named test failing: the
+stamp check (`a_changed_file_is_a_miss`), the path-and-page check
+(`another_path_and_another_page_are_misses`), the truncation check
+(`a_truncated_entry_is_a_miss`), the header's magic and version
+(`a_damaged_header_is_a_miss`), the usability rule
+(`a_preview_for_the_wrong_target_is_refused`), the "no full buffer" rule
+(`only_a_preview_without_a_full_buffer_is_worth_storing`), and three source
+scans - the store asked *before* the file is read, the hand-off non-blocking,
+and the write renamed into place.
+
+**Not claimed.** The end-to-end run in the app - a revisit painting from the
+store - is **not** measured here: no GUI can be launched from this session
+(`AGENTS.md`), and the store's own root is the real `%LOCALAPPDATA%`, so a test
+cannot drive the decode path against a temporary one without a hook this
+feature does not have. What is proven is the store's round trip (a hit is the
+decode's own pixels, byte for byte), the policy (what is stored and what is
+not), and the wiring (asked before the read, written after the picture). The
+counters `previews served from the on-disk store` and `store asks that did not
+have the picture` are what a probe would read to tell whether the store is
+doing anything at all; `tests/probe_thumb_cache.ps1` does not read them yet and
+that is owed. Also unmeasured: the store's effect on the **cold** path, which
+pays one extra `stat` and one 1 KB read per preview decode (tens of
+microseconds against a decode measured in hundreds of milliseconds).
+
+### 9.3 Preload bounded by bytes - done (256 MB)
 
 **Known.** ImageGlass bounds preload four ways at once — `CacheMaxFiles` 10,
 `CacheMaxMemoryInMb` 1000, `CacheMaxFileSizeInMb` 100, `CacheMaxDimension` 8000
