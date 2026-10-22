@@ -7065,7 +7065,6 @@ impl MyApp {
         }
 
         // --- full-resolution tiles ---
-// --- full-resolution tiles ---
         //
         // **Over every page of the turn, not the cursor's alone.** This loop used to
         // be filtered to `self.full` matching `shown.path` - the cursor - and that

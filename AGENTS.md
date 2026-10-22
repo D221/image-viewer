@@ -1962,6 +1962,22 @@ an edit.
   byte-offset check that the call really is after the block — and it was verified
   by moving the call back inside, where it fails. **When the defect is a value
   computed at the wrong time, presence is not the property; position is.**
+- **A paste can land at the wrong anchor, and nothing in the file says so.**
+  `README.md` carried **three** `# Image Viewer` headings, a stray keyboard row at
+  the top of the "Saving as" section, and one table row twice in a row — all from
+  edits that *inserted* a line where a line was meant to be *replaced*. Every
+  check that looked for the **content** passed, because the content was all still
+  there: the keyboard row was correct in its proper place further down, so
+  "does the README mention Undo/Redo" was true and the document was still a
+  document — just one with three titles. `src/main.rs` has carried
+  `// --- full-resolution tiles ---` twice since the zoom work, the second copy
+  at column 0 in the middle of an indented block.
+  **The tell is a line at the wrong indentation**, and the check has to be
+  **structural**, because the content is intact: `tests/unit.rs` now checks one
+  top-level title per document, no two identical adjacent lines, no one-row
+  "table", and no duplicated comment line in the sources — each rule red-verified
+  by putting the damage back. **A duplicate is a defect even when it is
+  harmless**; it is how the next reader learns to distrust the file.
 - `main.rs` is unreachable from any test. Every rule that has bitten us has been
   moved into `lib.rs` for that reason: the job planner, the resize policy, the
   transform algebra, `dim_bands`, the page cursor, the preview-cache eviction

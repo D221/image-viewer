@@ -1,10 +1,4 @@
 # Image Viewer
-  image stays sharp, which briefly costs some CPU.
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
-# Image Viewer
-  image stays sharp, which briefly costs some CPU.
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
-# Image Viewer
 
 A fast desktop image viewer for Windows, written in Rust with
 [egui/eframe](https://github.com/emilk/egui). Built around one rule: **the UI
@@ -265,7 +259,6 @@ Probing for a working graphics backend...
 ```
 
 ### Saving as (`Ctrl+Shift+A`)
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
 
 `Ctrl+S` always picks the name and the size. `Ctrl+Shift+A` lets you choose
 them: a **file** path, a **format** (`.jpg`, `.png`, `.webp`, `.bmp`, `.tiff`),
@@ -364,7 +357,6 @@ should not quietly do that.
 | `G` | Toggle the gallery grid |
 | `F` | Toggle fit-view mode (every image fitted; mutually exclusive with `T`) — also `Space`, which is JPEGView's own Space binding |
 | `Shift+F` | Fill window (crop overflow, single image only) |
-| `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
 | `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
 | `2`-`4` | Zoom presets 2-4 (2x, 4x, 8x by default; one-shot jumps) |
 | `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor). On fits now, arrivals refit, zooms re-hug |
