@@ -1074,8 +1074,8 @@ mod shell_cache {
     /// own decode, so "a shell cell is never cached" is a byte-offset fact.
     #[test]
     fn a_grid_cell_asks_our_cache_then_the_shell_then_decodes() {
-        let src = include_str!("../src/lib.rs");
-        let body = fn_body(src, "load_grid_thumbnail");
+        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shell_thumb.rs")).unwrap();
+        let body = fn_body(&src, "load_grid_thumbnail");
 
         let cache = body.find("read_cached_thumbnail").expect("our cache is asked");
         // The *last* ask is the one inside the cache-miss arm; the first is the
@@ -1114,7 +1114,7 @@ mod shell_cache {
 
         // The counters are what let a probe tell a shell-served grid from a
         // decoded one; both the hit and the miss are counted, and in one place.
-        let cell = fn_body(src, "shell_cell");
+        let cell = fn_body(&src, "shell_cell");
         assert!(cell.contains("C_SHELL_THUMB"), "a shell cell is counted");
         assert!(cell.contains("C_SHELL_MISS"), "and so is the miss that paid for it");
     }

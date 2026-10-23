@@ -445,7 +445,7 @@ fn code_only(body: &str) -> String {
 /// code**, and the property it checks is about the arrangement, not about where
 /// the text happens to sit.
 const SOURCES: &[&str] = &[
-    include_str!("../src/lib.rs"),
+    include_str!("../src/decode_page.rs"),
     include_str!("../src/preview_store.rs"),
 ];
 

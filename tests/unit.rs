@@ -86,6 +86,41 @@ fn with_floor<T>(floor: f32, f: impl FnOnce() -> T) -> T {
     with_floor_at(cached_default_strength(), floor, f)
 }
 
+/// Every library source file, concatenated - the whole crate except the binary.
+///
+/// `lib.rs` is a list of modules rather than the code (see `AGENTS.md` and
+/// `tests/source_size.rs`), so a scan of `include_str!("../src/lib.rs")` would
+/// read 127 lines of `pub mod` and find nothing. Read at run time rather than
+/// with `include_str!`: following the modules is exactly what these scans have
+/// to do, and a module added later must be covered without anyone remembering
+/// to add it here.
+fn lib_src() -> String {
+    all_src_files()
+        .into_iter()
+        .filter(|(name, _)| name != "src/main.rs")
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every file under `src/`, as `(relative name, text)`, sorted.
+fn all_src_files() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|p| {
+            let name = format!("src/{}", p.file_name().unwrap().to_string_lossy());
+            (name, std::fs::read_to_string(&p).unwrap())
+        })
+        .collect()
+}
 #[test]
 fn test_load_misnamed_png_with_jpg_extension() {
     // A real PNG saved with a .jpg extension must still decode fully;
@@ -1716,7 +1751,7 @@ fn fast_is_exactly_the_pre_existing_kernel_width() {
 /// `contributions` so each call site reads it for itself.
 #[test]
 fn one_strength_reaches_both_halves_of_the_resize() {
-    let src = include_str!("../src/lib.rs");
+    let src = lib_src();
 
     // Brace-match a function body rather than slicing to the first `\n}`: a
     // nested block at column 0 would end the slice early and the scan would pass
@@ -1926,7 +1961,7 @@ fn pixel_art_sampling_is_nearest_on_magnify_linear_on_minify() {
 #[test]
 fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
     let main = include_str!("../src/main.rs");
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
 
     assert!(
         lib.contains("#[serde(default)]\n    pub pixel_art: bool,"),
@@ -2412,7 +2447,7 @@ fn linear_resize_keeps_its_two_step_shape() {
     // brace-matched body, not the file, and not a comment elsewhere. Verified to
     // fail both ways round — with `box_reduce_srgb` put back, and with the
     // pre-reduction deleted outright.
-    let src = include_str!("../src/lib.rs");
+    let src = lib_src();
     let start = src.find("fn linear_resize(").expect("linear_resize exists");
     let body = &src[start..];
     // Brace-match the body rather than looking for the first `\n}`: a nested
@@ -2702,7 +2737,7 @@ fn the_min_filter_scale_is_a_no_op_where_the_prefilter_already_fires() {
 /// call sites carry the argument.
 #[test]
 fn the_floor_reaches_both_final_axes_and_only_those() {
-    let src = include_str!("../src/lib.rs");
+    let src = lib_src();
     let body_of = |name: &str| -> &str {
         let start = src
             .find(&format!("fn {name}("))
@@ -3462,7 +3497,7 @@ fn grid_follow_scroll_leaves_a_visible_selection_alone() {
 #[test]
 fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
     let src = include_str!("../src/main.rs");
-    let start = fn_body(src, "fn start_slideshow(&mut self)").expect("start_slideshow");
+    let start = fn_body(&src, "fn start_slideshow(&mut self)").expect("start_slideshow");
     assert!(
         start.contains("image_viewer::shuffle("),
         "starting a shuffled show must walk a shuffled copy, not the folder order"
@@ -3472,7 +3507,7 @@ fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
         "and it must save the folder's own order first, or stopping has \
          nothing to put back"
     );
-    let stop = fn_body(src, "fn stop_slideshow(&mut self)").expect("stop_slideshow");
+    let stop = fn_body(&src, "fn stop_slideshow(&mut self)").expect("stop_slideshow");
     assert!(
         stop.contains("slideshow_saved.take()"),
         "stopping must consume the saved order exactly once: a take that is \
@@ -3498,7 +3533,7 @@ fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
 #[test]
 fn the_grid_follows_through_measured_offsets_not_a_pinned_row() {
     let src = include_str!("../src/main.rs");
-    let grid = fn_body(src, "fn gallery_grid(&mut self").expect("gallery_grid");
+    let grid = fn_body(&src, "fn gallery_grid(&mut self").expect("gallery_grid");
     assert!(
         grid.contains("image_viewer::grid_follow_offset("),
         "the scroll decision must go through grid_follow_offset: pinning the \
@@ -4565,7 +4600,7 @@ fn the_comment_lines_are_wired_into_extract_exif() {
 #[test]
 fn the_colour_line_rides_on_the_preview_not_the_metadata_read() {
     let src = include_str!("../src/main.rs");
-    let body = fn_body(src, "fn extract_exif(").expect("extract_exif");
+    let body = fn_body(&src, "fn extract_exif(").expect("extract_exif");
     assert!(
         !body.contains("color_info"),
         "extract_exif must not classify colour: that is the decode's answer now, \
@@ -4837,7 +4872,7 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
 #[test]
 fn a_crop_gesture_records_once_on_press() {
     let src = include_str!("../src/main.rs");
-    let body = fn_body(src, "fn crop_from_screen(").expect("crop_from_screen");
+    let body = fn_body(&src, "fn crop_from_screen(").expect("crop_from_screen");
     // `record` must NOT be inside crop_from_screen (it is pure geometry).
     assert!(
         !body.contains("history.record("),
@@ -4847,7 +4882,7 @@ fn a_crop_gesture_records_once_on_press() {
     // It must be on the press handler, which runs once per gesture. The arm is
     // entered every frame the button is held, so the record must also sit after
     // the `primary_pressed()` test that makes it a press.
-    let press = fn_body(src, "fn central(").expect("central");
+    let press = fn_body(&src, "fn central(").expect("central");
     let pressed = press
         .find("primary_pressed()")
         .expect("the crop press must test for the press frame");
@@ -4933,7 +4968,7 @@ fn both_ends_of_an_archive_step_out_of_it() {
 fn leaving_an_archive_does_not_re_enter_it() {
     let src = include_str!("../src/main.rs");
 
-    let leave = fn_body(src, "fn leave_archive").expect("leave_archive");
+    let leave = fn_body(&src, "fn leave_archive").expect("leave_archive");
     // Leaving arms no guard — it just builds the parent gallery with the
     // cursor on the archive. `goto` no longer enters, so no guard is needed.
     assert!(
@@ -4941,7 +4976,7 @@ fn leaving_an_archive_does_not_re_enter_it() {
         "leave_archive no longer needs a one-shot because goto does not enter"
     );
 
-    let goto = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
+    let goto = fn_body(&src, "fn goto(&mut self, ctx: &Context)").expect("goto");
     // Goto must not enter archives at all — the one-shot is gone because
     // the whole branch is gone.
     assert!(
@@ -4956,7 +4991,7 @@ fn leaving_an_archive_does_not_re_enter_it() {
             "goto runs the position setup without an archive branch"
         );
 
-    let step = fn_body(src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");
+    let step = fn_body(&src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");
     assert!(
         step.contains("archive_edge(forward)"),
         "step must ask about both edges of the archive, not only the front:\n{step}"
@@ -4985,7 +5020,7 @@ fn the_show_archives_toggle_is_wired() {
          listing of the session answers from a stale flag"
     );
 
-    let panel = fn_body(src, "impl eframe::App for MyApp").expect("the app impl");
+    let panel = fn_body(&src, "impl eframe::App for MyApp").expect("the app impl");
     assert!(
         panel.contains("&mut self.config.show_archives"),
         "the toggle must exist in Settings"
@@ -5021,7 +5056,7 @@ fn archives_are_entered_explicitly_and_never_decoded() {
     let src = include_str!("../src/main.rs");
 
     // `goto` no longer enters: it positions, and the body shows it.
-    let goto = fn_body(src, "fn goto(&mut self, ctx: &Context)").expect("goto");
+    let goto = fn_body(&src, "fn goto(&mut self, ctx: &Context)").expect("goto");
     // The body shows the position logic without any archive entry: it sets
     // `is_nav`, `lat.begin`, then `snap_to_turn_anchor` — no `open_archive`.
     // The absence of an archive branch *is* the test.
@@ -5035,14 +5070,14 @@ fn archives_are_entered_explicitly_and_never_decoded() {
     );
 
     // Entry is in `step` (arrowing) and `pick_grid_selection` (grid).
-    let step = fn_body(src, "fn step(&mut self, ctx: &Context, forward: bool)")
+    let step = fn_body(&src, "fn step(&mut self, ctx: &Context, forward: bool)")
         .expect("step");
     assert!(
         step.contains("enter_archive_if_present(ctx)"),
         "arrowing onto an archive must call the entry helper"
     );
 
-    let pick = fn_body(src, "fn pick_grid_selection(&mut self, ctx: &Context)")
+    let pick = fn_body(&src, "fn pick_grid_selection(&mut self, ctx: &Context)")
         .expect("pick_grid_selection");
     assert!(
         pick.contains("enter_archive_if_present(ctx)"),
@@ -5061,7 +5096,7 @@ fn archives_are_entered_explicitly_and_never_decoded() {
     );
 
     // `Del` refuses when the cursor is ON an archive, not only when inside one.
-    let del = fn_body(src, "fn delete_current(&mut self, ctx: &Context)").expect("delete_current");
+    let del = fn_body(&src, "fn delete_current(&mut self, ctx: &Context)").expect("delete_current");
     assert!(
         del.contains("is_archive_path(&p) ||"),
         "delete must refuse when the cursor is ON an archive, not only when inside one"
@@ -5272,7 +5307,7 @@ fn tile_math_positions_tiles_in_buffer_pixels_at_source_pitch() {
 #[test]
 fn the_tile_loop_positions_through_the_ratio_aware_math() {
     let src = include_str!("../src/main.rs");
-    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
     assert!(
         central.contains("image_viewer::tile_axis_range("),
         "the tile range must come from tile_axis_range, which divides by the \
@@ -5338,13 +5373,13 @@ fn histogram_counts_bins_and_clipped_pixels_exactly() {
 #[test]
 fn the_histogram_is_counted_on_the_worker_and_drawn_from_cache() {
     let src = include_str!("../src/main.rs");
-    let decode = fn_body(src, "fn decode_preview(").expect("decode_preview");
+    let decode = fn_body(&src, "fn decode_preview(").expect("decode_preview");
     assert!(
         decode.contains("image_viewer::histogram_rgba("),
         "decode_preview must count the preview buffer it already holds: the \
          CPU pixels are dropped after upload, so later is too late"
     );
-    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
     assert!(
         !central.contains("histogram_rgba("),
         "the paint path must not count pixels itself — that is a buffer walk \
@@ -5359,7 +5394,7 @@ fn the_histogram_is_counted_on_the_worker_and_drawn_from_cache() {
 #[test]
 fn a_failed_grid_cell_says_so_instead_of_loading_forever() {
     let src = include_str!("../src/main.rs");
-    let cell = fn_body(src, "fn grid_cell(").expect("grid_cell");
+    let cell = fn_body(&src, "fn grid_cell(").expect("grid_cell");
     // Anchored on `>=`, not the bare name: the request guard in the same
     // function also mentions `THUMB_TRIES` (with `<`), so a bare `contains`
     // passes with the exhausted arm deleted — which is exactly the mutation
@@ -5385,8 +5420,8 @@ fn a_failed_grid_cell_says_so_instead_of_loading_forever() {
 /// gain a wrong explanation.
 #[test]
 fn the_decode_failure_names_unclaimed_bytes_only() {
-    let src = include_str!("../src/lib.rs");
-    let decode = fn_body(src, "fn decode_bytes(").expect("decode_bytes");
+    let src = lib_src();
+    let decode = fn_body(&src, "fn decode_bytes(").expect("decode_bytes");
     assert!(
         decode.contains("looks_like_supported_image(bytes)"),
         "the remap must be gated on the magic: bytes a decoder claims are \
@@ -5411,7 +5446,7 @@ fn a_failed_image_shows_its_error_instead_of_loading_forever() {
     // appears in a comment, and both read before the overlay without
     // guarding it. `panel.left_top()` is the paint call itself, unique in
     // the file.
-    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
     let at = central
         .find("self.cur != self.shown")
         .expect("the overlay condition");
@@ -5427,7 +5462,7 @@ fn a_failed_image_shows_its_error_instead_of_loading_forever() {
     );
     // ...and `goto` re-states the stored message, because the revisit
     // produces no new decode and therefore no new error of its own.
-    let goto = fn_body(src, "fn goto(&mut self").expect("goto");
+    let goto = fn_body(&src, "fn goto(&mut self").expect("goto");
     assert!(
         goto.contains("load_errors.get("),
         "goto must re-state a stored failure message: clearing the banner \
@@ -5721,7 +5756,7 @@ fn the_title_bar_toggle_keeps_the_client_area() {
     // The strip is only measurable while decorated: the hide arm is the one
     // place it is written, and it is persisted next to the setting so a
     // future show in a fresh session reads it back.
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     for want in ["pub title_strip: f32,", "pub fn outer_top_for_decoration_toggle"] {
         assert!(lib.contains(want), "lib.rs must carry {want}");
     }
@@ -6154,7 +6189,7 @@ fn the_fit_window_key_is_wired_to_a_live_resize() {
         !src.contains("fit_zoom("),
         "the shrink path is deleted, not bypassed"
     );
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     assert!(
         !lib.contains("fn fit_zoom("),
         "the shrink helper must go with its only caller"
@@ -6358,7 +6393,7 @@ fn window_chrome_applies_live() {
         src.contains("set_topmost(self.config.always_on_top)"),
         "always-on-top must apply straight away, not on restart"
     );
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     assert!(
         lib.contains("fn set_topmost(") && lib.contains("SetWindowPos"),
         "always-on-top must reach Win32 directly"
@@ -6450,7 +6485,7 @@ fn esc_defaults_to_closing_and_crop_comes_first() {
 /// applied, because a path carries no pixels.
 #[test]
 fn printing_is_wired_to_ctrl_p() {
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     assert!(
         lib.contains("fn print_file(") && lib.contains("ShellExecuteW"),
         "printing must go through the native print verb"
@@ -6634,7 +6669,7 @@ fn portable_mode_follows_the_marker_file() {
 /// config file sitting next to a roaming cache.
 #[test]
 fn persistent_roots_consult_portable_mode() {
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     for f in [
         "pub fn default_path()",
         "pub fn thumb_cache_root()",
@@ -6867,7 +6902,7 @@ fn side_panes_hide_individually_and_gate_their_reads() {
 #[test]
 fn save_as_and_paste_are_wired() {
     let src = include_str!("../src/main.rs");
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
 
     // --- save-as: the chord, the action, the panel, the call ---
     // The action table lives in `lib.rs`, so the *listing* is checked there and
@@ -6900,7 +6935,7 @@ fn save_as_and_paste_are_wired() {
     // name Ctrl+S would have chosen, with quality at the shared default and no
     // resize. A panel that opens on a different name means "save as" quietly
     // changed what saving does.
-    let open = fn_body(src, "fn open_save_as(&mut self)").expect("open_save_as");
+    let open = fn_body(&src, "fn open_save_as(&mut self)").expect("open_save_as");
     assert!(
         open.contains("self.save_as_infix(&p)"),
         "open_save_as must ask the shared rule for the name, not pick one itself \
@@ -6918,7 +6953,7 @@ fn save_as_and_paste_are_wired() {
     // The composition is asserted separately, because "called the shared rule"
     // and "asked it about the *composed* transform" are two properties and the
     // report was the second one.
-    let infix = fn_body(src, "fn save_as_infix(&self, path: &Path)").expect("save_as_infix");
+    let infix = fn_body(&src, "fn save_as_infix(&self, path: &Path)").expect("save_as_infix");
     assert!(
         infix.contains("display_xform") && infix.contains("exif_orientation"),
         "the infix must be asked of the *composed* transform: Ctrl+S names from \
@@ -6934,7 +6969,7 @@ fn save_as_and_paste_are_wired() {
     // The panel must be drawn *before* the early returns, or it is invisible
     // over the grid and over the archive placeholder - the two states where a
     // reader is most likely to want it.
-    let central = fn_body(src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
     let panel_at = central.find("if self.save_as.open {").expect("panel draw");
     let grid_at = central.find("if self.gallery_view {").expect("grid branch");
     assert!(
@@ -6952,7 +6987,7 @@ fn save_as_and_paste_are_wired() {
     // alone would still let Esc clear the search filter.
     //
     // **Absolute offsets, not `fn_body`.** `fn_body` starts counting *after* its
-    // marker, so `fn_body(src, "if esc {")` returns the body of the panel arm
+    // marker, so `fn_body(&src, "if esc {")` returns the body of the panel arm
     // alone - the marker already consumed the `if`'s own brace - and this
     // assertion then failed on "typing esc arm" for a chain that was correct. The
     // helper answers "the body of the next thing", which is the wrong question
@@ -7129,7 +7164,7 @@ fn the_history_is_capped_and_drops_the_oldest_step() {
 #[test]
 fn the_transform_tail_records_before_it_edits() {
     let src = include_str!("../src/main.rs");
-    let body = fn_body(src, "fn apply_to_current(").expect("apply_to_current");
+    let body = fn_body(&src, "fn apply_to_current(").expect("apply_to_current");
     let at = body.find("history.record(").expect("record must be called");
     let edit = body
         .find("f(&mut self.edits, &p.path)")
@@ -7145,7 +7180,7 @@ fn the_transform_tail_records_before_it_edits() {
 /// letters, so neither may appear in BARE_LETTERS.
 #[test]
 fn undo_and_redo_are_rebindable_chord_actions() {
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     assert!(
         lib.contains(r#"("undo", "Ctrl+Z", "Undo view transform"),"#),
         "undo must be a KEY_ACTIONS row so it shows in Settings and can be rebound"
@@ -7194,7 +7229,7 @@ fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
     // on `fn ui(`, because the naive brace counter in `fn_body` closes `ui`
     // early on a comment quoting code with unbalanced braces. The left pane is
     // the first `pane.show` in the file, so `find` lands on it.
-    let pane = fn_body(src, "pane.show(ui, |ui|").expect("the left pane");
+    let pane = fn_body(&src, "pane.show(ui, |ui|").expect("the left pane");
     let block = pane.find("rating_widget").or_else(|| pane.find("Rating"))
         .expect("a rating block in the pane");
     let heading = pane.find(r#"ui.heading("EXIF")"#).expect("the EXIF heading");
@@ -7205,9 +7240,9 @@ fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
 /// and a rating that disappears on leaving the archive is worse than a refusal.
 #[test]
 fn archives_are_refused_a_rating() {
-    let lib = include_str!("../src/lib.rs");
+    let lib = lib_src();
     assert!(
-        fn_body(lib, "pub fn sidecar_path(")
+        fn_body(&lib, "pub fn sidecar_path(")
             .expect("sidecar_path")
             .contains("is_archive_path"),
         "sidecar_path must return None for an archive member, which is what \
@@ -7222,7 +7257,7 @@ fn archives_are_refused_a_rating() {
 #[test]
 fn the_grid_reads_ratings_from_a_map_not_the_filesystem() {
     let src = include_str!("../src/main.rs");
-    let cell = fn_body(src, "fn grid_cell(").expect("grid_cell");
+    let cell = fn_body(&src, "fn grid_cell(").expect("grid_cell");
     assert!(
         !cell.contains("Ratings::read("),
         "grid_cell must not read sidecars - that is a filesystem read per cell \
@@ -7393,7 +7428,7 @@ fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
         Some(&src[open + 1..end?])
     }
     let src = src_source;
-    let goto = fn_body(src, "fn goto(").expect("goto");
+    let goto = fn_body(&src, "fn goto(").expect("goto");
     let block = span_after(goto, "if self.cur != self.pan_key {").expect("the cursor-change block");
     let remember = block
         .find("self.views.remember(")
@@ -7426,7 +7461,7 @@ fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
     );
     // And the forget: a re-export must not leave a view for pixels that no
     // longer exist, beside the page counts and shapes it already clears.
-    let inv = fn_body(src, "fn invalidate_path(").expect("invalidate_path");
+    let inv = fn_body(&src, "fn invalidate_path(").expect("invalidate_path");
     assert!(
         inv.contains("self.views.forget_file(p);"),
         "invalidate_path must drop the file's remembered views"
@@ -7453,7 +7488,7 @@ fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
 #[test]
 fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
     let src = include_str!("../src/main.rs");
-    let body = fn_body(src, "fn schedule(&mut self)").expect("schedule");
+    let body = fn_body(&src, "fn schedule(&mut self)").expect("schedule");
     let collect = body
         .find("self.stamps.get(p)")
         .expect("schedule must read the stamp registry for the file lengths");
@@ -7540,7 +7575,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
 
     // The funnel: save/restore only through `toggle_panels_master`, and the
     // save inside it is ordered after the flip.
-    let helper = fn_body(src, "fn toggle_panels_master(").expect("master helper");
+    let helper = fn_body(&src, "fn toggle_panels_master(").expect("master helper");
     let flip = helper
         .find("self.show_panels = !self.show_panels;")
         .expect("the helper must flip the master");
@@ -7555,7 +7590,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
     // Both `I` sites (key and Plates row) route through it. A site that
     // toggles inline would skip the persist, and the first launch would
     // quietly disagree.
-    let dispatch = fn_body(src, "fn ui(").expect("the event dispatcher");
+    let dispatch = fn_body(&src, "fn ui(").expect("the event dispatcher");
     let handlers = src.matches("self.toggle_panels_master();").count();
     let toggles_inline = src.matches("self.show_panels = !self.show_panels;").count();
     assert_eq!(
@@ -7569,7 +7604,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
 
     // Startup honours the saved value — the same capture pattern the
     // constructor uses for `loop_back`.
-    let ctor = fn_body(src, "fn new_with_renderer(").expect("constructor");
+    let ctor = fn_body(&src, "fn new_with_renderer(").expect("constructor");
     let capture = ctor
         .find("let show_panels = config.show_panels;")
         .expect("the constructor must read the saved master");
