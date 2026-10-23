@@ -129,11 +129,11 @@ that are already in memory. One crate, no workspace, no CI.
   **new** file must start under 1000 lines, a file that is **over** the target
   **may not grow** (the numbers in that test are ceilings, not wishes), and a
   file that comes down under the target **comes off the list**. So:
-  - **New code goes in a module of its own** — `src/<topic>.rs` or
-    `tests/<topic>.rs` — declared with `pub mod` at the crate root and
-    re-exported (`pub use <topic>::*;`) so `image_viewer::name` keeps working.
-    That is the pattern this crate already uses for `perf`, `icon` and
-    `ratings`.
+  - **New code goes in a module of its own** — `src/<topic>.rs`, or
+    `src/<topic>/mod.rs` when several files share a topic — declared with
+    `pub mod` at the crate root and re-exported (`pub use <topic>::*;`) so
+    `image_viewer::name` keeps working. That is the pattern this crate already
+    uses for `perf`, `icon` and `ratings`.
   - **To split a file that is over the target**, move a whole section into its
     own module, declare it where the old code was, and lower its number in
     `tests/source_size.rs` to the file's new size. The list only ever shortens.
@@ -145,20 +145,28 @@ that are already in memory. One crate, no workspace, no CI.
     `tests/source_size.rs`; the list only ever shortens. `TODO.md` §10 holds
     the remaining split work with its order.
 - `src/lib.rs` (127 lines) - the library crate root: crate documentation and
-  the module list. Every testable rule now lives in a module of its own under
-  `src/` (decode, transforms, colour maths, the caches, the watcher, the spread
-  algebra, the gallery, and more - about 40 modules), re-exported here so
+  the module list. Every testable rule lives in a folder of its own under
+  `src/` (core, config, system, scan, renderer, layout, resize, transform,
+  decode, cache, watch, gallery — about 40 modules), each re-exported here so
   `image_viewer::name` keeps working. Every module is under a thousand lines.
 - `src/main.rs` (274 lines) - the binary crate root: imports, `fn main`, and
-  the module list. `MyApp` and its egui wiring live in `src/app_*.rs` (21
-  modules: `app_ui`, `app_central`, `app_goto`, `app_nav`, `app_pump`, ...),
-  all under a thousand lines except `app_ui.rs` (2,048 - the `fn ui` paint
-  function) and `app_central.rs` (1,402 - the `fn central` paint function),
-  both carried as ceilings in `tests/source_size.rs`. Unreachable from a test.
-- `src/perf.rs` (16 latency metrics, 21 always-on counters), `src/fileassoc.rs`
-  (HKCU registration), `src/icon.rs` (generated icon artwork),
-  `src/preview_store.rs` (the on-disk preview tier, 645 lines - the first
-  section moved out of `lib.rs` under the rule above).
+  the module list. `MyApp` and its egui wiring live in `src/app/` (21 modules:
+  `ui`, `central`, `goto`, `nav`, `pump`, ...), all under a thousand lines
+  except `app/ui.rs` (2,048 - the `fn ui` paint function) and
+  `app/central.rs` (1,402 - the `fn central` paint function), both carried as
+  ceilings in `tests/source_size.rs`. Unreachable from a test.
+- `src/core/` (types, nav, sorting, image data), `src/config/` (`Config`,
+  key bindings, commands), `src/system/` (single-instance guard, file
+  associations, ratings, icon, perf counters), `src/cache/` (preview store,
+  thumb cache, shell cache), `src/decode/` (decode, EXIF, animation,
+  resample), `src/layout/` (spread pairing and turns), `src/transform/` (xform,
+  crop), `src/gallery/` (gallery, edits, archives, save), `src/color/` (colour
+  detection, wide-gamut conversion), `src/watch/` (folder watching),
+  `src/scan/`, `src/renderer/`, `src/resize/` — all folders under `src/`.
+- `src/preview_store.rs` is now `src/cache/preview_store.rs` (the on-disk
+  preview tier, 645 lines - the first section moved out of `lib.rs` under the
+  rule above). `src/system/ratings.rs` and `src/system/icon.rs` carry the
+  ratings and icon code.
 - `test-images/` is gitignored. `test-images/JPEGView_L` and
   `test-images/oculante` are reference checkouts, not fixtures.
 - `README.md` is the user-facing document (features, keys, settings, caveats) and

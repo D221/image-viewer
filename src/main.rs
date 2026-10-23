@@ -20,7 +20,8 @@
 // eprintln! diagnostics are visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod fileassoc;
+use image_viewer::fileassoc as fileassoc;
+mod app;
 
 pub(crate) use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 pub(crate) use nom_exif::{read_exif, ExifTag};
@@ -229,46 +230,25 @@ fn main() -> eframe::Result<()> {
 //
 // This file was 10,713 lines. The constants, the types and the methods now live
 // in modules of their own; main.rs keeps the imports, n main and this list.
-mod app_consts;
-mod app_main;
-mod app_types;
-mod app_struct;
-mod app_goto;
-mod app_nav;
-mod app_pump;
-mod app_open;
-mod app_files;
-mod app_watch;
-mod app_gallery_ops;
-mod app_actions;
-mod app_output;
-mod app_status;
-mod app_central;
-mod app_save_as;
-mod app_grid;
-mod app_edits;
-mod app_frame;
-mod app_paint;
-mod app_ui;
-pub(crate) use app_consts::*;
-pub(crate) use app_main::*;
-pub(crate) use app_types::*;
-pub(crate) use app_struct::*;
-pub(crate) use app_goto::*;
-pub(crate) use app_nav::*;
-pub(crate) use app_pump::*;
-pub(crate) use app_open::*;
-pub(crate) use app_files::*;
-pub(crate) use app_watch::*;
-pub(crate) use app_gallery_ops::*;
-pub(crate) use app_actions::*;
-pub(crate) use app_output::*;
-pub(crate) use app_status::*;
-pub(crate) use app_central::*;
-pub(crate) use app_save_as::*;
-pub(crate) use app_grid::*;
-pub(crate) use app_edits::*;
-pub(crate) use app_frame::*;
-pub(crate) use app_paint::*;
-pub(crate) use app_ui::*;
+pub(crate) use app::consts::*;
+pub(crate) use app::main::*;
+pub(crate) use app::types::*;
+pub(crate) use app::model::*;
+pub(crate) use app::goto::*;
+pub(crate) use app::nav::*;
+pub(crate) use app::pump::*;
+pub(crate) use app::open::*;
+pub(crate) use app::files::*;
+pub(crate) use app::watch::*;
+pub(crate) use app::gallery_ops::*;
+pub(crate) use app::actions::*;
+pub(crate) use app::output::*;
+pub(crate) use app::status::*;
+pub(crate) use app::central::*;
+pub(crate) use app::save_as::*;
+pub(crate) use app::grid::*;
+pub(crate) use app::edits::*;
+pub(crate) use app::frame::*;
+pub(crate) use app::paint::*;
+pub(crate) use app::ui::*;
 

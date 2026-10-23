@@ -72,22 +72,22 @@ fn dispatch_region_in(src: &str) -> String {
 
 fn source() -> String {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(&root)
-        .expect("src/")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-            p.extension().and_then(|e| e.to_str()) == Some("rs")
-                && (name == "main.rs" || name.starts_with("app_"))
-        })
-        .collect();
-    files.sort();
-    files
-        .iter()
-        .map(|p| std::fs::read_to_string(p).expect("read"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut texts: Vec<String> = Vec::new();
+    collect_src(&root, &mut texts);
+    texts.sort();
+    texts.join("\n")
+}
+
+fn collect_src(dir: &std::path::Path, texts: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_src(&path, texts);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            texts.push(std::fs::read_to_string(&path).expect("read"));
+        }
+    }
 }
 
 /// The body of `fn <sig>` in `src/main.rs`, found by **brace matching**.

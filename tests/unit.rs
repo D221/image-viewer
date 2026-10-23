@@ -95,21 +95,10 @@ fn with_floor<T>(floor: f32, f: impl FnOnce() -> T) -> T {
 /// to do, and a module added later must be covered without anyone remembering
 /// to add it here.
 fn main_src() -> String {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(&root)
-        .expect("src/")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-            p.extension().and_then(|e| e.to_str()) == Some("rs")
-                && (name == "main.rs" || name.starts_with("app_"))
-        })
-        .collect();
-    files.sort();
-    files
-        .iter()
-        .map(|p| std::fs::read_to_string(p).expect("read"))
+    all_src_files()
+        .into_iter()
+        .filter(|(name, _)| name == "main.rs" || name.starts_with("app/"))
+        .map(|(_, text)| text)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -117,7 +106,7 @@ fn main_src() -> String {
 fn lib_src() -> String {
     all_src_files()
         .into_iter()
-        .filter(|(name, _)| name != "src/main.rs")
+        .filter(|(name, _)| name != "main.rs")
         .map(|(_, text)| text)
         .collect::<Vec<_>>()
         .join("\n")
@@ -126,20 +115,27 @@ fn lib_src() -> String {
 /// Every file under `src/`, as `(relative name, text)`, sorted.
 fn all_src_files() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(&root)
-        .expect("src/")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
-        .collect();
-    files.sort();
-    files
-        .into_iter()
-        .map(|p| {
-            let name = format!("src/{}", p.file_name().unwrap().to_string_lossy());
-            (name, std::fs::read_to_string(&p).unwrap())
-        })
-        .collect()
+    let mut out: Vec<(String, String)> = Vec::new();
+    collect_src(&root, &root, &mut out);
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn collect_src(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_src(root, &path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, std::fs::read_to_string(&path).unwrap()));
+        }
+    }
 }
 #[test]
 fn test_load_misnamed_png_with_jpg_extension() {
@@ -4086,11 +4082,7 @@ fn each_document_is_structurally_sound() {
 /// `0,` in an array), so the rule is about comments only.
 #[test]
 fn no_source_carries_a_duplicated_comment_line() {
-    for (name, text) in [
-        ("src/lib.rs", include_str!("../src/lib.rs")),
-        ("src/main.rs", &main_src()),
-        ("src/perf.rs", include_str!("../src/perf.rs")),
-    ] {
+    for (name, text) in all_src_files() {
         let lines: Vec<&str> = text.lines().collect();
         for (i, pair) in lines.windows(2).enumerate() {
             let (a, b) = (pair[0].trim(), pair[1].trim());
@@ -7234,15 +7226,15 @@ fn the_undo_buttons_sit_with_the_transforms_and_disable_when_empty() {
 /// the UI whenever the pane is hidden.
 #[test]
 fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
-    // `fn ui(` lives in `app_ui.rs`: the left pane (`pane.show`) and the EXIF
+    // `fn ui(` lives in `app/ui.rs`: the left pane (`pane.show`) and the EXIF
     // gate (`wants_exif`) are both inside it, so their order inside this one
     // function is the property. A rating is a 300-byte sidecar, not a whole-file
     // read, so it must not be folded into the `wants_exif` gate - hiding the
     // pane must not hide the rating.
     let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app_ui.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/ui.rs"),
     )
-    .expect("src/app_ui.rs");
+    .expect("src/app/ui.rs");
     // All three markers occur once in `app_ui.rs`, all inside `fn ui(`: the
     // rating heading, the EXIF heading, and the `wants_exif` gate that wraps
     // only the EXIF read. The rating block must come before the gate - it is a

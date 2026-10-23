@@ -1074,7 +1074,7 @@ mod shell_cache {
     /// own decode, so "a shell cell is never cached" is a byte-offset fact.
     #[test]
     fn a_grid_cell_asks_our_cache_then_the_shell_then_decodes() {
-        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shell_thumb.rs")).unwrap();
+        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cache/shell_thumb.rs")).unwrap();
         let body = fn_body(&src, "load_grid_thumbnail");
 
         let cache = body.find("read_cached_thumbnail").expect("our cache is asked");
