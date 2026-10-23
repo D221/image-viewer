@@ -71,7 +71,23 @@ fn dispatch_region_in(src: &str) -> String {
 }
 
 fn source() -> String {
-    std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs")
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (name == "main.rs" || name.starts_with("app_"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The body of `fn <sig>` in `src/main.rs`, found by **brace matching**.

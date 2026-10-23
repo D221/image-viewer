@@ -141,18 +141,23 @@ that are already in memory. One crate, no workspace, no CI.
     visible in the diff, but it is the thing the rule exists to make you
     notice: "I needed 40 more lines in `lib.rs`" is a sentence nobody should
     be able to say by accident.
-  - The work of splitting the four files that are still over the target is in
-    `TODO.md` §10, with the order.
-- `src/lib.rs` (~13k lines) — everything testable: sniffing, decode, gallery
-  and paging, the job planner, the loader queue, the resize policy, the
-  transform algebra, ICC, archives, the grid-thumbnail cache, config. **If a rule
-  can be a pure function it belongs here** — every bug that could not be tested
-  lived in `main.rs`.
-- `src/main.rs` (~10.7k lines) — the binary: `MyApp`, egui, worker wiring, dialogs,
-  clipboard, wallpaper, Windows integration. Unreachable from a test.
+  - The files still over the target are listed with ceilings in
+    `tests/source_size.rs`; the list only ever shortens. `TODO.md` §10 holds
+    the remaining split work with its order.
+- `src/lib.rs` (127 lines) - the library crate root: crate documentation and
+  the module list. Every testable rule now lives in a module of its own under
+  `src/` (decode, transforms, colour maths, the caches, the watcher, the spread
+  algebra, the gallery, and more - about 40 modules), re-exported here so
+  `image_viewer::name` keeps working. Every module is under a thousand lines.
+- `src/main.rs` (274 lines) - the binary crate root: imports, `fn main`, and
+  the module list. `MyApp` and its egui wiring live in `src/app_*.rs` (21
+  modules: `app_ui`, `app_central`, `app_goto`, `app_nav`, `app_pump`, ...),
+  all under a thousand lines except `app_ui.rs` (2,048 - the `fn ui` paint
+  function) and `app_central.rs` (1,402 - the `fn central` paint function),
+  both carried as ceilings in `tests/source_size.rs`. Unreachable from a test.
 - `src/perf.rs` (16 latency metrics, 21 always-on counters), `src/fileassoc.rs`
   (HKCU registration), `src/icon.rs` (generated icon artwork),
-  `src/preview_store.rs` (the on-disk preview tier, 645 lines — the first
+  `src/preview_store.rs` (the on-disk preview tier, 645 lines - the first
   section moved out of `lib.rs` under the rule above).
 - `test-images/` is gitignored. `test-images/JPEGView_L` and
   `test-images/oculante` are reference checkouts, not fixtures.

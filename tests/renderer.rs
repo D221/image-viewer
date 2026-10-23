@@ -184,12 +184,29 @@ fn a_probe_that_stopped_at_the_first_success_decides_the_same_way() {
 /// Checking the text rather than the behaviour is what makes the claim checkable at
 /// all: a reordering or a `.map().collect()` instead of the loop is a diff, and a
 /// diff is the thing a reviewer reads.
+fn main_src() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (name == "main.rs" || name.starts_with("app_"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn the_probe_stops_at_the_first_backend_that_works() {
-    let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
-    )
-    .expect("src/main.rs");
+    let src = main_src();
 
     let body = src
         .split("fn probe_backends()")

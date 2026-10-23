@@ -94,6 +94,26 @@ fn with_floor<T>(floor: f32, f: impl FnOnce() -> T) -> T {
 /// with `include_str!`: following the modules is exactly what these scans have
 /// to do, and a module added later must be covered without anyone remembering
 /// to add it here.
+fn main_src() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (name == "main.rs" || name.starts_with("app_"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn lib_src() -> String {
     all_src_files()
         .into_iter()
@@ -1835,7 +1855,7 @@ fn one_strength_reaches_both_halves_of_the_resize() {
 /// documented counter-example in `AGENTS.md`.
 #[test]
 fn the_smooth_toggle_is_wired_and_invalidates_the_previews() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     assert!(
         src.contains("set_downscale_smoothing(config.smooth_downscale);"),
@@ -1960,7 +1980,7 @@ fn pixel_art_sampling_is_nearest_on_magnify_linear_on_minify() {
 /// deliberately stay linear stay linear.
 #[test]
 fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
-    let main = include_str!("../src/main.rs");
+    let main = main_src();
     let lib = lib_src();
 
     assert!(
@@ -3496,7 +3516,7 @@ fn grid_follow_scroll_leaves_a_visible_selection_alone() {
 /// folder shuffled with no way back.
 #[test]
 fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let start = fn_body(&src, "fn start_slideshow(&mut self)").expect("start_slideshow");
     assert!(
         start.contains("image_viewer::shuffle("),
@@ -3532,7 +3552,7 @@ fn a_shuffled_show_saves_its_order_and_both_off_ramps_restore_it() {
 /// runs on last week's folder.
 #[test]
 fn the_grid_follows_through_measured_offsets_not_a_pinned_row() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let grid = fn_body(&src, "fn gallery_grid(&mut self").expect("gallery_grid");
     assert!(
         grid.contains("image_viewer::grid_follow_offset("),
@@ -4068,7 +4088,7 @@ fn each_document_is_structurally_sound() {
 fn no_source_carries_a_duplicated_comment_line() {
     for (name, text) in [
         ("src/lib.rs", include_str!("../src/lib.rs")),
-        ("src/main.rs", include_str!("../src/main.rs")),
+        ("src/main.rs", &main_src()),
         ("src/perf.rs", include_str!("../src/perf.rs")),
     ] {
         let lines: Vec<&str> = text.lines().collect();
@@ -4359,7 +4379,7 @@ fn a_config_written_before_workers_still_loads_and_stays_auto() {
 /// every test, so this is a source scan - the established pattern here.
 #[test]
 fn the_worker_count_setting_is_wired_to_pool_startup() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("resolve_worker_count("),
         "pool startup must go through resolve_worker_count, not compute the clamp inline"
@@ -4394,7 +4414,7 @@ fn fill_scale_covers_the_area() {
 /// test, so this is a source scan - the established pattern here.
 #[test]
 fn the_fill_key_is_wired_to_a_fill_scale() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fill_scale("),
         "the fill key must size from fill_scale, not from fit_scale"
@@ -4478,7 +4498,7 @@ fn a_config_written_before_sort_descending_still_loads_and_stays_off() {
 /// from every test, so this is a source scan - the established pattern here.
 #[test]
 fn the_sort_direction_setting_is_wired_to_rescan() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("scan_folder_sorted_dir("),
         "folder scans must go through the directed sort, not the old wrapper"
@@ -4495,7 +4515,7 @@ fn the_sort_direction_setting_is_wired_to_rescan() {
 /// must disambiguate path from pixels inside the Copy arm.
 #[test]
 fn shift_copy_puts_the_path_on_the_clipboard() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("copy_path_to_clipboard"),
         "there must be a path-copy action distinct from copy_image_to_clipboard"
@@ -4577,7 +4597,7 @@ fn exif_comment_reads_description_from_a_real_file() {
 /// every test, so this is a source scan - the established pattern here.
 #[test]
 fn the_comment_lines_are_wired_into_extract_exif() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("image_viewer::exif_comment("),
         "extract_exif must show the EXIF description/UserComment"
@@ -4599,7 +4619,7 @@ fn the_comment_lines_are_wired_into_extract_exif() {
 /// kind.
 #[test]
 fn the_colour_line_rides_on_the_preview_not_the_metadata_read() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn extract_exif(").expect("extract_exif");
     assert!(
         !body.contains("color_info"),
@@ -4624,7 +4644,7 @@ fn the_colour_line_rides_on_the_preview_not_the_metadata_read() {
 /// test, so this is a source scan - the established pattern here.
 #[test]
 fn the_screen_save_key_is_wired_to_a_scaled_save() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("save_transformed_scaled("),
         "Ctrl+Shift+S must go through the scaled save, not the full-res one"
@@ -4639,7 +4659,7 @@ fn the_screen_save_key_is_wired_to_a_scaled_save() {
 /// status-line toasts; the sort change was the state change that stayed silent.
 #[test]
 fn resort_names_the_order_it_produced() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src
         .find("if resort {")
         .expect("the settings panel must have a resort arm");
@@ -4659,7 +4679,7 @@ fn resort_names_the_order_it_produced() {
 /// every test, so this is a source scan - the established pattern here.
 #[test]
 fn the_single_instance_toggle_is_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.config.single_instance"),
         "settings panel must offer the single-instance toggle"
@@ -4761,7 +4781,7 @@ fn every_default_key_is_a_known_name() {
 /// name, and buttons built through the live-label helper.
 #[test]
 fn capture_and_labels_are_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.capturing = Some(") && src.contains("press keys… (Esc cancels)"),
         "Settings must offer click-to-capture with an Esc out"
@@ -4810,7 +4830,7 @@ fn capture_and_labels_are_wired() {
 /// recursive variant where position is preserved.
 #[test]
 fn recursive_browsing_is_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn sorted_scan(") && src.contains("fn load_folder_into("),
         "every rebuild needs a funnel for each half (sorted list, position-preserving load)"
@@ -4871,7 +4891,7 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
 /// `the_turns_second_half_is_derived_not_latched`.
 #[test]
 fn a_crop_gesture_records_once_on_press() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn crop_from_screen(").expect("crop_from_screen");
     // `record` must NOT be inside crop_from_screen (it is pure geometry).
     assert!(
@@ -4966,7 +4986,7 @@ fn both_ends_of_an_archive_step_out_of_it() {
 /// grid pick are the only places that call `enter_archive_if_present`.
 #[test]
 fn leaving_an_archive_does_not_re_enter_it() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     let leave = fn_body(&src, "fn leave_archive").expect("leave_archive");
     // Leaving arms no guard — it just builds the parent gallery with the
@@ -5007,7 +5027,7 @@ fn leaving_an_archive_does_not_re_enter_it() {
 /// (or the panel changes the setting and the listing does not).
 #[test]
 fn the_show_archives_toggle_is_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("image_viewer::set_show_archives(config.show_archives)"),
         "start-up must tell the library before the first scan"
@@ -5053,7 +5073,7 @@ fn the_show_archives_toggle_is_wired() {
 /// a decode for one.
 #[test]
 fn archives_are_entered_explicitly_and_never_decoded() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     // `goto` no longer enters: it positions, and the body shows it.
     let goto = fn_body(&src, "fn goto(&mut self, ctx: &Context)").expect("goto");
@@ -5306,7 +5326,7 @@ fn tile_math_positions_tiles_in_buffer_pixels_at_source_pitch() {
 /// calls' presence. Either half alone passes on a halfway revert.
 #[test]
 fn the_tile_loop_positions_through_the_ratio_aware_math() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
     assert!(
         central.contains("image_viewer::tile_axis_range("),
@@ -5372,7 +5392,7 @@ fn histogram_counts_bins_and_clipped_pixels_exactly() {
 /// "this photo is black".
 #[test]
 fn the_histogram_is_counted_on_the_worker_and_drawn_from_cache() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let decode = fn_body(&src, "fn decode_preview(").expect("decode_preview");
     assert!(
         decode.contains("image_viewer::histogram_rgba("),
@@ -5393,7 +5413,7 @@ fn the_histogram_is_counted_on_the_worker_and_drawn_from_cache() {
 /// unreadable container does.
 #[test]
 fn a_failed_grid_cell_says_so_instead_of_loading_forever() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let cell = fn_body(&src, "fn grid_cell(").expect("grid_cell");
     // Anchored on `>=`, not the bare name: the request guard in the same
     // function also mentions `THUMB_TRIES` (with `<`), so a bare `contains`
@@ -5440,7 +5460,7 @@ fn the_decode_failure_names_unclaimed_bytes_only() {
 /// the revisit produces no new message of its own.
 #[test]
 fn a_failed_image_shows_its_error_instead_of_loading_forever() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     // Anchored on the overlay's own condition, not on the first "Loading…"
     // in the function: that literal also starts the shown-None branch and
     // appears in a comment, and both read before the overlay without
@@ -5476,7 +5496,7 @@ fn a_failed_image_shows_its_error_instead_of_loading_forever() {
 /// outlives its failure is shown for an image that now decodes.
 #[test]
 fn the_stored_failure_message_cannot_outlive_its_failure() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.load_errors.insert(key.clone(), msg.clone())"),
         "the message must be stored on the failure arm, beside the failed \
@@ -5542,7 +5562,7 @@ fn anim_frame_state_keeps_time_and_scales() {
 /// frame clock (paint and resume agree through the same clamp).
 #[test]
 fn animation_speed_is_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.config.anim_speed"),
         "Settings must offer the speed and the clock must read it"
@@ -5558,7 +5578,7 @@ fn animation_speed_is_wired() {
 /// cases the path-keyed edit cannot express.
 #[test]
 fn wallpaper_shown_is_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn set_wallpaper_shown(&mut self"),
         "there must be a processed-wallpaper action"
@@ -5596,7 +5616,7 @@ fn wallpaper_shown_is_wired() {
 /// arrangement until this moved.
 #[test]
 fn wallpaper_work_is_on_a_worker_and_the_last_press_wins() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     for name in ["fn set_wallpaper(", "fn set_wallpaper_shown("] {
         let at = src
@@ -5710,7 +5730,7 @@ fn the_decoration_toggle_lands_the_frame_where_the_client_was() {
 /// and maximized/fullscreen windows are left to the OS's clamping.
 #[test]
 fn the_title_bar_toggle_keeps_the_client_area() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     let at = src
         .find(".checkbox(&mut self.config.hide_title_bar,")
@@ -6163,7 +6183,7 @@ fn a_rar_this_build_cannot_read_says_so() {
 /// shrink behavior left to test — its absence is asserted in the wiring scan.
 #[test]
 fn the_fit_window_key_is_wired_to_a_live_resize() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.fit_window_to_image()"),
         "`T` must arm the fit"
@@ -6209,7 +6229,7 @@ fn the_fit_window_key_is_wired_to_a_live_resize() {
 /// resize centers on the old window.
 #[test]
 fn the_fit_window_mode_is_sticky_centered_and_follows() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.config.fit_window_mode = !self.config.fit_window_mode"),
         "`T` must toggle the mode, not fire once"
@@ -6250,7 +6270,7 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
 /// correctly computed 1.0.)
 #[test]
 fn adoption_follows_the_view_modes() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src
         .find("fn sync_shown(&mut self")
         .expect("sync_shown must exist");
@@ -6265,7 +6285,7 @@ fn adoption_follows_the_view_modes() {
 /// fit-window, and vice versa.
 #[test]
 fn view_modes_are_exclusive() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn toggle_fit_mode(&mut self)")
             && src.contains("fn toggle_fit_mode(&mut self"),
@@ -6285,7 +6305,7 @@ fn view_modes_are_exclusive() {
 /// so toggles and rescans re-`goto`ing the same image keep the pan.
 #[test]
 fn arriving_resets_the_pan_but_stays_do_not() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let goto_at = src.find("fn goto(&mut self").expect("goto must exist");
     // 9400 and not 8000: the cursor-change block also carries the per-image
     // remember wiring (`view_memory_is_wired_...`), which grew goto past
@@ -6304,7 +6324,7 @@ fn arriving_resets_the_pan_but_stays_do_not() {
 /// mode like Crop does.
 #[test]
 fn fit_window_pins_chrome_places_late_and_shows_state() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("exact_size("),
         "side panes must pin their width in the mode, or chrome drifts post-measure"
@@ -6335,7 +6355,7 @@ fn fit_window_pins_chrome_places_late_and_shows_state() {
 /// are source scans - the established pattern here.
 #[test]
 fn the_animation_keys_presets_and_chrome_are_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.step_animation(false)")
             && src.contains("self.step_animation(true)")
@@ -6367,7 +6387,7 @@ fn the_animation_keys_presets_and_chrome_are_wired() {
 /// the hook stays rebindable in Settings.
 #[test]
 fn the_alt_next_key_resumes_a_paused_animation() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("step_dir.filter(|_| !unpause)"),
         "the step branch must stand down when the key means resume"
@@ -6384,7 +6404,7 @@ fn the_alt_next_key_resumes_a_paused_animation() {
 /// and always-on-top through Win32 (`set_topmost`), not through a restart.
 #[test]
 fn window_chrome_applies_live() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("ViewportCommand::Decorations("),
         "hiding the title bar must send a live viewport command"
@@ -6406,7 +6426,7 @@ fn window_chrome_applies_live() {
 /// so this is a source scan - the established pattern here.
 #[test]
 fn the_slideshow_is_wired_to_a_tick_and_a_stop() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("Start slideshow") && src.contains("slideshow_secs"),
         "Settings must offer the toggle and the pace"
@@ -6446,7 +6466,7 @@ fn esc_defaults_to_closing_and_crop_comes_first() {
         image_viewer::Config::load(&missing).esc_closes_app,
         "a fresh config must keep the shipped Esc-closes behaviour"
     );
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src
         .find("if esc {")
         .expect("the Esc chain must exist");
@@ -6490,7 +6510,7 @@ fn printing_is_wired_to_ctrl_p() {
         lib.contains("fn print_file(") && lib.contains("ShellExecuteW"),
         "printing must go through the native print verb"
     );
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn print_current(&mut self"),
         "there must be a print action"
@@ -6513,7 +6533,7 @@ fn printing_is_wired_to_ctrl_p() {
 /// whole visible folder to EXIF dates with the dateless counted, not failed.
 #[test]
 fn touch_dates_are_wired_to_menu_buttons() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn touch_current(&mut self")
             && src.contains("fn touch_folder_to_exif_dates(&mut self"),
@@ -6534,7 +6554,7 @@ fn touch_dates_are_wired_to_menu_buttons() {
 /// call anywhere else in the bottom panel fails.
 #[test]
 fn the_bottom_bar_menus_carry_the_buttons_actions() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src
         .find(r#"egui::Panel::bottom("menu")"#)
         .expect("the bottom panel exists");
@@ -6688,7 +6708,7 @@ fn persistent_roots_consult_portable_mode() {
 /// no re-decode, EXIF-oriented but uncropped and unturned.
 #[test]
 fn copy_original_shares_the_copy_path() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn copy_image_to_clipboard(&mut self, unedited: bool)"),
         "there must be one copy path with an unedited arm"
@@ -6704,7 +6724,7 @@ fn copy_original_shares_the_copy_path() {
 /// established pattern here.
 #[test]
 fn the_settings_panel_scrolls() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src
         .find("Panel::right(\"settings\")")
         .expect("the settings panel must exist");
@@ -6720,7 +6740,7 @@ fn the_settings_panel_scrolls() {
 /// test, so these are source scans - the established pattern here.
 #[test]
 fn the_rebindable_keys_are_wired_to_the_direction_rule() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("set_nav_overrides(&self.config.keybindings)"),
         "startup and the settings panel must push keybindings into the nav table"
@@ -6744,7 +6764,7 @@ fn the_rebindable_keys_are_wired_to_the_direction_rule() {
 /// User commands must be **wired**: a chord, a runner, and the expansion.
 #[test]
 fn the_user_commands_are_wired_to_ctrl_digits() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("fn run_user_command(&mut self"),
         "there must be a user-command runner"
@@ -6766,7 +6786,7 @@ fn the_user_commands_are_wired_to_ctrl_digits() {
 /// never `key_pressed`.
 #[test]
 fn the_user_command_chord_ignores_key_repeat() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src
         .find("fn action_pressed_fresh(")
         .expect("the edge-triggered matcher must exist");
@@ -6799,7 +6819,7 @@ fn the_user_command_chord_ignores_key_repeat() {
 /// from every test, so this is a source scan, the established pattern.
 #[test]
 fn external_spawns_are_rate_limited() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("const SPAWN_COOLDOWN: Duration"),
         "there must be one cooldown every spawn site shares"
@@ -6825,7 +6845,7 @@ fn external_spawns_are_rate_limited() {
 /// two ghost reports (a chord that "did nothing", a freeze that was fixed).
 #[test]
 fn the_settings_panel_shows_the_build_id() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("env!(\"IV_BUILD_ID\")"),
         "Settings must show the build fingerprint, or stale binaries are \
@@ -6837,7 +6857,7 @@ fn the_settings_panel_shows_the_build_id() {
 /// same marker for both, matching the README's beta sections.
 #[test]
 fn beta_features_are_marked_beta_in_red() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     for base in ["Double page mode", "User commands (Ctrl+1..9):"] {
         let at = src
             .find(base)
@@ -6855,7 +6875,7 @@ fn beta_features_are_marked_beta_in_red() {
 /// gate, or hiding the pane leaves a worker reading a file nobody displays.
 #[test]
 fn side_panes_hide_individually_and_gate_their_reads() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     assert!(
         src.contains("self.show_panels && self.show_left"),
         "the left pane and its EXIF read must gate on master and flag"
@@ -6901,7 +6921,7 @@ fn side_panes_hide_individually_and_gate_their_reads() {
 /// value that differs from the behaviour it claims to match.
 #[test]
 fn save_as_and_paste_are_wired() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let lib = lib_src();
 
     // --- save-as: the chord, the action, the panel, the call ---
@@ -6917,7 +6937,7 @@ fn save_as_and_paste_are_wired() {
         "the action must be read from the binding table"
     );
     assert!(
-        src.contains("} else if save_as {\n                self.open_save_as();"),
+        src.contains("            } else if save_as {\n                self.open_save_as();"),
         "the chord must reach open_save_as"
     );
     assert!(
@@ -7163,7 +7183,7 @@ fn the_history_is_capped_and_drops_the_oldest_step() {
 /// function, after the edit.
 #[test]
 fn the_transform_tail_records_before_it_edits() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn apply_to_current(").expect("apply_to_current");
     let at = body.find("history.record(").expect("record must be called");
     let edit = body
@@ -7197,7 +7217,7 @@ fn undo_and_redo_are_rebindable_chord_actions() {
 /// as absent.
 #[test]
 fn the_undo_buttons_sit_with_the_transforms_and_disable_when_empty() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let at = src.find(r#""Undo""#).expect("an Undo button");
     let near = &src[at.saturating_sub(2500)..(at + 2500).min(src.len())];
     assert!(
@@ -7214,26 +7234,27 @@ fn the_undo_buttons_sit_with_the_transforms_and_disable_when_empty() {
 /// the UI whenever the pane is hidden.
 #[test]
 fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
-    let src = include_str!("../src/main.rs");
-    let exif_at = src.find("wants_exif(").expect("the EXIF gate exists");
-    let rating_at = src.find("Ratings::read(").expect("the rating is read somewhere");
+    // `fn ui(` lives in `app_ui.rs`: the left pane (`pane.show`) and the EXIF
+    // gate (`wants_exif`) are both inside it, so their order inside this one
+    // function is the property. A rating is a 300-byte sidecar, not a whole-file
+    // read, so it must not be folded into the `wants_exif` gate - hiding the
+    // pane must not hide the rating.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app_ui.rs"),
+    )
+    .expect("src/app_ui.rs");
+    // All three markers occur once in `app_ui.rs`, all inside `fn ui(`: the
+    // rating heading, the EXIF heading, and the `wants_exif` gate that wraps
+    // only the EXIF read. The rating block must come before the gate - it is a
+    // separate path and must not vanish when the pane is hidden.
+    let rating = src.find(r#"ui.heading("Rating")"#).expect("the rating heading in the left pane");
+    let gate = src.find("wants_exif(").expect("the EXIF gate wants_exif");
+    let _heading = src.find(r#"ui.heading("EXIF")"#).expect("the EXIF heading");
     assert!(
-        rating_at > exif_at,
-        "the rating read must come after the EXIF gate's own read, so it is a \
-         separate path rather than folded into it"
+        rating < gate,
+        "the rating block precedes the EXIF gate: it is not folded into it, so \
+         hiding the pane cannot hide the rating"
     );
-    // The left pane lives in `fn ui(`, not `fn central(`: central paints only
-    // the middle panel (it ends well before the pane code), while the EXIF pane
-    // is built in `ui`. The property is "above the EXIF heading in the pane",
-    // so this scans the pane — anchored on its `pane.show` closure rather than
-    // on `fn ui(`, because the naive brace counter in `fn_body` closes `ui`
-    // early on a comment quoting code with unbalanced braces. The left pane is
-    // the first `pane.show` in the file, so `find` lands on it.
-    let pane = fn_body(&src, "pane.show(ui, |ui|").expect("the left pane");
-    let block = pane.find("rating_widget").or_else(|| pane.find("Rating"))
-        .expect("a rating block in the pane");
-    let heading = pane.find(r#"ui.heading("EXIF")"#).expect("the EXIF heading");
-    assert!(block < heading, "the rating block is above the camera's own metadata");
 }
 
 /// Archives get no ratings: there is nowhere to write `vol1.cbz/p003.jpg.xmp`,
@@ -7256,7 +7277,7 @@ fn archives_are_refused_a_rating() {
 /// frame.
 #[test]
 fn the_grid_reads_ratings_from_a_map_not_the_filesystem() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let cell = fn_body(&src, "fn grid_cell(").expect("grid_cell");
     assert!(
         !cell.contains("Ratings::read("),
@@ -7401,7 +7422,7 @@ fn an_old_config_without_the_remember_setting_lands_on_the_default() {
 /// is already looking at.
 #[test]
 fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
-    let src_source = include_str!("../src/main.rs");
+    let src_source = main_src();
     // `fn_body` is built for signatures *without* a trailing `{`, so the body's
     // own braces carry the depth. A brace-terminated block needs the `{` left
     // out of the search instead, or every inner `if` returning to depth 0
@@ -7487,7 +7508,7 @@ fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
 /// except in memory).
 #[test]
 fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn schedule(&mut self)").expect("schedule");
     let collect = body
         .find("self.stamps.get(p)")
@@ -7571,7 +7592,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
         Some(&src[open + 1..end?])
     }
 
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     // The funnel: save/restore only through `toggle_panels_master`, and the
     // save inside it is ordered after the flip.

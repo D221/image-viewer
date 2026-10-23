@@ -5,7 +5,6 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-use crate::*;
 
 /// Side of one gallery-grid (G) thumbnail. The shipped size and the default
 /// every config without the key comes up on; the live value is

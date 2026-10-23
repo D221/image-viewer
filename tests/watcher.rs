@@ -453,15 +453,35 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
     panic!("{sig} has no closing brace");
 }
 
+fn main_src() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (name == "main.rs" || name.starts_with("app_"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn the_app_polls_only_when_no_watch_is_running() {
-    let src = include_str!("../src/main.rs");
+    let src = main_src();
 
     // `maybe_rescan` is the whole arrangement: the watch branch comes first and
     // returns, so the timer below it *is* the fallback. A poll that ran
     // unconditionally would keep the 2 s idle repaint the watch exists to
     // remove, and would look identical from outside.
-    let body = fn_body(src, "fn maybe_rescan(");
+    let body = fn_body(&src, "fn maybe_rescan(");
     let watch = body
         .find("if self.watcher.is_some() {")
         .expect("the watch branch");
@@ -475,7 +495,7 @@ fn the_app_polls_only_when_no_watch_is_running() {
     // The watch is pointed at what is browsed by *derivation*, so a folder
     // switch, the recursive toggle and opening an archive all restart or stop it
     // without a call site to forget.
-    let sync = fn_body(src, "fn sync_watcher(");
+    let sync = fn_body(&src, "fn sync_watcher(");
     let archive = sync
         .find("if self.zip_archive.is_some()")
         .expect("the archive guard");
@@ -502,7 +522,7 @@ fn the_app_polls_only_when_no_watch_is_running() {
     // only counting is the one a probe asserts on. The content half is
     // **deferred**, not acted on in the drain: a save arrives as several events
     // and decoding the first one decodes a half-written file.
-    let drain = fn_body(src, "fn drain_watch_events(");
+    let drain = fn_body(&src, "fn drain_watch_events(");
     assert!(drain.contains("classify_change"));
     assert!(drain.contains("coalesce_changes"));
     assert!(drain.contains("self.pending_content.insert(p, now)"));
@@ -510,7 +530,7 @@ fn the_app_polls_only_when_no_watch_is_running() {
         drain.contains("C_WATCH_EVENTS"),
         "the received count is what tells a silent OS from an ignored event"
     );
-    let flush = fn_body(src, "fn flush_content_changes(");
+    let flush = fn_body(&src, "fn flush_content_changes(");
     assert!(flush.contains("self.invalidate_path(&p, ctx)"));
     assert!(flush.contains("perf::C_WATCHED_CHANGES"));
     assert!(

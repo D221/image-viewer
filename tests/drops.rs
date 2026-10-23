@@ -230,8 +230,24 @@ fn a_changed_source_does_not_land_on_top_of_the_previous_copy() {
 /// `main.rs` is a binary and no test can reach into it, so the wiring is
 /// asserted against the source text - the established pattern, and the reason it
 /// is defensible here is that it checks **position**, not presence.
-fn main_src() -> &'static str {
-    include_str!("../src/main.rs")
+fn main_src() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (name == "main.rs" || name.starts_with("app_"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The body of the function whose signature starts with `sig`, by brace
@@ -274,7 +290,7 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
 #[test]
 fn a_drop_takes_a_copy_and_no_other_open_does() {
     let src = main_src();
-    let drop_body = fn_body(src, "fn load_dropped");
+    let drop_body = fn_body(&src, "fn load_dropped");
     assert!(
         drop_body.contains("self.open_file(ctx, path, true)"),
         "the drop must open transiently, or the picture blanks a second later.\n\
@@ -337,7 +353,7 @@ fn a_drop_takes_a_copy_and_no_other_open_does() {
 #[test]
 fn the_copy_is_made_off_the_ui_thread() {
     let src = main_src();
-    let body = fn_body(src, "fn start_drop_copy");
+    let body = fn_body(&src, "fn start_drop_copy");
     let at = |needle: &str| {
         body.find(needle)
             .unwrap_or_else(|| panic!("start_drop_copy must mention {needle}:\n{body}"))
@@ -367,7 +383,7 @@ fn the_copy_is_made_off_the_ui_thread() {
     // left if someone kept a synchronous copy here and used the thread for
     // something else. Brace-matched to `open_file`'s body, so a copy moved into
     // another function does not dodge it.
-    let open = fn_body(src, "fn open_file");
+    let open = fn_body(&src, "fn open_file");
     for needle in ["std::fs::", "fs::copy", "own_dropped", "create_dir_all"] {
         assert!(
             !open.contains(needle),
@@ -510,7 +526,7 @@ fn a_copy_of_the_wrong_length_is_not_reused() {
 #[test]
 fn a_drop_copies_its_source_after_releasing_the_previous_copy() {
     let src = main_src();
-    let body = fn_body(src, "fn open_file");
+    let body = fn_body(&src, "fn open_file");
     let release = body
         .find("self.close_transients()")
         .unwrap_or_else(|| panic!("open_file must release the previous copy:\n{body}"));
@@ -535,7 +551,7 @@ fn a_drop_copies_its_source_after_releasing_the_previous_copy() {
 #[test]
 fn a_drop_copy_is_released_on_exit_and_on_quit() {
     let src = main_src();
-    let exit = fn_body(src, "fn on_exit");
+    let exit = fn_body(&src, "fn on_exit");
     assert!(
         exit.contains("self.close_transients()"),
         "on_exit must release the drop copy, or every session leaks a directory:\n{exit}"
@@ -559,7 +575,7 @@ fn a_drop_copy_is_released_on_exit_and_on_quit() {
     );
     // ...and named, not just counted: the new site is only correct if it
     // releases the *archive's* half on the way out.
-    let leave = fn_body(src, "fn leave_archive");
+    let leave = fn_body(&src, "fn leave_archive");
     assert!(
         leave.contains("self.close_transients()"),
         "leaving an archive must release its extracted temp dir:\n{leave}"
@@ -575,7 +591,7 @@ fn a_drop_copy_is_released_on_exit_and_on_quit() {
 #[test]
 fn both_transients_are_released_by_one_call() {
     let src = main_src();
-    let body = fn_body(src, "fn close_transients");
+    let body = fn_body(&src, "fn close_transients");
     assert!(
         body.contains("self.zip_temp.take()"),
         "the archive's temp dir must still be released here:\n{body}"
@@ -613,7 +629,7 @@ fn both_transients_are_released_by_one_call() {
 #[test]
 fn a_stale_copy_is_dropped_rather_than_opened() {
     let src = main_src();
-    let pump = fn_body(src, "fn pump");
+    let pump = fn_body(&src, "fn pump");
     let test = pump.find("self.pending_drop.as_deref() != Some(src.as_path())");
     assert!(
         test.is_some(),
@@ -649,7 +665,7 @@ fn a_stale_copy_is_dropped_rather_than_opened() {
 #[test]
 fn only_a_dropped_file_is_copied() {
     let src = main_src();
-    let body = fn_body(src, "fn load_dropped");
+    let body = fn_body(&src, "fn load_dropped");
     let dir_branch = body
         .find("self.open_folder(ctx, path)")
         .expect("a folder branch");

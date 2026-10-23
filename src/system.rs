@@ -45,7 +45,6 @@ unsafe extern "system" fn find_own_window(hwnd: isize, out: isize) -> i32 {
         1
     }
 }
-use crate::*;
 
 /// Keep our window above all others, live (egui 0.36 has a builder for this
 /// but no viewport command, so this goes straight to Win32 instead of

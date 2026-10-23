@@ -32,6 +32,26 @@ use proptest::prelude::*;
 
 use Shape::{Double, Single};
 
+fn main_src() -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files: Vec<_> = std::fs::read_dir(&root)
+        .expect("src/")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            p.extension().and_then(|e| e.to_str()) == Some("rs")
+                && (name == "main.rs" || name.starts_with("app_"))
+        })
+        .collect();
+    files.sort();
+    files
+        .iter()
+        .map(|p| std::fs::read_to_string(p).expect("read"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A gallery of documents, each a list of page shapes. One entry per file, so a
 /// multi-page TIFF is a document with more than one page - which is what the
 /// straddle tests need.
@@ -1994,7 +2014,7 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
 /// calls it too, so that is not hypothetical.
 #[test]
 fn invalidate_path_drops_the_cached_dimensions() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn invalidate_path(");
 
     assert!(
@@ -2020,7 +2040,7 @@ fn invalidate_path_drops_the_cached_dimensions() {
 /// [`fn_body`]) rather than adding a second copy of it.
 #[test]
 fn invalidate_path_drops_the_overrides_and_saves_them() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn invalidate_path(");
 
     assert!(
@@ -2068,7 +2088,7 @@ fn invalidate_path_drops_the_overrides_and_saves_them() {
 /// guard is the proof.)
 #[test]
 fn arriving_previews_re_plan_through_the_partner() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let arm = fn_body(&src, "Msg::Preview { key, result } => match result {");
 
     assert!(
@@ -3804,7 +3824,7 @@ fn the_zoom_anchor_is_top_aligned_over_the_tallest_page() {
 /// task report); that evidence is not a test and does not survive here.
 #[test]
 fn the_zoom_measures_from_the_content_centre_at_both_scales() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn central(");
     // **Comments are stripped first**, and that is not tidiness: the block quotes the
     // expression it replaced ("`anchor - panel.center()` is right only when..."), so
@@ -3851,7 +3871,7 @@ fn the_zoom_measures_from_the_content_centre_at_both_scales() {
 /// instead, and the numbers are in the task report.
 #[test]
 fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
 
     let central = fn_body(&src, "fn central(");
     assert!(
@@ -4543,7 +4563,7 @@ fn a_pan_range_is_always_ordered_and_finite() {
 /// symmetric form is one line shorter.
 #[test]
 fn the_pan_clamp_asks_the_library_for_the_range() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn central(");
     let code = body
         .lines()
@@ -5819,7 +5839,7 @@ fn goto_page_refuses_a_file_that_is_not_there_and_trusts_the_page() {
 ///   them off an anchor with nothing in the tree to notice.
 #[test]
 fn manga_mode_makes_a_step_walk_a_turn() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
 
     for (sig, needed) in [
         (
@@ -6288,7 +6308,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
 /// "nobody has looked at a spread".
 #[test]
 fn the_turns_second_half_is_derived_not_latched() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
 
     let sync = fn_body(&src, "fn sync_shown(&mut self, ctx: &Context)");
     assert!(
@@ -6375,7 +6395,7 @@ fn the_turns_second_half_is_derived_not_latched() {
 ///   would put a `File::open` on the critical path of every keypress.
 #[test]
 fn goto_learns_the_page_count_of_the_turns_other_file() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
 
     let goto = fn_body(&src, "fn goto(&mut self, ctx: &Context)");
     assert!(
@@ -6429,7 +6449,7 @@ fn goto_learns_the_page_count_of_the_turns_other_file() {
 /// multi-page document, page forward, zoom, and confirm the tiles are that page's.
 #[test]
 fn the_full_resolution_buffer_is_keyed_by_page_not_by_path() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
 
     let full = fn_body(&src, "struct FullImage {");
     assert!(
@@ -6499,7 +6519,7 @@ fn the_full_resolution_buffer_is_keyed_by_page_not_by_path() {
 /// it cannot: it uses a real `.jpg`, which has exactly one page.
 #[test]
 fn copy_refuses_a_page_of_a_multi_page_document() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let body = fn_body(&src, "fn copy_image_to_clipboard(&mut self, unedited: bool)");
 
     let at = body
@@ -6994,7 +7014,7 @@ fn a_lone_spread_costs_one_refine_when_its_target_really_changes() {
 /// in this test and could disagree with itself on the frame a shape is learned.
 #[test]
 fn central_decides_and_threads_the_lone_spread_flag() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let central = fn_body(&src, "fn central(");
 
     assert!(
@@ -7095,7 +7115,7 @@ fn central_decides_and_threads_the_lone_spread_flag() {
 /// to be inside it, which a `contains` on the whole body could not tell.
 #[test]
 fn the_plan_is_empty_until_the_display_area_is_measured() {
-    let src = std::fs::read_to_string("src/main.rs").expect("cannot read src/main.rs");
+    let src = main_src();
     let schedule = fn_body(&src, "fn schedule(");
 
     assert!(

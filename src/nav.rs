@@ -5,7 +5,6 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-use crate::*;
 
 /// One navigation input, **named** rather than answered.
 ///
