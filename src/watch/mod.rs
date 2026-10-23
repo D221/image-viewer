@@ -6,7 +6,7 @@
 //! `tests/source_size.rs`.
 
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // Folder watching

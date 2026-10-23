@@ -6,7 +6,7 @@
 //! `tests/source_size.rs`.
 
 use crate::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Spread overrides: what the user decided, persisted
