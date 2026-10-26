@@ -737,7 +737,7 @@ Five input classes the spec implies but does not spell out, most likely to bite 
   `Config::manga_mode` was added in **Task 4**, because `turn_partner` gates on it and the
   field had to exist for that task to compile. So only `manga_rtl` is new here.
 
-  In `tests/spreads.rs`:
+  In `tests/manga_settings.rs`:
   ```rust
   #[test]
   fn a_config_written_before_manga_mode_still_loads() {
@@ -751,7 +751,7 @@ Five input classes the spec implies but does not spell out, most likely to bite 
 
 - [ ] **Step 2: Run to verify it fails, then passes**
 
-  Run: `cargo test --test spreads a_config_written_before_manga_mode_still_loads`
+  Run: `cargo test --test manga_settings a_config_written_before_manga_mode_still_loads`
   Expected: compile error on the missing field; then PASS.
 
 - [ ] **Step 3: Add the field and set it**

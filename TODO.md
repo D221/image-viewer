@@ -1057,9 +1057,10 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 | file | lines | what is in it |
 |---|---|---|
 | `tests/unit.rs` | 5,088 | the unit suite, one file for everything that does not deserve its own target |
-| `tests/spreads.rs` | 7,404 | the manga-mode suite, same shape |
+| `tests/spreads.rs` | 7,218 | the manga-mode suite, same shape |
 | `src/app/ui.rs` | 2,048 | pane layout against the egui UI |
-| `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size, the one move the ratchet's doc names for a split that leaves a file over target |
+| `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
+| `tests/manga_settings.rs` | 186 | manga `manga_mode`/`manga_rtl` forward-compat + BOM strip, split out of `spreads.rs` (2026-10-26); under target, so not on the list |
 | `tests/rotate_save.rs` | 1,921 | |
 | `tests/flip_through.rs` | 1,647 | |
 | `tests/keybindings.rs` | 1,402 | |
@@ -1069,12 +1070,12 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
-folders, then `unit.rs`'s prefilter suite out to `tests/resample.rs` (one
-contiguous block + local twins of the five helpers other files still call;
-the `#[test]` set partitioned 179 → 179, none lost, none duplicated) — so the
-mechanism is not theoretical. What remains is the same move: split a test file
-by subject, or move a section of `src/app/ui.rs` into its own module, and
-lower the numbers above.
+folders, then `unit.rs`'s prefilter suite out to `tests/resample.rs`, then
+`spreads.rs`'s settings section out to `tests/manga_settings.rs` (the 3 moved
+tests run green in the new target, none lost, none duplicated) — so the
+mechanism is not theoretical. What remains is the same move: split a test file by subject,
+or move a section of `src/app/ui.rs` or `src/app/central.rs` into its own
+module, and lower the numbers above.
 
 **Not claimed.** Line counts are a proxy for "can a person hold it in their
 head", not a measurement. What *is* true is that the check is enforced, so the
