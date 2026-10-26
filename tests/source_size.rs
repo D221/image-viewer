@@ -44,7 +44,8 @@ const TARGET: usize = 1000;
 /// new size. **To add to one without splitting it:** the new code goes in a
 /// module of its own instead.
 const OVER_TARGET: &[(&str, usize)] = &[
-    ("tests/unit.rs", 7_672),
+    ("tests/unit.rs", 5_088),
+    ("tests/resample.rs", 2_723),
     ("tests/spreads.rs", 7_404),
     ("src/app/central.rs", 1402),
     ("src/app/ui.rs", 2048),
