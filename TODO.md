@@ -1060,20 +1060,21 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 | `tests/spreads.rs` | 7,218 | the manga-mode suite, same shape |
 | `src/app/ui.rs` | 2,048 | pane layout against the egui UI |
 | `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
-| `tests/manga_settings.rs` | 186 | manga `manga_mode`/`manga_rtl` forward-compat + BOM strip, split out of `spreads.rs` (2026-10-26); under target, so not on the list |
 | `tests/rotate_save.rs` | 1,921 | |
 | `tests/flip_through.rs` | 1,647 | |
-| `tests/keybindings.rs` | 1,402 | |
 | `src/app/central.rs` | 1,402 | |
 | `tests/bench_browse.rs` | 1,309 | |
 | `tests/thumb_cache.rs` | 1,121 | |
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
-folders, then `unit.rs`'s prefilter suite out to `tests/resample.rs`, then
-`spreads.rs`'s settings section out to `tests/manga_settings.rs` (the 3 moved
-tests run green in the new target, none lost, none duplicated) — so the
-mechanism is not theoretical. What remains is the same move: split a test file by subject,
+folders, then `unit.rs`'s prefilter suite out to `tests/resample.rs`,
+`spreads.rs`'s settings section out to `tests/manga_settings.rs`, and
+`keybindings.rs` into `keybindings.rs` (674 lines, under target) plus
+`tests/keys_direction.rs` (914 lines, under target) — 17 tests split 7/10,
+none lost, none duplicated, no new warnings. Files that come down under the
+target leave the list; that is what just happened to `keybindings.rs` and
+`manga_settings.rs`. What remains is the same move: split a test file by subject,
 or move a section of `src/app/ui.rs` or `src/app/central.rs` into its own
 module, and lower the numbers above.
 

@@ -51,7 +51,6 @@ const OVER_TARGET: &[(&str, usize)] = &[
     ("src/app/ui.rs", 2048),
     ("tests/rotate_save.rs", 1_921),
     ("tests/flip_through.rs", 1_647),
-    ("tests/keybindings.rs", 1_402),
     ("tests/bench_browse.rs", 1_309),
     ("tests/thumb_cache.rs", 1_121),
 ];
