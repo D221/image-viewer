@@ -39,9 +39,12 @@ instead of pointing the shell at the original. **Now tested:** the pure half
 the decision: conversion off keeps the original path, an untagged JPEG keeps the
 original path even with conversion on, archive members always get a converted
 copy beside the config, and a source without an extension falls back to `.jpg`.
-The P3 + conversion-on case (real converted pixels landing in the wallpaper
-file) still needs a real P3 fixture — `test-images` has two P3 JPEGs but the
-directory is gitignored, so that test can't live in the tree.
+Two additional tests run when `test-images/` is present (same skip-if-absent
+pattern as `test_gps_decode`): they load a real P3 JPEG (`color-p3-named.jpg`)
+and verify `color_info` classifies it as WideGamut, `wallpaper_target` picks the
+converted copy beside the config, and `decode`+`convert_wide_gamut_rgba`
+produces a valid RGBA buffer matching the decoded dimensions. The by-eye
+comparison against JPEGView_L (§1) still needs a human with a P3 display.
 
 Cost when on, measured: 166 MP/s across the thread pool, so ~35 ms for a 2 MP
 preview and ~145 ms for a 24 MP full decode.

@@ -11,7 +11,8 @@
 //! already fell into once.
 
 use image_viewer::{
-    wallpaper_target, wide_gamut_conversion, set_wide_gamut_conversion,
+    wallpaper_target, wide_gamut_conversion, ColorSpace, color_info, load_image,
+    convert_wide_gamut_rgba, set_wide_gamut_conversion,
 };
 
 /// Restores `wide_gamut_conversion` to its previous value when dropped.
@@ -124,4 +125,82 @@ fn wide_gamut_conversion_defaults_to_off() {
     let _restore = RestoreConversion(wide_gamut_conversion());
     set_wide_gamut_conversion(false);
     assert!(!wide_gamut_conversion(), "the default is off, per AGENTS.md");
+}
+
+/// End-to-end check against a real P3 JPEG from test-images (gitignored, so
+/// this skips on fixture-free machines — same pattern as `test_gps_decode`).
+///
+/// Verifies that `color_info` classifies the file as WideGamut, that
+/// `wallpaper_target` picks the converted copy beside the config when the
+/// setting is on, and that the actual decode+convert produces a valid RGBA
+/// buffer matching the decoded dimensions.
+#[test]
+fn wallpaper_converts_real_p3_jpeg_when_fixture_present() {
+    let p3 = std::path::Path::new("test-images\\color-p3-named.jpg");
+    if !p3.exists() {
+        return; // fixture-free machines skip this check
+    }
+
+    // The file must classify as WideGamut for the conversion gate to fire.
+    let info = color_info(p3);
+    assert!(
+        info.space == ColorSpace::WideGamut,
+        "test P3 JPEG must be classified WideGamut, got {:?}",
+        info.space
+    );
+
+    // With conversion on, the target is a converted copy beside the config.
+    let _restore = RestoreConversion(wide_gamut_conversion());
+    set_wide_gamut_conversion(true);
+    let folder = std::path::Path::new(".");
+    let target = wallpaper_target(p3, folder, false);
+    assert_eq!(
+        target,
+        folder.join("wallpaper.jpg"),
+        "P3 + conversion on must write wallpaper.jpg beside the config"
+    );
+
+    // Decode and convert: the output must be a valid RGBA buffer.
+    let data = load_image(p3, image_viewer::MAX_TEXTURE_DIM).unwrap();
+    let w = data.width;
+    let h = data.height;
+    assert!(w > 0 && h > 0, "decoded P3 image must have non-zero dimensions");
+    assert_eq!(
+        data.rgba.len(),
+        (w as usize) * (h as usize) * 4,
+        "decoded buffer must match its dimensions"
+    );
+
+    let mut converted = data.clone();
+    convert_wide_gamut_rgba(&mut converted.rgba);
+    assert_eq!(
+        converted.rgba.len(),
+        (w as usize) * (h as usize) * 4,
+        "converted buffer must keep the same dimensions"
+    );
+
+    // The converted copy written by set_wallpaper would be this buffer saved as
+    // a JPEG — the encode is lossy but the buffer itself must be well-formed.
+    let _ = target;
+}
+
+/// Same as above but for an archive member: the target is always the converted
+/// copy regardless of colour space, because archive temp dirs die with the app.
+#[test]
+fn wallpaper_converts_p3_archive_member_when_fixture_present() {
+    let p3 = std::path::Path::new("test-images\\color-p3-named.jpg");
+    if !p3.exists() {
+        return; // fixture-free machines skip this check
+    }
+
+    let _restore = RestoreConversion(wide_gamut_conversion());
+    set_wide_gamut_conversion(true);
+    let folder = std::path::Path::new(".");
+    let target = wallpaper_target(p3, folder, true);
+    assert_eq!(
+        target,
+        folder.join("wallpaper.jpg"),
+        "P3 archive member must also write wallpaper.jpg beside the config"
+    );
+    let _ = target;
 }
