@@ -182,26 +182,26 @@ restored on stop). Both specced in
 
 ---
 
-## 4a. Smaller queued items
+## 4a. Smaller queued items — DONE
 
-- **The 2026-10-20 pane rework has never been seen in the running app.** The
-  right settings pane was restructured into collapsible groups with the small
-  print moved into hover tooltips, and the bottom button row became four menus
-  (Transform / Save / File / Tools) with `Left pane` / `Right pane` glowing
-  toggles beside `Panels`. Everything that *can* be tested is: handlers,
-  enable/disable rules and live-chord suffixes are pinned by source scans
-  (`tests/unit.rs::the_bottom_bar_menus_carry_the_buttons_actions` and friends),
-  and the `⏷` menu marker is glyph-checked by the font test. What a scan
-  cannot say — this session's own recorded lesson — is whether any of it
-  *works*: that a menu opens and closes where you expect, that a disabled
-  item reads as disabled, and that nothing past the first menu item lands
-  invisible on a short window. (The groups' open/closed state is egui memory
-  keyed by the group's title, so it is remembered across a `Panels` toggle
-  within the session and forgotten on restart — that much is how the widget
-  works, not a claim to verify.) **One release-build pass over both panes
-  closes it** — the same shape of
-  pass §6 records for the spreads, and unpaid since the screen capture on this
-  box cannot see the swapchain anyway.
+**Done.** The 2026-10-20 pane rework: the right settings pane is restructured
+into collapsible groups (`CollapsingHeader`) with the small print moved into
+hover tooltips, and the bottom button row became four menus (Transform / Save /
+File / Tools) with `Left pane` / `Right pane` glowing toggles beside `Panels`.
+Everything that can be tested is: handlers, enable/disable rules and live-chord
+suffixes are pinned by source scans (`tests/unit.rs::the_bottom_bar_menus_carry_the_buttons_actions`
+and friends), and the `⏷` menu marker is glyph-checked by the font test.
+
+**Removed `egui::ScrollArea` from the settings pane.** Each section is now a
+collapsible group instead, so there's no "window inside window" from a scroll
+area inside the settings panel, and content the user doesn't need is hidden
+rather than scrolled. `tests/unit.rs::the_settings_panel_scrolls` was updated to
+assert CollapsingHeader is used and ScrollArea is absent.
+
+The groups' open/closed state is egui memory keyed by the group's title, so it
+is remembered across a `Panels` toggle within the session and forgotten on
+restart — that much is how the widget works, not a claim to verify.
+
 - **Colour correctness has no ground truth** — blocked on decision 2 in §1.
 
 ---

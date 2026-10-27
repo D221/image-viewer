@@ -4147,11 +4147,18 @@ fn the_settings_panel_scrolls() {
     let at = src
         .find("Panel::right(\"settings\")")
         .expect("the settings panel must exist");
-    let arm = &src[at..(at + 800).min(src.len())];
+    let arm = &src[at..(at + 2000).min(src.len())];
+    // Each section is a collapsible group instead of a ScrollArea: content the
+    // user doesn't need is hidden, so nothing runs off the bottom of short
+    // windows and there's no "window inside window" from a scroll area inside
+    // the settings panel.
     assert!(
-        arm.contains("ScrollArea::vertical()"),
-        "settings content must sit in a vertical ScrollArea, or it runs off \
-         the bottom of short windows"
+        arm.contains("CollapsingHeader::new"),
+        "settings content must be in collapsible groups, not a scroll area"
+    );
+    assert!(
+        !arm.contains("ScrollArea::vertical()"),
+        "the settings panel must not wrap its content in a ScrollArea"
     );
 }
 

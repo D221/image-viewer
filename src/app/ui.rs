@@ -1088,10 +1088,7 @@ impl eframe::App for MyApp {
             }
             pane.show(ui, |ui| {
                 ui.heading("Settings");
-                // The panel long outgrew the window height (renderer, resample,
-                // cache, keys, user commands, manga, sort, associations), so
-                // the content scrolls instead of running off the bottom.
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Settings");
 
                 egui::CollapsingHeader::new("Graphics & window")
                     .default_open(true)
@@ -2004,7 +2001,6 @@ impl eframe::App for MyApp {
                 // Which checkout this binary came from, so a copy sitting in
                 // Downloads can be told apart from the current build.
                 ui.small(format!("Build {}", env!("IV_BUILD_ID")));
-                });
             });
             }
             if resort {
