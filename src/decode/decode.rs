@@ -231,6 +231,31 @@ pub fn is_tiff_bytes(bytes: &[u8]) -> bool {
     tag == 42 || tag == 43
 }
 
+/// True if the bytes look like an SVG document (content-based, not extension).
+///
+/// Accepts `<?xml ...?><svg ...>` and a bare `<svg ...>` root. An SVG has no
+/// magic bytes, so this is a prefix sniff: it looks for the XML declaration
+/// followed by an `<svg` element, or `<svg` at the very start. The `<svg` must
+/// be followed by `>`, `/`, or whitespace — a bare `<svg` fragment is not SVG.
+/// Content-based per AGENTS.md — an SVG saved as `.jpg` must load.
+pub fn is_svg_bytes(bytes: &[u8]) -> bool {
+    let starts_svg = |b: &[u8]| {
+        b.starts_with(b"<svg")
+            && (b.len() == 4 || matches!(b[4], b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r'))
+    };
+    if bytes.starts_with(b"<?xml") {
+        // Skip the XML declaration, then look for `<svg`.
+        let after = if let Some(end) = bytes.windows(2).position(|w| w == b"?>") {
+            &bytes[end + 2..]
+        } else {
+            bytes
+        };
+        starts_svg(after.trim_ascii_start())
+    } else {
+        starts_svg(bytes.trim_ascii_start())
+    }
+}
+
 /// Caps for animation decoding: stop when either limit is hit.
 pub const MAX_ANIM_FRAMES: usize = 240;
 pub const MAX_ANIM_BYTES: usize = 256 * 1024 * 1024;

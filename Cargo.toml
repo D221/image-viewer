@@ -42,6 +42,12 @@ pollster = "1.0.1"
 sevenz-rust2 = "0.23"
 rar = "0.4"
 
+# SVG. `resvg` is pure Rust with no C build; its `tiny-skia` pixel buffer is
+# used through `resvg::tiny_skia` so the versions match what `resvg` expects.
+# SVG is vector, so it renders at any target size — there is no `full` tier and
+# no source-size decode: the preview is the decode.
+resvg = "0.49"
+
 
 [target.'cfg(windows)'.dependencies]
 # `Win32_Security` and `Win32_System_IO` are not incidental: windows-sys gates

@@ -936,32 +936,32 @@ on, the way qView's is, or moving the window between two monitors keeps showing
 the old conversion. That is `refilter`'s problem shape, and `refilter` is the
 existing answer.
 
-### 9.6 SVG
+### 9.6 SVG — DELIVERED
 
-**Known.** Seven list SVG in their README (FlyPhotos via `ResvgWrap`, gthumb,
-gwenview, ImageGlass, nomacs, oculante, pix); PicView and PhoXo have it in source
-(`Avalonia.Svg.Skia`, nanosvg); qView's depends on a Qt plugin this checkout does
-not prove. It is one of the two formats the field has and this app does not
-(RAW is the other, §9.7), and `resvg` is pure Rust with no C build.
+**Delivered.** `resvg` (pure Rust, no C build) added as a dependency. SVG is
+content-sniffed (`is_svg_bytes` in `src/decode/decode.rs`: `<?xml` with an
+`<svg` root, or bare `<svg` followed by `>`/`/`/whitespace) and decoded in
+`decode_page` via `decode_svg` (`src/decode/decode_page.rs`, `pub`). Renders at
+the panel target the preview path computes — not a fixed 1024. There is no
+`full` tier and no `below_target`: the preview *is* the decode, and a target
+change is a `needs_refine`. Viewport (width/height) gives the natural aspect
+ratio; missing or zero falls back to the target square.
 
-**Shape.** Sniff it by content like the rest — `<?xml` with an `<svg` root, or a
-bare `<svg` — and render at the **panel target** the preview path already
-computes — not a fixed 1024, because a vector has no natural size. There is no
-`full` and no `below_target`: a re-render on resize is milliseconds, so the
-honest model is "the preview *is* the decode" and a target change is a
-`needs_refine`.
+**Tests:** `tests/svg.rs` (8 tests) cover `is_svg_bytes` (XML form, bare root,
+rejections), `decode_svg` (target size, scale down, scale up, no-viewport), and
+`load_image_preview_full` end-to-end (no `full` buffer, `below_target: true`).
 
 **The trap, and it is this file's kind.** `dims()` for an SVG is the viewport or
 `None`, and `pairable` treats unknown dimensions optimistically — so a wide SVG
 in manga mode is planned as a turn's partner and collapses the turn when the
 shape is learned. Same failure as a wide page arriving late
-(`arrival_reschedules`), which means an SVG wants an explicit shape rather than a
-guess.
+(`arrival_reschedules`), which means an SVG wants an explicit shape rather than
+a guess.
 
 **Unverified:** that `resvg`'s XML parser bounds entity/expansion work on an
-untrusted file — check, do not assume; and whether anyone using this app has SVGs
-at all (a photo and manga library has none). It is a generality item and should
-be argued on that, not on speed.
+untrusted file — check, do not assume; and whether anyone using this app has
+SVGs at all (a photo and manga library has none). It is a generality item and
+should be argued on that, not on speed.
 
 ### 9.7 WIC, as an experiment behind a flag
 

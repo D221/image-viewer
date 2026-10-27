@@ -151,6 +151,31 @@ pub(crate) fn decode_page(
         });
     }
 
+    // An SVG: vector, so it renders at any size — there is no source-size
+    // decode, no `full` tier, and no `below_target`. The preview *is* the
+    // decode. The viewport (width/height attributes) gives the natural aspect
+    // ratio; missing or zero means the target is used square.
+    //
+    // SVG wants an explicit shape rather than optimistic dimensions: `pairable`
+    // treats unknown dims as "probably fits", which would collapse a manga turn
+    // when a wide SVG's shape is learned late. `decode_svg` returns the
+    // viewport it actually rendered, so the caller knows the truth.
+    if is_svg_bytes(&bytes) {
+        if let Ok(data) = decode_svg(&bytes, max_dim, start) {
+            let dims = (data.width, data.height);
+            return Ok(PreviewAndFull {
+                preview: data,
+                full: None,
+                anim: None,
+                orig: Some(dims),
+                below_target: true,
+                exif_tag: tag,
+                crop_grid,
+                colour,
+            });
+        }
+    }
+
     // An animation: decode the whole loop once; no second full decode, no tiles.
     //
     // GIF, APNG and animated WebP all land here, and all three used to be handled
@@ -332,6 +357,41 @@ pub(crate) fn decode_page(
         crop_grid,
         colour,
     })
+}
+
+/// Decode an SVG at `max_dim` on the long side.
+///
+/// SVG is vector: it renders at any size, so there is no source-size decode,
+/// no `full` tier, and no `below_target` — the preview *is* the decode. The
+/// viewport (width/height attributes) gives the natural aspect ratio; missing
+/// or zero means the target is used square.
+pub fn decode_svg(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<ImageData, LoadError> {
+    let opt = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &opt)
+        .map_err(|e| LoadError::Other(format!("svg: {e}")))?;
+    let size = tree.size();
+    let (render_w, render_h) = if size.width() > 0.0 && size.height() > 0.0 {
+        let scale = (max_dim as f32 / size.width().max(size.height()) as f32).min(1.0);
+        let w = (size.width() * scale).round().max(1.0) as u32;
+        let h = (size.height() * scale).round().max(1.0) as u32;
+        (w, h)
+    } else {
+        (max_dim, max_dim)
+    };
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(render_w, render_h)
+        .ok_or_else(|| LoadError::Other("svg: could not allocate pixmap".to_string()))?;
+    let scale_x = render_w as f32 / size.width().max(1.0);
+    let scale_y = render_h as f32 / size.height().max(1.0);
+    let transform = resvg::tiny_skia::Transform::from_scale(scale_x, scale_y);
+    let mut pixmap_mut = pixmap.as_mut();
+    resvg::render(&tree, transform, &mut pixmap_mut);
+    let rgba = pixmap.data().to_vec();
+    Ok(normalized(ImageData {
+        width: render_w,
+        height: render_h,
+        rgba,
+        load_time: start.elapsed(),
+    }))
 }
 
 /// True if the bytes look like a JPEG XL image (naked codestream or container).
