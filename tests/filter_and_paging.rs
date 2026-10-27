@@ -310,6 +310,8 @@ fn the_filter_can_narrow_by_rating_flag_and_tag() {
         let r = image_viewer::ratings::Ratings {
             rating: image_viewer::ratings::Rating { stars, flag },
             tags: tags.into_iter().map(String::from).collect(),
+            caption: String::new(),
+            artist: String::new(),
         };
         r.write(&p).unwrap();
     }
@@ -352,6 +354,8 @@ fn the_filter_treats_missing_and_damaged_sidecars_as_unrated() {
     image_viewer::ratings::Ratings {
         rating: image_viewer::ratings::Rating { stars: 4, flag: true },
         tags: vec![],
+        caption: String::new(),
+        artist: String::new(),
     }
     .write(&rated)
     .unwrap();

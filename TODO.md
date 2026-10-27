@@ -146,11 +146,13 @@ restored on stop). Both specced in
   worker from the preview buffer. As a P3 instrument it remains what the
   section above says: comparison, not ground truth.
 
-- **Metadata editing.** Caption, artist, description: all absent, and there is no
-  write path at all — `nom-exif` is read-only in this tree. Blocked on the same
-  question as the ratings' storage decision (§ ratings above), and if the XMP
-  sidecar lands first then most of this is the same parser with more attributes.
-  **Do it after, not before.**
+- **Metadata editing.** Caption and artist: delivered through XMP sidecars
+  (`tests/ratings.rs`). `Ratings` gained `caption` and `artist` fields, stored
+  as `iviewer:Caption` and `iviewer:Creator` attributes using the same byte-level
+  merge as ratings; `set_caption` / `set_artist` write the sidecar and re-read;
+  the left pane has text fields for both. Description is reachable through the
+  same mechanism if wanted. The ratings storage decision (XMP sidecars) that
+  previously blocked this is now shipped.
 
 - **Comparison / light-table.** Declined by the user; recorded here only so it is
   not re-proposed from scratch. The reason is the app's own rule: N images
@@ -534,9 +536,9 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 
 | file | lines | what is in it |
 |---|---|---|
-| `tests/unit.rs` | 5,088 | the unit suite, one file for everything that does not deserve its own target |
+| `tests/unit.rs` | 5,095 | the unit suite, one file for everything that does not deserve its own target |
 | `tests/spreads.rs` | 6,687 | the manga-mode suite, same shape |
-| `src/app/ui.rs` | 2,048 | pane layout against the egui UI |
+| `src/app/ui.rs` | 2,060 | pane layout against the egui UI |
 | `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
 | `tests/rotate_save.rs` | 1,921 | |
 | `tests/flip_through.rs` | 1,647 | |

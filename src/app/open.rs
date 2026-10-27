@@ -196,4 +196,50 @@ impl MyApp {
         ctx.request_repaint();
     }
 
+    /// Set the cursor image's caption, write the sidecar, and re-read so the
+    /// pane shows what is on disk. Same write + re-read shape as `set_stars`.
+    pub(crate) fn set_caption(&mut self, ctx: &Context, caption: String) {
+        let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) else {
+            return;
+        };
+        if is_archive_path(&path) {
+            self.error = Some("Cannot caption an archive member: sidecars need a file beside it".into());
+            return;
+        }
+        let mut rating = self.rating.clone();
+        rating.caption = caption;
+        if let Err(e) = rating.write(&path) {
+            self.error = Some(format!("Failed to write caption for {}: {e}", path.display()));
+            return;
+        }
+        self.rating = rating;
+        self.grid_ratings.insert(path.clone(), self.rating.clone());
+        self.grid_rating_pending.remove(&path);
+        self.request_rating();
+        ctx.request_repaint();
+    }
+
+    /// Set the cursor image's artist, write the sidecar, and re-read. Same
+    /// shape as `set_caption`.
+    pub(crate) fn set_artist(&mut self, ctx: &Context, artist: String) {
+        let Some(path) = self.cur.as_ref().map(|k| k.path().to_path_buf()) else {
+            return;
+        };
+        if is_archive_path(&path) {
+            self.error = Some("Cannot credit an archive member: sidecars need a file beside it".into());
+            return;
+        }
+        let mut rating = self.rating.clone();
+        rating.artist = artist;
+        if let Err(e) = rating.write(&path) {
+            self.error = Some(format!("Failed to write artist for {}: {e}", path.display()));
+            return;
+        }
+        self.rating = rating;
+        self.grid_ratings.insert(path.clone(), self.rating.clone());
+        self.grid_rating_pending.remove(&path);
+        self.request_rating();
+        ctx.request_repaint();
+    }
+
 }

@@ -67,6 +67,10 @@ pub fn star_click_delta(current: u8, clicked: u8) -> i32 {
 pub struct Ratings {
     pub rating: Rating,
     pub tags: Vec<String>,
+    /// Caption / description, stored as `iviewer:Caption`.
+    pub caption: String,
+    /// Creator / artist, stored as `iviewer:Creator`.
+    pub artist: String,
 }
 
 /// The end of a markup span starting at `lt`: `-->` for comments, `?>` for
@@ -286,6 +290,12 @@ fn minimal(ratings: &Ratings) -> String {
     if ratings.rating.flag {
         out.push_str("\n   xmp:Label=\"Pick\"");
     }
+    if !ratings.caption.is_empty() {
+        out.push_str(&format!("\n   iviewer:Caption=\"{}\"", escape(&ratings.caption)));
+    }
+    if !ratings.artist.is_empty() {
+        out.push_str(&format!("\n   iviewer:Creator=\"{}\"", escape(&ratings.artist)));
+    }
     out.push('>');
     out.push_str(&render_keywords(&ratings.tags));
     out.push_str("</rdf:Description>\n </rdf:RDF>\n</x:xmpmeta>\n");
@@ -343,6 +353,26 @@ fn merge(existing: &str, new: &Ratings) -> String {
             "xmp:Rating",
             &new.rating.clamped_stars().to_string(),
             "xmlns:xmp",
+        );
+    }
+
+    // Caption and artist are always written (like Rating): an empty value
+    // removes the attribute, a non-empty one sets it. They use our own
+    // namespace, declared on the first Description tag.
+    if !new.caption.is_empty() || new.caption != old.caption {
+        out = set_description_attr(
+            &out,
+            "iviewer:Caption",
+            &new.caption,
+            "xmlns:iviewer",
+        );
+    }
+    if !new.artist.is_empty() || new.artist != old.artist {
+        out = set_description_attr(
+            &out,
+            "iviewer:Creator",
+            &new.artist,
+            "xmlns:iviewer",
         );
     }
 
@@ -423,6 +453,12 @@ fn parse(text: &str) -> Result<Ratings, String> {
                 break;
             }
         }
+    }
+    if let Some((vs, ve)) = attr_value_range(text, "iviewer:Caption") {
+        ratings.caption = unescape(&text[vs..ve]);
+    }
+    if let Some((vs, ve)) = attr_value_range(text, "iviewer:Creator") {
+        ratings.artist = unescape(&text[vs..ve]);
     }
     Ok(ratings)
 }

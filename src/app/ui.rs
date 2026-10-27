@@ -933,6 +933,17 @@ impl eframe::App for MyApp {
                                 self.toggle_flag(ui.ctx());
                             }
                         });
+                        ui.separator();
+                        ui.label("Caption:");
+                        let mut caption = self.rating.caption.clone();
+                        if ui.text_edit_singleline(&mut caption).changed() {
+                            self.set_caption(ctx, caption);
+                        }
+                        ui.label("Artist:");
+                        let mut artist = self.rating.artist.clone();
+                        if ui.text_edit_singleline(&mut artist).changed() {
+                            self.set_artist(ctx, artist);
+                        }
                     }
                 } else {
                     ui.label("No image.");

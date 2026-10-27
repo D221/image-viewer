@@ -40,11 +40,56 @@ fn a_rating_round_trips_through_the_sidecar() {
 }
 
 #[test]
+fn caption_and_artist_round_trip_through_the_sidecar() {
+    let (_d, p) = temp_image("a.jpg");
+    let mut r = Ratings::read(&p).unwrap();
+    r.caption = "A sunset over the hills".into();
+    r.artist = "Jane Doe".into();
+    r.write(&p).unwrap();
+
+    let back = Ratings::read(&p).unwrap();
+    assert_eq!(back.caption, "A sunset over the hills");
+    assert_eq!(back.artist, "Jane Doe");
+}
+
+#[test]
+fn caption_and_artist_survive_a_rating_write() {
+    let (_d, p) = temp_image("a.jpg");
+    let mut r = Ratings::read(&p).unwrap();
+    r.caption = "Mountains at dawn".into();
+    r.artist = "Photo Corp".into();
+    r.rating = Rating { stars: 3, flag: true };
+    r.write(&p).unwrap();
+
+    let back = Ratings::read(&p).unwrap();
+    assert_eq!(back.caption, "Mountains at dawn");
+    assert_eq!(back.artist, "Photo Corp");
+    assert_eq!(back.rating.stars, 3);
+    assert!(back.rating.flag);
+}
+
+#[test]
+fn an_empty_caption_or_artist_is_not_written() {
+    let (_d, p) = temp_image("a.jpg");
+    let mut r = Ratings::read(&p).unwrap();
+    r.caption = "Temporary".into();
+    r.write(&p).unwrap();
+    let first = Ratings::read(&p).unwrap();
+    assert_eq!(first.caption, "Temporary");
+
+    // Now clear it: writing empty should remove the attribute.
+    r.caption = String::new();
+    r.write(&p).unwrap();
+    let cleared = Ratings::read(&p).unwrap();
+    assert!(cleared.caption.is_empty(), "an empty caption is not stored");
+}
+
+#[test]
 fn stars_are_clamped_and_a_flag_is_a_label() {
     // Lightroom's flag is xmp:Label with text values, not a boolean, so the
     // bytes are Pick/Reject - that is what makes the file readable elsewhere.
     let (_d, p) = temp_image("a.jpg");
-    let r = Ratings { rating: Rating { stars: 9, flag: true }, tags: vec![] };
+    let r = Ratings { rating: Rating { stars: 9, flag: true }, tags: vec![], caption: String::new(), artist: String::new() };
     r.write(&p).unwrap();
     let bytes = std::fs::read(image_viewer::ratings::sidecar_path(&p).unwrap()).unwrap();
     let s = String::from_utf8_lossy(&bytes);
@@ -58,8 +103,8 @@ fn two_images_sharing_a_stem_get_separate_sidecars() {
     let p2 = d.path().join("photo.png");
     std::fs::write(&p2, b"\x89PNG\r\n\x1a\n").unwrap();
 
-    Ratings { rating: Rating { stars: 2, flag: false }, tags: vec![] }.write(&p1).unwrap();
-    Ratings { rating: Rating { stars: 5, flag: false }, tags: vec![] }.write(&p2).unwrap();
+    Ratings { rating: Rating { stars: 2, flag: false }, tags: vec![], caption: String::new(), artist: String::new() }.write(&p1).unwrap();
+    Ratings { rating: Rating { stars: 5, flag: false }, tags: vec![], caption: String::new(), artist: String::new() }.write(&p2).unwrap();
 
     assert_eq!(Ratings::read(&p1).unwrap().rating.stars, 2, "the .jpg kept its own");
     assert_eq!(Ratings::read(&p2).unwrap().rating.stars, 5, "the .png is untouched by it");
@@ -199,7 +244,7 @@ fn a_literal_rating_in_text_does_not_fool_the_parser() {
 #[test]
 fn a_write_leaves_no_temporary_file_behind() {
     let (_d, p) = temp_image("a.jpg");
-    Ratings { rating: Rating { stars: 3, flag: false }, tags: vec![] }.write(&p).unwrap();
+    Ratings { rating: Rating { stars: 3, flag: false }, tags: vec![], caption: String::new(), artist: String::new() }.write(&p).unwrap();
     let side = image_viewer::ratings::sidecar_path(&p).unwrap();
     let leftovers: Vec<_> = std::fs::read_dir(side.parent().unwrap())
         .unwrap()
