@@ -1,4 +1,4 @@
-//! Manga mode's pairing core: shapes, the anchor invariant, and the walk — plus
+//! Manga mode's pairing core: shapes, the anchor invariant, and the walk Ã¢â‚¬â€ plus
 //! the overrides the user makes on top of them, and the file they are written to.
 //!
 //! Most of this runs against [`TestGallery`] rather than a filesystem, which is
@@ -20,13 +20,13 @@
 //! test. What the source scan adds is only the call, which nothing else can see.
 
 use image_viewer::{
-    anchor_of, decode_panel_px, exif_orientation, last_anchor, load_image, load_spread_overrides,
-    lone, lone_spread_fills_turn, needs_refine, next_anchor, next_turn, page_dims, pairable,
+    anchor_of, decode_panel_px, exif_orientation, last_anchor, load_spread_overrides,
+    lone, lone_spread_fills_turn, next_anchor, next_turn, page_dims, pairable,
     prev_anchor, prev_turn, preview_target, save_spread_overrides, shape_of, spread_centre,
     spread_fit, spread_pan_bounds, spread_rects, spread_root_key, spreads_root, spreads_tmp,
     thumb_cache_root, turn_is_a_lone_spread, turn_len, turn_partner, Gallery, GallerySpreads,
-    ImgKey, PageCtx, PagePos, Rect4, ResizeAction, ResizeTracker, Shape, LEAD_LONE_DEFAULT,
-    LEAD_LONE_MAX, PROBE_PREFIX_BYTES, RESIZE_PX_FLOOR, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
+    ImgKey, PageCtx, PagePos, Rect4, Shape, LEAD_LONE_DEFAULT,
+    LEAD_LONE_MAX, PROBE_PREFIX_BYTES, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
 };
 use proptest::prelude::*;
 
@@ -433,18 +433,18 @@ proptest! {
     }
 
     /// One backward turn-step lands on the turn immediately before the turn the
-    /// position is on — from **every** position, anchor or not.
+    /// position is on Ã¢â‚¬â€ from **every** position, anchor or not.
     ///
     /// **This is the guard for the bug `prev_anchor`'s ambiguous `None` caused.** Its
     /// first version read `prev_anchor(a).is_none()` as "`a` is the first turn", so a
-    /// backward step from a *second half* — which `prev_anchor` also answers `None`
-    /// for — wrapped to `last_anchor` and put the reader on the last spread of the
+    /// backward step from a *second half* Ã¢â‚¬â€ which `prev_anchor` also answers `None`
+    /// for Ã¢â‚¬â€ wrapped to `last_anchor` and put the reader on the last spread of the
     /// volume, with `loop_back` on and off. Stated as a property rather than as one
     /// fixture, because the property is the thing the navigation rests on: a step goes
     /// to the previous turn or nowhere, never forwards.
     ///
     /// Two assertions, because "lands on an anchor" alone would be satisfied by the
-    /// first anchor of the gallery — which is what the bug returned.
+    /// first anchor of the gallery Ã¢â‚¬â€ which is what the bug returned.
     ///
     /// * `anchor_of(prev) == prev`: the position handed back is an anchor, so the
     ///   cursor is somewhere the pairing's rules are valid at.
@@ -456,7 +456,7 @@ proptest! {
     ///
     /// Every position of every random gallery is checked, not a sample, because the
     /// bug needs a second half and a hand-picked fixture does not reliably contain one
-    /// at every `lead_lone`. Positions that do not move are skipped — with `loop_back`
+    /// at every `lead_lone`. Positions that do not move are skipped Ã¢â‚¬â€ with `loop_back`
     /// off that is the first turn, and there is nothing to assert about it.
     ///
     /// **Verified to fail against the version this replaced**: `prev_turn` without the
@@ -741,7 +741,7 @@ fn a_one_page_gallery_is_a_turn_of_one_however_it_loops() {
 // position, because a key is what the loader and every pixel cache are keyed on.
 // That makes it the function the rest of the pipeline can get wrong silently: a
 // key built as `ImgKey::first` of the right path is the wrong picture of a
-// multi-page document, and `Job::path()` — which drops the page — cannot see the
+// multi-page document, and `Job::path()` Ã¢â‚¬â€ which drops the page Ã¢â‚¬â€ cannot see the
 // difference. So the key is asserted whole, and never through `path()`.
 
 /// A key the way `turn_partner` must build it: the document's path and the
@@ -782,7 +782,7 @@ fn a_lone_turn_has_no_partner() {
 
     // A one-page gallery, both shapes, both loop settings. With looping on this is
     // the case where the *wrapping* step would answer "page 0 again" and
-    // `pairable(0, 0)` would compare the page with itself and say yes — the
+    // `pairable(0, 0)` would compare the page with itself and say yes Ã¢â‚¬â€ the
     // artefact that made "does this page have a partner" and "where does the
     // cursor go" two different questions in the first place.
     for looping in [false, true] {
@@ -804,7 +804,7 @@ fn a_lone_turn_has_no_partner() {
 ///
 /// Page **2** and not page 1, deliberately: a key assembled as `ImgKey::first`
 /// would satisfy an assertion about page 1 and mean nothing at all. The extra
-/// `assert_ne` is the point — it says the fixture cannot pass by accident, so a
+/// `assert_ne` is the point Ã¢â‚¬â€ it says the fixture cannot pass by accident, so a
 /// future edit that flattens every key to page 0 breaks here instead of quietly
 /// making the test weaker.
 #[test]
@@ -833,7 +833,7 @@ fn the_partner_is_the_anchor_s_successor_with_its_own_page_number() {
 }
 
 /// The plan's interface notes specified `next_anchor` for this function, and
-/// `next_anchor(anchor)` is `step(anchor, turn_len(anchor))` — on any turn of two
+/// `next_anchor(anchor)` is `step(anchor, turn_len(anchor))` Ã¢â‚¬â€ on any turn of two
 /// that is **two** pages forward, the start of the next turn. So the wrong answer
 /// is pinned here rather than left to review.
 ///
@@ -882,7 +882,7 @@ fn the_partner_is_not_the_next_anchor() {
     );
 }
 
-/// A decode is a measurement, and a measurement can change the pairing — so
+/// A decode is a measurement, and a measurement can change the pairing Ã¢â‚¬â€ so
 /// `arrival_reschedules` fires for the turn's *second* page, not only the cursor's.
 ///
 /// The case it exists for is the optimistic half of `pairable`: a partner whose
@@ -917,7 +917,7 @@ fn a_partners_arrival_re_plans_because_it_can_change_the_turn() {
 }
 
 /// An unmeasured page is judged `Single` and **pairs** optimistically, so a turn
-/// is never stranded waiting for a dimension read. The spec's §5 rule 3: refusing
+/// is never stranded waiting for a dimension read. The spec's Ã‚Â§5 rule 3: refusing
 /// to pair on missing data would strand a turn, and a stranded turn is worse than
 /// a pair that turns out to be wrong.
 ///
@@ -1431,8 +1431,8 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
     let mut gal = Gallery::from_file(p.clone());
     gal.learn_pages(&p);
     assert_eq!(gal.pages_in(0), 2, "the fixture is really two pages");
-    // **The second call is redundant since RULING 13** — learning page 0 of a
-    // two-page document already learns page 1 — and it is kept anyway, as a cache
+    // **The second call is redundant since RULING 13** Ã¢â‚¬â€ learning page 0 of a
+    // two-page document already learns page 1 Ã¢â‚¬â€ and it is kept anyway, as a cache
     // hit, so this test's subject stays unambiguously "the IFD walk reaches page 1"
     // rather than "the next-page learn filled it".
     gal.learn_shapes(PagePos { index: 0, page: 0 });
@@ -1449,7 +1449,7 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
 
     // **And `forget_shapes` drops *every* page of the file, not just page 0.** The
     // entries are keyed by `ImgKey`, so a path-keyed `remove` would leave page 1's
-    // old shape behind and only page 0 would ever be re-measured — the per-page
+    // old shape behind and only page 0 would ever be re-measured Ã¢â‚¬â€ the per-page
     // failure that a per-file `remove` cannot even express. `known_shapes` is the
     // only place the difference shows: a single-page query answers identically
     // either way.
@@ -1463,8 +1463,8 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
 /// RULING 11: **the pages of one document are judged separately**, because a
 /// document can hold a landscape double-page spread among portrait singles.
 ///
-/// This is the shape the feature exists for — a manga volume scanned as one
-/// multi-page TIFF, with page 3 a two-page spread — and it is exactly what a
+/// This is the shape the feature exists for Ã¢â‚¬â€ a manga volume scanned as one
+/// multi-page TIFF, with page 3 a two-page spread Ã¢â‚¬â€ and it is exactly what a
 /// path-keyed cache cannot express: one entry for the file would judge page 3 by
 /// page 0, call it a portrait page, and pair it with page 4. Every spread after the
 /// fold-out would then be wrong, and nothing on screen would say why.
@@ -1474,7 +1474,7 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
 /// this one pins what the cache does with the answer.
 ///
 /// Both pages are measured deliberately. Learning only page 0 would leave page 3
-/// `None`, and `shape_of` reads `None` as `Single` — the *same wrong verdict* by a
+/// `None`, and `shape_of` reads `None` as `Single` Ã¢â‚¬â€ the *same wrong verdict* by a
 /// different route, so a test that asserted only "page 3 is not Double" would pass
 /// against the more likely half-regression as well.
 #[test]
@@ -1500,7 +1500,7 @@ fn a_page_of_a_document_is_judged_by_its_own_dimensions() {
     assert_eq!(gal.pages_in(0), 4, "the fixture is really four pages");
 
     // Arrive at each page in turn, the way `goto` does. Since RULING 13 the first call
-    // already learns pages 0 and 1, so the loop is mostly cache hits — kept because
+    // already learns pages 0 and 1, so the loop is mostly cache hits Ã¢â‚¬â€ kept because
     // this test's subject is "every page is judged on its own", and that should not
     // depend on how many pages the next-page learn happens to cover.
     for page in 0..4u32 {
@@ -1624,7 +1624,7 @@ fn a_spread_on_the_next_page_is_known_before_the_cursor_reaches_it() {
 ///
 /// **And the hop stays inside the document.** On the last page of a multi-page file,
 /// `step_no_wrap` points at the *next file's* first page; that is not this function's
-/// business, and nothing is lost by skipping it — the next file's first page is
+/// business, and nothing is lost by skipping it Ã¢â‚¬â€ the next file's first page is
 /// reported by its own preview landing, or measured when the cursor gets there.
 ///
 /// `known_shapes` is what makes the second half visible. `dims` cannot: a page nobody
@@ -1633,7 +1633,7 @@ fn a_spread_on_the_next_page_is_known_before_the_cursor_reaches_it() {
 ///
 /// **What this test does *not* establish, stated plainly:** the two bounds are not
 /// independently load-bearing, and only one of them can be caught here. Removing the
-/// page-count bound is a **no-op mutation** — a one-page file's next page is by
+/// page-count bound is a **no-op mutation** Ã¢â‚¬â€ a one-page file's next page is by
 /// definition in a *different* file, so the same-document bound always catches it too.
 /// Both mutations were run; that one leaves all 28 tests green. The page-count bound
 /// is kept because it states the read-ahead's scope at the point where it is decided
@@ -1654,7 +1654,7 @@ fn the_next_page_learn_stops_at_the_document() {
 
     // **Order matters here, and getting it wrong hides the cross-file hop.** The
     // document's last page is learned *first*, while the next file's page is still
-    // unknown. Learn it second instead and the cache-first check absorbs the hop —
+    // unknown. Learn it second instead and the cache-first check absorbs the hop Ã¢â‚¬â€
     // the entry is already there, so `known_shapes` cannot tell "did not learn it"
     // from "learned it and it was a no-op", and a guard that was doing nothing looks
     // exactly like a guard that is working. That is a no-op mutation wearing a green
@@ -1691,14 +1691,14 @@ fn the_next_page_learn_stops_at_the_document() {
 /// `note_shapes` **fills a gap and never replaces a measurement**, so a decode
 /// cannot displace what `learn_shapes` read out of the source header.
 ///
-/// The two numbers here are ratio-equivalent — 900x1200 and 450x600 — so no verdict
+/// The two numbers here are ratio-equivalent Ã¢â‚¬â€ 900x1200 and 450x600 Ã¢â‚¬â€ so no verdict
 /// is at stake either way, and that is exactly the point: the guard is not there to
 /// stop a wrong shape, it is there to stop a *source measurement* being replaced by a
 /// *downscaled approximation*. `learn_shapes` short-circuits on the entry existing, so
 /// once the approximation landed the better number could never come back.
 ///
 /// Both halves are asserted. The first says the learned value survives; the second
-/// says `note_shapes` is not merely inert — a key with no entry is still filled, or
+/// says `note_shapes` is not merely inert Ã¢â‚¬â€ a key with no entry is still filled, or
 /// this test would pass against a `note_shapes` that did nothing at all.
 #[test]
 fn a_decode_never_displaces_a_learned_dimension() {
@@ -1949,14 +1949,14 @@ fn an_unknown_preceding_page_count_makes_flat_unavailable() {
 ///
 /// **By brace matching, not by "up to the next `fn`".** The first version split
 /// on `"\n    fn "`, which is wrong in the direction that matters: `split` always
-/// yields at least one item, so when the delimiter did not match — `invalidate_path`
-/// last in the impl, or re-indented — the "body" became the whole rest of the
+/// yields at least one item, so when the delimiter did not match Ã¢â‚¬â€ `invalidate_path`
+/// last in the impl, or re-indented Ã¢â‚¬â€ the "body" became the whole rest of the
 /// file, the later call stood in for this one, and the scan passed
 /// **vacuously**. It could not fail; that is the opposite of what a guard is for.
 ///
 /// The depth starts at **0**, not 1, and that is load-bearing rather than
-/// incidental. It is 0 because the scan starts *before* the opening brace — the
-/// signature's `&mut self, p: &Path, ctx: &Context` has none — so the first `{`
+/// incidental. It is 0 because the scan starts *before* the opening brace Ã¢â‚¬â€ the
+/// signature's `&mut self, p: &Path, ctx: &Context` has none Ã¢â‚¬â€ so the first `{`
 /// is the function's and the matching `}` is the one that ends it. Starting at 1
 /// (the shape `keybindings.rs::dispatch_region` uses, correctly, because it
 /// begins *after* `if !typing {` and so has already consumed a brace) misses
@@ -1993,11 +1993,11 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
 ///
 /// What is pinned here is the **call**, and nothing else. The behaviour it calls is
 /// asserted once, by [`forget_shapes_makes_the_dimension_change_again`], and repeating
-/// it here would only be a second copy to keep in step — so this test is *only* the
+/// it here would only be a second copy to keep in step Ã¢â‚¬â€ so this test is *only* the
 /// source scan, and it says why.
 ///
 /// The reason it needs one: the thing that decides a file changed is
-/// `MyApp::invalidate_path`, and that lives in `src/main.rs` — a binary no
+/// `MyApp::invalidate_path`, and that lives in `src/main.rs` Ã¢â‚¬â€ a binary no
 /// integration test can reach. Adding a `#[cfg(test)]` module to it for this would
 /// break a documented property of the project (`AGENTS.md`, "Tests"), so the call is
 /// asserted against the source as text, for the same reason `tests/renderer.rs` and
@@ -2005,12 +2005,12 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
 ///
 /// A source scan is not behaviour, and it is weak in a specific way: it cannot tell
 /// whether `invalidate_path` *reaches* `forget_shapes` on this path or on some
-/// other. What it does catch is the regression that actually happens — the call being
-/// deleted, or a later edit adding a cache here and forgetting this one — and neither
+/// other. What it does catch is the regression that actually happens Ã¢â‚¬â€ the call being
+/// deleted, or a later edit adding a cache here and forgetting this one Ã¢â‚¬â€ and neither
 /// is visible at runtime. Deleting the line fails this test; that has been run.
 ///
 /// Scoped to `invalidate_path`'s own body so a `forget_shapes` anywhere else in
-/// the file cannot stand in for this one — and `remove_current_from_gallery`
+/// the file cannot stand in for this one Ã¢â‚¬â€ and `remove_current_from_gallery`
 /// calls it too, so that is not hypothetical.
 #[test]
 fn invalidate_path_drops_the_cached_dimensions() {
@@ -2032,7 +2032,7 @@ fn invalidate_path_drops_the_cached_dimensions() {
 /// would make "a re-export clears the override" true for one session and false
 /// across a restart, because the next load would read the stale entry straight back
 /// out of the file. So the `save_spreads` assertion is not a separate concern from
-/// the `forget_file` one — it is the half that makes it durable.
+/// the `forget_file` one Ã¢â‚¬â€ it is the half that makes it durable.
 ///
 /// The source scan is weak in the way [`invalidate_path_drops_the_cached_dimensions`]
 /// says, and for the same reason it exists at all. It has one advantage over that
@@ -2079,7 +2079,7 @@ fn invalidate_path_drops_the_overrides_and_saves_them() {
 /// Scoped to the **`Ok` half of the `Msg::Preview` arm**, not to `pump` as a whole,
 /// and narrower than that sounds. Brace matching starts after the signature, whose
 /// trailing `{` is the `match result`'s own, so the next brace it meets is the one
-/// that opens `Ok(p) => {` — and the brace it stops on is that arm's. The span is
+/// that opens `Ok(p) => {` Ã¢â‚¬â€ and the brace it stops on is that arm's. The span is
 /// therefore the `Ok` arm's body and nothing more: the `Err` arm, the `Msg::Full`
 /// and `Msg::Exif` arms, and the `turn_partner` capture above the message loop are
 /// all outside it and cannot stand in for the call. (The existing `fn_body` doc
@@ -2112,11 +2112,11 @@ fn arriving_previews_re_plan_through_the_partner() {
 // Two things make it its own section rather than three more cases in the ones
 // above. First, an override is only worth anything if it *beats* the detector, so
 // `an_override_beats_the_detector` drives a real `Gallery` through `PageCtx` with
-// a store attached and asserts the tiling moved — asserting on the store's own
+// a store attached and asserts the tiling moved Ã¢â‚¬â€ asserting on the store's own
 // bookkeeping would pass against a store nothing ever reads, which was checked by
 // making `override_shape` return `None`. Second, this is a file on disk, so it
 // inherits the thumbnail cache's rules: `%LOCALAPPDATA%` and not `%APPDATA%`, write
-// to a temporary name and rename, and **every failure is an empty override set** —
+// to a temporary name and rename, and **every failure is an empty override set** Ã¢â‚¬â€
 // nothing a user or an editor does to this file may be able to stop the app
 // starting.
 
@@ -2168,7 +2168,7 @@ impl PageCtx for WithOverrides<'_> {
 /// making progress would otherwise hang the suite rather than fail it, and a test
 /// that can only end by hanging reports nothing. With `loop_back` off the walk
 /// ends at the last turn, so neither guard is reached by a correct implementation
-/// — they are here so a wrong one fails.
+/// Ã¢â‚¬â€ they are here so a wrong one fails.
 fn tiling(ctx: &dyn PageCtx, lead_lone: u32) -> Vec<Vec<usize>> {
     let flat = |p: PagePos| {
         PageCtx::flat(ctx, p).expect("every page count in these fixtures is set")
@@ -2196,7 +2196,7 @@ fn tiling(ctx: &dyn PageCtx, lead_lone: u32) -> Vec<Vec<usize>> {
 
 /// The override wins over the aspect ratio, which is the entire feature.
 ///
-/// Four portrait pages of one document, and all four **measured** at 800x1200 — so
+/// Four portrait pages of one document, and all four **measured** at 800x1200 Ã¢â‚¬â€ so
 /// the detector has a positive answer to disagree with rather than falling through
 /// its optimistic default for an unmeasured page. Both readings are `Single`, so the
 /// measurement is not what makes the tilings below move; it is what makes "beats"
@@ -2266,7 +2266,7 @@ fn an_override_beats_the_detector() {
 /// atomicity: a mutation that writes the store directly and skips the temporary
 /// altogether passes every test in this file, and that was run rather than
 /// assumed. Crash-atomicity is not observable without fault injection, so it rests
-/// on `fs::rename` replacing on Windows — the same thing `write_cached_thumbnail`
+/// on `fs::rename` replacing on Windows Ã¢â‚¬â€ the same thing `write_cached_thumbnail`
 /// rests on, and likewise untested there.
 #[test]
 fn overrides_survive_a_reload_from_disk() {
@@ -2303,7 +2303,7 @@ fn overrides_survive_a_reload_from_disk() {
 /// "Empty" means what it says, and the second half is the one that matters.
 ///
 /// A store that fails to read quietly producing `lead_lone = 0` would pair the
-/// cover with page 2 in **every gallery opened after it** — the pairing changes,
+/// cover with page 2 in **every gallery opened after it** Ã¢â‚¬â€ the pairing changes,
 /// nothing on screen says why, and the cause is a file the user never knew
 /// existed. So the default offset is asserted by value, not by `== Default`.
 fn assert_empty(g: &GallerySpreads) {
@@ -2322,7 +2322,7 @@ fn assert_empty(g: &GallerySpreads) {
 ///
 /// Three ways of being unusable, because they fail differently and only the first
 /// is obvious: not JSON at all, JSON of the wrong *shape*, and a path that cannot
-/// be read at all (a directory where the file should be — the read error that is
+/// be read at all (a directory where the file should be Ã¢â‚¬â€ the read error that is
 /// not "not found"). All three are the same empty override set. There is no repair
 /// and no warning anywhere, deliberately: the alternative is refusing to open a
 /// folder over a cache file, which is a far worse outcome than losing an override
@@ -2390,12 +2390,12 @@ fn nudging_lead_lone_is_clamped_to_the_documented_range() {
 }
 
 /// `toggle` answers with the shape the page landed on **and stores it**, because
-/// the caller needs the answer to re-plan against — the tiling it is asking about
+/// the caller needs the answer to re-plan against Ã¢â‚¬â€ the tiling it is asking about
 /// has already changed by the time this returns.
 ///
 /// The stored value is deliberately *not* the input: the same `detected` answers
 /// the same way twice. That is the contract, not an accident of the order of two
-/// statements — `toggle` does not read its own last answer back, so the flip is
+/// statements Ã¢â‚¬â€ `toggle` does not read its own last answer back, so the flip is
 /// always away from what the *caller* says the page is now rather than away from
 /// what this store last wrote. (For the caller that passes the effective shape the
 /// two agree every time; where they part company is an override that has outlived
@@ -2423,28 +2423,28 @@ fn toggling_a_page_reports_the_shape_it_landed_on() {
 
 /// Two instances of the app must not write the same temporary.
 ///
-/// **The reader guarantee holds either way** — `fs::rename` replaces on Windows, so
+/// **The reader guarantee holds either way** Ã¢â‚¬â€ `fs::rename` replaces on Windows, so
 /// a reader sees either the old store or the new one, never a half-written file.
 /// What a *fixed* temporary name breaks is what gets renamed: `fs::write` opens with
 /// `Create`/`TRUNCATE`, so two savers milliseconds apart both hold a handle to the
 /// same file, both truncate it, and their writes interleave. The first to finish
-/// renames a mixture of the two over `spreads.json` — and because an unparseable
+/// renames a mixture of the two over `spreads.json` Ã¢â‚¬â€ and because an unparseable
 /// store is treated as empty and replaced, the next override press then rewrites the
 /// file with one gallery's entry and every other gallery's decisions are gone. There
 /// is no second copy anywhere, so that is not recoverable.
 ///
 /// **Two halves, because the property has two halves.** Naming is a pure function of
-/// the store path and an id, so "two ids, two names" is checkable — but that alone
+/// the store path and an id, so "two ids, two names" is checkable Ã¢â‚¬â€ but that alone
 /// does not pin the id the app *passes*, and a call site passing a constant would
 /// sail past it. So the second half observes the real thing: a save whose rename
 /// cannot succeed leaves its temporary behind, and the name it leaves is
 /// `spreads.json.tmp.<this process's id>`.
 ///
 /// The rename fails when the store path is a **directory**, which is also the only
-/// way to see a temporary at all — a successful save renames it away. Nothing here
+/// way to see a temporary at all Ã¢â‚¬â€ a successful save renames it away. Nothing here
 /// can see a *torn* write, and that is the part that stays untested: crash-atomicity
 /// is not observable without fault injection, and the thumbnail cache has no test for
-/// it either. Its fixed `.tmp` is not the precedent to copy, though — that is safe
+/// it either. Its fixed `.tmp` is not the precedent to copy, though Ã¢â‚¬â€ that is safe
 /// only because two writers of one entry write the same bytes, and this store is a
 /// read-modify-write, so they do not.
 #[test]
@@ -2486,8 +2486,8 @@ fn two_instances_of_the_app_cannot_write_the_same_temporary() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    // The store path itself is in there too — it is the directory this test put
-    // there — so it is excluded rather than the assertion being weakened to
+    // The store path itself is in there too Ã¢â‚¬â€ it is the directory this test put
+    // there Ã¢â‚¬â€ so it is excluded rather than the assertion being weakened to
     // "contains".
     left.retain(|n| n != "spreads.json");
     left.sort();
@@ -2503,17 +2503,17 @@ fn two_instances_of_the_app_cannot_write_the_same_temporary() {
 ///
 /// **The two halves are separate assertions because one cannot witness the other.**
 /// Both a load and a correctly-refusing save leave an over-cap store *looking* the
-/// same to the next load — empty either way — so an assertion on the load alone
+/// same to the next load Ã¢â‚¬â€ empty either way Ã¢â‚¬â€ so an assertion on the load alone
 /// cannot tell "left alone" from "rewritten as empty", which is the failure that
 /// matters: the store is a read-modify-write, so a save that could not read it would
 /// replace that gallery's real entry, and every other gallery's with it, and then
 /// there is no second copy anywhere. (This is the same trap as the two caps in
 /// `the_two_caps_degrade_to_nothing_rather_than_to_an_error`, where one cap could
-/// satisfy the other's assertion; the remedy is the same — state what each half
+/// satisfy the other's assertion; the remedy is the same Ã¢â‚¬â€ state what each half
 /// proves, and check the premises.)
 ///
 /// The fixture is **hand-built**, because a correct save refuses to write a store
-/// over the cap — asking `save_spread_overrides` to produce one would be asking for
+/// over the cap Ã¢â‚¬â€ asking `save_spread_overrides` to produce one would be asking for
 /// the bug this test exists to catch. It is checked three ways before it is used:
 /// over the cap, parseable, and still holding the entry that a clobbering save would
 /// destroy.
@@ -2557,7 +2557,7 @@ fn an_over_cap_store_is_left_alone_by_a_save_and_ignored_by_a_load() {
     assert_empty(&load_spread_overrides(&store, &root));
 
     // Half two: the save refuses, so the bytes are untouched. An `Err` *and* no
-    // write — both are asserted, because a save that reported success over the cap
+    // write Ã¢â‚¬â€ both are asserted, because a save that reported success over the cap
     // and one that reported failure after writing it are different bugs with the
     // same consequence.
     let mut small = GallerySpreads::default();
@@ -2600,7 +2600,7 @@ fn an_over_cap_store_is_left_alone_by_a_save_and_ignored_by_a_load() {
 /// by hand.
 ///
 /// `an_older_or_hand_edited_store_still_loads` proves that `"double"` *loads*, and a
-/// round trip stays green under any self-consistent serde setting — including one
+/// round trip stays green under any self-consistent serde setting Ã¢â‚¬â€ including one
 /// that writes `"Double"` and reads `"Double"`, which would leave a hand-edited file
 /// loading as nothing at all. So this asserts the bytes, not the round trip.
 #[test]
@@ -2630,7 +2630,7 @@ fn the_written_shape_is_the_spelling_the_file_documents() {
 /// This is the seam between two documented rules that pull in opposite directions,
 /// so it is worth naming rather than leaving to be discovered:
 ///
-/// * A store that cannot be **read at all** — missing, malformed, the wrong shape —
+/// * A store that cannot be **read at all** Ã¢â‚¬â€ missing, malformed, the wrong shape Ã¢â‚¬â€
 ///   is an empty override set. One unusable byte costs the user every override.
 ///
 /// * A store that reads, with one page key that is not a number, keeps every other
@@ -2715,7 +2715,7 @@ fn the_two_caps_degrade_to_nothing_rather_than_to_an_error() {
         "the offset is not what the cap is about, so it survives the emptied page map"
     );
 
-    // Byte cap: over it, so the read is skipped whatever the contents are — and
+    // Byte cap: over it, so the read is skipped whatever the contents are Ã¢â‚¬â€ and
     // **under the page cap, so the other cap cannot be what empties it.** That
     // attribution is the whole difficulty: the first version of this fixture was
     // 40 000 short-named entries, which is over both caps, and it passed with the
@@ -2760,8 +2760,8 @@ fn the_two_caps_degrade_to_nothing_rather_than_to_an_error() {
 /// silently replace the previous one's decision. `spread_root_key` refuses the same
 /// empty string for a *root*; this closes the same asymmetry one level down.
 ///
-/// Nothing reachable today produces such a path — a folder scan and `extract_zip`
-/// both name every file they yield — which is why the guard is a refusal rather
+/// Nothing reachable today produces such a path Ã¢â‚¬â€ a folder scan and `extract_zip`
+/// both name every file they yield Ã¢â‚¬â€ which is why the guard is a refusal rather
 /// than an error: the entry could never have been addressed again anyway.
 #[test]
 fn a_path_with_no_file_name_stores_nothing() {
@@ -2790,7 +2790,7 @@ fn a_path_with_no_file_name_stores_nothing() {
 ///
 /// The trap this exists for: `MyApp::folder` holds the extraction directory while
 /// an archive is open, and that directory's name is a hash of the archive's path,
-/// mtime and length — so it is stable only until the archive is edited. Keying
+/// mtime and length Ã¢â‚¬â€ so it is stable only until the archive is edited. Keying
 /// overrides by it would look right for as long as nobody touched the `.cbz`, then
 /// silently lose every override the first time they did.
 ///
@@ -2877,7 +2877,7 @@ fn overrides_are_scoped_to_one_gallery() {
 /// loads return the right answer, and the first gallery's overrides are gone
 /// anyway because the second save replaced the file. `spreads.json` is the only
 /// place the app keeps these, so that is the user losing every override in every
-/// other folder — with no error and nothing on screen to say so.
+/// other folder Ã¢â‚¬â€ with no error and nothing on screen to say so.
 #[test]
 fn saving_one_gallery_keeps_the_others_overrides() {
     let dir = tempfile::tempdir().unwrap();
@@ -2912,7 +2912,7 @@ fn saving_one_gallery_keeps_the_others_overrides() {
 ///
 /// **Every page, not one**, and for a sharper reason than the dimension cache's:
 /// an override naming page 3 of a document that is now one page long is not a
-/// stale *measurement*, it is a decision about pixels that no longer exist — and
+/// stale *measurement*, it is a decision about pixels that no longer exist Ã¢â‚¬â€ and
 /// because an override beats the detector, keeping it holds page 3 a spread for
 /// the session no matter what the file now contains. `invalidate_path` is what
 /// calls this, and it is the only thing that knows the file's contents changed.
@@ -2939,7 +2939,7 @@ fn forget_file_drops_every_page_of_one_file() {
 /// exists to prevent is *silent*: with no archive open, `folder` really is the
 /// gallery's root, and with one open `folder` is the extraction directory. A
 /// single expression that prefers the archive path is the only version of this
-/// that can be checked, and the empty-folder case is why it is `Option` at all —
+/// that can be checked, and the empty-folder case is why it is `Option` at all Ã¢â‚¬â€
 /// two galleries with no resolvable parent would otherwise share one entry, and
 /// each one's overrides would answer for the other.
 #[test]
@@ -3023,17 +3023,17 @@ fn the_overrides_live_beside_the_thumbnail_cache_not_beside_the_config() {
 /// one of these is something a hand or an older build does and the round trip
 /// cannot produce any of them:
 ///
-/// * `"double"` — the spelling `#[serde(rename_all = "lowercase")]` exists to
+/// * `"double"` Ã¢â‚¬â€ the spelling `#[serde(rename_all = "lowercase")]` exists to
 ///   produce. Without it serde writes `"Double"` and refuses to read `"double"`,
 ///   so a hand-edited file using the documented spelling loads as *nothing*, and
 ///   `AGENTS.md` records that exact trap for `WgpuBackend`.
-/// * a root with no `lead_lone` — an older build, or a hand that added one page.
+/// * a root with no `lead_lone` Ã¢â‚¬â€ an older build, or a hand that added one page.
 ///   It gets [`LEAD_LONE_DEFAULT`], not `0`: see `assert_empty`.
-/// * a root with no `pages` — likewise, and it gets none.
-/// * `"lead_lone": 99` — past the documented maximum. Clamped on load, or the
+/// * a root with no `pages` Ã¢â‚¬â€ likewise, and it gets none.
+/// * `"lead_lone": 99` Ã¢â‚¬â€ past the documented maximum. Clamped on load, or the
 ///   first 99 pages of the gallery stand alone, which is a pairing no reader
 ///   asked for.
-/// * `"note"` — an unknown key. Ignored, never rejected: that tolerance is the
+/// * `"note"` Ã¢â‚¬â€ an unknown key. Ignored, never rejected: that tolerance is the
 ///   only reason a file from an older build still loads at all.
 #[test]
 fn an_older_or_hand_edited_store_still_loads() {
@@ -3072,12 +3072,12 @@ fn an_older_or_hand_edited_store_still_loads() {
 // without a window. What is pinned here is the three decisions the pairing walk
 // above cannot see:
 //
-// * **one shared scale** — two halves cannot be drawn at two different zoom
+// * **one shared scale** Ã¢â‚¬â€ two halves cannot be drawn at two different zoom
 //   levels, so the constrained page decides and the other gets a margin under it;
-// * **input order out** — `rtl` decides which *side* a page lands on, so a
+// * **input order out** Ã¢â‚¬â€ `rtl` decides which *side* a page lands on, so a
 //   function returning screen order swaps which page is which in exactly one
 //   reading direction, and nowhere else;
-// * **the seam at the centre, always** — zero gutter, and no special case for a
+// * **the seam at the centre, always** Ã¢â‚¬â€ zero gutter, and no special case for a
 //   lone page, which is the case that reads as a bug.
 
 /// The panel every layout test below uses. Its seam is `x + width / 2` = 400.
@@ -3093,7 +3093,7 @@ fn right(r: Rect4) -> f32 {
 /// How much two rects overlap horizontally, or 0.0 for rects that merely touch.
 ///
 /// Used instead of comparing edges so "neither overlaps the other" is a claim
-/// about the two rects together — two pages drawn at the same `x` overlap no matter
+/// about the two rects together Ã¢â‚¬â€ two pages drawn at the same `x` overlap no matter
 /// how their edges compare to each other.
 fn overlap(a: Rect4, b: Rect4) -> f32 {
     right(a).min(right(b)) - a[0].max(b[0])
@@ -3143,7 +3143,7 @@ fn a_right_to_left_turn_opens_on_the_right() {
 ///
 /// Mihon's note on why a lone page is **not** centred: centring the span would pull
 /// it to the middle, indistinguishable from a page with no partner. So the
-/// assertions are that it hangs off the seam and stops there — and the control
+/// assertions are that it hangs off the seam and stops there Ã¢â‚¬â€ and the control
 /// below, because the centred version is the change somebody would make to "fix"
 /// this.
 #[test]
@@ -3244,7 +3244,7 @@ fn rects_come_back_in_input_order() {
 /// One scale for the whole turn: the **constrained** page decides it.
 ///
 /// A per-page fit would give the tall page 0.375 and the short one 0.75, and two
-/// halves at two scales is not a layout — it is one zoom level for the reader.
+/// halves at two scales is not a layout Ã¢â‚¬â€ it is one zoom level for the reader.
 #[test]
 fn spread_fit_is_the_more_constrained_of_the_pages() {
     let panel = (800.0, 600.0);
@@ -3266,8 +3266,8 @@ fn spread_fit_is_the_more_constrained_of_the_pages() {
     );
 }
 
-/// An **unflagged** turn — a lone portrait page, which is what a lone page in practice
-/// is now — is fitted into its half and laid out there.
+/// An **unflagged** turn Ã¢â‚¬â€ a lone portrait page, which is what a lone page in practice
+/// is now Ã¢â‚¬â€ is fitted into its half and laid out there.
 ///
 /// The case a naive fit gets wrong: fitting it into the *whole* panel gives
 /// `800 / 1200 = 0.667` and hands it the entire screen.
@@ -3394,7 +3394,7 @@ fn a_lone_spread_fills_the_whole_turn() {
 /// This is the regression guard for the fix. Everything above it is about a page that
 /// should have been bigger; this is about the page that must not have been, and the
 /// temptation a fix like that creates is to widen the rule to "a lone page fills the
-/// turn" — which would give a cover the whole window and lose the seam it shares with
+/// turn" Ã¢â‚¬â€ which would give a cover the whole window and lose the seam it shares with
 /// every other turn.
 #[test]
 fn a_lone_portrait_page_still_keeps_its_half() {
@@ -3443,7 +3443,7 @@ fn a_lone_portrait_page_still_keeps_its_half() {
 ///
 /// The height half alone is not enough to catch this: 2700x1920 at
 /// `min(400/2700, 600/1920)` is 148x106 in a half, at `min(800/2700, 600/1920)` it is
-/// 296x178 in the panel — so a fix that only centred the rect would leave the page at
+/// 296x178 in the panel Ã¢â‚¬â€ so a fix that only centred the rect would leave the page at
 /// half size in the middle of the window, which is a different wrong picture and just
 /// as wrong.
 #[test]
@@ -3490,7 +3490,7 @@ fn a_lone_spread_is_fitted_to_the_whole_panel() {
 ///
 /// Asserted over both flags and both directions rather than one, because the flag is a
 /// new parameter on a shared function and the failure it invites is a `len() == 1` check
-/// that is too wide — which would hand a real spread two half-width slots.
+/// that is too wide Ã¢â‚¬â€ which would hand a real spread two half-width slots.
 #[test]
 fn a_two_page_turn_is_unaffected() {
     let panel = (PANEL[2], PANEL[3]);
@@ -3511,7 +3511,7 @@ fn a_two_page_turn_is_unaffected() {
     }
 
     // The control: a pair whose pages *are* wide still pairs into halves, because
-    // `pairable` is what keeps a `Double` out of a pair — not the layout's flag. Without
+    // `pairable` is what keeps a `Double` out of a pair Ã¢â‚¬â€ not the layout's flag. Without
     // this, "a two-page turn is unaffected" is satisfiable by a `spread_rects` that lays
     // every turn out as a lone spread whenever the flag happens to be true, on a page
     // count nobody checked.
@@ -3530,8 +3530,8 @@ fn a_two_page_turn_is_unaffected() {
 /// The discriminator is the **shape**, and these are the two cases where a geometric
 /// `w > h` would answer differently.
 ///
-/// A lone near-square page is 1.05 — wider than tall, so a geometry test calls it a
-/// spread — and it is a `Single` (`SPREAD_ASPECT` is 1.2), so it keeps its half like a
+/// A lone near-square page is 1.05 Ã¢â‚¬â€ wider than tall, so a geometry test calls it a
+/// spread Ã¢â‚¬â€ and it is a `Single` (`SPREAD_ASPECT` is 1.2), so it keeps its half like a
 /// cover. The forced portrait page is the mirror: 0.70, so a geometry test calls it a
 /// page, and `X` has called it a `Double`, so it fills the turn.
 #[test]
@@ -3601,8 +3601,8 @@ fn a_lone_near_square_page_is_not_a_spread() {
 /// No degenerate input may produce a scale or a rect that cannot be painted, and a
 /// panel or a turn with nothing in it answers the one value that means "as drawn".
 ///
-/// The finiteness half is the property the layout depends on — a `NaN` scale reaches
-/// every rect and leaves an unpaintable page with no error to point at — and the two
+/// The finiteness half is the property the layout depends on Ã¢â‚¬â€ a `NaN` scale reaches
+/// every rect and leaves an unpaintable page with no error to point at Ã¢â‚¬â€ and the two
 /// `1.0`s are what keep the guard in `spread_fit` from being mistaken for decoration:
 /// the clamp alone would answer `1e-4` for an empty panel and `8.0` for no pages, both
 /// finite, and `1e-4` draws a page a fraction of a point across.
@@ -3669,7 +3669,7 @@ fn spread_fit_survives_an_empty_panel_and_a_zero_sized_page() {
 /// `[400-350, 400+200]` under `rtl` and `[400-200, 400+350]` under `ltr`. Both are
 /// 700 wide - the two halves together are always as wide as the seam plus both
 /// pages - so the centre is the midpoint of that span and the displacement is
-/// ±(350-200)/2 = ±75.
+/// Ã‚Â±(350-200)/2 = Ã‚Â±75.
 #[test]
 fn the_zoom_anchor_is_the_content_centre_not_the_panel_centre() {
     let pages = [(400.0, 800.0), (700.0, 800.0)];
@@ -3703,7 +3703,7 @@ fn the_zoom_anchor_is_the_content_centre_not_the_panel_centre() {
 ///
 /// `spread_rects` is used in the test as the definition of "its own slot", and the
 /// numbers are pinned as well: at 0.5 the page is 200 wide and 400 tall, so the
-/// centre is the seam ± 100 horizontally and 200 vertically.
+/// centre is the seam Ã‚Â± 100 horizontally and 200 vertically.
 #[test]
 fn a_lone_page_anchors_its_zoom_on_itself() {
     let pages = [(400.0, 800.0)];
@@ -3806,19 +3806,19 @@ fn the_zoom_anchor_is_top_aligned_over_the_tallest_page() {
     );
 }
 
-/// The zoom block asks for the content's centre — **twice, at two scales** — and
+/// The zoom block asks for the content's centre Ã¢â‚¬â€ **twice, at two scales** Ã¢â‚¬â€ and
 /// never for the panel's.
 ///
 /// **A source scan, and the four tests above are not it.** They pin
 /// [`spread_centre`]; nothing pins the call, because `MyApp::central` is in a binary
 /// no integration test can reach (`AGENTS.md`, "Tests"), and re-introducing
-/// `anchor - panel.center()` there leaves **all 84 tests in this file green** — that
+/// `anchor - panel.center()` there leaves **all 84 tests in this file green** Ã¢â‚¬â€ that
 /// was run, and it is why this exists.
 ///
 /// It is weak in the way [`invalidate_path_drops_the_cached_dimensions`] is weak in:
 /// it cannot tell whether the anchor maths *works*, only that the centre asked for
 /// is the one the library computes. What it catches is the regression that actually
-/// happens — the call being reverted, or a later edit reusing one centre where the
+/// happens Ã¢â‚¬â€ the call being reverted, or a later edit reusing one centre where the
 /// two scales differ. The behaviour was verified separately, by instrumenting the
 /// running app and checking its own per-frame offsets against the formula (see the
 /// task report); that evidence is not a test and does not survive here.
@@ -3862,12 +3862,12 @@ fn the_zoom_measures_from_the_content_centre_at_both_scales() {
 ///   hands every cached preview one) and the loop used to filter it away.
 /// * A `Kind::Full` result that is not the cursor's must be **kept**, on the page it
 ///   belongs to. Dropping it is what made the partner's half soft for the whole
-///   session rather than for one decode — and because the plan asks again every
+///   session rather than for one decode Ã¢â‚¬â€ and because the plan asks again every
 ///   schedule, it was a re-decode of a 30 MB page on every navigation.
 ///
 /// Scoped to their own functions so a `pv.full` or a `Kind::Full` elsewhere in the
 /// file cannot stand in for either. The tile loop is inside `central`, so the scan
-/// cannot tell which page it was reading — that was verified by instrumentation
+/// cannot tell which page it was reading Ã¢â‚¬â€ that was verified by instrumentation
 /// instead, and the numbers are in the task report.
 #[test]
 fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
@@ -3898,7 +3898,7 @@ fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
 //
 // The zoom keeps the point under the cursor where it is (above), and then the offset
 // is clamped so the picture cannot be lost off-screen. **The clamp was the same bug one
-// line further down**: `central` clamped to `±(content·scale − panel.size()) / 2`, and
+// line further down**: `central` clamped to `Ã‚Â±(contentÃ‚Â·scale Ã¢Ë†â€™ panel.size()) / 2`, and
 // that is the range that holds a content *centred on the panel's centre* and nothing
 // else. A turn's content is displaced from the panel's centre by exactly what
 // `spread_centre` reports - half the width difference horizontally, half the tallest
@@ -4048,7 +4048,7 @@ fn a_spread_pans_to_both_of_its_own_edges() {
 /// sides of it:
 ///
 /// * **Zero displacement** - two equal pages are symmetric about the seam - and the
-///   bound is `±(foot·scale − panel.size()) / 2` **bit for bit**. That is the case the
+///   bound is `Ã‚Â±(footÃ‚Â·scale Ã¢Ë†â€™ panel.size()) / 2` **bit for bit**. That is the case the
 ///   old expression was accidentally right about, and it is pinned so this change
 ///   cannot silently move it.
 /// * **Non-zero displacement** and the bound is translated. Horizontally by half the
@@ -4289,8 +4289,8 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
 /// The fixture is built so the symmetric bound truncates these steps and the content's
 /// bound does not. Panel 800x600, an unequal pair of tall pages (400x1200 and
 /// 700x1200), fitting at exactly 0.5, and a zoom to 1.0 - a factor of two, so the wanted
-/// offsets are large. The bounds at 1.0 are `x (0, 300)` and `y (−600, 0)` against the
-/// symmetric `±150` and `±300`.
+/// offsets are large. The bounds at 1.0 are `x (0, 300)` and `y (Ã¢Ë†â€™600, 0)` against the
+/// symmetric `Ã‚Â±150` and `Ã‚Â±300`.
 ///
 /// **Two anchors, because one of them leaves the clamp idle.** At x=150 the zoom asks
 /// for `+250`, comfortably inside `(0, 300)`, so "the point did not move" would be
@@ -4425,7 +4425,7 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
 /// The offset a zoom about `anchor` asks for, copied from `MyApp::central`.
 ///
 /// The exact two-scale form, and **not** the single-centre version the brief suggested:
-/// `c_to = anchor − C(target)` and `c_from = anchor − C(current)` bracket the same
+/// `c_to = anchor Ã¢Ë†â€™ C(target)` and `c_from = anchor Ã¢Ë†â€™ C(current)` bracket the same
 /// content point, and reusing one centre for both is exact only when the content's
 /// centre does not move with the zoom. That is true for a single image and false for
 /// every turn, so the copy below is the one the binary has. The binary's own copy is
@@ -4583,7 +4583,7 @@ fn the_pan_clamp_asks_the_library_for_the_range() {
     assert!(
         !code.contains("clamp_px * scale - panel.size()") && !code.contains("let max_off"),
         "the symmetric bound is being computed in the binary again, which is the defect this\n\
-         section fixes: it is `±(content - panel) / 2` about the PANEL's centre, so in a spread\n\
+         section fixes: it is `Ã‚Â±(content - panel) / 2` about the PANEL's centre, so in a spread\n\
          it truncates the zoom's anchor as soon as the zoom wants a pan the content's own\n\
          edges do not allow - 36 of 41 zoom steps on the running app, by up to 67 points.\n\
          Body was:\n{body}"
@@ -5700,8 +5700,8 @@ fn manga_mode_makes_a_step_walk_a_turn() {
 
 /// An **anchor** stays an anchor as the pairing learns about its neighbourhood.
 ///
-/// This is the invariant that lets `turn_partner_at` skip `anchor_of` — an
-/// O(distance from the front) walk — on the per-frame path that derives the turn's
+/// This is the invariant that lets `turn_partner_at` skip `anchor_of` Ã¢â‚¬â€ an
+/// O(distance from the front) walk Ã¢â‚¬â€ on the per-frame path that derives the turn's
 /// second half from where `shown` is. Without it, the derivation would have to snap,
 /// and snapping every frame is the cost the deferred anchor-list fix exists to remove.
 /// So it is asserted rather than left in `main.rs`'s doc comment, where a claim about
@@ -5709,7 +5709,7 @@ fn manga_mode_makes_a_step_walk_a_turn() {
 ///
 /// The argument, stated as the property: `lone(anchor)`'s three arms are `is_lead`,
 /// `shape_of(anchor) == Double` and `!pairable(anchor, next)`. Learning resolves a
-/// dimension from unknown — which `shape_of` reads as [`Shape::Single`] — to `Single`
+/// dimension from unknown Ã¢â‚¬â€ which `shape_of` reads as [`Shape::Single`] Ã¢â‚¬â€ to `Single`
 /// or to `Double`, so `shape_of` can only go `Single -> Double` and `pairable` can only
 /// go true -> false. **Both make `lone` more true, never less**, so a turn of two can
 /// only shrink to a turn of one, never grow, and a position that was an anchor can
@@ -5723,7 +5723,7 @@ fn manga_mode_makes_a_step_walk_a_turn() {
 /// derivation would be answering about a second half and painting the turn beside it.
 ///
 /// Drawn from the `turns_gallery` fixture and seeded with `mark_wide`, so a wide page
-/// really is wide in the shape cache rather than named in a comment — `mark_wide`'s
+/// really is wide in the shape cache rather than named in a comment Ã¢â‚¬â€ `mark_wide`'s
 /// doc explains why it goes through `note_shapes`.
 #[test]
 fn an_anchor_stays_an_anchor_as_the_pairing_learns() {
@@ -5734,7 +5734,7 @@ fn an_anchor_stays_an_anchor_as_the_pairing_learns() {
     mark_wide(&mut gal, 2, 1);
 
     for lead in 0..=2u32 {
-        // The anchor list **by walking** — `anchors_of` is `next_anchor` repeatedly,
+        // The anchor list **by walking** Ã¢â‚¬â€ `anchors_of` is `next_anchor` repeatedly,
         // and `anchor_of` is a separate forward search for "which turn is this page
         // on". They are two implementations of the same idea and they are asked to
         // agree: every position the walk calls an anchor must be one `anchor_of`
@@ -5758,7 +5758,7 @@ fn an_anchor_stays_an_anchor_as_the_pairing_learns() {
     // position, because "cannot grow" is a claim about a partition and not about a
     // single page.
     //
-    // Two galleries over the same files — four files, the third with two pages — one
+    // Two galleries over the same files Ã¢â‚¬â€ four files, the third with two pages Ã¢â‚¬â€ one
     // with page `(2,1)` measured wide and one with nothing measured at all. The second
     // is the *premise* and it matters: an unmeasured page reads as [`Shape::Single`],
     // so the untouched gallery is the optimistic one, and every pair in it is a pair
@@ -5941,7 +5941,7 @@ fn a_key_goes_back_to_the_position_it_came_from() {
     assert_eq!(empty.pos_of(&ImgKey::first(std::path::Path::new("/vol/page00.jpg"))), None);
 }
 
-/// A multi-page document is only unreachable by `→` while its page count is
+/// A multi-page document is only unreachable by `Ã¢â€ â€™` while its page count is
 /// unknown, and learning it is what makes it reachable.
 ///
 /// **This is the rule; the call that supplies the count is asserted by source scan
@@ -6086,9 +6086,9 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
 /// `if previews.contains_key(&cur) && shown != cur { ... }`. That gate is false on
 /// every frame the cursor stands still - and `M`, `O` and `X` all re-`goto`
 /// **without moving the cursor** - so all three changed what a page is while the
-/// screen kept the old answer. `→ → → M` in a folder of single pages halves the panel
+/// screen kept the old answer. `Ã¢â€ â€™ Ã¢â€ â€™ Ã¢â€ â€™ M` in a folder of single pages halves the panel
 /// and lays out **one** page, so the reader gets a half-width picture beside an empty
-/// half; the next `→` produces a correct spread, which is why it reads as "mostly
+/// half; the next `Ã¢â€ â€™` produces a correct spread, which is why it reads as "mostly
 /// working".
 ///
 /// **A `contains` scan would have passed on the bug.** The assignment was present, in
@@ -6385,7 +6385,7 @@ fn panel_px_at(ppp: u32) -> (u32, u32) {
 ///
 /// This is the fix. The layout was moved a commit ago and the decode target was not,
 /// so a page drawn across the panel's whole width was asked for a texture from half
-/// of it — and the picture was soft in proportion to how much of the panel it used.
+/// of it Ã¢â‚¬â€ and the picture was soft in proportion to how much of the panel it used.
 /// At `ppp` 1 that is a slightly downscaled 1518.75 points out of a 1920 texture and
 /// nothing is visible; at `ppp` 2 it is 2160 against a 3037.5-point draw, which is
 /// 0.71, and that is a visibly soft picture with no counter anywhere.
@@ -6427,7 +6427,7 @@ fn a_lone_spread_is_decoded_for_the_whole_panel() {
     );
     assert_eq!(preview_target(decode_panel_px(panel_px_at(2), true, true)), 3840);
 
-    // The height was never the axis in question — the seam runs vertically, so one
+    // The height was never the axis in question Ã¢â‚¬â€ the seam runs vertically, so one
     // page is fitted into the panel's full height in both cases.
     assert_eq!(
         decode_panel_px(panel_px_at(2), true, true).1,
@@ -6502,8 +6502,8 @@ fn a_two_page_turn_is_decoded_for_the_half() {
 /// width**, which is the whole claim; the two agreeing is what makes the flag one
 /// decision rather than two.
 ///
-/// The test derives the drawn rectangle from [`spread_fit`] — the function the app
-/// hands the same flag to — and requires the decode's long side to cover it, at both
+/// The test derives the drawn rectangle from [`spread_fit`] Ã¢â‚¬â€ the function the app
+/// hands the same flag to Ã¢â‚¬â€ and requires the decode's long side to cover it, at both
 /// pixel ratios. Two weaker assertions were available and both are worthless: "the
 /// decode is at least half the panel" is satisfied by the bug, and "the decode does not
 /// exceed the panel" is satisfied by a texture ten times too large.
@@ -6513,7 +6513,7 @@ fn a_two_page_turn_is_decoded_for_the_half() {
 /// **1.26** of it and the half-panel answer's 1080 is **0.71**. At `ppp` 2 that is
 /// 3840 of 3037.5 against 2160 of 3037.5. The portrait page and the pair both land
 /// exactly on 1080, because one page fitted into a half panel is bound by the panel's
-/// height — which is why the half-panel rule is not merely conservative on those two
+/// height Ã¢â‚¬â€ which is why the half-panel rule is not merely conservative on those two
 /// and is *wrong* only on the third.
 #[test]
 fn the_decode_target_covers_the_picture_the_layout_draws() {
@@ -6551,538 +6551,7 @@ fn the_decode_target_covers_the_picture_the_layout_draws() {
     // seventeen places would pin the rounding rather than the ratio.
     let scale = spread_fit(DECODE_PANEL, &[scan], true);
     assert_eq!(scale, 0.5625, "2700x1920 on a 1920x1080 panel");
-    let drawn = (scan.0 * scale).max(scan.1 * scale);
-    assert_eq!(drawn, 1518.75, "1518.75 x 1080, the number AGENTS.md records");
-    assert_eq!(coverage(1920, drawn), 1.264, "ppp 1: 1920 of 1518.75");
-    assert_eq!(
-        coverage(1080, drawn),
-        0.711,
-        "ppp 1, before the fix: 1080 of 1518.75 - close enough to hide, which is why this \
-         shipped"
-    );
-    assert_eq!(coverage(3840, drawn * 2.0), 1.264, "ppp 2: 3840 of 3037.5");
-    assert_eq!(
-        coverage(2160, drawn * 2.0),
-        0.711,
-        "ppp 2, before the fix: 2160 of 3037.5 - visibly soft"
-    );
 }
-
-/// How much of a drawn picture a decode target covers, to three decimals.
-///
-/// Below 1.0 is the defect in one number: a request smaller than the rectangle the
-/// picture is drawn into.
-fn coverage(target: u32, drawn: f32) -> f64 {
-    ((target as f64 / drawn as f64) * 1000.0).round() / 1000.0
-}
-
-/// End to end: the **texture** a lone spread comes back at, before and after — not
-/// the request, which is what the tests above pin.
-///
-/// They are not the same number, and only one of them is a picture.
-/// `decode_jpeg_scaled` picks the smallest of 1/8, 1/4, 1/2 and 1 whose long side
-/// still covers the request, so a request below the drawn size can land on a *lower
-/// rung* and return a texture narrower than the rectangle it is drawn into. The
-/// fixture is 2700x1920 — the double-page scan in every geometry test above, and a
-/// size whose rungs straddle the two requests: half of it is 1350, which covers the
-/// old 1080 and not the new 1920. So the old answer is a **1350-wide texture painted
-/// over 1518.75 pixels** and the new one is 2700 wide for the same 1518.75.
-///
-/// **What this test does *not* claim, and the reason the fixture's size is load-bearing
-/// here.** At `ppp` 2 both requests are past this source's long side, so both land on
-/// 1/1 and the texture is the same 2700 either way: for *this* page the defect is
-/// obvious at `ppp` 1 and invisible at `ppp` 2, while the *request* was wrong at both.
-/// Which rung a source lands on is a property of that source's dimensions — a 1600-wide
-/// page never leaves 1/2 and a 6000-wide one leaves it either way — so the rule the fix
-/// restores is about the request (never smaller than the draw), and pinning a rung here
-/// would pin the fixture rather than the rule.
-///
-/// Decoding for real is what makes this worth a 5 MP fixture: the pure tests above would
-/// all stay green if `decode_jpeg_scaled` chose the *largest* reduction that covers the
-/// request, which is a plausible edit and the opposite of right.
-#[test]
-fn a_lone_spread_is_decoded_at_the_size_it_is_drawn_at() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("spread.jpg");
-    write_jpeg(&path, WIDE_SCAN.0 as u32, WIDE_SCAN.1 as u32);
-
-    // The drawn rect, from the layout that is handed the same flag.
-    let scale = spread_fit(DECODE_PANEL, &[WIDE_SCAN], true);
-    let drawn = WIDE_SCAN.0 * scale;
-    assert_eq!(drawn, 1518.75, "the same 1518.75 the layout tests pin");
-
-    for (ppp, half, whole) in [
-        (1u32, (960u32, 1080u32), decode_panel_px(panel_px_at(1), true, true)),
-        (2, (1920, 2160), decode_panel_px(panel_px_at(2), true, true)),
-    ] {
-        let want = drawn * ppp as f32;
-        let old = load_image(&path, preview_target(half)).expect("the old target decodes");
-        let new = load_image(&path, preview_target(whole)).expect("the new target decodes");
-        assert!(
-            (old.width as f32) < want,
-            "ppp {ppp}: the half-panel request decoded {}x{} and the page is drawn {want} \
-             pixels wide, so the texture is upscaled to paint it",
-            old.width,
-            old.height
-        );
-        assert!(
-            (new.width as f32) >= want || new.width == WIDE_SCAN.0 as u32,
-            "ppp {ppp}: the whole-panel request decoded {}x{}, still short of the {want} pixels \
-             the page is drawn across",
-            new.width,
-            new.height
-        );
-        if ppp == 1 {
-            // The rungs, pinned: this is the mechanism, in two pairs of numbers.
-            assert_eq!(
-                (old.width, old.height),
-                (1350, 960),
-                "1080 is asked for, half of 2700 is 1350 which covers it, a quarter does not, so \
-                 1/2 is the rung"
-            );
-            assert_eq!(
-                (new.width, new.height),
-                (2700, 1920),
-                "1920 is asked for, 1/2 does not cover it, so 1/1 does - and 1/1 is all the \
-                 source has"
-            );
-            assert_eq!(
-                coverage(old.width, want),
-                0.889,
-                "and the old texture is 0.889 of what is painted across it: soft, at one pixel \
-                 ratio"
-            );
-            assert_eq!(
-                coverage(new.width, want),
-                1.778,
-                "and the new one is comfortably past it, which is what 'the source has no more \
-                 to give' looks like"
-            );
-        } else {
-            assert_eq!(
-                (old.width, old.height),
-                (2700, 1920),
-                "ppp 2: both requests are past this source's long side, so both land on 1/1 and \
-                 the texture is identical. The request was still wrong, and a page twice this \
-                 size would show it."
-            );
-            assert_eq!((new.width, new.height), (2700, 1920));
-            assert_eq!(
-                coverage(old.width, want),
-                0.889,
-                "which is why this page was not soft at ppp 2 - and the reason the report was \
-                 written about HiDPI is the *request*, which is 0.711 of the draw at both ratios"
-            );
-        }
-    }
-}
-
-/// A plain baseline JPEG of `w` x `h`, for the one test here that decodes rather than
-/// arithmetic.
-fn write_jpeg(path: &std::path::Path, w: u32, h: u32) {
-    let mut bytes = Vec::new();
-    image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(w, h, image::Luma([128])))
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
-        .unwrap();
-    std::fs::write(path, bytes).unwrap();
-}
-
-/// The resize machine sees a lone spread's target change **once**, refine **once**, and
-/// then nothing at all — including when the target does not change, which is the case
-/// the mode toggle now is.
-///
-/// Both halves are the real risk. The old half-panel answer made `M` on a lone spread
-/// change the target in both directions (1920 to 1080 and back) and charge a refine
-/// each way for a picture that did not change; the new answer makes the toggle
-/// **inert**, because on and off decode the same panel and lay out the same
-/// single-image rectangle. Neither is a storm — the tracker is sticky — but "no storm"
-/// was never the question. The question is whether a genuine change costs exactly one
-/// decode, and a flicker of the flag (a shape measured a frame later, a partner that
-/// lands) would either alternate the target and never settle, or settle twice.
-///
-/// The counts are over a **run of frames**, not one call, because that is the only
-/// shape in which "one" means anything: a per-call assertion cannot tell a settled
-/// refine from a storm of them.
-#[test]
-fn a_lone_spread_costs_one_refine_when_its_target_really_changes() {
-    let source_long = WIDE_SCAN.0 as u32;
-    let ppp = 2u32;
-    let target_of = |lone_spread: bool| {
-        preview_target(decode_panel_px(panel_px_at(ppp), true, lone_spread))
-    };
-
-    let half = target_of(false);
-    let whole = target_of(true);
-    assert_eq!((half, whole), (2160, 3840), "ppp 2 on a 1920x1080 panel");
-
-    // A turn whose shape has just been measured: the preview on screen was decoded for
-    // the half-panel answer, and the flag is now true.
-    let mut tracker = ResizeTracker::new();
-    let mut actions = Vec::new();
-    for _ in 0..12 {
-        let target = whole;
-        actions.push(tracker.frame(
-            target,
-            needs_refine(half, source_long, half, target, RESIZE_PX_FLOOR),
-        ));
-    }
-    assert_eq!(
-        actions.iter().filter(|a| **a == ResizeAction::Refine).count(),
-        1,
-        "twelve frames of one real change are one refine, not one per frame and not a \
-         storm of them: {actions:?}"
-    );
-    assert_eq!(
-        actions.first(),
-        Some(&ResizeAction::Wait),
-        "and the first frame only waits: the machine settles on the frame after a size \
-         changes, which is the rule that makes a window drag cost one decode"
-    );
-    // The decode lands, and a settled target costs nothing afterwards.
-    tracker.landed();
-    assert_eq!(
-        tracker.frame(whole, needs_refine(whole, source_long, whole, whole, RESIZE_PX_FLOOR)),
-        ResizeAction::Idle,
-        "once the sharper texture is in place the target is met exactly, so there is \
-         nothing left to ask for"
-    );
-
-    // **The toggle itself, with the fix in place.** Both modes decode the whole panel
-    // for a lone spread, so the target does not move and there is no refine to charge.
-    assert_eq!(
-        preview_target(decode_panel_px(panel_px_at(ppp), false, true)),
-        whole,
-        "mode off on a lone spread is the same panel as mode on - it is drawn as a single \
-         image either way"
-    );
-    let mut tracker = ResizeTracker::new();
-    let mut actions = Vec::new();
-    for target in [whole, whole] {
-        actions.push(tracker.frame(target, needs_refine(whole, source_long, whole, target, RESIZE_PX_FLOOR)));
-    }
-    assert_eq!(
-        actions,
-        vec![ResizeAction::Idle, ResizeAction::Idle],
-        "toggling `M` on a lone spread changes the decode target not at all, so it must not \
-         cost a decode for a picture that did not change"
-    );
-
-    // The control: on a page that is *not* a lone spread the mode does change the
-    // target, so the "no refine" above is not the tracker being deaf. Off to on is a
-    // shrink, which `needs_refine` refuses; on to off is a growth, which it accepts
-    // once.
-    let mut tracker = ResizeTracker::new();
-    let mut actions = Vec::new();
-    for target in [half, half, whole, whole, whole] {
-        actions.push(tracker.frame(
-            target,
-            needs_refine(half, source_long, half, target, RESIZE_PX_FLOOR),
-        ));
-    }
-    tracker.landed();
-    assert_eq!(
-        actions.iter().filter(|a| **a == ResizeAction::Refine).count(),
-        1,
-        "a portrait page or a pair does pay one refine when the mode goes back off, so the \
-         lone-spread case above is a property of the flag and not of the machine: {actions:?}"
-    );
-
-    // And a flicker would be visible as a storm of waits with no refine at all, which
-    // is what makes "twelve frames of one real change" the assertion worth having.
-    let mut tracker = ResizeTracker::new();
-    let flicker: Vec<ResizeAction> = (0..12)
-        .map(|i| {
-            let target = if i % 2 == 0 { half } else { whole };
-            tracker.frame(
-                target,
-                needs_refine(half, source_long, half, target, RESIZE_PX_FLOOR),
-            )
-        })
-        .collect();
-    assert_eq!(
-        flicker.iter().filter(|a| **a == ResizeAction::Refine).count(),
-        0,
-        "a flag that changed every frame would leave the machine waiting forever and never \
-         decoding at all - which is how a flickering flag presents, not as a storm: {flicker:?}"
-    );
-}
-
-/// The four layout calls and the decode target are handed **one** answer, and
-/// `central` reaches it through the library twice rather than through two readings of
-/// the rule.
-///
-/// **This is a source scan, and it is the only thing covering the wiring.** The
-/// behavioural tests above drive `lone_spread_fills_turn` and `decode_panel_px`
-/// directly, so every one of them stays green if `MyApp::central` never asks: the
-/// library would be correct and the app would still draw the reported defect, because
-/// the call sites would default to "halve". `central` is in the binary, which no
-/// integration test can reach, so the call is asserted against the source for the same
-/// reason `tests/renderer.rs`, `tests/keybindings.rs` and the other scans here do. What
-/// a scan cannot tell is whether any of it *works*.
-///
-/// **The negative assertions are the load-bearing half.** An earlier version of this
-/// wiring asked `turn_is_a_lone_spread(spread_dims.len(), shape_of(pos, ..))` where the
-/// pages were already laid out, which is right; moving the question earlier is only
-/// safe if there is exactly one place it is asked. A `central` that computed it twice
-/// — once for the decode and once for the fit — would satisfy every positive assertion
-/// in this test and could disagree with itself on the frame a shape is learned.
-#[test]
-fn central_decides_and_threads_the_lone_spread_flag() {
-    let src = main_src();
-    let central = fn_body(&src, "fn central(");
-
-    assert!(
-        central.contains("image_viewer::lone_spread_fills_turn("),
-        "`central` no longer asks the library whether the turn is a lone spread, so the flag is\n\
-         always false and every lone spread is fitted into a half and decoded for half a panel -\n\
-         which is the reported defect, unchanged.\nBody was:\n{central}"
-    );
-    assert!(
-        !central.contains("image_viewer::turn_is_a_lone_spread("),
-        "`central` asks the lone-spread question a second time, from `spread_dims.len()`. Two\n\
-         sites answering one rule is free to disagree - and the second one would be a reading of\n\
-         the paint, so it can be a frame out of date with the first. The query at the top of the\n\
-         frame is the one that is asked once.\nBody was:\n{central}"
-    );
-    assert_eq!(
-        central.matches("let lone_spread_fills_turn =").count(),
-        1,
-        "`central` must bind `lone_spread_fills_turn` exactly once and read it everywhere, so the\n\
-         decode target and the four layout calls cannot come from two different answers.\n\
-         Body was:\n{central}"
-    );
-
-    // **The decode target, and it must be the same flag.** A call that passed a literal
-    // `false`, or recomputed the shape, would leave the picture decoded for a half panel
-    // while it is drawn across the whole one - which is the defect, and it is the *only*
-    // thing in this fix.
-    let at = central
-        .find("decode_panel_px(")
-        .expect("`central` no longer halves the panel through the library");
-    let args = call_args(central, at);
-    assert!(
-        args.contains("lone_spread_fills_turn") && args.contains("self.config.manga_mode"),
-        "`decode_panel_px` must be handed the one flag and the mode, so the decode target is the\n\
-         layout's own answer rather than a second opinion about it.\nArguments were:\n{args}"
-    );
-    // ...and it must come **before** the first thing that consumes `panel_px`, which
-    // is what "asked early" means: `preview_target` is the resize machine's target and
-    // `display_dim` is what `schedule` reads, so a `panel_px` that is still being
-    // halved below those two lines is the old bug with extra steps. Comparing against
-    // the layout calls would be checking nothing — `central` fits after the picture is
-    // known, so an ask placed anywhere above `spread_fit` would satisfy it.
-    let preview_target_at = central
-        .find("preview_target(")
-        .expect("`central` no longer asks for the preview target");
-    assert!(
-        at < preview_target_at,
-        "the decode target is decided after `preview_target` and `display_dim` have already \
-         read `panel_px`, so the resize machine and the loader queue are planning against a \
-         half-panel answer whatever the layout then does with it"
-    );
-
-    // Every layout call, in both spellings, with the flag as an argument. `spread_fit`
-    // and `spread_rects` on one line in the common case and spread over several in this
-    // one, so the window is taken from the call's name to the end of its line.
-    for (call, what) in [
-        ("spread_fit(", "the fit: a lone spread drawn at half size in the middle of the window"),
-        ("spread_rects(", "the rects: the reported defect itself"),
-        ("spread_centre(", "the zoom anchor: a wheel notch would creep the page under the cursor"),
-        (
-            "spread_pan_bounds(",
-            "the pan clamp: the zoom's wanted offset would be silently truncated",
-        ),
-    ] {
-        let at = central
-            .find(call)
-            .unwrap_or_else(|| panic!("`central` no longer calls `{call}`, so {what}"));
-        let args = call_args(central, at);
-        assert!(
-            args.contains("lone_spread_fills_turn"),
-            "`central`'s `{call}` no longer receives `lone_spread_fills_turn`, so {what}, while \
-             the library's own tests stay green because they pass the flag directly.\n\
-             Arguments were:\n{args}"
-        );
-    }
-}
-
-/// The **wiring** half of the decode-target rule: `schedule` must ask the library
-/// for a target rather than invent one, and `central` must re-plan from inside the
-/// block that records the display area.
-///
-/// **This is a source scan, and it is here rather than in `flip_through.rs`
-/// because it is the third scan in this suite of the same defect class** — the
-/// block, not the call, being the property — and because it wants the
-/// brace-matching [`fn_body`] and [`block_after`] this file already owns.
-/// `central` and `MyApp::schedule` are in the binary, which no integration test
-/// can reach; `flip_through.rs`'s
-/// `there_is_no_decode_target_before_the_display_area_is_measured` covers the rule
-/// the library applies and cannot see either of these two call sites.
-///
-/// **The load-bearing assertion is the negative one, and it is about position.**
-/// `display_dim` is what `schedule` reads, so a `self.schedule()` one line *above*
-/// the assignment inside `central` would be a correct-looking call in the correct
-/// function re-planning against the same empty `display_dim` it is trying to fill —
-/// the exact defect shape `the_turns_second_half_is_derived_not_latched` records,
-/// where the assignment was present, in the right function, in the wrong block.
-/// So this brace-matches the `if` that assigns `display_dim` and requires the call
-/// to be inside it, which a `contains` on the whole body could not tell.
-#[test]
-fn the_plan_is_empty_until_the_display_area_is_measured() {
-    let src = main_src();
-    let schedule = fn_body(&src, "fn schedule(");
-
-    assert!(
-        schedule.contains("image_viewer::decode_target(self.display_dim)"),
-        "`MyApp::schedule` no longer asks the library for a decode target, so it is back \
-         to inventing one - and the fallback was `PREVIEW_TEXTURE_DIM`, which is the \
-         animation ceiling. On every cold open the first plan (current page, turn \
-         partner and all six preload neighbours) is then decoded at 4096, which for any \
-         source under 4096 px is the full-resolution page with `downscale_image` a \
-         no-op: measured byte-identical to the source decode on 32.jpg, and painted at \
-         3.397x (normal) / 4.645x (manga) the rectangle it is drawn in.\n\
-         Body was:\n{schedule}"
-    );
-    // **The old spelling, by its code and not by the constant it mentioned.** The
-    // removed line was
-    // `self.display_dim.map(image_viewer::preview_target).unwrap_or(PREVIEW_TEXTURE_DIM)`,
-    // so pinning the *call* catches it whatever the fallback is called - and a scan
-    // that trips on a comment is a scan that gets satisfied by rewording, which is
-    // the wrong pressure on the next editor.
-    assert!(
-        !schedule.contains("image_viewer::preview_target"),
-        "`MyApp::schedule` computes the target itself again. `display_dim.map(preview_target)` \
-         is the expression that had to answer for the `None`, and it must go through \
-         `decode_target`, which is the version that can say it does not know.\n\
-         Body was:\n{schedule}"
-    );
-    assert!(
-        schedule.contains("let Some(target_dim) ="),
-        "`MyApp::schedule` no longer takes the missing target as a case. There is no \
-         measured display area before `central`'s first frame, and that has to be a \
-         handled state rather than a default.\nBody was:\n{schedule}"
-    );
-    assert!(
-        schedule.contains("self.loader.replace(Vec::new())"),
-        "`MyApp::schedule` has no answer for a target it does not have: the plan it builds \
-         must be empty, so the frame that finally measures the display area is the one that \
-         queues the work.\nBody was:\n{schedule}"
-    );
-
-    // `central`: the call has to be *inside* the block that assigns `display_dim`.
-    let marker = "if self.display_dim != Some(panel_px)";
-    let block = block_after(&src, marker);
-    assert!(
-        block.contains("self.schedule()"),
-        "`central` assigns `display_dim` without re-planning, so the plan `frame_prelude` \
-         built - empty, because no target existed yet - stays empty and the first frame \
-         queues nothing at all: the viewer opens on a permanent \"Loading...\". The call \
-         belongs inside this block; brace-matched, because one line above the assignment \
-         it would read the same `display_dim` it is trying to fill.\nBlock was:\n{block}"
-    );
-    let assign = block
-        .find("self.display_dim = Some(panel_px)")
-        .unwrap_or_else(|| panic!("the block no longer assigns display_dim:\n{block}"));
-    let call = block
-        .find("self.schedule()")
-        .unwrap_or_else(|| panic!("the block has no schedule() call:\n{block}"));
-    assert!(
-        call > assign,
-        "`self.schedule()` sits before `display_dim` is assigned, so it builds a plan \
-         against the value it is meant to replace. This is the whole reason the assertion \
-         above is about position and not presence.\nBlock was:\n{block}"
-    );
-    // **And only on the first measurement.** Re-planning on every change of the
-    // display area is what a window drag must not do, so the call is gated on the
-    // transition and the gate has to be visible here rather than assumed.
-    assert!(
-        block.contains("is_none()"),
-        "`central` re-plans on every change of the display area rather than on the first \
-         measurement. That is a decode per frame of a window drag, which is the storm \
-         `ResizeTracker` exists to coalesce - `ResizeAction::Wait` is not `Refine` for \
-         exactly this reason.\nBlock was:\n{block}"
-    );
-    // One call in the block. (`central` has a second, unrelated `schedule()` in
-    // its `ResizeAction::Refine` arm, so the count is the block's - which is the
-    // unit the property is about.)
-    assert_eq!(
-        block.matches("self.schedule()").count(),
-        1,
-        "the `display_dim` block must re-plan exactly once: twice would be a second \
-         reading of the same transition, and a `ResizeAction::Refine` in the same block \
-         would re-plan for a target the block has only just replaced.\nBlock was:\n{block}"
-    );
-}
-
-/// The text between a call's `(` and its matching `)`, starting from the call's own name.
-///
-/// **Paren-matched rather than a line or a fixed window**, because every one of the four
-/// calls this is used on is written across several lines - two of them end with a `)` on a
-/// line of its own, which is not `);` - so both a `find(");")` and a 400-byte window are
-/// guesses about formatting rather than about the call. This is the same brace-matching
-/// [`fn_body`] does, for parentheses.
-///
-/// Weak in the way every source scan here is: it reads the text, so it cannot tell
-/// whether the value passed is the one the reader expects, only that *an* argument by
-/// that name is there. What it does catch is the regression that actually happens, which
-/// is a call site dropping a parameter that a later edit added.
-fn call_args<'a>(src: &'a str, at: usize) -> &'a str {
-    let open = src[at..].find('(').map(|i| at + i).expect("no `(` after the call name");
-    let mut depth = 0i32;
-    for (i, b) in src.as_bytes()[open..].iter().enumerate() {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &src[open + 1..open + i];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("the call at {at} has no closing parenthesis; its parens do not balance");
-}
-
-/// A navigation walk costs one `turn_len` per turn *behind* the cursor, in both
-/// directions.
-///
-/// The measurement is a **count of `dims` reads through a counting `PageCtx`**, not a
-/// time. That is deliberate and it is this suite's standing rule (see
-/// `thumb_cache.rs`): a timing assertion here would be dominated by the profile, the
-/// machine and how many dimensions happen to be cached, and would say nothing about the
-/// claim. What is being asserted is the *shape* of the cost — linear in the turns
-/// behind the cursor, and the same shape in both directions — and a count is exactly
-/// what answers that. Timing belongs in `bench_browse`.
-///
-/// **The number being corrected.** `anchor_of` walks forward from `(0, 0)`, so it is
-/// O(distance from the **front**), not from `pos`. `MyApp::turn_forward` calls
-/// `next_turn`, not `next_anchor`, and `next_turn` snaps first — so a *forward* press in
-/// manga mode is that whole walk plus one addition. Three places said otherwise
-/// (`anchor_of`'s doc, the design spec at "Why this needs no page map", and RULING 4),
-/// and the spec's claim is load-bearing: it is what says no pairing table is needed.
-///
-/// **And the direction is the wrong way round in RULING 4**, which said "forward
-/// navigation - the hot path for hold-to-browse - stays O(1)". Both directions are the
-/// same walk: `prev_anchor` also walks forward from `(0, 0)`. Forward only adds
-/// `next_anchor`'s single addition on top. So the two are the same order of magnitude
-/// and the honest statement is "**either direction costs a walk from the front**",
-/// with forward marginally worse.
-///
-/// What this does **not** claim: that it is slow. Every iteration is four lookups in
-/// caches that are already warm, against a preview decode measured in hundreds of
-/// milliseconds, and this suite has already spent 117-385 ms on an *actually* quadratic
-/// rule (`flat`, since replaced by `is_lead`) to make it 10x cheaper than that. The
-/// cost is not a hang and not a frame-time risk. It is a cost that is **linear in
-/// gallery size**, which is what a reader with a 2000-file volume pays on every press
-/// at the back of it, and the deferred fix — a per-gallery anchor list — is recorded in
-/// `TODO.md`.
-///
-/// The comparison the counter makes exact: the same `Gallery` pattern at 4 files and at
-/// 200, asked about the **last** turn in both. The reads must be proportional to the
-/// turn count (2 turns vs 100), and the per-turn figure must be identical, so a walk
-/// that early-exited would fail on the total and a walk that grew faster than linearly
-/// would fail on nothing measurable here — which is stated rather than papered over.
 #[test]
 fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     /// Reads through `dims`, which is what `turn_len` reads, wrapped so the same
@@ -7124,7 +6593,7 @@ fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     }
 
     // All portrait, `loop_back` off, so every turn is a pair of adjacent files and the
-    // anchors sit at even indices — which is what makes "the k-th anchor" a position
+    // anchors sit at even indices Ã¢â‚¬â€ which is what makes "the k-th anchor" a position
     // this test can write down rather than one it has to rediscover. 400 files, 200
     // turns: big enough that the constant at the end of the walk is not the number
     // being compared, small enough that the walk is instant.
@@ -7143,8 +6612,8 @@ fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     }
 
     // **Linear in the turns behind the cursor.** The marginal cost per anchor is measured
-    // between two *adjacent* anchors — where the constant cost of starting the walk is
-    // not in the difference — and then checked against the total to the far end. Exact
+    // between two *adjacent* anchors Ã¢â‚¬â€ where the constant cost of starting the walk is
+    // not in the difference Ã¢â‚¬â€ and then checked against the total to the far end. Exact
     // equality is the claim, because `anchor_of`'s loop body is a fixed number of
     // `turn_len` calls and nothing about a later turn costs more than an earlier one.
     let first = walk(&gal, anchors[0], 0).0;
@@ -7171,9 +6640,9 @@ fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     );
 
     // **And both directions walk.** `prev_anchor` also starts at `(0, 0)` and compares
-    // successors, so it walks from the front to find the turn *before* the cursor's —
-    // the same cost, and RULING 4's "forward navigation — the hot path for hold-to-
-    // browse — stays O(1)" had the direction backwards. Only `next_anchor`'s single
+    // successors, so it walks from the front to find the turn *before* the cursor's Ã¢â‚¬â€
+    // the same cost, and RULING 4's "forward navigation Ã¢â‚¬â€ the hot path for hold-to-
+    // browse Ã¢â‚¬â€ stays O(1)" had the direction backwards. Only `next_anchor`'s single
     // addition is forward-only, so a forward press is that walk plus one addition.
     //
     // Asked from the last of 200 turns, which is the maximum for both. `prev_anchor`
@@ -7207,7 +6676,7 @@ fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     // `(0,0)` to the 199th anchor, so it passed 199 turns; at the `per_turn` figure
     // measured above for `anchor_of`'s two reads per iteration and one read per
     // iteration here, that is hundreds of reads rather than a constant. The bound is
-    // deliberately loose — the claim being contradicted is "a bounded number of local
+    // deliberately loose Ã¢â‚¬â€ the claim being contradicted is "a bounded number of local
     // reads", so anything that scales with the gallery refutes it and anything within a
     // factor of a constant confirms the counter is measuring the walk.
     assert!(

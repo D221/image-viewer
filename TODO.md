@@ -1057,7 +1057,7 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 | file | lines | what is in it |
 |---|---|---|
 | `tests/unit.rs` | 5,088 | the unit suite, one file for everything that does not deserve its own target |
-| `tests/spreads.rs` | 7,218 | the manga-mode suite, same shape |
+| `tests/spreads.rs` | 6,687 | the manga-mode suite, same shape |
 | `src/app/ui.rs` | 2,048 | pane layout against the egui UI |
 | `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
 | `tests/rotate_save.rs` | 1,921 | |
@@ -1069,14 +1069,17 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
 folders, then `unit.rs`'s prefilter suite out to `tests/resample.rs`,
-`spreads.rs`'s settings section out to `tests/manga_settings.rs`, and
-`keybindings.rs` into `keybindings.rs` (674 lines, under target) plus
-`tests/keys_direction.rs` (914 lines, under target) — 17 tests split 7/10,
-none lost, none duplicated, no new warnings. Files that come down under the
-target leave the list; that is what just happened to `keybindings.rs` and
-`manga_settings.rs`. What remains is the same move: split a test file by subject,
-or move a section of `src/app/ui.rs` or `src/app/central.rs` into its own
-module, and lower the numbers above.
+`spreads.rs`'s settings section out to `tests/manga_settings.rs`,
+`keybindings.rs` into `keybindings.rs` (648 lines) plus
+`tests/keys_direction.rs` (889 lines) — 17 tests split 7/10 — and
+`spreads.rs`'s central/schedule wiring scans out to `tests/spread_wiring.rs`
+(328 lines) with the navigation-walk test staying in place — 113 → 109 tests
+in spreads.rs, none lost, none duplicated, no new warnings. Files that come
+down under the target leave the list; that is what just happened to
+`keybindings.rs`, `manga_settings.rs` and `spread_wiring.rs`. What remains is
+the same move: split a test file by subject, or move a section of
+`src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
+numbers above.
 
 **Not claimed.** Line counts are a proxy for "can a person hold it in their
 head", not a measurement. What *is* true is that the check is enforced, so the
