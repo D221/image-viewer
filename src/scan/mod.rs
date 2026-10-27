@@ -13,12 +13,12 @@ use crate::*;
 /// (`is_jpeg_bytes` and friends), so a misnamed file still opens whatever it
 /// really is. Anything missed here simply never appears in a folder scan; it
 /// can still be opened by passing the path on the command line.
-pub const SUPPORTED_EXTENSIONS: [&str; 16] = [
+pub const SUPPORTED_EXTENSIONS: [&str; 17] = [
     "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", // 9
     "tif", "tiff", // TIFF
     "bmp", "dib", // Windows bitmap
     "ico", "cur", // Windows icon / cursor (one container format)
-    "qoi", // Quite OK Image: lossless, modern, and detectable
+    "qoi", "svg", // QOI and SVG vector image
 ];
 
 /// Decoders the `image` crate offers that this app does not use, each with the

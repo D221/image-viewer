@@ -947,9 +947,11 @@ the panel target the preview path computes — not a fixed 1024. There is no
 change is a `needs_refine`. Viewport (width/height) gives the natural aspect
 ratio; missing or zero falls back to the target square.
 
-**Tests:** `tests/svg.rs` (8 tests) cover `is_svg_bytes` (XML form, bare root,
-rejections), `decode_svg` (target size, scale down, scale up, no-viewport), and
-`load_image_preview_full` end-to-end (no `full` buffer, `below_target: true`).
+**Tests:** `tests/svg.rs` (9 tests) cover `is_svg_bytes` (XML form, bare root,
+rejections), `decode_svg` (target size, scale down, scale up, no-viewport),
+`load_image_preview_full` end-to-end (no `full` buffer, `below_target: true`),
+and `svg_is_scannable` (`"svg"` in `SUPPORTED_EXTENSIONS`, `is_browsable` true
+for `.svg` — the fix for SVG files vanishing from folder scans).
 
 **The trap, and it is this file's kind.** `dims()` for an SVG is the viewport or
 `None`, and `pairable` treats unknown dimensions optimistically — so a wide SVG

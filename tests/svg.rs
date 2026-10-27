@@ -4,7 +4,7 @@
 //! renders at any target size — there is no `full` tier and no source-size
 //! decode: the preview *is* the decode.
 
-use image_viewer::{decode_svg, is_svg_bytes, load_image_preview_full};
+use image_viewer::{decode_svg, is_browsable, is_svg_bytes, load_image_preview_full, SUPPORTED_EXTENSIONS};
 
 /// A simple 100x100 red square SVG.
 fn red_square_svg() -> &'static [u8] {
@@ -89,3 +89,19 @@ fn load_image_preview_full_handles_svg() {
     assert!(r.full.is_none(), "SVG has no full tier — preview is the decode");
     assert!(r.below_target, "SVG render at target density is below_target");
 }
+
+#[test]
+fn svg_is_scannable() {
+    assert!(
+        SUPPORTED_EXTENSIONS.contains(&"svg"),
+        "\"svg\" missing from SUPPORTED_EXTENSIONS — folder scans hide .svg files"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image.svg");
+    std::fs::write(&path, red_square_svg()).unwrap();
+    assert!(
+        is_browsable(&path),
+        "is_browsable must list .svg files so a folder scan shows them"
+    );
+}
+
