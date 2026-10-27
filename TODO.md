@@ -30,10 +30,18 @@ what the reference is for a photo whose correct rendering nobody has recorded.
 conversion is the wrong operation to begin with, and the same eyeball settles
 both.
 
-Also unverified, and cheap to check by hand: the **wallpaper** path. It is the one
-consumer that reads the *file* rather than our buffers, so with the setting on it
-decodes, converts and writes `%APPDATA%\image-viewer\wallpaper.<ext>` instead of
-pointing the shell at the original. Nothing tests it.
+Also unverified, and cheap to check by hand: the **wallpaper** path. It is the
+one consumer that reads the *file* rather than our buffers, so with the setting
+on it decodes, converts and writes `%APPDATA%\image-viewer\wallpaper.<ext>`
+instead of pointing the shell at the original. **Now tested:** the pure half
+(`image_viewer::wallpaper_target`) was extracted from `MyApp::set_wallpaper` in
+`src/app/output.rs` so it can be unit-tested, and `tests/wallpaper.rs` covers
+the decision: conversion off keeps the original path, an untagged JPEG keeps the
+original path even with conversion on, archive members always get a converted
+copy beside the config, and a source without an extension falls back to `.jpg`.
+The P3 + conversion-on case (real converted pixels landing in the wallpaper
+file) still needs a real P3 fixture — `test-images` has two P3 JPEGs but the
+directory is gitignored, so that test can't live in the tree.
 
 Cost when on, measured: 166 MP/s across the thread pool, so ~35 ms for a 2 MP
 preview and ~145 ms for a 24 MP full decode.

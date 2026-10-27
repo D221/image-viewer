@@ -20,6 +20,28 @@ pub fn sidecar_path(image: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(s))
 }
 
+/// Where the wallpaper should be read from: the original file, or a converted
+/// copy written beside the config.
+///
+/// With wide-gamut conversion on, a Display P3 source has to be converted and
+/// written as a file, because the shell reads the path and never goes near our
+/// decode path. An archive member has the same problem: its temp dir dies with
+/// the app, so it must be copied out first. Everything else can be handed to
+/// the shell as-is.
+pub fn wallpaper_target(image: &Path, folder: &Path, in_archive: bool) -> PathBuf {
+    let converted = wide_gamut_conversion()
+        && color_info(image).space == ColorSpace::WideGamut;
+    if in_archive || converted {
+        let ext = image
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_else(|| "jpg".into());
+        folder.join(format!("wallpaper.{ext}"))
+    } else {
+        image.to_path_buf()
+    }
+}
+
 use nom_exif::{ExifTag, URational};
 use serde::{Deserialize, Serialize};
 use rayon::prelude::*;

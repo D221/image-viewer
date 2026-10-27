@@ -448,6 +448,14 @@ impl MyApp {
         self.notice = Some("Setting wallpaper…".into());
         let tx = self.drop_tx.clone();
         let wake = self.drop_wake.clone();
+        // The target is decided by a pure function so it can be unit-tested:
+        // P3 + conversion on, or an archive member, both need a converted
+        // copy beside the config; everything else goes to the shell as-is.
+        let target = image_viewer::wallpaper_target(&p, &folder, in_archive);
+        let converted = image_viewer::wide_gamut_conversion()
+            && image_viewer::color_info(&p).space
+                == image_viewer::ColorSpace::WideGamut;
+        let needs_write = in_archive || converted;
         std::thread::spawn(move || {
             // An immediately-called closure keeps the body one phrasing over
             // the two early-abort checks and the fall-through set.
@@ -457,25 +465,7 @@ impl MyApp {
                 if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
                     return Err("superseded".into());
                 }
-                // The conversion question is part of the *worker's* work now:
-                // `color_info` reads the whole file, and that read belongs
-                // wherever the rest of the decode lives.
-                let converted = image_viewer::wide_gamut_conversion()
-                    && image_viewer::color_info(&p).space
-                        == image_viewer::ColorSpace::WideGamut;
-                // Two reasons the wallpaper cannot always be the original
-                // file, recorded here because the UI decision above decided
-                // one of them for it: an archive member only exists in a
-                // temp dir that dies with the app — the UI side already decided
-                // that as `in_archive` — and a converted picture has to exist
-                // as a file at all, because the shell reads the file and never
-                // goes near our decode path.
-                let target: PathBuf = if in_archive || converted {
-                    let ext = p
-                        .extension()
-                        .map(|e| e.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "jpg".into());
-                    let dest = folder.join(format!("wallpaper.{ext}"));
+                if needs_write {
                     let wrote = if converted {
                         match image_viewer::load_image(&p, image_viewer::MAX_TEXTURE_DIM) {
                             Ok(mut d) => {
@@ -483,13 +473,13 @@ impl MyApp {
                                 let img = image::RgbaImage::from_raw(d.width, d.height, d.rgba)
                                     .unwrap_or_else(|| image::RgbaImage::new(d.width, d.height));
                                 image::DynamicImage::ImageRgba8(img)
-                                    .save(&dest)
+                                    .save(&target)
                                     .map_err(|e| std::io::Error::other(e.to_string()))
                             }
                             Err(e) => Err(std::io::Error::other(e.to_string())),
                         }
                     } else {
-                        std::fs::copy(&p, &dest).map(|_| ())
+                        std::fs::copy(&p, &target).map(|_| ())
                     };
                     if let Err(e) = wrote {
                         return Err(e.to_string());
@@ -501,10 +491,7 @@ impl MyApp {
                     if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
                         return Err("superseded".into());
                     }
-                    dest
-                } else {
-                    p
-                };
+                }
                 match wallpaper::set_from_path(&target.to_string_lossy()) {
                     Ok(()) => Ok(()),
                     Err(e) => Err(e.to_string()),
