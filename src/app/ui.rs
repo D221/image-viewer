@@ -1088,9 +1088,13 @@ impl eframe::App for MyApp {
             }
             pane.show(ui, |ui| {
                 ui.heading("Settings");
-                ui.heading("Settings");
-
-                egui::CollapsingHeader::new("Graphics & window")
+                // Scrollable so expanded sections don't run off the bottom of
+                // short windows; no frame so it doesn't look like a "window
+                // inside window" — each section is its own collapsible group.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        egui::CollapsingHeader::new("Graphics & window")
                     .default_open(true)
                     .show(ui, |ui| {
                     // ---- renderer ------------------------------------------------
@@ -2001,6 +2005,7 @@ impl eframe::App for MyApp {
                 // Which checkout this binary came from, so a copy sitting in
                 // Downloads can be told apart from the current build.
                 ui.small(format!("Build {}", env!("IV_BUILD_ID")));
+                });
             });
             }
             if resort {
