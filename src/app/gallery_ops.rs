@@ -339,20 +339,17 @@ impl MyApp {
         }
     }
 
-    /// Restore the most recently deleted file from the Recycle Bin and put it
-    /// back in the gallery. `Ctrl+Y`. `Del` is the one bare letter allowed to
+    /// Restore the most recently deleted file from the Recycle Bin. `Ctrl+Y`. `Del` is the one bare letter allowed to
     /// lose data; this makes it recoverable instead of the sole exception.
     ///
     /// Trash operations run on a background thread so a slow Recycle Bin
     /// never freezes the viewer. The result arrives via `rx_undo_delete` and
     /// is applied in `ui.rs`'s update loop.
     pub(crate) fn undo_delete(&mut self, _ctx: &Context) {
-        eprintln!("[IV-DEBUG] undo_delete called; stack={:?}", self.deleted_stack.len());
         let Some(original) = self.deleted_stack.pop() else {
             self.notice = Some("Nothing to restore".into());
             return;
         };
-        eprintln!("[IV-DEBUG] popped stack item: {:?}", original);
         let name = match original.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_owned(),
             None => {
@@ -360,18 +357,12 @@ impl MyApp {
                 return;
             }
         };
-        eprintln!("[IV-DEBUG] file name: {name}");
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            eprintln!("[IV-DEBUG] thread: starting trash operations");
             let items = match trash::os_limited::list() {
-                Ok(items) => {
-                    eprintln!("[IV-DEBUG] thread: trash items ({}): {:?}", items.len(), items.iter().map(|i| i.name.to_string_lossy().into_owned()).collect::<Vec<_>>());
-                    items
-                }
+                Ok(items) => items,
                 Err(e) => {
-                    eprintln!("[IV-DEBUG] thread: list ERR: {e}");
                     let _ = tx.send(UndoDeleteResult::Failed {
                         error: format!("Cannot read the Recycle Bin: {e}"),
                         original: original.clone(),
@@ -384,21 +375,17 @@ impl MyApp {
                     .to_str()
                     .map_or(false, |n| Path::new(n).file_name() == Some(std::ffi::OsStr::new(&name)))
             }) else {
-                eprintln!("[IV-DEBUG] thread: item not found");
                 let _ = tx.send(UndoDeleteResult::NotFound {
-                    name: name.clone(),
+                    name,
                     original: original.clone(),
                 });
                 return;
             };
-            eprintln!("[IV-DEBUG] thread: matched item: {:?}", item.name);
             match trash::os_limited::restore_all(std::iter::once(item.clone())) {
                 Ok(()) => {
-                    eprintln!("[IV-DEBUG] thread: restore_all OK");
                     let _ = tx.send(UndoDeleteResult::Restored(original.clone()));
                 }
                 Err(e) => {
-                    eprintln!("[IV-DEBUG] thread: restore_all ERR: {e}");
                     let _ = tx.send(UndoDeleteResult::Failed {
                         error: format!("Restore failed: {e}"),
                         original: original.clone(),

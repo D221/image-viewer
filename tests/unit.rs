@@ -4033,6 +4033,7 @@ fn the_bottom_bar_menus_carry_the_buttons_actions() {
                 "self.transfer_current(ctx, false)",
                 "self.transfer_current(ctx, true)",
                 "self.delete_current(ctx)",
+                "self.undo_delete(ctx)",
                 "self.print_current()",
             ],
             _ => &[

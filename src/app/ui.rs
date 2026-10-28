@@ -616,9 +616,7 @@ impl eframe::App for MyApp {
         if let Some(rx) = &self.rx_undo_delete {
             match rx.try_recv() {
                 Ok(UndoDeleteResult::Restored(original)) => {
-                    eprintln!("[IV-DEBUG] UI: restore completed for {:?}", original);
                     let files = self.scan_current();
-                    eprintln!("[IV-DEBUG] UI: scan_current returned {} files", files.len());
                     self.set_files(files, ctx);
                     if let Some(pos) = self
                         .gallery
@@ -626,11 +624,8 @@ impl eframe::App for MyApp {
                         .iter()
                         .position(|p| p == &original)
                     {
-                        eprintln!("[IV-DEBUG] UI: found restored file at index {pos}");
                         self.gallery.index = pos;
                         self.goto(ctx);
-                    } else {
-                        eprintln!("[IV-DEBUG] UI: restored file NOT found in scan results");
                     }
                     self.notice = Some(format!(
                         "Restored {}",
@@ -639,13 +634,11 @@ impl eframe::App for MyApp {
                     self.rx_undo_delete = None;
                 }
                 Ok(UndoDeleteResult::NotFound { name, original }) => {
-                    eprintln!("[IV-DEBUG] UI: item not found in trash: {name}");
                     self.deleted_stack.push(original);
                     self.error = Some(format!("{name} is not in the Recycle Bin"));
                     self.rx_undo_delete = None;
                 }
                 Ok(UndoDeleteResult::Failed { error, original }) => {
-                    eprintln!("[IV-DEBUG] UI: restore failed: {error}");
                     self.deleted_stack.push(original);
                     self.error = Some(error);
                     self.rx_undo_delete = None;
@@ -986,6 +979,14 @@ impl eframe::App for MyApp {
                         if ui.button(action_button_text(&self.config, "Delete", "del")).clicked() {
                             ui.close();
                             self.delete_current(ctx);
+                        }
+                        if ui
+                            .button(action_button_text(&self.config, "Restore from Trash", "restore_delete"))
+                            .on_hover_text("Restore the most recently deleted file")
+                            .clicked()
+                        {
+                            ui.close();
+                            self.undo_delete(ctx);
                         }
                         ui.separator();
                         if ui.button(action_button_text(&self.config, "Print…", "print")).clicked() {
