@@ -146,7 +146,6 @@ impl MyApp {
     /// config, never archives (their temp dir is already flat). The one
     /// funnel for every rebuild, so the flag cannot be forgotten at one
     /// site — startup, rescan, opens and the toggle all read this.
-    #[allow(dead_code)] // kept because tests/unit.rs scans source text for it
     pub(crate) fn scan_current(&self) -> Vec<PathBuf> {
         Self::sorted_scan(
             &self.folder,
@@ -334,9 +333,8 @@ impl MyApp {
     }
 
     /// Restore the most recently deleted file from the Recycle Bin and put it
-    /// back in the gallery at its old position. `Ctrl+Y`. `Del` is the one
-    /// bare letter allowed to lose data; this makes it recoverable instead of
-    /// the sole exception.
+    /// back in the gallery. `Ctrl+Y`. `Del` is the one bare letter allowed to
+    /// lose data; this makes it recoverable instead of the sole exception.
     pub(crate) fn undo_delete(&mut self, ctx: &Context) {
         let Some(original) = self.deleted_stack.pop() else {
             self.notice = Some("Nothing to restore".into());
@@ -365,15 +363,20 @@ impl MyApp {
         };
         match trash::os_limited::restore_all(std::iter::once(item.clone())) {
             Ok(()) => {
-                // Put it back at the end of the gallery and navigate to it.
-                self.gallery.files.push(original.clone());
-                let idx = self.gallery.files.len() - 1;
-                self.gallery.index = idx;
-                self.reset_display();
-                self.goto(ctx);
-                // goto() clears the notice, so set it after; schedule() is
-                // called inside goto() so the restored image starts decoding
-                // on the very next frame.
+                // Re-scan the folder so the restored file is listed alongside
+                // everything still on disk, then navigate to it. Going through
+                // set_files keeps filter/sort state consistent.
+                let files = self.scan_current();
+                self.set_files(files, ctx);
+                if let Some(pos) = self
+                    .gallery
+                    .files
+                    .iter()
+                    .position(|p| p == &original)
+                {
+                    self.gallery.index = pos;
+                    self.goto(ctx);
+                }
                 self.notice = Some(format!("Restored {name}"));
             }
             Err(e) => {
