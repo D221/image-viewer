@@ -369,6 +369,9 @@ impl MyApp {
                 self.gallery.index = idx;
                 self.reset_display();
                 self.goto(ctx);
+                // goto() clears the notice, so set it after; schedule() is
+                // called inside goto() so the restored image starts decoding
+                // on the very next frame.
                 self.notice = Some(format!("Restored {name}"));
             }
             Err(e) => {

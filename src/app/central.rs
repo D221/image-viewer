@@ -614,7 +614,8 @@ impl MyApp {
         }
         // Colour picker: click on the picture to sample the pixel under the
         // cursor. Reads from the full-res buffer when one is cached; otherwise
-        // reports that it is not available (zoom in to 1:1 to make it so).
+        // reports that it is not available (zoom in to 1:1 for pixel-accurate
+        // sampling). Copies the colour to the clipboard on click.
         if self.color_picker_active && resp.clicked() {
             if let Some(hover) = resp.hover_pos() {
                 if let Some(key) = self.cur.as_ref() {
@@ -628,14 +629,14 @@ impl MyApp {
                             if sx >= 0 && sx < full.width as i32 && sy >= 0 && sy < full.height as i32 {
                                 let idx = (sy as usize * full.width as usize + sx as usize) * 4;
                                 let c = &full.rgba[idx..idx + 4];
-                                self.notice = Some(
-                                    format!(
-                                        "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
-                                        c[0], c[1], c[2],
-                                        c[0], c[1], c[2],
-                                        sx, sy
-                                    )
-                                );
+                                let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
+                                let rgb = format!("rgb({}, {}, {})", c[0], c[1], c[2]);
+                                let label = format!("{}  {}  at {}x{}", hex, rgb, sx, sy);
+                                self.notice = Some(label);
+                                // Copy to clipboard
+                                if let Ok(mut cb) = arboard::Clipboard::new() {
+                                    let _ = cb.set_text(&hex);
+                                }
                             } else {
                                 self.notice = Some("Click outside the picture".into());
                             }

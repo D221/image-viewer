@@ -722,6 +722,13 @@ impl eframe::App for MyApp {
                         self.toggle_fit_width_mode();
                     }
                     if ui
+                        .selectable_label(self.color_picker_active, "Colour picker")
+                        .on_hover_text("Ctrl+K — click the picture to sample the pixel under the cursor, copied to the clipboard")
+                        .clicked()
+                    {
+                        self.toggle_color_picker();
+                    }
+                    if ui
                         .selectable_label(
                             self.config.fit_window_mode,
                             action_button_text(&self.config, "Fit window", "fit_window"),
