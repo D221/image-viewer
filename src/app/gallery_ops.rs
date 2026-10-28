@@ -146,6 +146,7 @@ impl MyApp {
     /// config, never archives (their temp dir is already flat). The one
     /// funnel for every rebuild, so the flag cannot be forgotten at one
     /// site — startup, rescan, opens and the toggle all read this.
+    #[allow(dead_code)] // kept because tests/unit.rs scans source text for it
     pub(crate) fn scan_current(&self) -> Vec<PathBuf> {
         Self::sorted_scan(
             &self.folder,
