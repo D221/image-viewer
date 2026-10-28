@@ -336,10 +336,12 @@ impl MyApp {
     /// back in the gallery. `Ctrl+Y`. `Del` is the one bare letter allowed to
     /// lose data; this makes it recoverable instead of the sole exception.
     pub(crate) fn undo_delete(&mut self, ctx: &Context) {
+        eprintln!("[IV-DEBUG] undo_delete called; stack={:?}", self.deleted_stack.len());
         let Some(original) = self.deleted_stack.pop() else {
             self.notice = Some("Nothing to restore".into());
             return;
         };
+        eprintln!("[IV-DEBUG] popped stack item: {:?}", original);
         let name = match original.file_name().and_then(|n| n.to_str()) {
             Some(n) => n.to_owned(),
             None => {
@@ -347,12 +349,16 @@ impl MyApp {
                 return;
             }
         };
+        eprintln!("[IV-DEBUG] file name: {name}");
         // Find the matching item in the Recycle Bin. On Windows the trash
         // item name is the full path, so compare file names rather than the
         // whole string. If several items share a name we restore the newest
         // one (list is newest-first).
         let items = match trash::os_limited::list() {
-            Ok(items) => items,
+            Ok(items) => {
+                eprintln!("[IV-DEBUG] trash items ({}): {:?}", items.len(), items.iter().map(|i| i.name.to_string_lossy().into_owned()).collect::<Vec<_>>());
+                items
+            }
             Err(e) => {
                 self.error = Some(format!("Cannot read the Recycle Bin: {e}"));
                 return;
@@ -366,12 +372,15 @@ impl MyApp {
             self.error = Some(format!("{name} is not in the Recycle Bin"));
             return;
         };
+        eprintln!("[IV-DEBUG] matched trash item: {:?}", item.name);
         match trash::os_limited::restore_all(std::iter::once(item.clone())) {
             Ok(()) => {
+                eprintln!("[IV-DEBUG] restore_all OK");
                 // Re-scan the folder so the restored file is listed alongside
                 // everything still on disk, then navigate to it. Going through
                 // set_files keeps filter/sort state consistent.
                 let files = self.scan_current();
+                eprintln!("[IV-DEBUG] scan_current returned {} files", files.len());
                 self.set_files(files, ctx);
                 if let Some(pos) = self
                     .gallery
@@ -379,12 +388,16 @@ impl MyApp {
                     .iter()
                     .position(|p| p == &original)
                 {
+                    eprintln!("[IV-DEBUG] found restored file at index {pos}");
                     self.gallery.index = pos;
                     self.goto(ctx);
+                } else {
+                    eprintln!("[IV-DEBUG] restored file NOT found in scan results");
                 }
                 self.notice = Some(format!("Restored {name}"));
             }
             Err(e) => {
+                eprintln!("[IV-DEBUG] restore_all ERR: {e}");
                 // Put the path back so the user can try again.
                 self.deleted_stack.push(original);
                 self.error = Some(format!("Restore failed: {e}"));
