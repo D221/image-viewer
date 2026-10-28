@@ -7,33 +7,6 @@
 
 use crate::*;
 
-/// Read a whole file into a `Vec<u8>`.
-///
-/// On Windows the open uses `FILE_FLAG_SEQUENTIAL_SCAN`, telling the cache
-/// manager to readahead aggressively: the file will be read straight through
-/// with no random-access caching, which helps on network shares and large
-/// files. On other platforms this is just `fs::read`. The whole file is read
-/// either way; this is about the *access pattern*, not avoiding the read.
-pub(crate) fn read_sequential(path: &Path) -> std::io::Result<Vec<u8>> {
-    #[cfg(windows)]
-    {
-        use std::io::Read;
-        use std::os::windows::fs::OpenOptionsExt;
-        let metadata = std::fs::metadata(path)?;
-        let mut buf = Vec::with_capacity(metadata.len() as usize);
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(0x0800_0000) // FILE_FLAG_SEQUENTIAL_SCAN
-            .open(path)?;
-        f.read_to_end(&mut buf)?;
-        Ok(buf)
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::read(path)
-    }
-}
-
 /// Load a preview in one pass, decoding the file only once.
 ///
 /// * Large JPEGs get the cheap DCT-scaled preview; the full decode happens
@@ -124,7 +97,7 @@ pub(crate) fn decode_page(
             }
         }
     }
-    let bytes = read_sequential(path)?;
+    let bytes = std::fs::read(path)?;
     let max_dim = preview_max_dim.min(MAX_TEXTURE_DIM);
     let jpeg = is_jpeg_bytes(&bytes);
     // EXIF orientation: camera pixels are stored unrotated; the tag says how
@@ -636,7 +609,7 @@ pub(crate) fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant
 /// JPEGs are rotated according to their EXIF orientation tag.
 pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
     let start = std::time::Instant::now();
-    let bytes = read_sequential(path)?;
+    let bytes = std::fs::read(path)?;
     let mut data = normalized(decode_bytes(&bytes, max_dim.min(MAX_TEXTURE_DIM), start)?);
     if is_jpeg_bytes(&bytes) {
         apply_exif_orientation(&mut data, exif_orientation(path));
