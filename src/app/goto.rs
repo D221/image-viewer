@@ -194,6 +194,7 @@ impl MyApp {
             pending_content: std::collections::HashMap::new(),
             watch_events_seen: 0,
             rx_rescan: None,
+            rx_undo_delete: None,
             last_external_spawn: None,
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,

@@ -8,6 +8,7 @@
 //! `tests/source_size.rs`.
 
 use crate::*;
+use crate::app::gallery_ops::UndoDeleteResult;
 
 pub(crate) struct Preview {
 pub(crate) tex: TextureHandle,
@@ -416,6 +417,11 @@ pub(crate) watch_events_seen: u64,
     /// Keeping the old gallery until the new one arrives means a rescan never
     /// blanks the picture — the same rule the decode path follows.
     pub(crate) rx_rescan: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
+    /// An undo-delete in flight on a background thread. `Some` while trash
+    /// operations (list + restore) are running; the receiver delivers the
+    /// result when it lands. Runs off the UI thread so a slow Recycle Bin
+    /// never freezes the viewer.
+    pub(crate) rx_undo_delete: Option<std::sync::mpsc::Receiver<UndoDeleteResult>>,
     /// When an external process was last spawned (user command, Explorer).
     /// Rate-limits spawns so a repeating chord can never fork-bomb the
     /// machine again — see `SPAWN_COOLDOWN`.

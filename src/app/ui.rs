@@ -8,6 +8,7 @@
 //! `tests/source_size.rs`.
 
 use crate::*;
+use crate::app::gallery_ops::UndoDeleteResult;
 
 impl eframe::App for MyApp {
 
@@ -608,6 +609,54 @@ impl eframe::App for MyApp {
         }
         if cancel {
             self.rename_input = None;
+        }
+
+        // Undo-delete result from the background thread. Applied here so the
+        // gallery re-scan and navigation happen on the UI thread.
+        if let Some(rx) = &self.rx_undo_delete {
+            match rx.try_recv() {
+                Ok(UndoDeleteResult::Restored(original)) => {
+                    eprintln!("[IV-DEBUG] UI: restore completed for {:?}", original);
+                    let files = self.scan_current();
+                    eprintln!("[IV-DEBUG] UI: scan_current returned {} files", files.len());
+                    self.set_files(files, ctx);
+                    if let Some(pos) = self
+                        .gallery
+                        .files
+                        .iter()
+                        .position(|p| p == &original)
+                    {
+                        eprintln!("[IV-DEBUG] UI: found restored file at index {pos}");
+                        self.gallery.index = pos;
+                        self.goto(ctx);
+                    } else {
+                        eprintln!("[IV-DEBUG] UI: restored file NOT found in scan results");
+                    }
+                    self.notice = Some(format!(
+                        "Restored {}",
+                        original.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                    ));
+                    self.rx_undo_delete = None;
+                }
+                Ok(UndoDeleteResult::NotFound { name, original }) => {
+                    eprintln!("[IV-DEBUG] UI: item not found in trash: {name}");
+                    self.deleted_stack.push(original);
+                    self.error = Some(format!("{name} is not in the Recycle Bin"));
+                    self.rx_undo_delete = None;
+                }
+                Ok(UndoDeleteResult::Failed { error, original }) => {
+                    eprintln!("[IV-DEBUG] UI: restore failed: {error}");
+                    self.deleted_stack.push(original);
+                    self.error = Some(error);
+                    self.rx_undo_delete = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still running: wait for the next frame.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.rx_undo_delete = None;
+                }
+            }
         }
 
         // Remember the window geometry: size, position and maximized state.
