@@ -2266,8 +2266,8 @@ fn recursive_browsing_is_wired() {
          flat listing of a folder the reader was browsing as a tree."
     );
     assert!(
-        src.contains("fn scan_current(&self)") && src.contains("self.scan_current()"),
-        "rescan must go through the same funnel as the opens"
+        src.contains("fn scan_current(&self)") && src.contains("rx_rescan"),
+        "rescan scans off the paint thread via rx_rescan, keeping the funnel"
     );
     assert!(
         src.contains("load_all_from_folder_recursive("),

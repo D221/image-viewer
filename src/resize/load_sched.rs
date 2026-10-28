@@ -266,7 +266,22 @@ impl Loader {
             let run = run.clone();
             let panic_msg = panic_msg.clone();
             let wake = wake.clone();
-            std::thread::spawn(move || loop {
+            std::thread::spawn(move || {
+                // Decode workers run below normal priority so a burst of large
+                // decodes cannot starve the paint thread. FlyPhotos raises its
+                // HQ thread above normal; we do the inverse — the UI owns the
+                // machine, decodes get what's left. No-op off Windows.
+                #[cfg(windows)]
+                {
+                    use windows_sys::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority,
+                        THREAD_PRIORITY_BELOW_NORMAL,
+                    };
+                    let _ = unsafe {
+                        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+                    };
+                }
+                loop {
                 let job = {
                     let (lock, cv) = &*shared;
                     let mut q = lock.lock().unwrap();
@@ -332,7 +347,7 @@ impl Loader {
                     return; // UI is gone
                 }
                 wake();
-            });
+            }});
         }
         Self { shared }
     }

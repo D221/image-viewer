@@ -288,7 +288,7 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, rename_key, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, rating_up, rating_down, flag_key, pane_left, pane_right) = ctx.input(|i| {
+        let (del, rename_key, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, rating_up, rating_down, flag_key, restore_delete, pane_left, pane_right, color_pick) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
                 binding_down(i, &kb, "rename"),
@@ -308,8 +308,10 @@ impl eframe::App for MyApp {
                 binding_down(i, &kb, "rating_up"),
                 binding_down(i, &kb, "rating_down"),
                 binding_down(i, &kb, "flag"),
+                binding_down(i, &kb, "restore_delete"),
                 binding_down(i, &kb, "pane_left"),
                 binding_down(i, &kb, "pane_right"),
+                binding_down(i, &kb, "color_pick"),
             )
         });
         // Mouse side buttons: back = previous image, forward = next image.
@@ -495,6 +497,12 @@ impl eframe::App for MyApp {
             }
             if rename_key {
                 self.rename_current(ctx);
+            }
+            if restore_delete {
+                self.undo_delete(ctx);
+            }
+            if color_pick {
+                self.toggle_color_picker();
             }
             if del {
                 self.delete_current(ctx);
@@ -1460,6 +1468,7 @@ impl eframe::App for MyApp {
                                     SortMode::Name,
                                     SortMode::Date,
                                     SortMode::Size,
+                                    SortMode::Taken,
                                     SortMode::Random,
                                 ] {
                                     ui.selectable_value(&mut new_sort, m, format!("{m:?}"));

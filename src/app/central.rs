@@ -612,6 +612,42 @@ impl MyApp {
                 target_scale = fit_scale;
             }
         }
+        // Colour picker: click on the picture to sample the pixel under the
+        // cursor. Reads from the full-res buffer when one is cached; otherwise
+        // reports that it is not available (zoom in to 1:1 to make it so).
+        if self.color_picker_active && resp.clicked() {
+            if let Some(hover) = resp.hover_pos() {
+                if let Some(key) = self.cur.as_ref() {
+                    if let Some(pv) = self.previews.get(key) {
+                        if let Some(full) = &pv.full {
+                            let center = panel.center();
+                            let rel_x = hover.x - center.x - offset.x;
+                            let rel_y = hover.y - center.y - offset.y;
+                            let sx = (rel_x / scale + img_px.x / 2.0).round() as i32;
+                            let sy = (rel_y / scale + img_px.y / 2.0).round() as i32;
+                            if sx >= 0 && sx < full.width as i32 && sy >= 0 && sy < full.height as i32 {
+                                let idx = (sy as usize * full.width as usize + sx as usize) * 4;
+                                let c = &full.rgba[idx..idx + 4];
+                                self.notice = Some(
+                                    format!(
+                                        "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
+                                        c[0], c[1], c[2],
+                                        c[0], c[1], c[2],
+                                        sx, sy
+                                    )
+                                );
+                            } else {
+                                self.notice = Some("Click outside the picture".into());
+                            }
+                        } else {
+                            self.notice = Some(
+                                "Full-res buffer not available — view at 1:1 for pixel-accurate sampling".into(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
         if key_fill && pages.is_empty() {
             // Single-image only: a turn's layout (`spread_fit`, pan bounds,
             // seam) assumes the fit scale, so filling there is a layout change,

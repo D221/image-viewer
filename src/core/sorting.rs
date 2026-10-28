@@ -112,6 +112,18 @@ pub(crate) fn apply_sort_order(files: &mut [PathBuf], mode: SortMode, descending
             });
         }
         SortMode::Random => shuffle(files),
+        SortMode::Taken => {
+            // Newest capture date first, from EXIF `DateTimeOriginal`. Files
+            // without a capture date sort oldest (empty string sorts first).
+            // The date string "YYYY:MM:DD HH:MM:SS" sorts lexicographically,
+            // so `Reverse` on it gives newest first. Each file's EXIF is read
+            // once per sort (cached by `sort_by_cached_key`); the persisted
+            // shape cache makes this cheaper for files that have been viewed,
+            // but the first sort of a large folder still pays the EXIF read.
+            files.sort_by_cached_key(|p| {
+                std::cmp::Reverse(exif_date_taken(p))
+            });
+        }
     }
     if descending {
         files.reverse();

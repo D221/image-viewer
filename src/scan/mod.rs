@@ -200,5 +200,10 @@ pub enum SortMode {
     Size,
     /// Shuffled once per folder load.
     Random,
+    /// Newest capture date first, from EXIF `DateTimeOriginal`. Files without a
+    /// capture date sort oldest. Reads EXIF for every file on the first sort —
+    /// the persisted shape cache (`shapes.json`) makes subsequent sorts cheaper
+    /// for files that have been viewed.
+    Taken,
 }
 

@@ -90,6 +90,20 @@ impl MyApp {
         );
     }
 
+    /// Colour picker: click on the picture to sample the pixel under the
+    /// cursor and show its colour. `Ctrl+K`; view-only, one bool.
+    pub(crate) fn toggle_color_picker(&mut self) {
+        self.color_picker_active = !self.color_picker_active;
+        self.notice = Some(
+            if self.color_picker_active {
+                "Colour picker: on — click the picture to sample"
+            } else {
+                "Colour picker: off"
+            }
+            .into(),
+        );
+    }
+
     /// Fit window to image as a mode (`T`): every press fits now *and*
     /// toggles persistence — JPEGView's exact shape (`AdjustWindowToImage`
     /// runs unconditionally; only the sticky flag flips conditionally).

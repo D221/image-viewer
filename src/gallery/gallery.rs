@@ -52,6 +52,41 @@ pub struct Gallery {
     /// count must not outlive the list it describes: these are keyed on paths and
     /// would otherwise accumulate every page the session ever opened.
     shapes: std::collections::HashMap<ImgKey, (u32, u32)>,
+    /// Persisted dims/orientation/capture-date sidecar, keyed by file path.
+    /// Loaded once from `%LOCALAPPDATA%\image-viewer\shapes.json`, saved when
+    /// dirty. Invalidated by mtime+length so an edited file is re-measured.
+    shape_cache: std::collections::HashMap<String, FileShape>,
+    shape_cache_loaded: bool,
+    shape_cache_dirty: bool,
+}
+
+/// One file's measured shape, persisted across sessions.
+///
+/// `date_taken` is EXIF `DateTimeOriginal` as "YYYY:MM:DD HH:MM:SS", empty when
+/// absent or unreadable. `orientation` is the EXIF tag (1-8), 0 when absent.
+/// `mtime`/`len` are the invalidate key: a file whose either changed is re-measured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileShape {
+    pub w: u32,
+    pub h: u32,
+    pub orientation: u16,
+    pub date_taken: String,
+    pub mtime: u64,
+    pub len: u64,
+}
+
+impl Default for FileShape {
+    fn default() -> Self {
+        Self {
+            w: 0,
+            h: 0,
+            orientation: 0,
+            date_taken: String::new(),
+            mtime: 0,
+            len: 0,
+        }
+    }
 }
 
 /// A filter needle interpreted as a rating query rather than a name substring.
@@ -118,6 +153,9 @@ impl Gallery {
             page: 0,
             page_counts: std::collections::HashMap::new(),
             shapes: std::collections::HashMap::new(),
+            shape_cache: std::collections::HashMap::new(),
+            shape_cache_loaded: false,
+            shape_cache_dirty: false,
         }
     }
 
@@ -135,6 +173,9 @@ impl Gallery {
             page: 0,
             page_counts: std::collections::HashMap::new(),
             shapes: std::collections::HashMap::new(),
+            shape_cache: std::collections::HashMap::new(),
+            shape_cache_loaded: false,
+            shape_cache_dirty: false,
         }
     }
 
@@ -147,6 +188,9 @@ impl Gallery {
             page: 0,
             page_counts: std::collections::HashMap::new(),
             shapes: std::collections::HashMap::new(),
+            shape_cache: std::collections::HashMap::new(),
+            shape_cache_loaded: false,
+            shape_cache_dirty: false,
         }
     }
 
@@ -422,6 +466,31 @@ impl Gallery {
         if self.shapes.contains_key(&key) {
             return;
         }
+        // Check the persisted cache first: a cache hit avoids re-opening the
+        // file entirely, which is the whole point of the sidecar. Cache is
+        // per-file (page 0), so multi-page documents still measure each page
+        // on first arrival — page 0 comes from the cache, later pages from
+        // their own header reads.
+        if !self.shape_cache_loaded {
+            self.shape_cache = load_shape_cache();
+            self.shape_cache_loaded = true;
+        }
+        if pos.page == 0 {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if let Some(cached) = self.shape_cache.get(&path_str(&path)) {
+                    if cached.mtime == mtime && cached.len == metadata.len() {
+                        self.insert_shapes(key, (cached.w, cached.h));
+                        return;
+                    }
+                }
+            }
+        }
         let Some(((w, h), jpeg)) = page_dims_and_jpeg(&path, pos.page) else {
             return;
         };
@@ -429,6 +498,33 @@ impl Gallery {
         // applied there, and `exif_orientation` costs a seek out of the file.
         let tag = if jpeg { exif_orientation(&path) } else { 0 };
         self.insert_shapes(key, if orientation_swaps_dims(tag) { (h, w) } else { (w, h) });
+        // Update the persisted cache for page 0: dims, orientation, capture
+        // date, mtime and length. Multi-page pages are not cached here — their
+        // dims vary per page and the in-memory `shapes` map already covers them.
+        if pos.page == 0 {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                let mtime = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let date_taken = if jpeg { exif_date_taken(&path) } else { String::new() };
+                self.shape_cache.insert(
+                    path_str(&path),
+                    FileShape {
+                        w,
+                        h,
+                        orientation: tag,
+                        date_taken,
+                        mtime,
+                        len: metadata.len(),
+                    },
+                );
+                self.shape_cache_dirty = true;
+                self.save_shape_cache();
+            }
+        }
     }
 
     /// Record the size a page **displays** at, from a decode that already knows.
@@ -975,6 +1071,85 @@ impl PageCtx for Gallery {
             n += *self.page_counts.get(path)? as usize;
         }
         Some(n)
+    }
+}
+
+/// Where the shape sidecar lives: `%LOCALAPPDATA%\image-viewer\shapes.json`.
+///
+/// Same rules as `spreads_root`: local, not roaming; beside the cache, not the
+/// config. `None` means "do not persist".
+pub(crate) fn shape_cache_root() -> Option<PathBuf> {
+    if let Some(dir) = portable_dir() {
+        return Some(dir.join("shapes.json"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        Some(PathBuf::from(local).join("image-viewer").join("shapes.json"))
+    } else if let Some(home) = std::env::var_os("HOME") {
+        Some(PathBuf::from(home).join(".cache").join("image-viewer").join("shapes.json"))
+    } else {
+        None
+    }
+}
+
+/// The sidecar's `.tmp.<pid>` name — same per-process atomic-write guard as
+/// `spreads_tmp`.
+pub(crate) fn shape_cache_tmp(store: &Path, pid: u32) -> PathBuf {
+    let mut name = store.as_os_str().to_os_string();
+    name.push(format!(".tmp.{pid}"));
+    PathBuf::from(name)
+}
+
+/// Load the persisted shape cache, or an empty map if the file is absent or
+/// unreadable. An unreadable store is treated as empty and replaced on save,
+/// the same rule `load_spread_overrides` uses.
+pub(crate) fn load_shape_cache() -> std::collections::HashMap<String, FileShape> {
+    let Some(root) = shape_cache_root() else {
+        return Default::default();
+    };
+    let Ok(data) = std::fs::read(&root) else {
+        return Default::default();
+    };
+    match serde_json::from_slice(&data) {
+        Ok(map) => map,
+        Err(_) => Default::default(),
+    }
+}
+
+/// Save the shape cache atomically (tmp + rename). A store that cannot be
+/// parsed is treated as empty and replaced on the next save; a save that
+/// cannot be written is silently dropped — the cache is a performance hint,
+/// not critical data.
+pub(crate) fn save_shape_cache(cache: &std::collections::HashMap<String, FileShape>) {
+    let Some(root) = shape_cache_root() else {
+        return;
+    };
+    let Ok(json) = serde_json::to_string_pretty(cache) else {
+        return;
+    };
+    let tmp = shape_cache_tmp(&root, std::process::id());
+    if std::fs::write(&tmp, &json).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp, &root);
+}
+
+/// A file's path as a lossy String, the cache's key type.
+fn path_str(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+impl Gallery {
+    /// Persist the shape cache if anything changed since the last save.
+    ///
+    /// Called from `learn_one_page` after a cache insert. Saves every time
+    /// because the cache is small (a few KB per 1000 files) and writes are
+    /// atomic — simpler than a debounce timer that could lose data on exit.
+    pub(crate) fn save_shape_cache(&mut self) {
+        if !self.shape_cache_dirty {
+            return;
+        }
+        save_shape_cache(&self.shape_cache);
+        self.shape_cache_dirty = false;
     }
 }
 

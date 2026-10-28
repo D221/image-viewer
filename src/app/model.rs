@@ -280,7 +280,15 @@ pub(crate) full_due: Option<Instant>,
 pub(crate) view: View,
 pub(crate) error: Option<String>,
 pub(crate) notice: Option<String>, // transient feedback for file actions
+    /// Files deleted this session, most recent first, capped at ten. `Del` is
+    /// the one bare letter allowed to lose data; this stack makes it
+    /// recoverable instead of the sole exception. Keys are the original paths,
+    /// so re-adding restores the file beside its neighbours.
+    pub(crate) deleted_stack: Vec<PathBuf>,
 pub(crate) anim: Option<AnimView>, // playing animation (animated GIF)
+    /// Colour picker is active: click on the picture to sample the pixel under
+    /// the cursor and show its colour. `Ctrl+K`; view-only, one bool.
+    pub(crate) color_picker_active: bool,
 
 pub(crate) exif_info: Option<String>,
 pub(crate) exif_loading: bool,
@@ -403,6 +411,11 @@ pub(crate) pending_content: std::collections::HashMap<PathBuf, Instant>,
     /// `DirWatcher::events()` as of the last frame, so the perf counter counts
     /// what this session *received*.
 pub(crate) watch_events_seen: u64,
+    /// A folder scan in flight on a background thread. `Some` while the scan
+    /// is running; the receiver delivers the new file list when it lands.
+    /// Keeping the old gallery until the new one arrives means a rescan never
+    /// blanks the picture — the same rule the decode path follows.
+    pub(crate) rx_rescan: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
     /// When an external process was last spawned (user command, Explorer).
     /// Rate-limits spawns so a repeating chord can never fork-bomb the
     /// machine again — see `SPAWN_COOLDOWN`.

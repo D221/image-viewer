@@ -8,6 +8,7 @@
 //! `tests/source_size.rs`.
 
 use crate::*;
+use std::path::PathBuf;
 
 impl MyApp {
     /// Throw away everything cached for `p` and, if it is on screen, ask for it
@@ -170,6 +171,11 @@ impl MyApp {
 
     /// Re-scan the current folder and merge the result, keeping the user's
     /// position. `force` bypasses the load_all setting (manual reload key).
+    ///
+    /// The scan itself runs on a background thread so a 2 000-file network
+    /// share can't block the paint thread every 2 s fallback poll. The old
+    /// gallery stays on screen until the new list lands — the same rule the
+    /// decode path follows.
     pub(crate) fn rescan(&mut self, ctx: &Context, force: bool) {
         if self.zip_archive.is_some() {
             return; // archives: the extracted temp dir is stable
@@ -177,8 +183,48 @@ impl MyApp {
         if !force && !self.config.load_all_on_startup {
             return;
         }
+
+        // A scan is in flight: check if it has landed. Keeping the old gallery
+        // until then means the picture never blanks for a rescan.
+        if let Some(rx) = &self.rx_rescan {
+            match rx.try_recv() {
+                Ok(files) => {
+                    self.rx_rescan = None;
+                    self.apply_scanned_files(files, ctx, force);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still scanning: wait for the next frame.
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.rx_rescan = None;
+                }
+            }
+            return;
+        }
+
+        // Start the scan on a background thread. `sorted_scan` is pure on the
+        // file system, so it is safe off the UI thread.
+        let folder = self.folder.clone();
+        let sort = self.config.sort;
+        let descending = self.config.sort_descending;
+        let recursive = self.config.recursive_folders;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let files = if recursive {
+                image_viewer::scan_folder_sorted_recursive(&folder, sort, descending)
+            } else {
+                scan_folder_sorted_dir(&folder, sort, descending)
+            };
+            let _ = tx.send(files);
+        });
+        self.rx_rescan = Some(rx);
+    }
+
+    /// Apply a file list that arrived from a background scan. The Random
+    /// merge happens here (not in the thread) so `all_files` is only touched
+    /// on the UI thread.
+    fn apply_scanned_files(&mut self, mut files: Vec<PathBuf>, ctx: &Context, force: bool) {
         self.lat.t_scan = Some(Instant::now());
-        let mut files = self.scan_current();
         // Random must not reshuffle on every poll: keep the user's order,
         // append new files, drop vanished ones (manual reload reshuffles).
         if self.config.sort == SortMode::Random && !force && !self.all_files.is_empty() {
@@ -276,8 +322,60 @@ impl MyApp {
                     .unwrap_or_default();
                 self.remove_current_from_gallery(ctx);
                 self.notice = Some(format!("Deleted {name}"));
+                // Remember what was deleted so it can be restored. Cap the
+                // stack at ten; older deletions fall off.
+                self.deleted_stack.insert(0, p);
+                self.deleted_stack.truncate(10);
             }
             Err(e) => self.error = Some(format!("Delete failed: {e}")),
+        }
+    }
+
+    /// Restore the most recently deleted file from the Recycle Bin and put it
+    /// back in the gallery at its old position. `Ctrl+Y`. `Del` is the one
+    /// bare letter allowed to lose data; this makes it recoverable instead of
+    /// the sole exception.
+    pub(crate) fn undo_delete(&mut self, ctx: &Context) {
+        let Some(original) = self.deleted_stack.pop() else {
+            self.notice = Some("Nothing to restore".into());
+            return;
+        };
+        let name = match original.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_owned(),
+            None => {
+                self.error = Some("Cannot restore: bad path".into());
+                return;
+            }
+        };
+        // Find the matching item in the Recycle Bin. Matching by name is the
+        // best we have without tracking the shell's opaque item id at delete
+        // time; if several items share a name we restore the newest one.
+        let items = match trash::os_limited::list() {
+            Ok(items) => items,
+            Err(e) => {
+                self.error = Some(format!("Cannot read the Recycle Bin: {e}"));
+                return;
+            }
+        };
+        let Some(item) = items.iter().find(|i| i.name.to_str() == Some(&name)) else {
+            self.error = Some(format!("{name} is not in the Recycle Bin"));
+            return;
+        };
+        match trash::os_limited::restore_all(std::iter::once(item.clone())) {
+            Ok(()) => {
+                // Put it back at the end of the gallery and navigate to it.
+                self.gallery.files.push(original.clone());
+                let idx = self.gallery.files.len() - 1;
+                self.gallery.index = idx;
+                self.reset_display();
+                self.goto(ctx);
+                self.notice = Some(format!("Restored {name}"));
+            }
+            Err(e) => {
+                // Put the path back so the user can try again.
+                self.deleted_stack.insert(0, original);
+                self.error = Some(format!("Restore failed: {e}"));
+            }
         }
     }
 
@@ -403,3 +501,4 @@ impl MyApp {
     }
 
 }
+

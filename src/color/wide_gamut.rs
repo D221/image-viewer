@@ -327,6 +327,18 @@ pub fn exif_orientation(path: &Path) -> u16 {
         .unwrap_or(0)
 }
 
+/// EXIF `DateTimeOriginal` ("YYYY:MM:DD HH:MM:SS") of a JPEG file, or empty
+/// when absent/unreadable. Only JPEG carries the tag in practice.
+pub fn exif_date_taken(path: &Path) -> String {
+    nom_exif::read_exif(path)
+        .ok()
+        .and_then(|exif| {
+            exif.get(nom_exif::ExifTag::DateTimeOriginal)
+                .map(|v| v.to_string())
+        })
+        .unwrap_or_default()
+}
+
 /// First JPEG COM segment in `bytes`, as text.
 ///
 /// Walks markers from SOI and stops at SOS — scan data follows it, so anything
