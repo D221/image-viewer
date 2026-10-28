@@ -347,9 +347,10 @@ impl MyApp {
                 return;
             }
         };
-        // Find the matching item in the Recycle Bin. Matching by name is the
-        // best we have without tracking the shell's opaque item id at delete
-        // time; if several items share a name we restore the newest one.
+        // Find the matching item in the Recycle Bin. On Windows the trash
+        // item name is the full path, so compare file names rather than the
+        // whole string. If several items share a name we restore the newest
+        // one (list is newest-first).
         let items = match trash::os_limited::list() {
             Ok(items) => items,
             Err(e) => {
@@ -357,7 +358,11 @@ impl MyApp {
                 return;
             }
         };
-        let Some(item) = items.iter().find(|i| i.name.to_str() == Some(&name)) else {
+        let Some(item) = items.iter().find(|i| {
+            i.name
+                .to_str()
+                .map_or(false, |n| Path::new(n).file_name() == Some(std::ffi::OsStr::new(&name)))
+        }) else {
             self.error = Some(format!("{name} is not in the Recycle Bin"));
             return;
         };
