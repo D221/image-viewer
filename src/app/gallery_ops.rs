@@ -324,8 +324,9 @@ impl MyApp {
                 self.remove_current_from_gallery(ctx);
                 self.notice = Some(format!("Deleted {name}"));
                 // Remember what was deleted so it can be restored. Cap the
-                // stack at ten; older deletions fall off.
-                self.deleted_stack.insert(0, p);
+                // stack at ten; older deletions fall off. push/pop are a
+                // matched pair: newest pushed, newest popped.
+                self.deleted_stack.push(p);
                 self.deleted_stack.truncate(10);
             }
             Err(e) => self.error = Some(format!("Delete failed: {e}")),
@@ -377,7 +378,7 @@ impl MyApp {
             }
             Err(e) => {
                 // Put the path back so the user can try again.
-                self.deleted_stack.insert(0, original);
+                self.deleted_stack.push(original);
                 self.error = Some(format!("Restore failed: {e}"));
             }
         }

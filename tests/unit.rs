@@ -4041,6 +4041,7 @@ fn the_bottom_bar_menus_carry_the_buttons_actions() {
                 "self.touch_current(false)",
                 "self.touch_current(true)",
                 "self.touch_folder_to_exif_dates()",
+                "self.toggle_color_picker()",
             ],
         };
         for callee in want {
