@@ -370,7 +370,20 @@ impl MyApp {
                 lone_spread_fills_turn,
             )
         };
-        let max_scale = MAX_SCALE.max(fit_scale);
+        // Fit-width: the picture's width fills the panel and the height
+        // overflows, so you pan vertically — the natural mode for tall pages.
+        // For a turn the whole spread's width fills the panel.
+        let fit_width_scale = if pages.is_empty() {
+            (panel.width() / display_px.x).clamp(1e-4, 8.0)
+        } else {
+            let total_width: f32 = spread_dims.iter().map(|&(w, _)| w).sum();
+            if total_width > 0.0 {
+                (panel.width() / total_width).clamp(1e-4, 8.0)
+            } else {
+                1.0
+            }
+        };
+        let max_scale = MAX_SCALE.max(fit_scale).max(fit_width_scale);
 
         // Fit window to image: reset (`T`, arrivals in the mode) sets
         // 100%-if-fits and sizes the window; wrap (user zooms in the mode)
@@ -487,12 +500,14 @@ impl MyApp {
             }
         }
 
-        let mut scale = if self.view.fit {
+        let mut scale = if self.config.fit_width_mode {
+            fit_width_scale
+        } else if self.view.fit {
             fit_scale
         } else {
             self.view.scale
         };
-        let mut offset = if self.view.fit {
+        let mut offset = if self.config.fit_width_mode || self.view.fit {
             Vec2::ZERO
         } else {
             self.view.offset
@@ -508,11 +523,12 @@ impl MyApp {
         // keeps the shipped meaning: 100%). Read as one option so the
         // dispatch below has a single branch rather than four.
         let kb = build_bindings(&self.config);
-        let (scroll, pinch, key_fit, key_fill, preset) = ui.input(|i| {
+        let (scroll, pinch, key_fit, key_fit_width, key_fill, preset) = ui.input(|i| {
             (
                 i.smooth_scroll_delta.y,
                 i.zoom_delta(),
                 binding_down(i, &kb, "fit") || binding_down(i, &kb, "fit_alt"),
+                binding_down(i, &kb, "fit_width"),
                 binding_down(i, &kb, "fill"),
                 ["preset_1", "preset_2", "preset_3", "preset_4"]
                     .iter()
@@ -569,6 +585,15 @@ impl MyApp {
                 // arrival to make the mode visible.
                 target_scale = if self.config.fit_mode {
                     fit_scale
+                } else {
+                    self.view.scale = 1.0 / ppp;
+                    1.0 / ppp
+                };
+            }
+            if key_fit_width {
+                self.toggle_fit_width_mode();
+                target_scale = if self.config.fit_width_mode {
+                    fit_width_scale
                 } else {
                     self.view.scale = 1.0 / ppp;
                     1.0 / ppp

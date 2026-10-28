@@ -153,8 +153,22 @@ fn main() -> eframe::Result<()> {
         // Window chrome from config at creation; the checkboxes apply the
         // same flags live, so this only matters for what a fresh launch
         // looks like.
-        let mut viewport = egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0]);
+        let mut viewport = egui::ViewportBuilder::default();
+        // Remembered size: fall back to the shipped 1280x800 on first launch.
+        if let Some((w, h)) = config.window_size {
+            viewport = viewport.with_inner_size([w as f32, h as f32]);
+        } else {
+            viewport = viewport.with_inner_size([1280.0, 800.0]);
+        }
+        // Remembered position, maximized state first so the window opens where
+        // the user left it. Position is applied even when maximized is set —
+        // winit ignores the position of a maximized window, so nothing breaks.
+        if let Some((x, y)) = config.window_pos {
+            viewport = viewport.with_position([x as f32, y as f32]);
+        }
+        if config.window_maximized {
+            viewport = viewport.with_maximized(true);
+        }
         if config.always_on_top {
             viewport = viewport.with_always_on_top();
         }

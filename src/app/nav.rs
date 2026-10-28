@@ -33,6 +33,7 @@ impl MyApp {
     /// changes nothing outside a running show.
     pub(crate) fn start_slideshow(&mut self) {
         self.slideshow = true;
+        self.slideshow_paused = false;
         self.slideshow_last = Instant::now();
         if self.config.slideshow_shuffle && self.slideshow_saved.is_none() {
             let saved = self.gallery.files.clone();
@@ -47,8 +48,22 @@ impl MyApp {
     /// finish): a shuffled show puts the folder's own order back first.
     pub(crate) fn stop_slideshow(&mut self) {
         self.slideshow = false;
+        self.slideshow_paused = false;
         if let Some(saved) = self.slideshow_saved.take() {
             self.set_gallery_order(saved);
+        }
+    }
+
+    /// Pause or resume a running slideshow. Resuming restarts the interval so
+    /// the pause never steals time from the next slide. No-op when the show
+    /// is not running.
+    pub(crate) fn toggle_slideshow_pause(&mut self) {
+        if !self.slideshow {
+            return;
+        }
+        self.slideshow_paused = !self.slideshow_paused;
+        if !self.slideshow_paused {
+            self.slideshow_last = Instant::now();
         }
     }
 

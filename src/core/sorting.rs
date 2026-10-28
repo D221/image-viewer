@@ -16,30 +16,29 @@ pub fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     while i < ab.len() && j < bb.len() {
         let (ca, cb) = (ab[i].to_ascii_lowercase(), bb[j].to_ascii_lowercase());
         if ca.is_ascii_digit() && cb.is_ascii_digit() {
-            let sa: Vec<u8> = ab[i..]
-                .iter()
-                .copied()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            i += sa.len();
-            let sb: Vec<u8> = bb[j..]
-                .iter()
-                .copied()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
-            j += sb.len();
+            let mut ia = i;
+            let mut ja = j;
+            while ia < ab.len() && ab[ia].is_ascii_digit() {
+                ia += 1;
+            }
+            while ja < bb.len() && bb[ja].is_ascii_digit() {
+                ja += 1;
+            }
             // Numeric compare: fewer significant digits first, then by value,
-            // then shorter digit runs (a1 before a01).
-            let na = trim_leading_zeros(&sa);
-            let nb = trim_leading_zeros(&sb);
+            // then shorter digit runs (a1 before a01). Compare the digit-run
+            // slices directly instead of collecting each run into a Vec.
+            let na = trim_leading_zeros(&ab[i..ia]);
+            let nb = trim_leading_zeros(&bb[j..ja]);
             let ord = na
                 .len()
                 .cmp(&nb.len())
                 .then_with(|| na.cmp(nb))
-                .then_with(|| sa.len().cmp(&sb.len()));
+                .then_with(|| (ia - i).cmp(&(ja - j)));
             if ord != Ordering::Equal {
                 return ord;
             }
+            i = ia;
+            j = ja;
         } else if ca != cb {
             return ca.cmp(&cb);
         } else {
@@ -69,7 +68,15 @@ pub fn scan_folder_sorted(folder: &Path, mode: SortMode) -> Vec<PathBuf> {
 /// of a shuffle is still a shuffle. A reversal rather than per-mode
 /// ascending/descending semantics, so no shipped order changes meaning.
 pub fn scan_folder_sorted_dir(folder: &Path, mode: SortMode, descending: bool) -> Vec<PathBuf> {
-    let mut files = scan_folder(folder);
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(folder) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && is_browsable(&p) {
+                files.push(p);
+            }
+        }
+    }
     apply_sort_order(&mut files, mode, descending);
     files
 }

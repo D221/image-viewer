@@ -567,6 +567,49 @@ list can only get shorter - and a raise is a visible act with a reason in it.
 
 ---
 
+## 11. Speedups & features from reading the other twelve viewers — surveyed 2026-10-28
+
+Same rules as §9: twelve checkouts in `test-images\projects`, read but not built or run; no figure here claims "faster" until it is measured under the preconditions in `AGENTS.md` **Measuring**. Every candidate was grepped against `src/` and is absent (a few are absent by design, noted where they are).
+
+### 11.1 Speedups — none refused by §4/§9/§10
+
+**1. Folder scan off the paint thread.** `open_folder` (`app/open.rs:13`) → `load_folder_into` (`app/gallery_ops.rs:163`) → `load_all_from_folder` (`gallery/gallery.rs:812`) runs `scan_folder` synchronously on the UI thread; `maybe_rescan` (`app/watch.rs:28`) runs every frame (`app/frame.rs:63`), and when no OS watch exists the 2 s fallback poll (`app/consts.rs:559`) re-scans and re-sorts the whole folder (`app/watch.rs:58-65`). Each scan stats every entry with `p.is_file()` even though `entry.file_type()` is already in hand (`scan/mod.rs:126-128`), and `is_browsable` opens every archive's central directory (`scan/mod.rs:108-111`, `gallery/archives.rs:519`). Fix shape: `Msg::Scanned` via the existing worker pool (`app/types.rs`, `new_loader`), keeping the old gallery until the new one lands — the same rule the decode path already follows. *Effort M, risk low.*
+
+**2. Persisted dims / capture-date sidecar.** `learn_one_page` (`gallery/gallery.rs:414-427`) reads each page's 64 KB prefix (`decode.rs:405-417`) on first arrival, so pairing and any date-based order are learned one page at a time and re-learned on every reopen — the first visit to a cold book still shifts its pairing once. A small sidecar keyed by `(path, mtime, len)`, same shape as `spreads.json`, stores dims, orientation and `DateTimeOriginal` (already parsed at `color/wide_gamut.rs:323` and `app/output.rs:76`). It does *not* remove the §5 first-visit floor — header reads per page are that floor — but it makes pairing stable across sessions and unlocks `SortMode::Taken` (`config.rs:21`, `sorting.rs:193-203` currently only Name/file-Date/Size/Random). *Effort M, unverified benefit size; measure with `bench_browse`.*
+
+**3. Sort once, no per-comparison allocations.** `scan_folder_sorted_dir` name-sorts in `scan_folder` then re-sorts in `apply_sort_order` (`core/sorting.rs:71-74`), so the Name sort is thrown away for Date/Size/Random. `natural_cmp` builds two `Vec<u8>` per digit run (`core/sorting.rs:19-27`), and `scan_folder_recursive` builds two `String`s per comparison (`scan/mod.rs:181-186`). Behaviour-preserving decorate-sort-undecorate fixes both; `tests/unit.rs::test_natural_sort` pins the order. *Effort S.* **DONE 2026-10-28:** `natural_cmp` now compares digit-run slices directly (zero allocations) and `scan_folder_sorted_dir` reads the directory once and sorts once by mode; `tests/unit.rs` 140/140 green.
+
+**4. mmap / sequential-scan reads.** `fs::read` copies the whole file before decode (`decode.rs` entry points; `read_prefix` at `decode.rs:417` shows the prefix pattern works). On this box a 27 MB read is 13 ms (§5 table), so this is a small win that matters most on network shares. *Effort S, weigh.*
+
+**5. Idle warm-up of cold cells.** Cold cells cost 595–709 ms (`README.md:647`), warm cells 0.6–1.8 ms (§5:209). FlyPhotos writes decoded previews back to its disk cache; ImageGlass warms outward from the centre. Queuing previews for the whole folder on idle workers costs CPU/battery but no new failure semantics — the queue's `wanted` map already decides what survives. *Effort M, weigh.*
+
+**6. Worker threads below normal priority.** Four decodes run at default priority against the paint thread (`app/types.rs`, `new_loader` uses `available_parallelism`); FlyPhotos raises its HQ thread above normal and Windows sets I/O priority. Moving decode workers below normal smooths the UI during bursts without changing any decode semantics. *Effort S, weigh.*
+
+### 11.2 Features
+
+**Low cost:**
+- **Rename (F2).** qView (`qvrenamedialog`), gwenview (`file_rename`), PicView (dialog). Ours has Move/Copy but no rename action (`gallery_ops.rs:257-294` is delete/transfer only). Single-image `Del`→Recycle Bin is the sole allowed bare-letter data loss (`AGENTS.md`); rename is explicit and fits. *Effort S/M.* **DONE 2026-10-28:** `Config` key binding `F2` → `rename` (`commands.rs`), `rename_current` opens a prefilled dialog and `rename_commit` does `std::fs::rename`, re-points the gallery entry, moves cached preview/failed/load_errors entries to the new key, fixes up `cur`, and refuses archives (`app/gallery_ops.rs`). Centered egui `Window` with Confirm/Cancel + Enter/Esc (`app/ui.rs`). Refuses name collisions. 140/140 unit tests green.
+- **Clipboard paste (Ctrl+V).** qView `paste()`, JPEGView `IDM_PASTE` (`KeyMap.txt.default:74`), PicView "Single Image". Ours is write-only (`app/paint.rs:249` `set_clipboard_rgba`). Tried and reverted: `Ctrl+V` did nothing for an image on the Windows clipboard, and it's not a useful function here — a viewer opens *files*, not clipboard pixels. *Effort S.* **Not taken.**
+- **Colour picker.** ImageGlass and oculante's eyedropper/picker. None here. *Effort S.*
+- **Fit width.** qimgv cycles fit-window / fit-width / 1:1 (`qimgv/README.md:46-48`). Ours has fit (`F`), fill (`Shift+F`) and four zoom presets (`commands.rs:68-74`) but no fit-width; tall pages need vertical pan, which exists. *Effort S.* **DONE 2026-10-28:** added `Config::fit_width_mode` (`config.rs`, default `false`, mutually exclusive with `fit_mode`), `toggle_fit_width_mode` (`app/actions.rs`), width-based scale for single images and manga spreads (`app/central.rs`), `Ctrl+F` chord (`commands.rs`), settings selectable_label (`app/ui.rs`). Note: `F` keeps its existing fit on/off behaviour (cycling it would change a shipped chord), so fit-width is a separate chord — rebindable. 140/140 unit tests green.
+- **Slideshow pause.** ImageGlass toggles pause with Space and shows `▮▮` in its countdown overlay (`SlideshowCountdownOverlay.cs:47`; `Key.Space` at `AppAPIProvider_Hotkeys.cs:158`). Ours starts/stops slideshow (`nav.rs:48` `stop_slideshow`); `K` pauses animation, not the slideshow. *Effort S.* **DONE 2026-10-28:** added `slideshow_paused` app state (`app/model.rs`, init in `app/goto.rs`), `toggle_slideshow_pause` (`app/nav.rs`), the advance is skipped while paused and resuming restarts the interval (`app/ui.rs:541`), and the settings button cycles Start → Pause → Resume. Shipped without a key chord (Space is `fit_alt`; rebindable via the keybinding editor).
+- **Undo delete / restore.** qView keeps a stack and restores (`mainwindow.cpp:903-938`). Ours recycles and shows a notice (`gallery_ops.rs:257-282`); `trash` 5.2.9 already exposes Windows `os_limited::list`/`restore_all` (`trash-5.2.9/src/windows.rs:127,248`). Makes `Del` recoverable instead of the sole exception. *Effort S.*
+- **Window geometry + monitor.** Fixed 1280×800 (`main.rs:156-157`), no geometry fields in `config.rs`. FlyPhotos restores placement per monitor and discards it when monitors change (`FlyPhotos\Src\FlyPhotos\UI\Behaviors\WindowPlacementManager.cs`). *Effort S.* **DONE 2026-10-28:** `Config::window_size`/`window_pos`/`window_maximized` (`config.rs`, `#[serde(default)]`), applied at launch via `ViewportBuilder` (`main.rs`), and saved debounced-once-a-second whenever the viewport changes (`app/model.rs` `last_geometry_save`, `app/ui.rs`). 140/140 unit tests green.
+- **Sort by capture date.** gthumb/ImageGlass/JPEGView sort by EXIF date; ours sorts by file `modified()`/`len()` only (`sorting.rs:94-105`), and no capture-date data is stored anywhere. Cheap given item 2's sidecar; structural without it because `read_exif_iter` opens the whole file (`nom-exif-3.8.0/src/lib.rs:233`). *Effort S with the sidecar, otherwise M.*
+
+**Larger — do not mistake for afternoons:**
+- **Multi-select + batch triage.** `grid_sel: usize` is single (`app/model.rs:408`); qimgv's 1–9 destination slots, gthumb's numbered selections and gwenview's batch save show the shape. *Effort L.*
+- **File history back/forward + favourite folders.** PicView's `n`/`ns` split (ADRs `docs\adr\0001-…` and `0003-…`); ours stores one resume name per folder, no page (`app/files.rs:62-70`, `app/model.rs:213`, `gallery/gallery.rs:54`). *Effort M.*
+- **Per-file adjustment DB** (gamma/contrast/brightness/saturation stored per image, pixels untouched) — JPEGView's parameter DB (`KeyMap.txt.default:66` `IDM_SAVE_PARAM_DB`). Nothing tonal exists anywhere here. *Effort L, structural.*
+- **RAW via WIC + embedded JPEG first.** FlyPhotos/ImageGlass/PicView/qimgv all decode RAW; our only on-ramp is §9.7's WIC experiment. *Effort L.*
+- **Tabs.** PicView opens many images in tabs; one image at a time here. *Effort L.*
+
+### 11.3 Checked, not worth doing (recorded so nobody re-derives)
+
+- **AVIF via dav1d.** `heic` 0.1.6 already uses `rav1d-safe` (`heic/Cargo.toml:52`) with `parallel` (`:56`); oculante's dav1d option buys nothing here.
+- **`image`'s `rayon` feature for PNG/WebP.** It reaches AVIF encode and buffer iterators only — no decoder parallelism (`image-0.25.10/Cargo.toml:113-116`, `src/images.rs:3`).
+- **Texture mipmaps.** egui-wgpu 0.36 allocates `mip_level_count: 1` (`egui-wgpu-0.36.2/src/renderer.rs:699`) and epaint documents `mipmap_mode` as glow-only (`epaint-0.36.2/src/textures.rs:177`), so `README.md:640` ("linear sampler and no mipmaps") is accurate; only a native texture with a mip chain would change it.
+
 ## Deliberately not doing — don't re-open without a reason
 
 - **HEIF / AVIF image sequences.** An ISO-BMFF `meta` box can hold several

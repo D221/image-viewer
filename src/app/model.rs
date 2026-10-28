@@ -238,6 +238,10 @@ pub(crate) frame: u64,
 
     /// What the user asked for: a file and a page of it.
 pub(crate) cur: Option<ImgKey>,
+    /// A rename dialog is open: `Some(current file name)` prefilled, `None`
+    /// when closed. Confirming renames the file on disk and re-points the
+    /// gallery at the new path; cancelling drops it.
+    pub(crate) rename_input: Option<String>,
     /// What is on screen: a file and a page of it. Lags `cur` until the wanted
     /// preview has been adopted by `sync_shown`.
     ///
@@ -359,6 +363,14 @@ pub(crate) slideshow_last: Instant,
     /// show puts it back. `None` whenever no shuffled show is running — the
     /// flag and the saved order are set and cleared together, never apart.
 pub(crate) slideshow_saved: Option<Vec<PathBuf>>,
+    /// Slideshow paused mid-show. The clock stops and no frames advance;
+    /// resuming restarts the interval so a pause never steals time from a
+    /// slide. Session-only like the show itself.
+    pub(crate) slideshow_paused: bool,
+
+    /// When the window geometry was last written to config, so a resize or
+    /// move does not hammer the disk every frame.
+    pub(crate) last_geometry_save: Instant,
 pub(crate) next_scan: Instant, // fallback folder poll (only when no OS watch runs)
     /// The OS notification watch for the folder on screen, when the platform
     /// gave us one. **`Some` is what turns the 2 s poll off**: with a watch

@@ -52,6 +52,7 @@ impl MyApp {
         self.config.fit_mode = !self.config.fit_mode;
         if self.config.fit_mode {
             self.config.fit_window_mode = false;
+            self.config.fit_width_mode = false;
             self.view.fit = true;
         } else {
             self.view.fit = false;
@@ -62,6 +63,28 @@ impl MyApp {
                 "Fit view: on"
             } else {
                 "Fit view: off"
+            }
+            .into(),
+        );
+    }
+
+    /// Fit-width as a mode: every image scaled so its width fills the window,
+    /// the height overflows and you pan vertically. Mutually exclusive with
+    /// fit mode — turning one on switches the other off.
+    pub(crate) fn toggle_fit_width_mode(&mut self) {
+        self.config.fit_width_mode = !self.config.fit_width_mode;
+        if self.config.fit_width_mode {
+            self.config.fit_mode = false;
+            self.view.fit = true;
+        } else {
+            self.view.fit = false;
+        }
+        self.config.save(&self.config_path);
+        self.notice = Some(
+            if self.config.fit_width_mode {
+                "Fit width: on"
+            } else {
+                "Fit width: off"
             }
             .into(),
         );

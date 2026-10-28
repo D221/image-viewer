@@ -288,9 +288,10 @@ impl eframe::App for MyApp {
                 i.modifiers.shift,
             )
         });
-        let (del, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, rating_up, rating_down, flag_key, pane_left, pane_right) = ctx.input(|i| {
+        let (del, rename_key, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, rating_up, rating_down, flag_key, pane_left, pane_right) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
+                binding_down(i, &kb, "rename"),
                 binding_down(i, &kb, "explore"),
                 binding_down(i, &kb, "reload"),
                 binding_down(i, &kb, "wall"),
@@ -492,6 +493,9 @@ impl eframe::App for MyApp {
             } else if lead_up {
                 self.nudge_lead_lone(1, ctx);
             }
+            if rename_key {
+                self.rename_current(ctx);
+            }
             if del {
                 self.delete_current(ctx);
             } else if explore {
@@ -540,7 +544,10 @@ impl eframe::App for MyApp {
             // below would never run until something else moved.
             if self.slideshow {
                 ctx.request_repaint_after(Duration::from_millis(250));
-                if image_viewer::slideshow_due(
+                // Paused: keep the loop ticking so the UI can repaint, but do
+                // not advance. Resuming restarts the interval, so a pause never
+                // steals time from the next slide.
+                if !self.slideshow_paused && image_viewer::slideshow_due(
                     self.slideshow_last,
                     Instant::now(),
                     self.config.slideshow_secs,
@@ -558,6 +565,64 @@ impl eframe::App for MyApp {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if let Some(path) = dropped.first().map(|f| f.path().to_path_buf()) {
             self.load_dropped(ctx, path);
+        }
+
+        // Rename dialog: prefilled with the current name, confirmed with Enter
+        // or Confirm, cancelled with Esc or Cancel.
+        let mut confirm = false;
+        let mut cancel = false;
+        {
+            if let Some(name) = self.rename_input.as_mut() {
+                egui::Window::new("Rename")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                    .show(ctx, |ui| {
+                        ui.set_min_width(260.0);
+                        ui.label("New name:");
+                        let resp = ui.add(egui::TextEdit::singleline(name).desired_width(240.0));
+                        let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        confirm = enter || ui.button("Confirm").clicked();
+                        cancel = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    });
+            }
+        }
+        // The `name` borrow ended with the block; now it is safe to touch self again.
+        if confirm {
+            if let Some(new_name) = self.rename_input.take() {
+                if new_name.is_empty() {
+                    self.rename_input = Some(new_name);
+                } else if self.rename_commit(ctx, &new_name).is_none() {
+                    // Failed: put the name back so the dialog stays open.
+                    self.rename_input = Some(new_name);
+                }
+            }
+        }
+        if cancel {
+            self.rename_input = None;
+        }
+
+        // Remember the window geometry: size, position and maximized state.
+        // Written at most once a second so a live resize does not hammer the
+        // disk; the last frame before close wins because the loop keeps
+        // painting until the window is gone.
+        let (new_size, new_pos, new_maximized) = ctx.input(|i| {
+            let vp = &i.viewport();
+            let size = vp.inner_rect.map(|r| (r.size().x as u32, r.size().y as u32));
+            let pos = vp.outer_rect.map(|r| (r.min.x as i32, r.min.y as i32));
+            (size, pos, vp.maximized.unwrap_or(false))
+        });
+        let changed = self.config.window_size != new_size
+            || self.config.window_pos != new_pos
+            || self.config.window_maximized != new_maximized;
+        if changed
+            && self.last_geometry_save.elapsed() > Duration::from_secs(1)
+        {
+            self.config.window_size = new_size;
+            self.config.window_pos = new_pos;
+            self.config.window_maximized = new_maximized;
+            self.config.save(&self.config_path);
+            self.last_geometry_save = Instant::now();
         }
 
         if self.show_panels {
@@ -637,6 +702,16 @@ impl eframe::App for MyApp {
                         .clicked()
                     {
                         self.toggle_fit_mode();
+                    }
+                    if ui
+                        .selectable_label(
+                            self.config.fit_width_mode,
+                            action_button_text(&self.config, "Fit width", "fit_width"),
+                        )
+                        .on_hover_text("Scale every image to window width; pan vertically for the rest")
+                        .clicked()
+                    {
+                        self.toggle_fit_width_mode();
                     }
                     if ui
                         .selectable_label(
@@ -1644,18 +1719,18 @@ impl eframe::App for MyApp {
                     // until the end with looping off. The pace persists; running
                     // does not survive a restart.
                     ui.horizontal(|ui| {
-                        if ui
-                            .button(if self.slideshow {
-                                "Stop slideshow"
-                            } else {
-                                "Start slideshow"
-                            })
-                            .clicked()
-                        {
-                            if self.slideshow {
-                                self.stop_slideshow();
-                            } else {
+                        let label = if !self.slideshow {
+                            "Start slideshow"
+                        } else if self.slideshow_paused {
+                            "Resume slideshow"
+                        } else {
+                            "Pause slideshow"
+                        };
+                        if ui.button(label).clicked() {
+                            if !self.slideshow {
                                 self.start_slideshow();
+                            } else {
+                                self.toggle_slideshow_pause();
                             }
                         }
                         ui.label("every");

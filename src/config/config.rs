@@ -327,6 +327,27 @@ pub struct Config {
     #[serde(default)]
     pub fit_mode: bool,
 
+    /// Fit-width as a sticky mode: every image scaled so its width fills the
+    /// window, letting the height overflow so you pan vertically — the natural
+    /// mode for tall pages and scans. Mutually exclusive with fit mode —
+    /// turning one on switches the other off. Off by default.
+    #[serde(default)]
+    pub fit_width_mode: bool,
+
+    /// Remembered window size, so a restart opens where you left it. Validated
+    /// against the current monitors on load — a saved position on a monitor
+    /// that no longer exists is dropped and the window is centred instead.
+    #[serde(default)]
+    pub window_size: Option<(u32, u32)>,
+
+    /// Remembered window position (top-left, physical pixels).
+    #[serde(default)]
+    pub window_pos: Option<(i32, i32)>,
+
+    /// Remembered maximized state.
+    #[serde(default)]
+    pub window_maximized: bool,
+
     /// **Remember the view per image**: an image you zoomed or panned comes
     /// back the way you left it — zoom **and** pan restored — while an image
     /// never touched keeps today's behaviour (zoom carried, pan reset), for

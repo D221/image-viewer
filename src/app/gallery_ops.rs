@@ -334,4 +334,72 @@ impl MyApp {
         }
     }
 
+    /// Rename the current file on disk and re-point the gallery at the new
+    /// path. Refuses archives (same rule as delete/move): the cursor file, not
+    /// the listing, decides. The new name is typed into `rename_input` and
+    /// confirmed from `ui`.
+    pub(crate) fn rename_current(&mut self, _ctx: &Context) {
+        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
+            return;
+        };
+        if is_archive_path(&p) || self.zip_archive.is_some() {
+            self.error = Some("Rename is not supported for archives".into());
+            return;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()).map(|s| s.to_owned()) else {
+            return;
+        };
+        self.rename_input = Some(name);
+    }
+
+    /// Commit a rename that the user typed into `rename_input` and confirmed.
+    /// Returns the new path on success so the UI can report it.
+    pub(crate) fn rename_commit(&mut self, ctx: &Context, new_name: &str) -> Option<PathBuf> {
+        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
+            return None;
+        };
+        let i = self.gallery.index;
+        let new_path = p.with_file_name(new_name);
+        if new_path == p {
+            return Some(p);
+        }
+        if new_path.exists() {
+            self.error = Some(format!("Target already exists: {}", new_path.display()));
+            return None;
+        }
+        match std::fs::rename(&p, &new_path) {
+            Ok(()) => {
+                // Re-point the gallery entry and move any cached pixels over to
+                // the new key, so the renamed image keeps its preview.
+                self.gallery.files[i] = new_path.clone();
+                let old_key = ImgKey { path: p.clone(), page: self.gallery.current_page() };
+                let new_key = ImgKey {
+                    path: new_path.clone(),
+                    page: self.gallery.current_page(),
+                };
+                if let Some(prev) = self.previews.remove(&old_key) {
+                    self.previews.insert(new_key.clone(), prev);
+                }
+                if self.failed.contains(&(old_key.clone(), Kind::Full)) {
+                    self.failed.remove(&(old_key.clone(), Kind::Full));
+                    self.failed.insert((new_key.clone(), Kind::Full));
+                }
+                self.load_errors.remove(&old_key);
+                if let Some(c) = self.cur.as_mut() {
+                    if c.path == p {
+                        c.path = new_path.clone();
+                    }
+                }
+                self.reset_display();
+                self.goto(ctx);
+                self.notice = Some(format!("Renamed to {}", new_path.display()));
+                Some(new_path)
+            }
+            Err(e) => {
+                self.error = Some(format!("Rename failed: {e}"));
+                None
+            }
+        }
+    }
+
 }
