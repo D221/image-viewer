@@ -463,20 +463,7 @@ impl MyApp {
                     }),
                 current_stale: self.resize.pending(),
                 target_dim,
-                // Idle warm-up: when the loader has no outstanding jobs (no
-                // navigation in progress), preload a much larger window around
-                // the current image so the next several arrow presses hit warm
-                // cells. When the user starts navigating again, `replace`
-                // drops unwanted jobs via the `wanted` map — no failure
-                // semantics change, just CPU/battery spent on likely-future
-                // cells. FlyPhotos writes previews back to disk; ImageGlass
-                // warms outward from the centre; we do the same with spare
-                // worker capacity.
-                radius: if self.loader.outstanding() == 0 {
-                    self.gallery.files.len().min(50)
-                } else {
-                    PRELOAD_RADIUS
-                },
+                radius: PRELOAD_RADIUS,
                 file_bytes: &file_bytes,
                 preload_budget: PRELOAD_BUDGET_BYTES,
             }),
