@@ -1809,20 +1809,21 @@ fn browse_parametric(
         if cache.contains_key(cur) {
             s.arrived_cached += 1;
             pending_since.remove(cur);
+            pending_full.remove(cur);
             s.ttfp_ms.push(0.0);
         } else {
             s.arrived_decode += 1;
             pending_since.insert(cur.clone(), Instant::now());
+            pending_full.insert(cur.clone(), Instant::now());
         }
 
-        // Request full-res decode after full_dwell_ms has elapsed for current image
-        pending_full.insert(cur.clone(), Instant::now());
-        if full_dwell_ms > 0 {
-            let pending_full_time = pending_full.get(cur).copied().unwrap_or(Instant::now());
-            if pending_full_time.elapsed() >= Duration::from_millis(full_dwell_ms) {
-                wanted.insert(cur.clone());
-            }
-        }
+        // Request full-res decode after full_dwell_ms has elapsed since first seen
+        let want_full = if full_dwell_ms > 0 {
+            let since_pending = pending_full.get(cur).map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+            since_pending >= Duration::from_millis(full_dwell_ms)
+        } else {
+            true
+        };
 
         let cached_set: HashSet<ImgKey> = cache.keys().map(|p| ImgKey::first(p)).collect();
         let jobs = plan_jobs(&Plan {
@@ -1834,7 +1835,7 @@ fn browse_parametric(
             cached: &cached_set,
             failed: &failed,
             wants_exif: false,
-            wants_full: wanted.contains(cur),
+            wants_full: want_full,
             current_stale: false,
             target_dim,
             radius,
