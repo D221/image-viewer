@@ -509,12 +509,12 @@ pub(crate) fn effective_nav_keys() -> Vec<(ResolvedBinding, NavInput)> {
 }
 
 /// How many images on each side of the current one get their preview preloaded.
-pub(crate) const PRELOAD_RADIUS: usize = 3;
+pub(crate) const PRELOAD_RADIUS: usize = 5;
 
 /// The preload window's whole budget in **file bytes** — what the watcher's
 /// stamp registry already holds, so the cost is known before any decode.
-/// Chosen so that every ordinary folder spends nothing new: radius 3 plans
-/// six neighbours, and 6 × 24 MB photographs — the largest folder a photo
+/// Chosen so that every ordinary folder spends nothing new: radius 5 plans
+/// ten neighbours, and 10 × 24 MB photographs — the largest folder a photo
 /// library brings — sits under the budget, so the walk on it plans exactly
 /// what it always did. What it removes is the tail: a 200-500 MB scan is past
 /// the whole budget, is never preloaded, and costs its decode the moment it

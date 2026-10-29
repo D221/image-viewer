@@ -4961,7 +4961,7 @@ fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
     // And the constant sits with the radius it bounds, so the two knobs that
     // shape one window are found together.
     let radius = src
-        .find("const PRELOAD_RADIUS: usize = 3;")
+        .find("const PRELOAD_RADIUS: usize = 5;")
         .expect("the radius");
     let budget = src
         .find("const PRELOAD_BUDGET_BYTES: u64 =")

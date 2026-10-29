@@ -134,10 +134,10 @@ pub fn preview_target(panel_px: (u32, u32)) -> u32 {
 /// direction.** [`preview_target`] answers a *known* display area; before
 /// `central` has run there is none, and the caller used to answer
 /// `PREVIEW_TEXTURE_DIM` instead. So the **first plan of every session** — the
-/// current page, the turn's partner and the whole preload window — asked for a
-/// 4096-long texture, and for every source under 4096 px `downscale_image` is a
+/// current page, the turn's partner and the whole preload window — asked for an
+/// 8192-long texture, and for every source under 8192 px `downscale_image` is a
 /// **no-op**: measured on `32.jpg`,
-/// `load_page_preview_full(path, 4096, 0).preview` is **byte-identical** to the
+/// `load_page_preview_full(path, 8192, 0).preview` is **byte-identical** to the
 /// source decode. No prefilter, no kernel pass, no resampling of any kind
 /// anywhere in the pipeline; a full-resolution page then goes to the GPU's
 /// bilinear sampler, which has no mipmaps.
@@ -308,7 +308,7 @@ pub fn min_filter_scale() -> f32 {
 /// and it is the arm this function was missing.** Every arm below compares against
 /// `decoded_for` in one direction, so a preview decoded for a much larger target
 /// could not be corrected by any resize for the rest of the session. Measured,
-/// on the panel in [`decode_target`]: a page decoded for a 4096 target and painted
+/// on the panel in [`decode_target`]: a page decoded for an 8192 target and painted
 /// into a manga half-panel is at **4.645** of the drawn rectangle, and no resize
 /// would ever have said so.
 ///

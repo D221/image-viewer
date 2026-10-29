@@ -102,9 +102,9 @@ pub fn image_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
 pub const FAST_FULL_MAX_PIXELS: u64 = 12_000_000;
 
 /// Long side of the display texture when the preview pass decoded the full
-/// image. 4096 is crisp fit-to-window on a 4K screen; zooming further refines
+/// image. 8192 is crisp fit-to-window on an 8K screen; zooming further refines
 /// with tiles from the full-res data.
-pub const PREVIEW_TEXTURE_DIM: u32 = 4096;
+pub const PREVIEW_TEXTURE_DIM: u32 = 8192;
 
 /// What a decode is *for*, which decides how much of it is kept.
 ///

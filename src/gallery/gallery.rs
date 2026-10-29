@@ -560,7 +560,7 @@ impl Gallery {
     ///    *pixels*, not the reported source size.
     /// 2. An **animation**: `orig` comes from `anim.frames[0]`, and
     ///    `collect_animation` has already downscaled that frame to
-    ///    [`PREVIEW_TEXTURE_DIM`](crate::PREVIEW_TEXTURE_DIM) (4096). An animation
+    ///    [`PREVIEW_TEXTURE_DIM`](crate::PREVIEW_TEXTURE_DIM) (8192). An animation
     ///    wider than that records a downscaled size.
     /// 3. A **page past the first of a TIFF**: `orig` is that page's *decoded*
     ///    dimensions, and `decode_tiff_page` has already downscaled it to the

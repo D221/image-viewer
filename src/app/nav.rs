@@ -384,8 +384,8 @@ impl MyApp {
         // `frame_prelude` — before `central` has ever drawn a frame. This used to
         // answer `PREVIEW_TEXTURE_DIM` for that gap, which is the animation ceiling
         // and not a decode request: **the current page, the turn's other half and
-        // the entire preload window were then all decoded at 4096**, and for every
-        // source under 4096 px `downscale_image` is a no-op, so those textures are
+        // the entire preload window were then all decoded at 8192**, and for every
+        // source under 8192 px `downscale_image` is a no-op, so those textures are
         // the *full-resolution* page (measured byte-identical to the source decode
         // on `32.jpg`) with no prefilter and no kernel pass anywhere in the
         // pipeline. The GPU then minifies them with a bilinear sampler and no

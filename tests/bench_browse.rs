@@ -75,8 +75,8 @@ use std::time::{Duration, Instant};
 
 const W: u32 = 3000;
 const H: u32 = 2000;
-const PREVIEW_DIM: u32 = 1600;
-const RADIUS: usize = 3;
+const PREVIEW_DIM: u32 = 8192;
+const RADIUS: usize = 5;
 /// Preview entries held, mirroring `PREVIEW_CACHE_CAP` in the app.
 const CAP: usize = 16;
 /// Shipped defaults from app/consts.rs, duplicated here so the bench can vary
