@@ -509,7 +509,7 @@ pub(crate) fn effective_nav_keys() -> Vec<(ResolvedBinding, NavInput)> {
 }
 
 /// How many images on each side of the current one get their preview preloaded.
-pub(crate) const PRELOAD_RADIUS: usize = 5;
+pub(crate) const PRELOAD_RADIUS: usize = 3;
 
 /// The preload window's whole budget in **file bytes** — what the watcher's
 /// stamp registry already holds, so the cost is known before any decode.

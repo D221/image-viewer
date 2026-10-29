@@ -66,7 +66,7 @@
 
 use image::ImageEncoder as _;
 use std::io::Read;
-use image_viewer::{jpeg_comment, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
+use image_viewer::{jpeg_comment, load_image_full, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
@@ -76,12 +76,14 @@ use std::time::{Duration, Instant};
 const W: u32 = 3000;
 const H: u32 = 2000;
 const PREVIEW_DIM: u32 = 8192;
-const RADIUS: usize = 5;
+const RADIUS: usize = 3;
 /// Preview entries held, mirroring `PREVIEW_CACHE_CAP` in the app.
 const CAP: usize = 16;
 /// Shipped defaults from app/consts.rs, duplicated here so the bench can vary
 /// them independently without recompiling the app crate.
 const PRELOAD_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+/// Shipped default for full-res decode dwell (ms).
+const FULL_DWELL_MS: u64 = 120;
 /// Quality the generated fixtures are written at. `image`'s default JPEG
 /// quality, spelled out because the EXIF arm's cost is a whole-file read and
 /// therefore a function of how big the file is.
@@ -206,6 +208,12 @@ struct Session {
     dropped: u64,
     /// Total worker time, useful and wasted together.
     decode_ms: f64,
+    /// Worker time on full-resolution decodes.
+    full_ms: f64,
+    /// Per-image full decode times.
+    full_each: Vec<f64>,
+    /// Number of full decodes.
+    full_jobs: usize,
     /// Previews that came back below the requested density.
     below_target: usize,
     wall_ms: f64,
@@ -1081,6 +1089,8 @@ fn idle_warmup_bench() {
 
     idle_warmup(&dir, 0, runs);
     idle_warmup(&dir, 30, runs);
+
+    full_dwell_sweep(&dir, runs);
 }
 
 /// The A/B for the fullscreen change: probe the current picture's metadata on
@@ -1668,6 +1678,7 @@ fn browse_parametric(
     preload_budget_bytes: u64,
     target_dim: u32,
     cache_cap: usize,
+    full_dwell_ms: u64,
 ) -> Session {
     let files = files(dir);
     let n = files.len();
@@ -1691,6 +1702,12 @@ fn browse_parametric(
                         below_target: r.below_target,
                     })
                     .map_err(|e| e.to_string()),
+                Kind::Full => load_image_full(job.path(), 0)
+                    .map(|r| Decoded {
+                        bytes: r.rgba.len(),
+                        below_target: false,
+                    })
+                    .map_err(|e| e.to_string()),
                 Kind::Exif => {
                     let _ = nom_exif::read_exif(job.path());
                     if let Ok(mut f) = std::fs::File::open(job.path()) {
@@ -1703,7 +1720,7 @@ fn browse_parametric(
                         below_target: false,
                     })
                 }
-                _ => Err("benchmark only decodes previews and reads exif".to_string()),
+                _ => Err("benchmark only decodes previews, full, and reads exif".to_string()),
             };
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let logged = out.clone();
@@ -1746,13 +1763,14 @@ fn browse_parametric(
 
     let mut index = 0usize;
     let t_start = Instant::now();
+    let mut pending_full: HashMap<PathBuf, Instant> = HashMap::new();
     for step in 0..n {
         // Take delivery of anything that finished
         for (path, kind, ms, outcome) in drain(&rx, &decode_ms) {
             if kind != Kind::Preview {
-                s.exif_ms += ms;
-                s.exif_each.push(ms);
-                s.exif_jobs += 1;
+                s.full_ms += ms;
+                s.full_each.push(ms);
+                s.full_jobs += 1;
                 continue;
             }
             match outcome {
@@ -1797,6 +1815,15 @@ fn browse_parametric(
             pending_since.insert(cur.clone(), Instant::now());
         }
 
+        // Request full-res decode after full_dwell_ms has elapsed for current image
+        pending_full.insert(cur.clone(), Instant::now());
+        if full_dwell_ms > 0 {
+            let pending_full_time = pending_full.get(cur).copied().unwrap_or(Instant::now());
+            if pending_full_time.elapsed() >= Duration::from_millis(full_dwell_ms) {
+                wanted.insert(cur.clone());
+            }
+        }
+
         let cached_set: HashSet<ImgKey> = cache.keys().map(|p| ImgKey::first(p)).collect();
         let jobs = plan_jobs(&Plan {
             files: &files,
@@ -1807,7 +1834,7 @@ fn browse_parametric(
             cached: &cached_set,
             failed: &failed,
             wants_exif: false,
-            wants_full: false,
+            wants_full: wanted.contains(cur),
             current_stale: false,
             target_dim,
             radius,
@@ -1845,9 +1872,15 @@ fn browse_parametric(
         let left = loader.outstanding();
         for (path, kind, ms, outcome) in drain(&rx, &decode_ms) {
             if kind != Kind::Preview {
-                s.exif_ms += ms;
-                s.exif_each.push(ms);
-                s.exif_jobs += 1;
+                if kind == Kind::Full {
+                    s.full_ms += ms;
+                    s.full_each.push(ms);
+                    s.full_jobs += 1;
+                } else {
+                    s.exif_ms += ms;
+                    s.exif_each.push(ms);
+                    s.exif_jobs += 1;
+                }
                 continue;
             }
             if let Ok(d) = outcome {
@@ -1925,9 +1958,15 @@ fn take_delivery_parametric(
     for (path, kind, ms, outcome) in drain(rx, log) {
         *clock += 1;
         if kind != Kind::Preview {
-            s.exif_ms += ms;
-            s.exif_each.push(ms);
-            s.exif_jobs += 1;
+            if kind == Kind::Full {
+                s.full_ms += ms;
+                s.full_each.push(ms);
+                s.full_jobs += 1;
+            } else {
+                s.exif_ms += ms;
+                s.exif_each.push(ms);
+                s.exif_jobs += 1;
+            }
             continue;
         }
         match outcome {
@@ -1967,12 +2006,14 @@ fn browse_parametric_row(
     preload_budget_bytes: u64,
     target_dim: u32,
     cache_cap: usize,
+    full_dwell_ms: u64,
     runs: usize,
 ) {
     let mut sessions = Vec::new();
     for _ in 0..runs {
         sessions.push(browse_parametric(
             dir, hold_ms, radius, preload_budget_bytes, target_dim, cache_cap,
+            full_dwell_ms,
         ));
     }
     let hits = med(
@@ -1995,12 +2036,13 @@ fn browse_parametric_row(
             .collect(),
     );
     eprintln!(
-        "  {:>6}  {:>5}  {:>12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "  {:>6}  {:>5}  {:>12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
         hold_ms,
         radius,
         preload_budget_bytes / 1_048_576,
         target_dim,
         cache_cap,
+        full_dwell_ms,
         med(sessions.iter().map(|x| x.ttfp_p(0.50)).collect()),
         med(sessions.iter().map(|x| x.ttfp_p(0.95)).collect()),
         hits,
@@ -2014,12 +2056,13 @@ fn browse_parametric_row(
 /// Header for the heuristic benchmark table.
 fn heuristic_header() {
     eprintln!(
-        "  {:>6}  {:>5}  {:>12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "  {:>6}  {:>5}  {:>12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
         "hold_ms",
         "radius",
         "preload_MB",
         "target_px",
         "cache_cap",
+        "full_dwell_ms",
         "ttfp_p50_ms",
         "ttfp_p95_ms",
         "cache_hit%",
@@ -2049,7 +2092,7 @@ fn heuristic_sweep() {
     assert!(files.len() >= n, "fixture is short: {} of {n}", files.len());
 
     // Warm-up so first-touch page faults don't dominate.
-    let _ = browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP);
+    let _ = browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
 
     eprintln!(
         "\n  Heuristic sweep: {} pictures at {W}x{H}, {} images, median of {} runs",
@@ -2067,7 +2110,7 @@ fn heuristic_sweep() {
     eprintln!("  ## 1: Preload radius (how many neighbours to preload each side)");
     heuristic_header();
     for radius in [1usize, 2, 3, 5, 10] {
-        browse_parametric_row(&dir, 30, radius, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, runs);
+        browse_parametric_row(&dir, 30, radius, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS, runs);
     }
     eprintln!();
 
@@ -2075,7 +2118,7 @@ fn heuristic_sweep() {
     eprintln!("  ## 2: Preload budget (byte budget for neighbour preloads)");
     heuristic_header();
     for budget_mb in [64usize, 128, 256, 512, 1024] {
-        browse_parametric_row(&dir, 30, RADIUS, budget_mb as u64 * 1_048_576, PREVIEW_DIM, CAP, runs);
+        browse_parametric_row(&dir, 30, RADIUS, budget_mb as u64 * 1_048_576, PREVIEW_DIM, CAP, FULL_DWELL_MS, runs);
     }
     eprintln!();
 
@@ -2083,7 +2126,7 @@ fn heuristic_sweep() {
     eprintln!("  ## 3: Preview target dimension (panel size in physical px)");
     heuristic_header();
     for target_dim in [1024u32, 2048, 4096, 8192] {
-        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, target_dim, CAP, runs);
+        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, target_dim, CAP, FULL_DWELL_MS, runs);
     }
     eprintln!();
 
@@ -2091,7 +2134,7 @@ fn heuristic_sweep() {
     eprintln!("  ## 4: Preview cache cap (max entries in preview cache)");
     heuristic_header();
     for cap in [4usize, 8, 16, 32] {
-        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, cap, runs);
+        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, cap, FULL_DWELL_MS, runs);
     }
     eprintln!();
 
@@ -2099,11 +2142,58 @@ fn heuristic_sweep() {
     eprintln!("  ## 5: Hold time between steps (navigation speed)");
     heuristic_header();
     for hold_ms in [0u64, 15, 30, 60, 120, 250, 500] {
-        browse_parametric_row(&dir, hold_ms, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, runs);
+        browse_parametric_row(&dir, hold_ms, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS, runs);
+    }
+    eprintln!();
+
+    // ===== Sweep 6: Full dwell time (when to start full-res decode) =====
+    eprintln!("  ## 6: Full dwell time (ms before starting full-res decode)");
+    heuristic_header();
+    for full_dwell_ms in [0u64, 60, 120, 250, 500, 1000] {
+        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, full_dwell_ms, runs);
     }
     eprintln!();
 
     eprintln!("  ## End of heuristic sweep");
+}
+
+fn full_dwell_sweep(dir: &std::path::Path, runs: usize) {
+    let n: usize = std::env::var("IV_BENCH_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    let files = files(&dir);
+    assert!(files.len() >= n, "fixture is short: {} of {n}", files.len());
+
+    // Warm-up
+    let _ = browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
+
+    eprintln!(
+        "\n  Full dwell sweep: {} pictures at {W}x{H}, {} images, median of {} runs",
+        n,
+        files.len(),
+        runs
+    );
+    eprintln!(
+        "  Varying full-res decode dwell time (ms): how long to wait before full-res decode starts"
+    );
+    eprintln!(
+        "  {:>6}  {:>12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+        "hold_ms",
+        "full_dwell_ms",
+        "ttfp_p50_ms",
+        "ttfp_p95_ms",
+        "cache_hit%",
+        "full_ms",
+        "peak_MB",
+        "wall_s",
+    );
+    eprintln!("  {}", "-".repeat(120));
+
+    for full_dwell_ms in [0u64, 60, 120, 250, 500, 1000] {
+        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, full_dwell_ms, runs);
+    }
+    eprintln!();
 }
 
 fn real_scan_cells() {
