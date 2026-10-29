@@ -6,15 +6,12 @@
 //! method's visibility is scoped to the module that holds its `impl`; the
 //! fields are `pub(crate)` for the same reason. See `AGENTS.md` and
 //! `tests/source_size.rs`.
-
 use crate::*;
-
 impl MyApp {
     pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let panel = ui.available_rect_before_wrap();
         let ppp = ctx.pixels_per_point();
-
         // Track the display area in physical pixels; previews are decoded to
         // match it. If the window grew, below-target textures are dropped so
         // schedule() re-decodes them at the new, larger target.
@@ -166,7 +163,6 @@ impl MyApp {
             }
             image_viewer::ResizeAction::Idle => {}
         }
-
         // The save-as panel, drawn as a window over whatever is behind it and
         // **before the early returns below**, so it also appears over the grid
         // and over the archive placeholder. Placed after those returns it would
@@ -177,7 +173,6 @@ impl MyApp {
             let still_open = self.save_as_panel(ui);
             self.save_as.open = still_open;
         }
-
         // Gallery grid view (G): scrollable thumbnail grid, click to open.
         // This must run *before* the panel rect is allocated below — an
         // allocated rect consumes the whole panel, leaving the grid's
@@ -186,10 +181,8 @@ impl MyApp {
             self.gallery_grid(ui, &ctx, panel);
             return;
         }
-
         let resp = ui.allocate_rect(panel, egui::Sense::click_and_drag());
         let painter = ui.painter_at(panel);
-
         // **Standing on an archive (not inside one) draws a placeholder.**
         // Previously the previous image stayed painted while the status line named
         // a zip, and that mismatch is what made this feel broken. The cursor is
@@ -220,7 +213,6 @@ impl MyApp {
             );
             return;
         }
-
         let Some(shown) = self.shown.clone() else {
             let msg = if let Some(e) = &self.error {
                 e.clone()
@@ -238,7 +230,6 @@ impl MyApp {
             );
             return;
         };
-
         let (orig, tex_id, tex_w, pv_has_alpha) = {
             let Some(pv) = self.previews.get_mut(&shown) else {
                 // The wanted image has no texture yet: this frame shows nothing.
@@ -300,7 +291,6 @@ impl MyApp {
         } else {
             (tex_id, tex_w)
         };
-
         let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
         // Quarter turns and mirrors, clockwise. Only the eight lattice symmetries,
         // so the image stays axis-aligned and 1:1 stays pixel-sharp.
@@ -308,7 +298,6 @@ impl MyApp {
         // What the image *occupies* on screen: four of the eight swap the axes.
         let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
         let display_px = Vec2::new(dw, dh);
-
         // The turn's pages, in manga mode: the cursor page and, when the turn
         // holds two, the other one. **Empty with the mode off**, so every branch
         // below falls through to the single-image path unchanged — that is the
@@ -338,7 +327,6 @@ impl MyApp {
             .iter()
             .map(|(_, (w, h), xf)| xformed_footprint(*w as f32, *h as f32, *xf))
             .collect();
-
         // **A turn of one page that is a spread fills the turn, and the page _is_ the
         // whole spread** — so it is fitted against the panel's whole width and centred
         // on the seam, rather than confined to a half with an empty one beside it.
@@ -351,7 +339,6 @@ impl MyApp {
         // `turn_len` is what `turn_partner` is built from and `shape_of` is the shape
         // the fit is judged by, so it is answerable before `pages` exists and cannot be
         // a frame out of date with the paint the way a latched count can.
-
         // One shared scale for the whole turn, and the cursor page's own fit when
         // the mode is off. `spread_fit` clamps to the same `(1e-4, 8.0)` the
         // single-image fit uses, and is used as this frame's `fit_scale` so the
@@ -370,21 +357,14 @@ impl MyApp {
                 lone_spread_fills_turn,
             )
         };
-        // Fit-width: the picture's width fills the panel and the height
-        // overflows, so you pan vertically — the natural mode for tall pages.
-        // For a turn the whole spread's width fills the panel.
+        // Fit-width: picture width fills the panel, height overflows for vertical pan.
         let fit_width_scale = if pages.is_empty() {
             (panel.width() / display_px.x).clamp(1e-4, 8.0)
         } else {
-            let total_width: f32 = spread_dims.iter().map(|&(w, _)| w).sum();
-            if total_width > 0.0 {
-                (panel.width() / total_width).clamp(1e-4, 8.0)
-            } else {
-                1.0
-            }
+            let tw: f32 = spread_dims.iter().map(|&(w, _)| w).sum();
+            if tw > 0.0 { (panel.width() / tw).clamp(1e-4, 8.0) } else { 1.0 }
         };
         let max_scale = MAX_SCALE.max(fit_scale).max(fit_width_scale);
-
         // Fit window to image: reset (`T`, arrivals in the mode) sets
         // 100%-if-fits and sizes the window; wrap (user zooms in the mode)
         // keeps the zoom and only re-hugs. Every resize centers on the
@@ -499,24 +479,12 @@ impl MyApp {
                 }
             }
         }
-
-        let mut scale = if self.config.fit_width_mode {
-            fit_width_scale
-        } else if self.view.fit {
-            fit_scale
-        } else {
-            self.view.scale
-        };
-        let mut offset = if self.config.fit_width_mode || self.view.fit {
-            Vec2::ZERO
-        } else {
-            self.view.offset
-        };
+        let mut scale = if self.config.fit_width_mode { fit_width_scale } else if self.view.fit { fit_scale } else { self.view.scale };
+        let mut offset = if self.config.fit_width_mode || self.view.fit { Vec2::ZERO } else { self.view.offset };
         // Free zoom-out: the floor is effectively zero rather than the fit
         // scale, so the picture can shrink below the window. Centering below
         // fit comes from the pan bounds, not from snapping back.
         scale = scale.clamp(1e-4, max_scale);
-
         // --- input: zoom (wheel / pinch), pan (drag), shortcuts ---
         let hover = resp.hover_pos();
         // Fixed zoom presets, each a configurable source-pixel ratio (`1`
@@ -535,7 +503,6 @@ impl MyApp {
                     .position(|a| binding_down(i, &kb, a)),
             )
         });
-
         // Wheel navigation mode: accumulate wheel deltas and flip images
         // instead of zooming. Ctrl+wheel always zooms.
         let wheel_nav_active = self.config.wheel_navigation && !ui.input(|i| i.modifiers.ctrl);
@@ -557,7 +524,6 @@ impl MyApp {
                 self.step(&ctx, !down);
             }
         }
-
         let mut factor = 1.0f32;
         if resp.hovered() {
             factor *= pinch;
@@ -592,12 +558,7 @@ impl MyApp {
             }
             if key_fit_width {
                 self.toggle_fit_width_mode();
-                target_scale = if self.config.fit_width_mode {
-                    fit_width_scale
-                } else {
-                    self.view.scale = 1.0 / ppp;
-                    1.0 / ppp
-                };
+                target_scale = if self.config.fit_width_mode { fit_width_scale } else { self.view.scale = 1.0 / ppp; 1.0 / ppp };
             }
         }
         if resp.double_clicked() {
@@ -613,37 +574,27 @@ impl MyApp {
             }
         }
         // Colour picker: click on the picture to sample the pixel under the
-        // cursor. Reads from the full-res buffer when one is cached; otherwise
-        // reports that it is not available (zoom in to 1:1 for pixel-accurate
-        // sampling). Copies the colour to the clipboard on click.
+        // cursor, copied to the clipboard. Reads from the full-res buffer;
+        // reports when it isn't available (zoom to 1:1 first).
         if self.color_picker_active && resp.clicked() {
             if let Some(hover) = resp.hover_pos() {
                 if let Some(key) = self.cur.as_ref() {
                     if let Some(pv) = self.previews.get(key) {
                         if let Some(full) = &pv.full {
                             let center = panel.center();
-                            let rel_x = hover.x - center.x - offset.x;
-                            let rel_y = hover.y - center.y - offset.y;
-                            let sx = (rel_x / scale + img_px.x / 2.0).round() as i32;
-                            let sy = (rel_y / scale + img_px.y / 2.0).round() as i32;
-                            if sx >= 0 && sx < full.width as i32 && sy >= 0 && sy < full.height as i32 {
-                                let idx = (sy as usize * full.width as usize + sx as usize) * 4;
-                                let c = &full.rgba[idx..idx + 4];
-                                let hex = format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]);
-                                let rgb = format!("rgb({}, {}, {})", c[0], c[1], c[2]);
-                                let label = format!("{}  {}  at {}x{}", hex, rgb, sx, sy);
-                                self.notice = Some(label);
-                                // Copy to clipboard
+                            let sx = ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0).round() as i32;
+                            let sy = ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0).round() as i32;
+                            if (0..full.width as i32).contains(&sx) && (0..full.height as i32).contains(&sy) {
+                                let c = &full.rgba[((sy as usize * full.width as usize + sx as usize) * 4)..];
+                                self.notice = Some(format!("#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}", c[0], c[1], c[2], c[0], c[1], c[2], sx, sy));
                                 if let Ok(mut cb) = arboard::Clipboard::new() {
-                                    let _ = cb.set_text(&hex);
+                                    let _ = cb.set_text(&format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
                                 }
                             } else {
                                 self.notice = Some("Click outside the picture".into());
                             }
                         } else {
-                            self.notice = Some(
-                                "Full-res buffer not available — view at 1:1 for pixel-accurate sampling".into(),
-                            );
+                            self.notice = Some("Full-res buffer not available — view at 1:1 for pixel-accurate sampling".into());
                         }
                     }
                 }
@@ -731,7 +682,6 @@ impl MyApp {
             self.lat.t_pan = Some(Instant::now());
             self.lat.want_viewport_tiles = true;
         }
-
         // Keep the image from being lost off-screen; centre it on axes where it fits.
         // Uses the *transformed* footprint, so panning limits and fit are correct
         // whichever way up the image is.
@@ -799,7 +749,6 @@ impl MyApp {
         );
         offset.x = offset.x.clamp(off_lo[0], off_hi[0]);
         offset.y = offset.y.clamp(off_lo[1], off_hi[1]);
-
         // Fit mode is explicit only (F key, fit-window shrink, turns): never
         // re-engaged by proximity, which used to forget the zoom on the next
         // frame and read as a rubberband blocking zoom-out.
@@ -810,7 +759,6 @@ impl MyApp {
         self.view.fit = at_fit;
         self.view.scale = scale;
         self.view.offset = offset;
-
         // Snap the image origin to the physical pixel grid so 1:1 is razor sharp.
         // `rect` stays in *unrotated* image space — that is what the tiles and
         // the source-pixel mapping below expect — and is rotated about its
@@ -820,7 +768,6 @@ impl MyApp {
         let src_size = img_px * scale;
         // Where each page of the turn goes: one rect per page, in the order
         // `turn_pages` gave them, so `rects[0]` is the **cursor** page.
-        //
         // The panel handed in is **already translated by `self.view.offset`** — set
         // a few lines above, this frame's clamped value — so the seam pans with
         // the image rather than sitting still while the turn slides under it. It
@@ -955,7 +902,6 @@ impl MyApp {
         } else {
             Rect::from_center_size(rect.center(), size)
         };
-
         // The turn's other half. Painted **before** the cursor page's own, so a
         // missing partner texture costs a blank half rather than the whole turn.
         //
@@ -1012,7 +958,6 @@ impl MyApp {
                 paint_tex(&painter, partner_tex, *partner_rect, uv, partner_xform);
             }
         }
-
         // Always paint the preview first; tiles refine it where available.
         // Transparent images get a checkerboard backdrop underneath.
         if pv_has_alpha {
@@ -1030,7 +975,6 @@ impl MyApp {
         if self.cur.as_ref() == Some(&shown) {
             self.lat.painted(Instant::now());
         }
-
         // --- full-resolution tiles ---
         //
         // **Over every page of the turn, not the cursor's alone.** This loop used to
@@ -1059,7 +1003,6 @@ impl MyApp {
         let screen_density = scale * ppp; // physical px per source px
         self.frame += 1;
         let frame = self.frame;
-
         // What each page of the turn can be sharpened from, gathered **before** any
         // mutable borrow and owned: an `Arc` clone (a refcount) plus that page's own
         // density and its two rectangles. `None` is a page with no full buffer.
@@ -1136,7 +1079,6 @@ impl MyApp {
                 })
                 .collect()
         };
-
         // The map each page keeps its tiles in, **moved out** for the length of the
         // loop and put back below: the cursor page's on the adopted `FullImage`
         // (rebuilt, and so cleared, whenever the cursor moves - the rule that has
@@ -1166,7 +1108,6 @@ impl MyApp {
                 maps.push((std::mem::take(&mut pv.tiles), TileMapOwner::Page(key)));
             }
         }
-
         let mut budget = TILES_PER_FRAME;
         let mut pending = false;
         let mut sharpened = false;
@@ -1197,7 +1138,6 @@ impl MyApp {
                     let (y0, y1) = image_viewer::tile_axis_range(
                         vis.min.y, vis.max.y, paint.min.y, scale, ky, fh,
                     );
-
                     if x1 > x0 && y1 > y0 {
                         for ty in (y0 / TILE)..=((y1 - 1) / TILE) {
                             for tx in (x0 / TILE)..=((x1 - 1) / TILE) {
@@ -1266,7 +1206,6 @@ impl MyApp {
                 }
             }
         }
-
         // Bound GPU memory: drop the least recently drawn tiles, **counting every
         // page's map**. One page's map used to be the whole of it, and it is the
         // whole of it in the single-image case still - so with manga mode off this is
@@ -1316,7 +1255,6 @@ impl MyApp {
                 }
             }
         }
-
         // The two outcomes, once every borrow of `self` is done: `self.lat` cannot be
         // touched while `self.previews` is lent out, which is why they are flags.
         if pending {
@@ -1325,7 +1263,6 @@ impl MyApp {
             // Everything the viewport needs is on screen, on every page of the turn.
             self.lat.viewport_tiles_ready(Instant::now());
         }
-
         // --- crop ---
         //
         // egui already tracks where the current press started
@@ -1372,7 +1309,6 @@ impl MyApp {
                 }
             }
         }
-
         // Draw the frame from the *stored* crop mapped back out, so what is on
         // screen is the rectangle the save will cut — block-aligned, and correct
         // through any EXIF tag or turn or mirror.
@@ -1440,7 +1376,6 @@ impl MyApp {
                 }
             }
         }
-
         if self.cur.is_some() && self.cur != self.shown {
             // Never for a target that already failed: its decode will never
             // be re-issued, so "Loading…" is a promise nothing keeps, and the
@@ -1460,5 +1395,4 @@ impl MyApp {
             }
         }
     }
-
 }

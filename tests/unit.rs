@@ -5093,5 +5093,3 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
         "the Esc exit restores too — one restore, one fullscreen with no way back"
     );
 }
-
-

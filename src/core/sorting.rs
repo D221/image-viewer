@@ -97,7 +97,13 @@ pub fn scan_folder_sorted_recursive(
 /// disagree about what an order means.
 pub(crate) fn apply_sort_order(files: &mut [PathBuf], mode: SortMode, descending: bool) {
     match mode {
-        SortMode::Name => {}
+        SortMode::Name => {
+            files.sort_by(|a, b| {
+                let an = a.file_name().unwrap_or_default().to_string_lossy();
+                let bn = b.file_name().unwrap_or_default().to_string_lossy();
+                natural_cmp(&an, &bn)
+            });
+        }
         SortMode::Date => {
             files.sort_by_cached_key(|p| {
                 std::fs::metadata(p)
