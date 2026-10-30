@@ -141,6 +141,15 @@ impl eframe::App for MyApp {
                         && !i.modifiers.alt),
             )
         });
+        // `Alt+Left` / `Alt+Right`: back/forward through navigation history.
+        // Read separately from `prev`/`next` so the shipped arrow keys keep
+        // their step behaviour and `Alt+arrows` own history.
+        let (history_back, history_forward) = ctx.input(|i| {
+            (
+                binding_down(i, &kb, "history_back"),
+                binding_down(i, &kb, "history_forward"),
+            )
+        });
 
         if f11 {
             let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
@@ -419,6 +428,10 @@ impl eframe::App for MyApp {
                 self.goto_edge(false, ctx);
             } else if last {
                 self.goto_edge(true, ctx);
+            } else if history_back {
+                self.go_back(ctx);
+            } else if history_forward {
+                self.go_forward(ctx);
             }
             // The alt-next key resumes a paused animation instead of stepping:
             // `,`/`.` pause onto a frame, and this is the handiest way back
@@ -1554,6 +1567,92 @@ impl eframe::App for MyApp {
                         // so it has to be told.
                         self.gallery.loop_back = self.config.loop_back;
                         self.config.save(&self.config_path);
+                    }
+
+                    // ---- back/forward history ----
+                    ui.separator();
+                    ui.label("Back/forward history");
+                    ui.horizontal(|ui| {
+                        let back_enabled = !self.history_back.is_empty();
+                        let fwd_enabled = !self.history_forward.is_empty();
+                        if ui
+                            .add_enabled(
+                                back_enabled,
+                                egui::Button::new("← Back").shortcut_text("Alt+Left"),
+                            )
+                            .on_hover_text(if back_enabled {
+                                "Return to the previously viewed image"
+                            } else {
+                                "Nothing to go back to"
+                            })
+                            .clicked()
+                        {
+                            self.go_back(ctx);
+                        }
+                        if ui
+                            .add_enabled(
+                                fwd_enabled,
+                                egui::Button::new("Forward →").shortcut_text("Alt+Right"),
+                            )
+                            .on_hover_text(if fwd_enabled {
+                                "Return to the image you went back from"
+                            } else {
+                                "Nothing to go forward to"
+                            })
+                            .clicked()
+                        {
+                            self.go_forward(ctx);
+                        }
+                        ui.label(format!(
+                            "{} back / {} forward",
+                            self.history_back.len(),
+                            self.history_forward.len()
+                        ));
+                    });
+
+                    // ---- favourite folders ----
+                    ui.separator();
+                    ui.label("Favourite folders");
+                    for fav in self.config.favourite_folders.clone() {
+                        let exists = fav.is_dir();
+                        let label = format!(
+                            "{} {}",
+                            fav.display(),
+                            if exists { "" } else { " (missing)" }
+                        );
+                        if ui
+                            .add_enabled(
+                                exists,
+                                egui::Button::new(label).shortcut_text(""),
+                            )
+                            .on_hover_text("Open this folder")
+                            .clicked()
+                        {
+                            self.close_transients();
+                            self.open_folder(ctx, fav.clone());
+                        }
+                        if ui.button("✕").on_hover_text("Remove favourite").clicked() {
+                            if let Some(pos) = self
+                                .config
+                                .favourite_folders
+                                .iter()
+                                .position(|p| p == &fav)
+                            {
+                                self.config.favourite_folders.remove(pos);
+                                self.config.save(&self.config_path);
+                            }
+                        }
+                    }
+                    if ui.button("Add current folder").clicked() {
+                        let already = self
+                            .config
+                            .favourite_folders
+                            .iter()
+                            .any(|p| p == &self.folder);
+                        if !already {
+                            self.config.favourite_folders.push(self.folder.clone());
+                            self.config.save(&self.config_path);
+                        }
                     }
                 });
 

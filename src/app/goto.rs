@@ -250,6 +250,11 @@ impl MyApp {
             t_boot: perf::boot(),
             t_prev_frame: None,
             pending_advance: None,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            history_cap: 50,
+            history_navigating: false,
+            favourite_folders: Vec::new(),
             zip_archive,
             zip_temp,
             archive_parent: None,
@@ -409,6 +414,7 @@ impl MyApp {
         // answered: `pump` records a page's dimensions as its preview lands, so a
         // page in the preload window has them before the user gets there.
         self.gallery.learn_shapes(self.gallery.page_pos());
+        self.record_history();
         self.cur = self
             .gallery
             .current()

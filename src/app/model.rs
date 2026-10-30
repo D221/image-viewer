@@ -10,6 +10,15 @@
 use crate::*;
 use crate::app::gallery_ops::UndoDeleteResult;
 
+/// A position in a gallery: folder + file index + page. This is everything
+/// needed to restore "where the reader was" when they go back or forward.
+#[derive(Clone, Debug)]
+pub(crate) struct HistoryEntry {
+    pub folder: PathBuf,
+    pub index: usize,
+    pub page: u32,
+}
+
 pub(crate) struct Preview {
 pub(crate) tex: TextureHandle,
 pub(crate) orig: (u32, u32),
@@ -567,6 +576,26 @@ pub(crate) grid_ratings: HashMap<PathBuf, image_viewer::Ratings>,
     /// that wrote a fresher value than the in-flight read could hold.
 pub(crate) grid_rating_pending: HashSet<PathBuf>,
 pub(crate) gallery_view: bool, // grid browser open
+
+    /// Back/forward navigation history: where the reader has been, in the order
+    /// they were visited. The most recent entry is the last one pushed — going
+    /// back pops it and pushes the current position onto the forward stack.
+    pub(crate) history_back: Vec<HistoryEntry>,
+    /// Positions reachable by going forward: cleared on every normal navigation,
+    /// pushed to by going back.
+    pub(crate) history_forward: Vec<HistoryEntry>,
+    /// Cap on each history stack so a long session cannot grow without bound.
+    /// 50 entries each covers an hour of steady browsing and costs nothing.
+    pub(crate) history_cap: usize,
+    /// True while `goto` is being driven by back/forward, so the current
+    /// position is not pushed onto the back stack a second time.
+    pub(crate) history_navigating: bool,
+
+    /// Favourite folders: bookmarked locations the reader can jump to from
+    /// Settings. Stored as absolute paths; a favourite whose folder no longer
+    /// exists is silently skipped when opened.
+    pub(crate) favourite_folders: Vec<PathBuf>,
+
     /// Every file in the folder, **unfiltered**. `gallery.files` is this list
     /// run through `filter`, so a filter is always reversible and the folder's
     /// real contents are never thrown away.

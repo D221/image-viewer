@@ -235,6 +235,78 @@ impl MyApp {
         ctx.request_repaint();
     }
 
+    /// `Alt+Left`: go back to the previously viewed image. Pushes the current
+    /// position onto the forward stack so `go_forward` can return here.
+    ///
+    /// Nothing happens at the back edge: the button and the chord are always
+    /// enabled so the Settings panel can show them, but they are no-ops when
+    /// the stack is empty.
+    pub(crate) fn go_back(&mut self, ctx: &Context) {
+        if let Some(entry) = self.history_back.pop() {
+            // Push where we are now so forward can return here.
+            if let Some(cur) = self.cur.clone() {
+                self.history_forward.push(HistoryEntry {
+                    folder: self.folder.clone(),
+                    index: self.gallery.index,
+                    page: cur.page,
+                });
+                if self.history_forward.len() > self.history_cap {
+                    self.history_forward.remove(0);
+                }
+            }
+            // Jump to the recorded position and re-enter goto, which will
+            // re-snap to turn anchor and re-plan decodes.
+            self.history_navigating = true;
+            self.gallery.goto_page(PagePos {
+                index: entry.index.min(self.gallery.files.len().saturating_sub(1)),
+                page: entry.page,
+            });
+            self.folder = entry.folder.clone();
+            self.goto(ctx);
+        }
+    }
+
+    /// Record where the reader was before `goto` moves the cursor: normal
+    /// navigation pushes the old position onto the back stack and clears the
+    /// forward stack; back/forward navigation does neither.
+    pub(crate) fn record_history(&mut self) {
+        if !self.history_navigating {
+            if let Some(cur) = self.cur.clone() {
+                self.history_back.push(HistoryEntry {
+                    folder: self.folder.clone(),
+                    index: self.gallery.index,
+                    page: cur.page,
+                });
+                if self.history_back.len() > self.history_cap {
+                    self.history_back.remove(0);
+                }
+            }
+            self.history_forward.clear();
+        }
+        self.history_navigating = false;
+    }
+    pub(crate) fn go_forward(&mut self, ctx: &Context) {
+        if let Some(entry) = self.history_forward.pop() {
+            if let Some(cur) = self.cur.clone() {
+                self.history_back.push(HistoryEntry {
+                    folder: self.folder.clone(),
+                    index: self.gallery.index,
+                    page: cur.page,
+                });
+                if self.history_back.len() > self.history_cap {
+                    self.history_back.remove(0);
+                }
+            }
+            self.history_navigating = true;
+            self.gallery.goto_page(PagePos {
+                index: entry.index.min(self.gallery.files.len().saturating_sub(1)),
+                page: entry.page,
+            });
+            self.folder = entry.folder.clone();
+            self.goto(ctx);
+        }
+    }
+
     /// `O` / `Shift+O`: step the leading-lone offset by `by`, clamped, and persist it.
     ///
     /// Writes only `spreads.json` under `%LOCALAPPDATA%` - **a file this app owns**,

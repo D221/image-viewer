@@ -121,6 +121,8 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("fullscreen", "F11", "Fullscreen"),
     ("focus_search", "Slash", "Focus filter box"),
     ("fit_window", "T", "Fit window mode"),
+    ("history_back", "Alt+ArrowLeft", "Back in history"),
+    ("history_forward", "Alt+ArrowRight", "Forward in history"),
 ];
 
 
@@ -446,6 +448,7 @@ impl Config {
             window_maximized: false,
             remember_view: false,
             show_panels: true,
+            favourite_folders: Vec::new(),
         };
 
         let Ok(data) = std::fs::read_to_string(path) else {

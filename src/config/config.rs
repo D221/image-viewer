@@ -212,6 +212,12 @@ pub struct Config {
     #[serde(default)]
     pub last_by_folder: std::collections::HashMap<String, String>,
 
+    /// Favourite folders: bookmarked locations the reader can jump to from
+    /// Settings. Absolute paths; a favourite whose folder no longer exists is
+    /// silently skipped when opened.
+    #[serde(default)]
+    pub favourite_folders: Vec<PathBuf>,
+
     /// Show images as **turns** of one or two pages instead of one picture at a time.
     ///
     /// **Off by default**, and opt-in because single-image browsing is the app's

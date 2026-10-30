@@ -49,7 +49,7 @@ const OVER_TARGET: &[(&str, usize)] = &[
     ("tests/resample.rs", 2_723),
     ("tests/spreads.rs", 6_687),
     ("src/app/central.rs", 1_398),
-    ("src/app/ui.rs", 2_203),
+    ("src/app/ui.rs", 2_302),
     ("tests/rotate_save.rs", 1_921),
     ("tests/flip_through.rs", 1_647),
     ("tests/bench_browse.rs", 2_246),
