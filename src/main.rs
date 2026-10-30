@@ -50,7 +50,30 @@ pub(crate) use image_viewer::{
 // Tunables
 // ---------------------------------------------------------------------------
 
-/// Wheel delta accumulated before a flip triggers in wheel-navigation mode.
+/// The folder this launch will list, for the prefetch above.
+///
+/// `None` means "do not prefetch" and covers both cases where a listing is not
+/// what the launch opens: `load_all_on_startup` off (the app does not build a
+/// whole-folder list at start-up at all), and an archive argument (its folder is
+/// an extraction target that does not exist yet).
+///
+/// The arms mirror the app creator's. They cannot drift into a wrong answer that
+/// matters — the creator compares the path before accepting the prefetched list
+/// and falls back to walking the folder itself — but a drift would silently
+/// restore the cost this exists to remove.
+fn launch_scan_folder(config: &image_viewer::Config) -> Option<PathBuf> {
+    if !config.load_all_on_startup {
+        return None;
+    }
+    match image_viewer::path_arg(std::env::args().skip(1)) {
+        Some(a) if image_viewer::is_archive_path(&a) => None,
+        Some(a) if a.is_dir() => Some(a),
+        Some(a) if a.is_file() => a.parent().map(|p| p.to_path_buf()),
+        // Neither a file nor a folder (deleted, or a typo) falls through to the
+        // saved folder in the creator, so that is what gets listed here.
+        _ => Some(image_viewer::startup_folder(config.folder.as_deref())),
+    }
+}
 
 fn main() -> eframe::Result<()> {
     // CLI: `--register` / `--unregister` manage file associations and exit;
@@ -115,6 +138,14 @@ fn main() -> eframe::Result<()> {
         std::process::exit(probe_one(backend));
     }
 
+    // The window icon takes ~18 ms to render (1024 px supersampled then downscaled).
+    // Start it on a worker thread now so it overlaps the registry and config work
+    // below; joined before the event loop so the render is never on the critical
+    // path to the first frame.
+    let icon_handle = std::thread::spawn(move || {
+        image_viewer::icon::render(WINDOW_ICON_PX)
+    });
+
     // The taskbar keys its icon cache on an AppUserModelID, and caches whatever
     // it found the first time. Declared here, before any window exists, because
     // after the window is created the call is ignored. See
@@ -140,6 +171,30 @@ fn main() -> eframe::Result<()> {
         std::process::exit(0);
     }
     let (mut backend, probed) = resolve_renderer(&config.renderer);
+    // Joined here: the render started before the registry/config work, so it is
+    // usually done by now and the join returns at once. Stored as an Arc so the
+    // renderer-restart loop can reuse the same icon data without re-rendering.
+    let icon = std::sync::Arc::new(egui::IconData {
+        rgba: icon_handle.join().expect("icon render thread panicked").into_raw(),
+        width: WINDOW_ICON_PX,
+        height: WINDOW_ICON_PX,
+    });
+    // The launch listing starts here, not in the app creator: the creator only
+    // runs once the window, adapter, device and surface exist (~150 ms on this
+    // machine), and the walk needs none of them. See `core/startup_scan.rs`.
+    let launch_folder = launch_scan_folder(&config);
+    let prefetched = launch_folder.as_deref().map(|folder| {
+        (
+            folder.to_path_buf(),
+            image_viewer::prefetch_folder_scan(
+                folder,
+                config.sort,
+                config.sort_descending,
+                config.recursive_folders,
+            ),
+        )
+    });
+    let prefetched = std::sync::Arc::new(std::sync::Mutex::new(prefetched));
     if let Some(p) = probed {
         // Remember the answer so the next launch does not probe again.
         config.renderer.probed = Some(p);
@@ -193,20 +248,25 @@ fn main() -> eframe::Result<()> {
                 // `assets/app.ico` for the embedded resource, so the window icon
                 // and the icon in the exe are the same artwork by construction
                 // rather than by two files agreeing.
-                .with_icon(std::sync::Arc::new(egui::IconData {
-                    rgba: image_viewer::icon::render(WINDOW_ICON_PX).into_raw(),
-                    width: WINDOW_ICON_PX,
-                    height: WINDOW_ICON_PX,
-                })),
+                .with_icon(icon.clone()),
             wgpu_options: wgpu_options(backend),
+            // eframe's own window-state store is one more file to read on the
+            // start-up path, and its job is already done here: size, position
+            // and maximized are persisted in `config.json` and applied through
+            // the viewport above, which also means the two cannot disagree
+            // about the window geometry.
+            persist_window: false,
             ..Default::default()
         };
         let slot = restart.clone();
+        let prefetch = prefetched.clone();
         let result = eframe::run_native(
             "Image Viewer",
             options,
             Box::new(move |cc| {
-                Ok(Box::new(MyApp::new_with_renderer(cc, slot)) as Box<dyn eframe::App>)
+                let listing = prefetch.lock().ok().and_then(|mut p| p.take());
+                let app = MyApp::new_with_renderer(cc, slot, listing);
+                Ok(Box::new(app) as Box<dyn eframe::App>)
             }),
         );
 

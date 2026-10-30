@@ -15,5 +15,8 @@ pub use sorting::*;
 pub mod startup_view;
 pub use startup_view::*;
 
+pub mod startup_scan;
+pub use startup_scan::*;
+
 pub mod zoom_gps;
 pub use zoom_gps::*;

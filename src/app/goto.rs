@@ -10,7 +10,11 @@
 use crate::*;
 
 impl MyApp {
-    pub(crate) fn new_with_renderer(cc: &eframe::CreationContext<'_>, restart: RestartSlot) -> Self {
+    pub(crate) fn new_with_renderer(
+        cc: &eframe::CreationContext<'_>,
+        restart: RestartSlot,
+        mut prefetched: Option<(PathBuf, std::sync::mpsc::Receiver<Vec<PathBuf>>)>,
+    ) -> Self {
         let ctx = &cc.egui_ctx;
         let config_path = Config::default_path();
         let config = Config::load(&config_path);
@@ -40,7 +44,17 @@ impl MyApp {
         let mut zip_temp: Option<PathBuf> = None;
         let (folder, mut gallery) = match arg {
             Some(a) if a.is_dir() => {
-                let g = Gallery::new(&a);
+                // `load_all_on_startup` re-lists this folder below, with the
+                // configured sort order, and *replaces* whatever is here — so
+                // building it now is a second full walk of the same directory.
+                // The default-folder arm below already skips it for that reason;
+                // this one did not, and on a cold cache a 1400-image folder paid
+                // ~300 ms for a list that was thrown away before the first frame.
+                let g = if config.load_all_on_startup {
+                    Gallery::empty()
+                } else {
+                    Gallery::new(&a)
+                };
                 (a, g)
             }
             Some(a) if a.is_file() && is_archive_path(&a) => {
@@ -49,7 +63,14 @@ impl MyApp {
                     Ok((count, _)) if count > 0 => {
                         zip_archive = Some(a.clone());
                         zip_temp = Some(temp.clone());
-                        (temp.clone(), Gallery::new(&temp))
+                        // Same reason as the folder arm above: the sort pass
+                        // below re-lists this directory and replaces the result.
+                        let g = if config.load_all_on_startup {
+                            Gallery::empty()
+                        } else {
+                            Gallery::new(&temp)
+                        };
+                        (temp.clone(), g)
                     }
                     _ => (
                         a.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
@@ -62,12 +83,7 @@ impl MyApp {
                 (dir, Gallery::from_file(a))
             }
             _ => {
-                let folder = config
-                    .folder
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .filter(|p| p.is_dir())
-                    .unwrap_or_else(|| PathBuf::from("test-images"));
+                let folder = image_viewer::startup_folder(config.folder.as_deref());
                 // `Gallery::new` scans the folder, and with `load_all_on_startup`
                 // (the default) the sorted scan below immediately replaces that
                 // list. So the first walk is thrown away. Measured at ~50 ms on a
@@ -90,12 +106,31 @@ impl MyApp {
             // Sort per config (natural name order by default) and pick what to show.
             // The rule itself lives in `image_viewer::startup_index` so it can be
             // tested; see its doc comment for the bug it fixes.
-            let files = Self::sorted_scan(
-                &folder,
-                config.sort,
-                config.sort_descending,
-                config.recursive_folders && zip_archive.is_none(),
-            );
+            //
+            // The background prefetch (started in `main` before the window exists)
+            // lands here if it matches this folder; otherwise a synchronous scan
+            // is the fallback.
+            let recursive = config.recursive_folders && zip_archive.is_none();
+            let files = match prefetched.take() {
+                Some((dir, rx)) if dir == folder => match rx.recv() {
+                    Ok(files) => files,
+                    Err(_) => Self::sorted_scan(
+                        &folder,
+                        config.sort,
+                        config.sort_descending,
+                        recursive,
+                    ),
+                },
+                _ => {
+                    let files = Self::sorted_scan(
+                        &folder,
+                        config.sort,
+                        config.sort_descending,
+                        recursive,
+                    );
+                    files
+                }
+            };
             gallery.index = image_viewer::startup_index(
                 &files,
                 named_file.as_deref(),
