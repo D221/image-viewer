@@ -170,7 +170,10 @@ fn main() -> eframe::Result<()> {
         eprintln!("Another image-viewer instance is already running — exiting.");
         std::process::exit(0);
     }
-    let (mut backend, probed) = resolve_renderer(&config.renderer);
+    // Glow renderer — OpenGL is universally available on Windows, no probe
+    // needed, no risk of wgpu driver access violations. The wgpu probe code
+    // (renderer.rs) stays in the tree for reference but is not called here.
+    let _config = &config;
     // Joined here: the render started before the registry/config work, so it is
     // usually done by now and the join returns at once. Stored as an Arc so the
     // renderer-restart loop can reuse the same icon data without re-rendering.
@@ -195,11 +198,6 @@ fn main() -> eframe::Result<()> {
         )
     });
     let prefetched = std::sync::Arc::new(std::sync::Mutex::new(prefetched));
-    if let Some(p) = probed {
-        // Remember the answer so the next launch does not probe again.
-        config.renderer.probed = Some(p);
-        let _ = config.save(&config_path);
-    }
 
     // One iteration per renderer the user runs. The app is rebuilt from the
     // config each time, so a restart keeps the folder, sort mode and settings
@@ -231,6 +229,7 @@ fn main() -> eframe::Result<()> {
             viewport = viewport.with_decorations(false);
         }
         let options = eframe::NativeOptions {
+            renderer: eframe::Renderer::Glow,
             viewport: viewport
                 // The window icon, set at creation rather than afterwards.
                 //
@@ -249,7 +248,7 @@ fn main() -> eframe::Result<()> {
                 // and the icon in the exe are the same artwork by construction
                 // rather than by two files agreeing.
                 .with_icon(icon.clone()),
-            wgpu_options: wgpu_options(backend),
+            glow_options: eframe::egui_glow::GlowConfiguration::default(),
             // eframe's own window-state store is one more file to read on the
             // start-up path, and its job is already done here: size, position
             // and maximized are persisted in `config.json` and applied through
@@ -273,17 +272,12 @@ fn main() -> eframe::Result<()> {
         // Whatever happened, get the request out before deciding. The perf
         // report is written by `on_exit`, not here: that is the clean-exit path,
         // and writing it from both places would produce it twice.
-        let requested = restart.lock().ok().and_then(|mut s| s.take());
+        let _requested = restart.lock().ok().and_then(|mut s| s.take());
 
-        match (result, requested) {
-            (_, Some(next)) if next != backend => {
-                eprintln!("Restarting with the {} backend...", next.name());
-                backend = next;
-                // Loop, rather than fall through: the user asked for this
-                // backend and has not been shown it yet.
-            }
-            (Ok(_), _) => return Ok(()),
-            (Err(e), _) => {
+        // Glow build: no backend switching — glow is the only renderer.
+        match result {
+            Ok(_) => return Ok(()),
+            Err(e) => {
                 eprintln!("Failed to start the viewer: {e}");
                 return Err(e.into());
             }

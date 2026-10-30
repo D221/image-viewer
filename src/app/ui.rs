@@ -14,7 +14,7 @@ impl eframe::App for MyApp {
 
     /// Persist the last-viewed image per folder on app close, then clean up
     /// any extracted archive temp dir.
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
         // Key by the archive path when one is open (the temp folder name is
         // meaningless to the user).
         let key: String = match &self.zip_archive {
