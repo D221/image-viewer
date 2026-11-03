@@ -175,10 +175,7 @@ fn an_apng_is_recognised_from_its_bytes_and_judged_animated() {
 
     assert_eq!(animated_format(&bytes), Some(AnimatedFormat::Png));
     assert!(image_viewer::is_animated(&bytes, AnimatedFormat::Png));
-    assert!(image_viewer::is_animated(
-        &std::fs::read(&p).unwrap(),
-        AnimatedFormat::Png
-    ));
+    assert!(image_viewer::is_animated(&std::fs::read(&p).unwrap(), AnimatedFormat::Png));
 }
 
 /// The bug that cost the most to find, and it was only reachable with a real
@@ -236,11 +233,7 @@ fn a_truncated_gif_still_decodes_and_does_not_hang() {
         .expect("a truncated GIF must still decode")
         .anim
         .expect("and still be an animation");
-    assert!(
-        anim.frames.len() >= 2,
-        "at least the two intact frames, got {}",
-        anim.frames.len()
-    );
+    assert!(anim.frames.len() >= 2, "at least the two intact frames, got {}", anim.frames.len());
     assert_eq!(decoded_corner(&anim.frames[0]), [0, 255, 0]);
     assert_eq!(decoded_corner(&anim.frames[1]), [21, 234, 10]);
 }
@@ -321,25 +314,13 @@ fn an_animated_webp_decodes_every_frame_it_contains() {
         anim.frames.iter().all(|f| (f.width, f.height) == (400, 400)),
         "every frame is 400x400"
     );
-    assert!(
-        anim.delays.iter().all(|d| d.as_millis() == 40),
-        "40 ms per frame: {:?}",
-        anim.delays
-    );
+    assert!(anim.delays.iter().all(|d| d.as_millis() == 40), "40 ms per frame: {:?}", anim.delays);
     assert_eq!(anim.total_duration().as_millis(), 400, "400 ms loop");
 
     // The frames must actually differ. Ten copies of one picture would satisfy
     // every assertion above, and would be a still image wearing a container.
-    let differing = anim
-        .frames
-        .windows(2)
-        .filter(|pair| pair[0].rgba != pair[1].rgba)
-        .count();
-    assert_eq!(
-        differing,
-        9,
-        "all 9 adjacent frame pairs must differ, or this is not animating"
-    );
+    let differing = anim.frames.windows(2).filter(|pair| pair[0].rgba != pair[1].rgba).count();
+    assert_eq!(differing, 9, "all 9 adjacent frame pairs must differ, or this is not animating");
 }
 
 #[test]
@@ -429,8 +410,7 @@ fn an_animated_gif_still_works() {
                 Delay::from_numer_denom_ms(80, 1),
             )
         };
-        enc.encode_frames([f([255, 0, 0]), f([0, 255, 0]), f([0, 0, 255])])
-            .unwrap();
+        enc.encode_frames([f([255, 0, 0]), f([0, 255, 0]), f([0, 0, 255])]).unwrap();
     }
     let p = write(dir.path(), "three.gif", &bytes);
 
@@ -478,8 +458,7 @@ fn multipage_tiff(pages: &[[u8; 3]], w: u32, h: u32) -> Vec<u8> {
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
         for rgb in pages {
             let px: Vec<u8> = (0..(w * h)).flat_map(|_| [rgb[0], rgb[1], rgb[2], 255]).collect();
-            enc.write_image::<colortype::RGBA8>(w, h, &px)
-                .expect("one chained page");
+            enc.write_image::<colortype::RGBA8>(w, h, &px).expect("one chained page");
         }
     }
     out
@@ -510,11 +489,7 @@ fn a_multi_page_tiff_reports_every_page() {
     );
 
     let bytes = std::fs::read(&p).unwrap();
-    assert_eq!(
-        image_viewer::tiff_page_count_bytes(&bytes),
-        3,
-        "the IFD chain has three entries"
-    );
+    assert_eq!(image_viewer::tiff_page_count_bytes(&bytes), 3, "the IFD chain has three entries");
     assert_eq!(image_viewer::tiff_page_count(&p), 3, "and from a path too");
 }
 
@@ -621,11 +596,7 @@ fn a_cmyk_past_the_first_page_is_converted_not_refused() {
 
     // The actual conversion, checked against `image`'s own formula.
     let px = |i: usize| {
-        [
-            cmyk.preview.rgba[i * 4],
-            cmyk.preview.rgba[i * 4 + 1],
-            cmyk.preview.rgba[i * 4 + 2],
-        ]
+        [cmyk.preview.rgba[i * 4], cmyk.preview.rgba[i * 4 + 1], cmyk.preview.rgba[i * 4 + 2]]
     };
     assert_eq!(px(0), [0, 255, 255], "full cyan ink");
     assert_eq!(px(1), [0, 0, 0], "full black ink");
@@ -687,7 +658,8 @@ fn a_page_is_downscaled_like_any_other_decode() {
 /// also being right, or every navigation test fails for the wrong reason when it
 /// breaks. The counting is tested separately, in `a_multi_page_tiff_reports_every_page`.
 fn gallery_with_pages(files: &[(&str, u32)]) -> image_viewer::Gallery {
-    let paths: Vec<std::path::PathBuf> = files.iter().map(|(n, _)| std::path::PathBuf::from(n)).collect();
+    let paths: Vec<std::path::PathBuf> =
+        files.iter().map(|(n, _)| std::path::PathBuf::from(n)).collect();
     let mut g = image_viewer::Gallery::empty();
     g.set_filtered(&paths, "");
     g.set_page_counts(files.iter().map(|(_, n)| *n));
@@ -813,10 +785,8 @@ fn the_filter_keeps_your_place_in_a_document_but_not_across_files() {
     // means the user keeps their page; the current file being filtered out means
     // the index moved, and carrying a page number to a different file would be
     // showing page 4 of something that has one page.
-    let all: Vec<std::path::PathBuf> = ["doc.tif", "other.tif", "photo.jpg"]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
+    let all: Vec<std::path::PathBuf> =
+        ["doc.tif", "other.tif", "photo.jpg"].iter().map(std::path::PathBuf::from).collect();
     let mut g = image_viewer::Gallery::empty();
     g.set_filtered(&all, "");
     g.set_page_counts([4, 4, 1]);
@@ -842,11 +812,8 @@ fn the_page_count_is_learned_from_the_file_and_asked_only_once() {
     // The cost control: four bytes for anything that is not a TIFF, and the
     // answer cached so browsing back and forth does not re-read.
     let dir = tempfile::tempdir().unwrap();
-    let p = write(
-        dir.path(),
-        "three.tif",
-        &multipage_tiff(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], 8, 8),
-    );
+    let p =
+        write(dir.path(), "three.tif", &multipage_tiff(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], 8, 8));
     let mut g = image_viewer::Gallery::empty();
     g.set_filtered(&[p.clone()], "");
 
@@ -884,13 +851,7 @@ fn the_cursor_can_never_name_a_page_that_does_not_exist() {
     // has not got.
     for docs in [[1u32, 1, 1], [3, 1, 1], [1, 5, 1], [1, 1, 4], [2, 3, 4], [7, 1, 1]] {
         for start in 0..docs.len() {
-            let mut g = gallery_with_pages(
-                &[
-                    ("a", docs[0]),
-                    ("b", docs[1]),
-                    ("c", docs[2]),
-                ],
-            );
+            let mut g = gallery_with_pages(&[("a", docs[0]), ("b", docs[1]), ("c", docs[2])]);
             g.goto_index(start);
             for _ in 0..30 {
                 assert!(
@@ -921,23 +882,21 @@ fn the_protected_set_does_not_grow_with_the_length_of_a_document() {
     // cache unbounded while you walk a document, because nothing is ever
     // evictable. On a folder of photos it cannot happen — every file is one page —
     // so the only way to see it is to ask the policy directly.
-    let files: Vec<std::path::PathBuf> = ["doc.tif", "a.jpg", "b.jpg"].iter().map(std::path::PathBuf::from).collect();
+    let files: Vec<std::path::PathBuf> =
+        ["doc.tif", "a.jpg", "b.jpg"].iter().map(std::path::PathBuf::from).collect();
     for page in 0..200u32 {
         let p = image_viewer::protected_preview_keys(&files, 0, page, None, 3);
         // The window contributes at most `2 * radius + 1` distinct files, and the
         // page on screen is at most one more.
-        assert!(
-            p.len() <= 2 * 3 + 2,
-            "page {page} protected {} keys: {p:?}",
-            p.len()
-        );
+        assert!(p.len() <= 2 * 3 + 2, "page {page} protected {} keys: {p:?}", p.len());
     }
 }
 
 #[test]
 fn the_protected_set_keeps_the_page_you_are_on_and_only_page_zero_of_neighbours() {
     use image_viewer::{protected_preview_keys, ImgKey};
-    let files: Vec<std::path::PathBuf> = (0..9).map(|i| std::path::PathBuf::from(format!("{i}.jpg"))).collect();
+    let files: Vec<std::path::PathBuf> =
+        (0..9).map(|i| std::path::PathBuf::from(format!("{i}.jpg"))).collect();
 
     // On page 6 of a document, with nothing shown yet.
     let p = protected_preview_keys(&files, 0, 6, None, 3);
@@ -975,7 +934,8 @@ fn the_protected_set_includes_what_is_actually_on_screen() {
     // image from the one being protected as "current". Forgetting it means the
     // picture on screen can be the eviction victim.
     use image_viewer::{protected_preview_keys, ImgKey};
-    let files: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg"].iter().map(std::path::PathBuf::from).collect();
+    let files: Vec<std::path::PathBuf> =
+        ["a.jpg", "b.jpg", "c.jpg"].iter().map(std::path::PathBuf::from).collect();
     let shown = ImgKey { path: files[2].clone(), page: 0 };
     let p = protected_preview_keys(&files, 0, 0, Some(&shown), 1);
     assert!(p.contains(&shown), "what is painted is never evicted");
@@ -984,4 +944,3 @@ fn the_protected_set_includes_what_is_actually_on_screen() {
 // ---------------------------------------------------------------------------
 // Small helpers, kept here so the fixtures above read as pictures not as bytes
 // ---------------------------------------------------------------------------
-

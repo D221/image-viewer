@@ -10,10 +10,7 @@ fn main() {
         std::process::exit(1);
     }
     for &s in &image_viewer::icon::SIZES {
-        println!(
-            "  {s:>3}px  fills {:.1}% of the bitmap",
-            image_viewer::icon::coverage(s) * 100.0
-        );
+        println!("  {s:>3}px  fills {:.1}% of the bitmap", image_viewer::icon::coverage(s) * 100.0);
     }
     println!("wrote {}/app.ico and app-icon-preview.png", dir.display());
 }

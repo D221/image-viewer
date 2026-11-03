@@ -48,8 +48,5 @@ pub fn bench_image() -> Option<PathBuf> {
 /// True when `test-images/` holds at least one image, so the folder-scanning
 /// benches measure something real.
 pub fn have_folder() -> bool {
-    Path::new("test-images")
-        .read_dir()
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false)
+    Path::new("test-images").read_dir().map(|mut d| d.next().is_some()).unwrap_or(false)
 }

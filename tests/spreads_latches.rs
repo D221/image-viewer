@@ -32,10 +32,9 @@ use spreads_fixtures::*;
 /// Panics rather than returning `""` when the marker is gone: a scan that quietly
 /// sees nothing is a scan that cannot fail, which is the opposite of a guard.
 fn block_after<'a>(src: &'a str, marker: &str) -> &'a str {
-    let at = src
-        .find(marker)
-        .unwrap_or_else(|| panic!("{marker} is gone; update this test to match"))
-        + marker.len();
+    let at =
+        src.find(marker).unwrap_or_else(|| panic!("{marker} is gone; update this test to match"))
+            + marker.len();
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     for (i, b) in bytes[at..].iter().enumerate() {
@@ -76,10 +75,7 @@ fn block_after<'a>(src: &'a str, marker: &str) -> &'a str {
 #[test]
 fn a_key_goes_back_to_the_position_it_came_from() {
     let gal = turns_gallery(&[3, 1]);
-    let key = |i: usize, p: u32| ImgKey {
-        path: gal.files[i].clone(),
-        page: p,
-    };
+    let key = |i: usize, p: u32| ImgKey { path: gal.files[i].clone(), page: p };
 
     // The round trip, over both files and every page of the document.
     for (i, p) in [(0usize, 0u32), (0, 1), (0, 2), (1, 0)] {
@@ -147,10 +143,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
     let mut gal = turns_gallery(&[1, 1, 200, 1]);
     gal.set_loop_back(false);
     let lead = LEAD_LONE_DEFAULT;
-    let b = PagePos {
-        index: 1,
-        page: 0,
-    };
+    let b = PagePos { index: 1, page: 0 };
 
     // The premise: `b` is an anchor at this offset, so the step off it is a step off
     // a turn rather than off the second half of one.
@@ -166,10 +159,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
 
     assert_eq!(
         next_turn(gal.page_pos(), lead, &gal),
-        Some(PagePos {
-            index: 3,
-            page: 0
-        }),
+        Some(PagePos { index: 3, page: 0 }),
         "with the count unknown the turn claims the document's only (believed) page \
          and the step lands past it"
     );
@@ -181,10 +171,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
     assert_eq!(gal.pages_in(2), 200);
     assert_eq!(
         next_turn(gal.page_pos(), lead, &gal),
-        Some(PagePos {
-            index: 2,
-            page: 1
-        }),
+        Some(PagePos { index: 2, page: 1 }),
         "with the count known the step lands *inside* the document, which is the \
          difference this fix makes"
     );
@@ -193,10 +180,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
     // of the volume by pressing right rather than by jumping. The cursor is moved to
     // the turn the assertion above only *asked* about - `next_turn` is a query, so the
     // two assertions above leave the cursor on `b`.
-    gal.goto_page(PagePos {
-        index: 2,
-        page: 1,
-    });
+    gal.goto_page(PagePos { index: 2, page: 1 });
     // Two pages per turn, because every page of this document is portrait and
     // unmeasured and `pairable` pairs optimistically: 1 -> 3 -> 5.
     for page in [3u32, 5] {
@@ -209,7 +193,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
     // **The whole document, walked.** This is the claim the defect was about - 199
     // pages unreachable by pressing right - so it is asserted by walking rather than
     // by landing on the last page: `learn_shapes` and `learn_pages` are per *page*,
-//    and a count that is known for the document while its shapes are known for none
+    //    and a count that is known for the document while its shapes are known for none
     // of its pages is not the state a reader is ever in. ~98 presses, each an
     // `anchor_of` walk over ~100 turns of cached arithmetic, which is the cost the
     // app pays for a real volume anyway.
@@ -238,10 +222,7 @@ fn a_document_behind_an_unknown_page_count_is_stepped_over() {
     // from its anchor is a refusal. Which is `Gallery::loop_back`'s business, not this
     // test's; what is asserted here is only that the refusal is *at the end* rather
     // than in the middle of the volume, which is what the bug produced.
-    assert!(
-        !step_forward(&mut gal, lead),
-        "there is a turn after the gallery's last one"
-    );
+    assert!(!step_forward(&mut gal, lead), "there is a turn after the gallery's last one");
 }
 
 /// `goto` learns the page count of the file the turn's **other half** names, and
@@ -317,13 +298,10 @@ fn the_turns_second_half_is_derived_not_latched() {
     // 1. ...and it really is called after the gate rather than only from elsewhere.
     //    A byte offset is the honest way to say "textually after", and the gate is
     //    the last thing in `sync_shown` that ends in `;` before it.
-    let gate_end = sync
-        .find("if self.previews.contains_key(&cur)")
-        .expect("the gate is still there")
-        + gate.len();
-    let call_at = sync
-        .find("self.sync_shown_partner();")
-        .expect("the call is in sync_shown");
+    let gate_end =
+        sync.find("if self.previews.contains_key(&cur)").expect("the gate is still there")
+            + gate.len();
+    let call_at = sync.find("self.sync_shown_partner();").expect("the call is in sync_shown");
     assert!(
         call_at >= gate_end,
         "`sync_shown_partner()` has moved *into* the adopt gate (byte {call_at} is \
@@ -394,11 +372,9 @@ fn goto_learns_the_page_count_of_the_turns_other_file() {
     );
 
     let learn = fn_body(&src, "fn learn_partner_pages(&mut self)");
-    for want in [
-        "self.turn_partner()",
-        "self.gallery.learn_pages(&partner.path)",
-        "partner.path == here",
-    ] {
+    for want in
+        ["self.turn_partner()", "self.gallery.learn_pages(&partner.path)", "partner.path == here"]
+    {
         assert!(
             learn.contains(want),
             "`learn_partner_pages` no longer holds `{want}`. The cost of this call is\n\
@@ -508,9 +484,9 @@ fn copy_refuses_a_page_of_a_multi_page_document() {
     let src = main_src();
     let body = fn_body(&src, "fn copy_image_to_clipboard(&mut self, unedited: bool)");
 
-    let at = body
-        .find("if cur.page > 0")
-        .unwrap_or_else(|| panic!("the page refusal is gone from `copy_image_to_clipboard`:\n{body}"));
+    let at = body.find("if cur.page > 0").unwrap_or_else(|| {
+        panic!("the page refusal is gone from `copy_image_to_clipboard`:\n{body}")
+    });
     let window = &body[at..(at + 400).min(body.len())];
     assert!(
         window.contains("self.error = Some(") && window.contains("multi-page document"),
@@ -519,9 +495,8 @@ fn copy_refuses_a_page_of_a_multi_page_document() {
          Window was:\n{window}"
     );
     // It has to come **before** the fast path, or the pixels leave the app first.
-    let fast = body
-        .find("if let Some(f) = self.full.as_ref()")
-        .expect("the fast path is still there");
+    let fast =
+        body.find("if let Some(f) = self.full.as_ref()").expect("the fast path is still there");
     assert!(
         at < fast,
         "the page refusal has moved below the fast path, so the clipboard is already \

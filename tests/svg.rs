@@ -4,7 +4,9 @@
 //! renders at any target size — there is no `full` tier and no source-size
 //! decode: the preview *is* the decode.
 
-use image_viewer::{decode_svg, is_browsable, is_svg_bytes, load_image_preview_full, SUPPORTED_EXTENSIONS};
+use image_viewer::{
+    decode_svg, is_browsable, is_svg_bytes, load_image_preview_full, SUPPORTED_EXTENSIONS,
+};
 
 /// A simple 100x100 red square SVG.
 fn red_square_svg() -> &'static [u8] {
@@ -99,9 +101,5 @@ fn svg_is_scannable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image.svg");
     std::fs::write(&path, red_square_svg()).unwrap();
-    assert!(
-        is_browsable(&path),
-        "is_browsable must list .svg files so a folder scan shows them"
-    );
+    assert!(is_browsable(&path), "is_browsable must list .svg files so a folder scan shows them");
 }
-

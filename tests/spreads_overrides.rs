@@ -11,8 +11,8 @@
 
 use image_viewer::{
     load_spread_overrides, save_spread_overrides, spread_root_key, spreads_root, spreads_tmp,
-    thumb_cache_root, GallerySpreads, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX,
-    SPREADS_MAX_BYTES, SPREADS_MAX_PAGES,
+    thumb_cache_root, GallerySpreads, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, SPREADS_MAX_BYTES,
+    SPREADS_MAX_PAGES,
 };
 
 use Shape::{Double, Single};

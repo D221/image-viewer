@@ -66,9 +66,5 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    println!(
-        "cargo:rustc-env=IV_BUILD_ID={}{}",
-        hash,
-        if dirty { "-dirty" } else { "" }
-    );
+    println!("cargo:rustc-env=IV_BUILD_ID={}{}", hash, if dirty { "-dirty" } else { "" });
 }

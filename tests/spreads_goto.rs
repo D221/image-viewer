@@ -55,10 +55,7 @@ fn nothing_moves_with_looping_off_at_the_end() {
             "lead {lead}: one step fewer than the turn count, since the first turn is where it starts"
         );
         assert_eq!(gal.page_pos(), last, "lead {lead}: the last turn opens here");
-        assert!(
-            !step_forward(&mut gal, lead),
-            "lead {lead}: and there is nothing after it"
-        );
+        assert!(!step_forward(&mut gal, lead), "lead {lead}: and there is nothing after it");
         assert_eq!(gal.page_pos(), last, "lead {lead}: a refused step does not move the cursor");
 
         let mut backwards = 0usize;
@@ -161,7 +158,10 @@ fn a_backward_step_from_the_first_turns_second_half_still_wraps() {
     assert_ne!(anchor_of(second_half, lead, &looping), second_half, "it is a second half");
     assert_eq!(anchor_of(second_half, lead, &looping), PagePos { index: 0, page: 0 });
     assert!(prev_anchor(second_half, lead, &looping).is_none(), "and there is no anchor before it");
-    assert!(prev_anchor(PagePos { index: 0, page: 0 }, lead, &looping).is_none(), "nor before the first turn");
+    assert!(
+        prev_anchor(PagePos { index: 0, page: 0 }, lead, &looping).is_none(),
+        "nor before the first turn"
+    );
 
     assert!(step_backward(&mut looping, lead), "looping on: a backward step still moves");
     assert_eq!(
@@ -252,7 +252,8 @@ fn every_position_is_on_the_turn_its_anchor_opens() {
                 // `turn_len(anchor) == 2` alone would also be satisfied by the
                 // neighbouring page, which is what makes a wrong anchor invisible.
                 let holds = pos == at
-                    || (turn_len(at, lead, &gal) == 2 && PageCtx::step_no_wrap(&gal, at, 1) == Some(pos));
+                    || (turn_len(at, lead, &gal) == 2
+                        && PageCtx::step_no_wrap(&gal, at, 1) == Some(pos));
                 assert!(
                     holds,
                     "{pos:?} (lead {lead}, {counts:?}) is not in the turn anchored at {at:?}"
@@ -360,12 +361,7 @@ fn a_front_page_behind_an_unlearned_page_count_is_still_front_matter() {
 /// [`goto_page_refuses_a_file_that_is_not_there_and_trusts_the_page`].
 #[test]
 fn every_turn_step_lands_on_a_position_that_exists() {
-    for counts in [
-        vec![1u32, 1, 1, 1, 1, 1, 1, 1],
-        vec![3, 1, 1],
-        vec![1, 4],
-        vec![2, 3, 1],
-    ] {
+    for counts in [vec![1u32, 1, 1, 1, 1, 1, 1, 1], vec![3, 1, 1], vec![1, 4], vec![2, 3, 1]] {
         for looping in [true, false] {
             let mut gal = turns_gallery(&counts);
             gal.set_loop_back(looping);
@@ -470,18 +466,9 @@ fn manga_mode_makes_a_step_walk_a_turn() {
                 "self.gallery.prev()",
             ][..],
         ),
-        (
-            "fn turn_forward(&mut self)",
-            &["next_turn(", "goto_turn("][..],
-        ),
-        (
-            "fn turn_backward(&mut self)",
-            &["prev_turn(", "goto_turn("][..],
-        ),
-        (
-            "fn goto_turn(&mut self, to: Option<PagePos>)",
-            &["self.gallery.goto_page(pos)"][..],
-        ),
+        ("fn turn_forward(&mut self)", &["next_turn(", "goto_turn("][..]),
+        ("fn turn_backward(&mut self)", &["prev_turn(", "goto_turn("][..]),
+        ("fn goto_turn(&mut self, to: Option<PagePos>)", &["self.gallery.goto_page(pos)"][..]),
         ("fn goto(&mut self, ctx: &Context)", &["self.snap_to_turn_anchor();"][..]),
         (
             "fn snap_to_turn_anchor(&mut self)",
@@ -644,10 +631,7 @@ fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     }
     /// `dims` reads the walk to `anchor_of(pos)` makes, and the position it landed on.
     fn walk(gal: &Gallery, pos: PagePos, lead: u32) -> (usize, PagePos) {
-        let c = Counting {
-            gal,
-            reads: std::cell::Cell::new(0),
-        };
+        let c = Counting { gal, reads: std::cell::Cell::new(0) };
         let at = anchor_of(pos, lead, &c);
         (c.reads.get(), at)
     }
@@ -714,10 +698,7 @@ fn a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor() {
     // What it is about is that both are hundreds of reads at the back of a 400-file
     // gallery, and a reader who believes forward is O(1) will size the fix wrongly.
     let prev_reads = {
-        let c = Counting {
-            gal: &gal,
-            reads: std::cell::Cell::new(0),
-        };
+        let c = Counting { gal: &gal, reads: std::cell::Cell::new(0) };
         let got = prev_anchor(anchors[199], 0, &c);
         assert_eq!(
             got,

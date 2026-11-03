@@ -395,4 +395,3 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub show_panels: bool,
 }
-

@@ -44,15 +44,15 @@ const TARGET: usize = 1000;
 /// new size. **To add to one without splitting it:** the new code goes in a
 /// module of its own instead.
 const OVER_TARGET: &[(&str, usize)] = &[
-    ("tests/unit.rs", 5_095),
-    ("src/gallery/gallery.rs", 1_155),
-    ("tests/resample.rs", 2_723),
-    ("src/app/central.rs", 1_398),
-    ("src/app/ui.rs", 2_302),
-    ("tests/rotate_save.rs", 1_921),
-    ("tests/flip_through.rs", 1_647),
-    ("tests/bench_browse.rs", 2_246),
-    ("tests/thumb_cache.rs", 1_121),
+    ("tests/unit.rs", 4_752),
+    ("src/gallery/gallery.rs", 1_099),
+    ("tests/resample.rs", 2_549),
+    ("src/app/central.rs", 1_393),
+    ("src/app/ui.rs", 2_272),
+    ("tests/rotate_save.rs", 1_845),
+    ("tests/flip_through.rs", 1_580),
+    ("tests/bench_browse.rs", 2_143),
+    ("tests/thumb_cache.rs", 1_086),
 ];
 
 /// The directories a source file can live in.
@@ -101,10 +101,7 @@ fn line_count(path: &Path) -> usize {
 /// The path of a file relative to the crate root, as the table spells it.
 fn relative(path: &Path) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 /// **A file over the target does not grow.**

@@ -20,10 +20,12 @@
 // eprintln! diagnostics are visible.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use image_viewer::fileassoc as fileassoc;
+use image_viewer::fileassoc;
 mod app;
 
-pub(crate) use egui::{Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
+pub(crate) use egui::{
+    Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2,
+};
 pub(crate) use nom_exif::{read_exif, ExifTag};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::io::Read as _;
@@ -33,18 +35,17 @@ pub(crate) use std::sync::Arc;
 pub(crate) use std::time::{Duration, Instant};
 
 pub(crate) use image_viewer::perf;
-pub(crate) use image_viewer::{Job, Kind, Loader, PRIO_CURRENT_EXIF, PRIO_THUMB_BASE};
 pub(crate) use image_viewer::{
     archive_image_count, buffer_has_alpha, extract_archive, fill_scale, fit_scale_no_upscale,
-    forget_thumbnail, grid_cols,
-    is_archive_path, last_anchor, load_grid_thumbnail, load_image_full, load_page_preview_full,
-    load_spread_overrides, nav_is_forward, protected_preview_keys, save_spread_overrides,
-    scan_folder_sorted_dir, set_downscale_filter, set_downscale_smoothing, set_linear_resample,
-    set_thumbnail_cache,
-    spread_root_key, spreads_root, thumb_cache_root, xformed_footprint, Animation, Config,
-    DownscaleFilter, Gallery, GallerySpreads, ImgKey, ImageData, NavInput, PageCtx, PagePos, Shape,
-    SavedView, SortMode, Xform, GRID_LABEL_H, grid_row_h, MAX_FULL_PIXELS,
+    forget_thumbnail, grid_cols, grid_row_h, is_archive_path, last_anchor, load_grid_thumbnail,
+    load_image_full, load_page_preview_full, load_spread_overrides, nav_is_forward,
+    protected_preview_keys, save_spread_overrides, scan_folder_sorted_dir, set_downscale_filter,
+    set_downscale_smoothing, set_linear_resample, set_thumbnail_cache, spread_root_key,
+    spreads_root, thumb_cache_root, xformed_footprint, Animation, Config, DownscaleFilter, Gallery,
+    GallerySpreads, ImageData, ImgKey, NavInput, PageCtx, PagePos, SavedView, Shape, SortMode,
+    Xform, GRID_LABEL_H, MAX_FULL_PIXELS,
 };
+pub(crate) use image_viewer::{Job, Kind, Loader, PRIO_CURRENT_EXIF, PRIO_THUMB_BASE};
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -142,9 +143,7 @@ fn main() -> eframe::Result<()> {
     // Start it on a worker thread now so it overlaps the registry and config work
     // below; joined before the event loop so the render is never on the critical
     // path to the first frame.
-    let icon_handle = std::thread::spawn(move || {
-        image_viewer::icon::render(WINDOW_ICON_PX)
-    });
+    let icon_handle = std::thread::spawn(move || image_viewer::icon::render(WINDOW_ICON_PX));
 
     // The taskbar keys its icon cache on an AppUserModelID, and caches whatever
     // it found the first time. Declared here, before any window exists, because
@@ -291,7 +290,6 @@ fn main() -> eframe::Result<()> {
 /// crash is not something to recover from in-process, so the only two channels
 /// available are a process exit code (too coarse) and shared state. This is the
 /// shared state.
-
 // ---------------------------------------------------------------------------
 // The modules
 // ---------------------------------------------------------------------------
@@ -300,7 +298,6 @@ fn main() -> eframe::Result<()> {
 // in modules of their own; main.rs keeps the imports, n main and this list.
 pub(crate) use app::consts::*;
 pub(crate) use app::main::*;
-pub(crate) use app::types::*;
 pub(crate) use app::model::*;
 pub(crate) use app::paint::*;
-
+pub(crate) use app::types::*;

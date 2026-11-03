@@ -6,14 +6,19 @@
 //! named files is a sniffer that will one day pick the wrong decoder.
 
 use image_viewer::{
-    image_dims_bytes, is_bmp_bytes, is_ico_bytes, is_qoi_bytes, is_tiff_bytes, load_image, load_image_preview_full,
-    scan_folder, SUPPORTED_EXTENSIONS,
+    image_dims_bytes, is_bmp_bytes, is_ico_bytes, is_qoi_bytes, is_tiff_bytes, load_image,
+    load_image_preview_full, scan_folder, SUPPORTED_EXTENSIONS,
 };
 use std::path::Path;
 
 /// Encode `img` in `format`, with `name` as the file name — deliberately able to
 /// disagree with the content.
-fn write_as(dir: &Path, name: &str, img: &image::DynamicImage, format: image::ImageFormat) -> std::path::PathBuf {
+fn write_as(
+    dir: &Path,
+    name: &str,
+    img: &image::DynamicImage,
+    format: image::ImageFormat,
+) -> std::path::PathBuf {
     let path = dir.join(name);
     let mut bytes = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut bytes), format)
@@ -142,10 +147,7 @@ fn a_renamed_video_names_its_container_instead_of_the_guessers_shrug() {
     let p = tmp.path().join("nothing.png");
     std::fs::write(&p, b"").unwrap();
     let err = image_viewer::load_image(&p, 4096).unwrap_err().to_string();
-    assert!(
-        err.contains("empty"),
-        "a 0-byte file must say so, got: {err}"
-    );
+    assert!(err.contains("empty"), "a 0-byte file must say so, got: {err}");
 }
 
 /// The other direction, and the reason the remap is gated on the magic: a
@@ -180,11 +182,7 @@ fn the_qoi_sniffer_does_not_fire_on_other_formats() {
     ] {
         let p = write_as(tmp.path(), name, &sample(), format);
         let bytes = std::fs::read(&p).unwrap();
-        assert_eq!(
-            is_qoi_bytes(&bytes),
-            name.ends_with(".qoi"),
-            "is_qoi_bytes wrong for {name}"
-        );
+        assert_eq!(is_qoi_bytes(&bytes), name.ends_with(".qoi"), "is_qoi_bytes wrong for {name}");
     }
     // A too-short buffer must not read past the end.
     for n in 0..20usize {
@@ -345,11 +343,7 @@ fn every_new_format_survives_a_lying_extension() {
         ("actually_an_ico.webp", image::ImageFormat::Ico),
     ] {
         // ICO needs an RGBA source; see `sample_rgba`.
-        let img = if format == image::ImageFormat::Ico {
-            sample_rgba()
-        } else {
-            sample()
-        };
+        let img = if format == image::ImageFormat::Ico { sample_rgba() } else { sample() };
         let p = write_as(tmp.path(), name, &img, format);
         let d = load_image(&p, 4096).unwrap_or_else(|e| panic!("{name} failed: {e:?}"));
         assert_eq!((d.width, d.height), (96, 48), "{name} decoded at the wrong size");
@@ -371,11 +365,7 @@ fn the_sniffers_do_not_fire_on_each_other() {
     ];
     let mut written = Vec::new();
     for (name, format) in cases {
-        let img = if format == image::ImageFormat::Ico {
-            sample_rgba()
-        } else {
-            sample()
-        };
+        let img = if format == image::ImageFormat::Ico { sample_rgba() } else { sample() };
         let p = write_as(tmp.path(), name, &img, format);
         written.push((name, std::fs::read(&p).unwrap()));
     }
@@ -403,7 +393,7 @@ fn truncated_and_empty_input_is_rejected_rather_than_panicking() {
         &b"II\x2a"[..],
         &b"MM"[..],
         &b"MM\x00"[..],
-        &b"II\x00\x00"[..],   // right byte order, wrong version tag
+        &b"II\x00\x00"[..], // right byte order, wrong version tag
         &b"MM\x00\x00"[..],
         &b"\x00\x00\x00\x00"[..],
         &b"\x00\x00\x01\x00"[..],
@@ -466,10 +456,7 @@ fn the_extension_list_covers_both_spellings_and_both_ico_kinds() {
     // `tif`/`tiff` and `ico`/`cur` are the same formats; a scan that only knows
     // one spelling silently hides files the decoder could open.
     for want in ["tif", "tiff", "bmp", "dib", "ico", "cur"] {
-        assert!(
-            SUPPORTED_EXTENSIONS.contains(&want),
-            "{want} missing from SUPPORTED_EXTENSIONS"
-        );
+        assert!(SUPPORTED_EXTENSIONS.contains(&want), "{want} missing from SUPPORTED_EXTENSIONS");
     }
 }
 
@@ -484,11 +471,7 @@ fn a_preview_of_a_new_format_reports_its_source_dimensions() {
         ("p.tiff", image::ImageFormat::Tiff),
         ("p.ico", image::ImageFormat::Ico),
     ] {
-        let img = if format == image::ImageFormat::Ico {
-            sample_rgba()
-        } else {
-            sample()
-        };
+        let img = if format == image::ImageFormat::Ico { sample_rgba() } else { sample() };
         let p = write_as(tmp.path(), name, &img, format);
         let r = load_image_preview_full(&p, 4096).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(r.orig, Some((96, 48)), "{name} sniffed the wrong size");

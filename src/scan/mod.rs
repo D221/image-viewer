@@ -109,11 +109,7 @@ pub fn is_browsable(p: &Path) -> bool {
     if is_archive_path(p) {
         return show_archives_enabled() && archive_image_count(p).map(|c| c > 0).unwrap_or(false);
     }
-    let ext = p
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     SUPPORTED_EXTENSIONS.contains(&ext.as_str())
 }
 
@@ -151,10 +147,7 @@ pub fn scan_folder_recursive(folder: &Path) -> Vec<PathBuf> {
         };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by(|a, b| {
-            natural_cmp(
-                &a.file_name().to_string_lossy(),
-                &b.file_name().to_string_lossy(),
-            )
+            natural_cmp(&a.file_name().to_string_lossy(), &b.file_name().to_string_lossy())
         });
         for entry in entries {
             let Ok(ft) = entry.file_type() else {
@@ -206,4 +199,3 @@ pub enum SortMode {
     /// for files that have been viewed.
     Taken,
 }
-

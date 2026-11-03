@@ -151,10 +151,7 @@ pub struct GallerySpreads {
 
 impl Default for GallerySpreads {
     fn default() -> Self {
-        GallerySpreads {
-            lead_lone: LEAD_LONE_DEFAULT,
-            pages: HashMap::new(),
-        }
+        GallerySpreads { lead_lone: LEAD_LONE_DEFAULT, pages: HashMap::new() }
     }
 }
 
@@ -190,10 +187,7 @@ mod spread_pages {
     ) -> Result<S::Ok, S::Error> {
         let mut by_file: ByFile = BTreeMap::new();
         for ((name, page), shape) in pages {
-            by_file
-                .entry(name.clone())
-                .or_default()
-                .insert(page.to_string(), *shape);
+            by_file.entry(name.clone()).or_default().insert(page.to_string(), *shape);
         }
         by_file.serialize(serializer)
     }
@@ -339,10 +333,7 @@ pub fn load_spread_overrides(store: &Path, root: &Path) -> GallerySpreads {
         return GallerySpreads::default();
     };
     let all: SpreadStore = serde_json::from_str(strip_bom(&text)).unwrap_or_default();
-    let mut g = all
-        .get(root.to_string_lossy().as_ref())
-        .cloned()
-        .unwrap_or_default();
+    let mut g = all.get(root.to_string_lossy().as_ref()).cloned().unwrap_or_default();
     // Clamped, not obeyed. This is a file a person can open and edit, so a
     // `lead_lone` of 99 is a thing that will happen, and obeying it stands the
     // first 99 pages of the gallery alone.
@@ -465,11 +456,7 @@ pub fn spreads_tmp(store: &Path, pid: u32) -> PathBuf {
 /// (refuse the oversized write) would mean refusing to save at all once a store had
 /// drifted over, which loses the very decisions the cap exists to protect. The
 /// threshold is deliberately not an invariant on writes; see [`SPREADS_MAX_BYTES`].
-pub fn save_spread_overrides(
-    store: &Path,
-    root: &Path,
-    g: &GallerySpreads,
-) -> std::io::Result<()> {
+pub fn save_spread_overrides(store: &Path, root: &Path, g: &GallerySpreads) -> std::io::Result<()> {
     if let Ok(meta) = std::fs::metadata(store) {
         if meta.len() > SPREADS_MAX_BYTES {
             return Err(std::io::Error::new(
@@ -513,4 +500,3 @@ pub fn save_spread_overrides(
     std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, store)
 }
-

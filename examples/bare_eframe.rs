@@ -43,11 +43,7 @@ fn main() -> eframe::Result<()> {
     // 0xC0000005 before a window exists: wgpu enumerates *every* enabled backend
     // before choosing an adapter, and Vulkan is a hard access violation on this
     // machine. A nice incidental confirmation of the rule in `AGENTS.md`.
-    let backend = if std::env::args().any(|a| a == "--gl") {
-        Backends::GL
-    } else {
-        Backends::DX12
-    };
+    let backend = if std::env::args().any(|a| a == "--gl") { Backends::GL } else { Backends::DX12 };
     let mut instance = InstanceDescriptor::new_without_display_handle();
     instance.backends = backend;
 

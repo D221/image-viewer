@@ -50,10 +50,7 @@ pub struct ImgKey {
 impl ImgKey {
     /// The ordinary case: the file's only page.
     pub fn first(path: &Path) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            page: 0,
-        }
+        Self { path: path.to_path_buf(), page: 0 }
     }
 
     pub fn path(&self) -> &Path {
@@ -86,11 +83,7 @@ impl SavedView {
     /// panned rather than dragged into the next one. Writing `0.0` here rather
     /// than calling it "default" is the point: this is the rule, stated.
     pub fn carried(fit: bool, scale: f32) -> Self {
-        Self {
-            fit,
-            scale,
-            offset: (0.0, 0.0),
-        }
+        Self { fit, scale, offset: (0.0, 0.0) }
     }
 }
 
@@ -117,9 +110,7 @@ impl Default for ViewMemory {
 
 impl ViewMemory {
     pub fn new() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
+        Self { map: HashMap::new() }
     }
 
     /// Record what the view of `key` was when the user left it.
@@ -153,7 +144,6 @@ impl ViewMemory {
 pub fn arriving_view(saved: Option<SavedView>, fit: bool, scale: f32) -> SavedView {
     saved.unwrap_or_else(|| SavedView::carried(fit, scale))
 }
-
 
 impl std::fmt::Display for ImgKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -242,13 +232,7 @@ impl Loader {
     /// once hid OOM, the most likely cause, behind an unreproducible symptom.
     /// `wake` is called on the thread that received a result, to ask for a
     /// repaint.
-    pub fn spawn<M, R, P, W>(
-        workers: usize,
-        tx: Sender<M>,
-        run: R,
-        panic_msg: P,
-        wake: W,
-    ) -> Self
+    pub fn spawn<M, R, P, W>(workers: usize, tx: Sender<M>, run: R, panic_msg: P, wake: W) -> Self
     where
         M: Send + 'static,
         R: Fn(&Job) -> (M, bool) + Send + Sync + 'static,
@@ -268,27 +252,28 @@ impl Loader {
             let wake = wake.clone();
             std::thread::spawn(move || {
                 loop {
-                let job = {
-                    let (lock, cv) = &*shared;
-                    let mut q = lock.lock().unwrap();
-                    loop {
-                        let best = q
-                            .jobs
-                            .iter()
-                            .enumerate()
-                            .min_by_key(|(_, j)| j.prio)
-                            .map(|(i, _)| i);
-                        if let Some(i) = best {
-                            let job = q.jobs.swap_remove(i);
-                            q.busy.insert((job.key.clone(), job.kind));
-                            break job;
+                    let job = {
+                        let (lock, cv) = &*shared;
+                        let mut q = lock.lock().unwrap();
+                        loop {
+                            let best = q
+                                .jobs
+                                .iter()
+                                .enumerate()
+                                .min_by_key(|(_, j)| j.prio)
+                                .map(|(i, _)| i);
+                            if let Some(i) = best {
+                                let job = q.jobs.swap_remove(i);
+                                q.busy.insert((job.key.clone(), job.kind));
+                                break job;
+                            }
+                            q = cv.wait(q).unwrap();
                         }
-                        q = cv.wait(q).unwrap();
-                    }
-                };
+                    };
 
-                let (msg, delivered) =
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&job))) {
+                    let (msg, delivered) = match std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| run(&job)),
+                    ) {
                         Ok(r) => r,
                         Err(payload) => {
                             perf::count(perf::C_DECODE_PANICS, 1);
@@ -303,37 +288,38 @@ impl Loader {
                         }
                     };
 
-                let alive = tx.send(msg).is_ok();
-                // Free the slot, then honour anything still waiting on it.
-                let (lock, cv) = &*shared;
-                let mut q = lock.lock().unwrap();
-                let key = (job.key.clone(), job.kind);
-                q.busy.remove(&key);
-                if delivered {
-                    // Delivered: the wanted entry was *for* this job and is
-                    // satisfied; keeping it would leave `wanted_but_idle` > 0
-                    // with the loader idle — the strand signal that map's doc
-                    // defines, fired permanently for a job that is actually
-                    // done (invisible while a schedule keeps recomposing
-                    // `wanted`, and exactly what a test that stops replacing
-                    // sees). A fresh decode asks for itself: the next plan
-                    // that wants the key re-inserts it.
-                    q.wanted.remove(&key);
-                } else if let Some(wanted) = q.wanted.get(&key).cloned() {
-                    // Gave up without producing anything. If it is still wanted,
-                    // ask again — this is the whole safety property, and it is
-                    // why the wanted set is kept rather than inferred.
-                    if !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == key) {
-                        q.jobs.push(wanted);
-                        cv.notify_all();
+                    let alive = tx.send(msg).is_ok();
+                    // Free the slot, then honour anything still waiting on it.
+                    let (lock, cv) = &*shared;
+                    let mut q = lock.lock().unwrap();
+                    let key = (job.key.clone(), job.kind);
+                    q.busy.remove(&key);
+                    if delivered {
+                        // Delivered: the wanted entry was *for* this job and is
+                        // satisfied; keeping it would leave `wanted_but_idle` > 0
+                        // with the loader idle — the strand signal that map's doc
+                        // defines, fired permanently for a job that is actually
+                        // done (invisible while a schedule keeps recomposing
+                        // `wanted`, and exactly what a test that stops replacing
+                        // sees). A fresh decode asks for itself: the next plan
+                        // that wants the key re-inserts it.
+                        q.wanted.remove(&key);
+                    } else if let Some(wanted) = q.wanted.get(&key).cloned() {
+                        // Gave up without producing anything. If it is still wanted,
+                        // ask again — this is the whole safety property, and it is
+                        // why the wanted set is kept rather than inferred.
+                        if !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == key) {
+                            q.jobs.push(wanted);
+                            cv.notify_all();
+                        }
                     }
+                    drop(q);
+                    if !alive {
+                        return; // UI is gone
+                    }
+                    wake();
                 }
-                drop(q);
-                if !alive {
-                    return; // UI is gone
-                }
-                wake();
-            }});
+            });
         }
         Self { shared }
     }
@@ -407,8 +393,7 @@ impl Loader {
         q.wanted
             .keys()
             .filter(|k| {
-                !q.busy.contains(*k)
-                    && !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == **k)
+                !q.busy.contains(*k) && !q.jobs.iter().any(|j| (j.key.clone(), j.kind) == **k)
             })
             .count()
     }
@@ -533,10 +518,7 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     // prefetching a 200-page document's other 199 pages would be absurd, and
     // because you arrive at a neighbour's later pages by pressing right, at which
     // point it is the current image and gets planned then.
-    let cur_key = ImgKey {
-        path: cur.clone(),
-        page: p.current_page,
-    };
+    let cur_key = ImgKey { path: cur.clone(), page: p.current_page };
 
     let need_preview = |key: &ImgKey| {
         // **An archive is never a decode job.** `goto` enters the one the cursor
@@ -617,12 +599,7 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
         });
     }
     if p.wants_full {
-        jobs.push(Job {
-            key: cur_key.clone(),
-            kind: Kind::Full,
-            prio: PRIO_FULL,
-            target_dim: 0,
-        });
+        jobs.push(Job { key: cur_key.clone(), kind: Kind::Full, prio: PRIO_FULL, target_dim: 0 });
     }
 
     let mut seen: HashSet<usize> = HashSet::from([i]);
@@ -635,10 +612,9 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
     // window as well.
     let mut spent: u64 = 0;
     for d in 1..=p.radius {
-        for (idx, prio) in [
-            ((i + d) % n, 10 + 2 * d as u32),
-            ((i + n - d % n) % n, 11 + 2 * d as u32),
-        ] {
+        for (idx, prio) in
+            [((i + d) % n, 10 + 2 * d as u32), ((i + n - d % n) % n, 11 + 2 * d as u32)]
+        {
             let key = ImgKey::first(&p.files[idx]);
             // The partner is skipped by **key**, not by seeding `seen` with its
             // index. `seen` is the window's dedup of *indices* and the partner is a
@@ -675,15 +651,9 @@ pub fn plan_jobs(p: &Plan) -> Vec<Job> {
                     continue;
                 }
                 spent += len;
-                jobs.push(Job {
-                    key,
-                    kind: Kind::Preview,
-                    prio,
-                    target_dim: p.target_dim,
-                });
+                jobs.push(Job { key, kind: Kind::Preview, prio, target_dim: p.target_dim });
             }
         }
     }
     jobs
 }
-

@@ -101,9 +101,8 @@ impl MyApp {
         // the dimensions it is handed, so a 1x1 placeholder is a 1-point sliver at
         // the seam. That is the failure this line prevents, and not the one the
         // `min` would suggest.
-        let dims = cached
-            .or_else(|| self.previews.get(partner).map(|pv| pv.orig))
-            .unwrap_or(cursor_dims);
+        let dims =
+            cached.or_else(|| self.previews.get(partner).map(|pv| pv.orig)).unwrap_or(cursor_dims);
         vec![
             (shown.clone(), cursor_dims, cursor_xform),
             (partner.clone(), dims, self.edits.xform(&partner.path)),
@@ -113,11 +112,7 @@ impl MyApp {
     // ---- drawing ----------------------------------------------------------
 
     pub(crate) fn status_text(&self, ppp: f32) -> String {
-        let idx = if self.gallery.is_empty() {
-            0
-        } else {
-            self.gallery.index + 1
-        };
+        let idx = if self.gallery.is_empty() { 0 } else { self.gallery.index + 1 };
         let filename = self
             .shown
             .as_ref()
@@ -132,12 +127,7 @@ impl MyApp {
             ),
             _ => format!("{}\\{}", self.folder.display(), filename),
         };
-        let mut s = format!(
-            "{} - {}/{}",
-            location,
-            idx,
-            self.gallery.len()
-        );
+        let mut s = format!("{} - {}/{}", location, idx, self.gallery.len());
         // Standing on an archive says what it holds and what pressing → does.
         // **The cursor, not `shown`**: an archive has no picture on screen — the
         // previous image is still painted, deliberately — so a readout built
@@ -166,10 +156,8 @@ impl MyApp {
                 s += &format!(" - page {}/{}", k.page + 1, pages);
             }
         }
-        if let Some((shown_key, pv)) = self
-            .shown
-            .as_ref()
-            .and_then(|k| self.previews.get(k).map(|pv| (k, pv)))
+        if let Some((shown_key, pv)) =
+            self.shown.as_ref().and_then(|k| self.previews.get(k).map(|pv| (k, pv)))
         {
             s += &format!(" - {}x{} - preview {} ms", pv.orig.0, pv.orig.1, pv.load_ms);
             // Show the dimensions as displayed once turned, so the readout
@@ -190,11 +178,8 @@ impl MyApp {
                 s += &format!(" - anim {} frames", anim.frames.len());
                 // Paused frame, so stepping shows where it landed. Read off
                 // the player, not the preview: the preview never pauses.
-                if let Some(held) = self
-                    .anim
-                    .as_ref()
-                    .filter(|a| a.path == shown_key.path)
-                    .and_then(|a| a.paused)
+                if let Some(held) =
+                    self.anim.as_ref().filter(|a| a.path == shown_key.path).and_then(|a| a.paused)
                 {
                     s += &format!(" (paused {}/{})", held + 1, anim.frames.len());
                 }
@@ -216,10 +201,7 @@ impl MyApp {
         // Zoom as a percentage of 1:1, so it means the same whatever the window
         // is doing. `view.scale` is points per source pixel; times `ppp` that
         // is physical pixels per source pixel, which is what the percent means.
-        s += &format!(
-            " - {}%",
-            image_viewer::zoom_percent(self.view.scale, ppp)
-        );
+        s += &format!(" - {}%", image_viewer::zoom_percent(self.view.scale, ppp));
         if self.slideshow {
             s += &format!(" - slideshow {}s", self.config.slideshow_secs);
         }
@@ -241,5 +223,4 @@ impl MyApp {
         }
         s
     }
-
 }

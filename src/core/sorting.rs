@@ -106,10 +106,7 @@ pub(crate) fn apply_sort_order(files: &mut [PathBuf], mode: SortMode, descending
         }
         SortMode::Date => {
             files.sort_by_cached_key(|p| {
-                std::fs::metadata(p)
-                    .and_then(|m| m.modified())
-                    .map(std::cmp::Reverse)
-                    .ok()
+                std::fs::metadata(p).and_then(|m| m.modified()).map(std::cmp::Reverse).ok()
             });
         }
         SortMode::Size => {
@@ -126,9 +123,7 @@ pub(crate) fn apply_sort_order(files: &mut [PathBuf], mode: SortMode, descending
             // once per sort (cached by `sort_by_cached_key`); the persisted
             // shape cache makes this cheaper for files that have been viewed,
             // but the first sort of a large folder still pays the EXIF read.
-            files.sort_by_cached_key(|p| {
-                std::cmp::Reverse(exif_date_taken(p))
-            });
+            files.sort_by_cached_key(|p| std::cmp::Reverse(exif_date_taken(p)));
         }
     }
     if descending {
@@ -156,4 +151,3 @@ pub fn shuffle(files: &mut [PathBuf]) {
         files.swap(i, j);
     }
 }
-

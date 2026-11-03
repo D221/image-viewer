@@ -92,14 +92,9 @@ pub fn thumb_cache_root() -> PathBuf {
         return dir.join("thumbs");
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        PathBuf::from(local)
-            .join("image-viewer")
-            .join("thumbs")
+        PathBuf::from(local).join("image-viewer").join("thumbs")
     } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("image-viewer")
-            .join("thumbs")
+        PathBuf::from(home).join(".cache").join("image-viewer").join("thumbs")
     } else {
         PathBuf::from("image-viewer-thumbs")
     }
@@ -108,7 +103,8 @@ pub fn thumb_cache_root() -> PathBuf {
 /// On/off for the whole cache, so a user who wants the viewer to write nothing
 /// outside its config folder can say so. Mirrors [`set_linear_resample`]: a
 /// global the workers read, set once from config at start-up.
-pub(crate) static THUMB_CACHE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub(crate) static THUMB_CACHE_ON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 pub fn set_thumbnail_cache(on: bool) {
     THUMB_CACHE_ON.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -140,10 +136,7 @@ pub fn thumb_stamp(path: &Path) -> Option<ThumbStamp> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Some(ThumbStamp {
-        mtime_secs,
-        len: meta.len(),
-    })
+    Some(ThumbStamp { mtime_secs, len: meta.len() })
 }
 
 /// Header of one cache entry: everything needed to decide whether it may be
@@ -201,10 +194,7 @@ pub(crate) fn decode_thumb_header(bytes: &[u8]) -> Option<(ThumbHeader, &[u8])> 
         ThumbHeader {
             width: u32_at(8),
             height: u32_at(12),
-            stamp: ThumbStamp {
-                mtime_secs: u64_at(16),
-                len: u64_at(24),
-            },
+            stamp: ThumbStamp { mtime_secs: u64_at(16), len: u64_at(24) },
             target: u32_at(32),
             path,
         },
@@ -246,16 +236,11 @@ pub fn mark_not_content_indexed(dir: &Path) -> bool {
         Ok(m) => m.file_attributes(),
         Err(_) => return false,
     };
-    let wide = dir
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<u16>>();
+    let wide = dir.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
     unsafe {
         windows_sys::Win32::Storage::FileSystem::SetFileAttributesW(
             wide.as_ptr(),
-            current
-                | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+            current | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
         ) != 0
     }
 }
@@ -264,5 +249,3 @@ pub fn mark_not_content_indexed(dir: &Path) -> bool {
 pub fn mark_not_content_indexed(_dir: &Path) -> bool {
     true
 }
-
-

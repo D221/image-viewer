@@ -9,7 +9,8 @@ use crate::*;
 
 /// Global toggle for linear-light downsampling (set from the config toggle in
 /// main.rs). Workers read it; the UI thread writes it.
-pub(crate) static LINEAR_RESAMPLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+pub(crate) static LINEAR_RESAMPLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 
 /// Enable/disable linear-light downsampling at runtime.
 pub fn set_linear_resample(on: bool) {
@@ -35,7 +36,8 @@ pub enum DownscaleFilter {
     Lanczos3,
 }
 
-pub(crate) static DOWNSCALE_FILTER: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub(crate) static DOWNSCALE_FILTER: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
 
 /// Set the downsampling filter at runtime (workers read it per-resize).
 pub fn set_downscale_filter(f: DownscaleFilter) {
@@ -195,21 +197,14 @@ pub(crate) fn lin_tables() -> (&'static [u16; 256], &'static [u8; 4096]) {
         let mut to_lin = Box::new([0u16; 256]);
         for (i, v) in to_lin.iter_mut().enumerate() {
             let s = i as f64 / 255.0;
-            let lin = if s <= 0.04045 {
-                s / 12.92
-            } else {
-                ((s + 0.055) / 1.055).powf(2.4)
-            };
+            let lin = if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) };
             *v = (lin * 4095.0).round() as u16;
         }
         let mut to_srgb = Box::new([0u8; 4096]);
         for (i, v) in to_srgb.iter_mut().enumerate() {
             let lin = i as f64 / 4095.0;
-            let s = if lin <= 0.003_130_8 {
-                lin * 12.92
-            } else {
-                1.055 * lin.powf(1.0 / 2.4) - 0.055
-            };
+            let s =
+                if lin <= 0.003_130_8 { lin * 12.92 } else { 1.055 * lin.powf(1.0 / 2.4) - 0.055 };
             *v = ((s * 255.0).round()).clamp(0.0, 255.0) as u8;
         }
         (to_lin, to_srgb)
@@ -222,9 +217,8 @@ pub(crate) fn lin_tables() -> (&'static [u16; 256], &'static [u8; 4096]) {
 /// CatmullRom filter (sharper, correct edges on lineart); otherwise it uses the
 /// fast gamma-space Triangle filter.
 pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
-    let scale = (max_dim as f32 / data.width as f32)
-        .min(max_dim as f32 / data.height as f32)
-        .min(1.0);
+    let scale =
+        (max_dim as f32 / data.width as f32).min(max_dim as f32 / data.height as f32).min(1.0);
     if scale >= 1.0 {
         return ImageData {
             width: data.width,
@@ -233,10 +227,8 @@ pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
             load_time: data.load_time, // keep original decode time
         };
     }
-    let (new_w, new_h) = (
-        (data.width as f32 * scale).max(1.0) as u32,
-        (data.height as f32 * scale).max(1.0) as u32,
-    );
+    let (new_w, new_h) =
+        ((data.width as f32 * scale).max(1.0) as u32, (data.height as f32 * scale).max(1.0) as u32);
     let out = if linear_resample_enabled() {
         ImageData {
             width: new_w,
@@ -264,9 +256,7 @@ pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
         // so the aspect-ratio clamp started shaving pixels off. That is also why
         // it looked machine- and window-dependent, and why only the gamma-space
         // path failed — `linear_resize` writes its own exact buffer.
-        let resized = img
-            .resize(new_w, new_h, image::imageops::FilterType::Triangle)
-            .to_rgba8();
+        let resized = img.resize(new_w, new_h, image::imageops::FilterType::Triangle).to_rgba8();
         ImageData {
             width: resized.width(),
             height: resized.height(),
@@ -360,7 +350,13 @@ pub fn prefilter_dim(dim: u32, target: u32) -> u32 {
 /// kernel that already meets it. Measured, not inferred: handing this stage the
 /// real floor changes the output at R 2.02 and above, i.e. at every reduction the
 /// shipped threshold already covers.
-pub(crate) fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32, strength: f32, floor: f32) -> Vec<u8> {
+pub(crate) fn kernel_reduce_linear(
+    data: &ImageData,
+    pre_w: u32,
+    pre_h: u32,
+    strength: f32,
+    floor: f32,
+) -> Vec<u8> {
     let (to_lin, to_srgb) = lin_tables();
     let (sw, sh) = (data.width as usize, data.height as usize);
     let (pw, ph) = (pre_w as usize, pre_h as usize);
@@ -372,26 +368,24 @@ pub(crate) fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32, str
     let mut tmp = vec![0u8; pw * sh * 4];
     let src_stride = sw * 4;
     let src = &data.rgba;
-    tmp.par_chunks_mut(pw * 4)
-        .enumerate()
-        .for_each(|(y, out_row)| {
-            let row = &src[y * src_stride..(y + 1) * src_stride];
-            for (x, con) in horizontal.iter().enumerate() {
-                let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
-                for &(si, w) in con {
-                    let p = &row[si * 4..si * 4 + 4];
-                    r += to_lin[p[0] as usize] as f32 * w;
-                    g += to_lin[p[1] as usize] as f32 * w;
-                    b += to_lin[p[2] as usize] as f32 * w;
-                    a += (p[3] as f32) * 16.0 * w;
-                }
-                let o = x * 4;
-                out_row[o] = to_srgb[r.max(0.0).min(4095.0) as usize];
-                out_row[o + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
-                out_row[o + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
-                out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+    tmp.par_chunks_mut(pw * 4).enumerate().for_each(|(y, out_row)| {
+        let row = &src[y * src_stride..(y + 1) * src_stride];
+        for (x, con) in horizontal.iter().enumerate() {
+            let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+            for &(si, w) in con {
+                let p = &row[si * 4..si * 4 + 4];
+                r += to_lin[p[0] as usize] as f32 * w;
+                g += to_lin[p[1] as usize] as f32 * w;
+                b += to_lin[p[2] as usize] as f32 * w;
+                a += (p[3] as f32) * 16.0 * w;
             }
-        });
+            let o = x * 4;
+            out_row[o] = to_srgb[r.max(0.0).min(4095.0) as usize];
+            out_row[o + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
+            out_row[o + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
+            out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+        }
+    });
     if ph == sh {
         return tmp;
     }
@@ -400,28 +394,25 @@ pub(crate) fn kernel_reduce_linear(data: &ImageData, pre_w: u32, pre_h: u32, str
     // no LUT; it rides the same 0..4080 scale `lin` uses for it.
     let mut out = vec![0u8; pw * ph * 4];
     let tmp_stride = pw * 4;
-    out.par_chunks_mut(tmp_stride)
-        .enumerate()
-        .for_each(|(y, out_row)| {
-            for x in 0..pw {
-                let i = x * 4;
-                let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
-                for &(si, w) in &vertical[y] {
-                    let p = &tmp[si * tmp_stride + i..si * tmp_stride + i + 4];
-                    r += to_lin[p[0] as usize] as f32 * w;
-                    g += to_lin[p[1] as usize] as f32 * w;
-                    b += to_lin[p[2] as usize] as f32 * w;
-                    a += (p[3] as f32) * 16.0 * w;
-                }
-                out_row[i] = to_srgb[r.max(0.0).min(4095.0) as usize];
-                out_row[i + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
-                out_row[i + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
-                out_row[i + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+    out.par_chunks_mut(tmp_stride).enumerate().for_each(|(y, out_row)| {
+        for x in 0..pw {
+            let i = x * 4;
+            let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+            for &(si, w) in &vertical[y] {
+                let p = &tmp[si * tmp_stride + i..si * tmp_stride + i + 4];
+                r += to_lin[p[0] as usize] as f32 * w;
+                g += to_lin[p[1] as usize] as f32 * w;
+                b += to_lin[p[2] as usize] as f32 * w;
+                a += (p[3] as f32) * 16.0 * w;
             }
-        });
+            out_row[i] = to_srgb[r.max(0.0).min(4095.0) as usize];
+            out_row[i + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
+            out_row[i + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
+            out_row[i + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+        }
+    });
     out
 }
-
 
 /// Resample in 12-bit linear light with a separable kernel.
 ///
@@ -483,10 +474,8 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
     };
     let t1 = std::time::Instant::now();
     let mut lin = vec![0u16; (lw as usize) * (lh as usize) * 4];
-    small
-        .par_chunks_exact(lw as usize * 4)
-        .zip(lin.par_chunks_mut(lw as usize * 4))
-        .for_each(|(srow, lrow)| {
+    small.par_chunks_exact(lw as usize * 4).zip(lin.par_chunks_mut(lw as usize * 4)).for_each(
+        |(srow, lrow)| {
             for (c, chunk) in srow.chunks_exact(4).enumerate() {
                 lrow[c * 4] = to_lin[chunk[0] as usize];
                 lrow[c * 4 + 1] = to_lin[chunk[1] as usize];
@@ -494,7 +483,8 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
                 // alpha is linear by definition
                 lrow[c * 4 + 3] = (chunk[3] as u16) << 4;
             }
-        });
+        },
+    );
 
     let t2 = std::time::Instant::now();
     // Separable kernel resample in 12-bit linear light with precomputed weights.
@@ -506,9 +496,7 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
     let mut tmp = vec![0u16; (new_w as usize) * (lh as usize) * 4];
     let pre_stride = lw as usize * 4;
     let new_wu = new_w as usize;
-    tmp.par_chunks_mut(new_wu * 4)
-        .enumerate()
-        .for_each(|(y, out_row)| {
+    tmp.par_chunks_mut(new_wu * 4).enumerate().for_each(|(y, out_row)| {
         let row = &lin[y * pre_stride..(y + 1) * pre_stride];
         for (x, con) in horizontal.iter().enumerate() {
             let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
@@ -533,22 +521,22 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
     let stride = new_w as usize * 4;
     out.par_chunks_mut(stride).enumerate().for_each(|(y, out_row)| {
         {
-        for x in 0..new_w as usize {
-            let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
-            for &(si, w) in &vertical[y] {
-                let p = &tmp[si * stride + x * 4..si * stride + x * 4 + 4];
-                r += p[0] as f32 * w;
-                g += p[1] as f32 * w;
-                b += p[2] as f32 * w;
-                a += p[3] as f32 * w;
+            for x in 0..new_w as usize {
+                let (mut r, mut g, mut b, mut a) = (0f32, 0f32, 0f32, 0f32);
+                for &(si, w) in &vertical[y] {
+                    let p = &tmp[si * stride + x * 4..si * stride + x * 4 + 4];
+                    r += p[0] as f32 * w;
+                    g += p[1] as f32 * w;
+                    b += p[2] as f32 * w;
+                    a += p[3] as f32 * w;
+                }
+                // Clamp to the 12-bit linear range (filters overshoot on edges).
+                let o = x * 4;
+                out_row[o] = to_srgb[(r.max(0.0).min(4095.0)) as usize];
+                out_row[o + 1] = to_srgb[(g.max(0.0).min(4095.0)) as usize];
+                out_row[o + 2] = to_srgb[(b.max(0.0).min(4095.0)) as usize];
+                out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
             }
-            // Clamp to the 12-bit linear range (filters overshoot on edges).
-            let o = x * 4;
-            out_row[o] = to_srgb[(r.max(0.0).min(4095.0)) as usize];
-            out_row[o + 1] = to_srgb[(g.max(0.0).min(4095.0)) as usize];
-            out_row[o + 2] = to_srgb[(b.max(0.0).min(4095.0)) as usize];
-            out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
-        }
         }
     });
     if *PHASE_TIMING.get_or_init(|| std::env::var("PERF_PHASE").is_ok()) {
@@ -642,4 +630,3 @@ pub fn normalized(mut data: ImageData) -> ImageData {
 pub fn buffer_has_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|p| p[3] != 255)
 }
-

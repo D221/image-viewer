@@ -24,11 +24,7 @@ pub enum Colour<'a> {
     Icc(&'a [u8]),
     /// `colr` with colour_type `nclx`: primaries, transfer and matrix, which is
     /// how a file states its colour with no profile at all.
-    Nclx {
-        primaries: u16,
-        transfer: u16,
-        matrix: u16,
-    },
+    Nclx { primaries: u16, transfer: u16, matrix: u16 },
 }
 
 /// A HEIF whose primary item declares its colour with an ICC profile.
@@ -45,11 +41,7 @@ pub fn heif_with_icc(icc: &[u8]) -> Vec<u8> {
 /// identity). This is the shape a phone HEIC takes, and the reason `None` must
 /// not be read as "sRGB".
 pub fn heif_with_nclx_display_p3() -> Vec<u8> {
-    heif(Colour::Nclx {
-        primaries: 12,
-        transfer: 13,
-        matrix: 0,
-    })
+    heif(Colour::Nclx { primaries: 12, transfer: 13, matrix: 0 })
 }
 
 fn heif(colour: Colour<'_>) -> Vec<u8> {
@@ -85,11 +77,7 @@ fn heif(colour: Colour<'_>) -> Vec<u8> {
             c.extend_from_slice(icc);
             c
         }
-        Colour::Nclx {
-            primaries,
-            transfer,
-            matrix,
-        } => {
+        Colour::Nclx { primaries, transfer, matrix } => {
             let mut c = b"nclx".to_vec();
             c.extend_from_slice(&primaries.to_be_bytes());
             c.extend_from_slice(&transfer.to_be_bytes());
@@ -106,7 +94,8 @@ fn heif(colour: Colour<'_>) -> Vec<u8> {
     ipma.extend_from_slice(&1u16.to_be_bytes()); // item_ID
     ipma.push(1); // association_count
     ipma.push(1); // essential = 0, property index = 1
-    let iprp = box_(b"iprp", &[ipco.as_slice(), full_box(b"ipma", 0, 0, &ipma).as_slice()].concat());
+    let iprp =
+        box_(b"iprp", &[ipco.as_slice(), full_box(b"ipma", 0, 0, &ipma).as_slice()].concat());
 
     let mut meta = Vec::new();
     meta.extend_from_slice(&full_box(b"hdlr", 0, 0, &hdlr));

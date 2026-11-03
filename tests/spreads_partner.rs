@@ -11,8 +11,8 @@
 //! difference. So the key is asserted whole, and never through `path()`.
 
 use image_viewer::{
-    next_anchor, pairable, prev_anchor, shape_of, turn_len, turn_partner, ImgKey, PageCtx,
-    PagePos, Shape,
+    next_anchor, pairable, prev_anchor, shape_of, turn_len, turn_partner, ImgKey, PageCtx, PagePos,
+    Shape,
 };
 
 use Shape::{Double, Single};
@@ -56,10 +56,7 @@ fn a_lone_turn_has_no_partner() {
     // cursor go" two different questions in the first place.
     for looping in [false, true] {
         for shapes in [vec![Single], vec![Double]] {
-            let g = TestGallery {
-                docs: vec![shapes],
-                loop_back: looping,
-            };
+            let g = TestGallery { docs: vec![shapes], loop_back: looping };
             assert_eq!(
                 partner(&g, 0, 0, 0),
                 None,
@@ -116,9 +113,8 @@ fn the_partner_is_not_the_next_anchor() {
     // Both are compared as page numbers because that is the only part that can
     // differ: both keys name the same document, so a `path()`-only assertion would
     // pass for either answer.
-    let next_turn_page = |anchor| {
-        next_anchor(anchor, 0, &doc).and_then(|p| doc.key(p)).map(|k| k.page)
-    };
+    let next_turn_page =
+        |anchor| next_anchor(anchor, 0, &doc).and_then(|p| doc.key(p)).map(|k| k.page);
     let partner_page = |anchor| turn_partner(anchor, 0, &doc).map(|k| k.page);
 
     let anchor = PagePos { index: 0, page: 0 };
@@ -127,11 +123,7 @@ fn the_partner_is_not_the_next_anchor() {
         Some(2),
         "test setup: `next_anchor` really is two pages forward"
     );
-    assert_eq!(
-        partner_page(anchor),
-        Some(1),
-        "the turn's second page is one"
-    );
+    assert_eq!(partner_page(anchor), Some(1), "the turn's second page is one");
     assert_ne!(
         next_turn_page(anchor),
         partner_page(anchor),

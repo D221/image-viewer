@@ -167,7 +167,6 @@ const COUNTER_NAMES: [&str; N_COUNTERS] = [
     "worker decode panics",
     "stalls (>5s to first pixels)",
     "frames built",
-
     "frames with input events",
     "grid thumbnails from cache",
     "grid thumbnails decoded (cache miss)",
@@ -192,11 +191,7 @@ impl Metric {
     const fn new() -> Self {
         #[allow(clippy::declare_interior_mutable_const)]
         const Z: AtomicU32 = AtomicU32::new(0);
-        Self {
-            count: AtomicU64::new(0),
-            write: AtomicUsize::new(0),
-            ring: [Z; CAP],
-        }
+        Self { count: AtomicU64::new(0), write: AtomicUsize::new(0), ring: [Z; CAP] }
     }
 
     fn push(&self, micros: u64) {
@@ -208,13 +203,8 @@ impl Metric {
     /// Copy the ring into a sorted `Vec` of microsecond values.
     fn snapshot(&self) -> (u64, Vec<u32>) {
         let n = self.count.load(Relaxed);
-        let mut v: Vec<u32> = self
-            .ring
-            .iter()
-            .map(|a| a.load(Relaxed))
-            .filter(|&s| s != 0)
-            .map(|s| s - 1)
-            .collect();
+        let mut v: Vec<u32> =
+            self.ring.iter().map(|a| a.load(Relaxed)).filter(|&s| s != 0).map(|s| s - 1).collect();
         v.sort_unstable();
         (n, v)
     }
@@ -351,11 +341,7 @@ pub fn report() -> String {
     }
     out.push_str("\n  counters\n");
     for (i, c) in COUNTERS.iter().enumerate() {
-        out.push_str(&format!(
-            "    {:<40} {}\n",
-            COUNTER_NAMES[i],
-            c.load(Relaxed)
-        ));
+        out.push_str(&format!("    {:<40} {}\n", COUNTER_NAMES[i], c.load(Relaxed)));
     }
     let causes = repaint_causes();
     if !causes.is_empty() {

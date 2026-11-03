@@ -206,9 +206,7 @@ pub(crate) fn png_colour_chunks(bytes: &[u8]) -> (bool, Option<Vec<u8>>) {
 }
 
 pub(crate) fn icc_tag(b: &[u8], at: usize) -> String {
-    String::from_utf8_lossy(&b[at..at + 4])
-        .trim_end()
-        .to_string()
+    String::from_utf8_lossy(&b[at..at + 4]).trim_end().to_string()
 }
 
 /// The `desc` tag, which is ASCII in an ICC v2 profile and UTF-16BE `mluc` in
@@ -254,8 +252,10 @@ pub(crate) fn icc_description_opt(icc: &[u8]) -> Option<String> {
                 // for validation and otherwise unused.
                 let _n = u32::from_be_bytes(icc.get(r + 4..r + 8)?.try_into().ok()?) as usize;
                 let str_off = r + 8;
-                let len = u32::from_be_bytes(icc.get(str_off..str_off + 4)?.try_into().ok()?) as usize;
-                let at = u32::from_be_bytes(icc.get(str_off + 4..str_off + 8)?.try_into().ok()?) as usize;
+                let len =
+                    u32::from_be_bytes(icc.get(str_off..str_off + 4)?.try_into().ok()?) as usize;
+                let at = u32::from_be_bytes(icc.get(str_off + 4..str_off + 8)?.try_into().ok()?)
+                    as usize;
                 let start = off.checked_add(at)?;
                 let end = start.checked_add(len)?.min(icc.len());
                 if start >= icc.len() || start % 2 != 0 {
@@ -265,9 +265,7 @@ pub(crate) fn icc_description_opt(icc: &[u8]) -> Option<String> {
                     .chunks_exact(2)
                     .map(|c| u16::from_be_bytes([c[0], c[1]]))
                     .collect();
-                String::from_utf16(&units)
-                    .ok()
-                    .map(|s| s.trim().to_string())
+                String::from_utf16(&units).ok().map(|s| s.trim().to_string())
             }
             _ => None,
         };
@@ -357,10 +355,8 @@ pub(crate) fn classify_icc(icc: &[u8]) -> ColorInfo {
     // "sRGB IEC61966-2.1" yields `srgb`, without matching a `p3` buried inside a
     // longer word.
     let d = info.description.to_ascii_lowercase();
-    let tokens: Vec<&str> = d
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let tokens: Vec<&str> =
+        d.split(|c: char| !c.is_ascii_alphanumeric()).filter(|s| !s.is_empty()).collect();
     let has = |w: &str| tokens.iter().any(|t| *t == w);
     info.space = if has("prophoto") {
         ColorSpace::WideGamut
@@ -498,4 +494,3 @@ pub fn scan_colour(folder: &Path) -> Vec<(PathBuf, ColorInfo)> {
         })
         .collect()
 }
-

@@ -42,9 +42,7 @@ fn collect_src(dir: &Path, texts: &mut Vec<String>) {
 
 /// The body of `fn <sig>` in `src/main.rs`, found by **brace matching**.
 fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
         + sig.len();
     let mut depth = 0i32;
     let mut end = None;
@@ -61,17 +59,18 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
             _ => {}
         }
     }
-    let end = end.expect("could not find the end of the function: its braces do not \
-                         balance, or the signature changed shape. Update this test.");
+    let end = end.expect(
+        "could not find the end of the function: its braces do not \
+                         balance, or the signature changed shape. Update this test.",
+    );
     &src[start..end]
 }
 
 /// The text from `marker` through its matching closing brace.
 fn block_after<'a>(src: &'a str, marker: &str) -> &'a str {
-    let at = src
-        .find(marker)
-        .unwrap_or_else(|| panic!("{marker} is gone; update this test to match"))
-        + marker.len();
+    let at =
+        src.find(marker).unwrap_or_else(|| panic!("{marker} is gone; update this test to match"))
+            + marker.len();
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     for (i, b) in bytes[at..].iter().enumerate() {
@@ -171,9 +170,8 @@ fn central_decides_and_threads_the_lone_spread_flag() {
     // halved below those two lines is the old bug with extra steps. Comparing against
     // the layout calls would be checking nothing Ã¢â‚¬â€ `central` fits after the picture is
     // known, so an ask placed anywhere above `spread_fit` would satisfy it.
-    let preview_target_at = central
-        .find("preview_target(")
-        .expect("`central` no longer asks for the preview target");
+    let preview_target_at =
+        central.find("preview_target(").expect("`central` no longer asks for the preview target");
     assert!(
         at < preview_target_at,
         "the decode target is decided after `preview_target` and `display_dim` have already \

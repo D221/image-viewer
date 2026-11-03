@@ -141,13 +141,10 @@ impl MyApp {
         };
         let quality = self.save_as.quality;
         let edit = self.edits.get(&p);
-        match image_viewer::save_transformed_to(&p, edit.xform, edit.crop, &dest, quality, max_long) {
+        match image_viewer::save_transformed_to(&p, edit.xform, edit.crop, &dest, quality, max_long)
+        {
             Ok(out) => {
-                let name = dest
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+                let name = dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let sized = if max_long == 0 {
                     String::new()
                 } else {
@@ -156,7 +153,10 @@ impl MyApp {
                 self.notice = Some(if out.lossless {
                     format!("Saved {name} ({} , lossless){sized}", edit.label())
                 } else {
-                    format!("Saved {name} ({} , re-encoded at quality {quality}){sized}", edit.label())
+                    format!(
+                        "Saved {name} ({} , re-encoded at quality {quality}){sized}",
+                        edit.label()
+                    )
                 });
                 self.save_as.open = false;
             }
@@ -190,10 +190,7 @@ impl MyApp {
                     .selected_text(current_ext.clone())
                     .show_ui(ui, |ui| {
                         for f in self.save_as.formats {
-                            if ui
-                                .selectable_label(current_ext == *f, format!(".{f}"))
-                                .clicked()
-                            {
+                            if ui.selectable_label(current_ext == *f, format!(".{f}")).clicked() {
                                 let dest = std::mem::take(&mut self.save_as.dest);
                                 self.save_as.dest = replace_extension(&dest, f);
                             }
@@ -248,7 +245,8 @@ impl MyApp {
             // "Go back" cell pressed
             self.leave_archive(ctx, false);
         } else {
-            let file_idx = self.grid_sel.saturating_sub(if self.zip_archive.is_some() { 1 } else { 0 });
+            let file_idx =
+                self.grid_sel.saturating_sub(if self.zip_archive.is_some() { 1 } else { 0 });
             self.gallery.goto_index(file_idx.min(self.gallery.len().saturating_sub(1)));
             self.gallery_view = false;
             self.goto(ctx);
@@ -259,5 +257,4 @@ impl MyApp {
             self.enter_archive_if_present(ctx);
         }
     }
-
 }

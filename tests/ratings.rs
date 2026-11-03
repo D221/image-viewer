@@ -89,7 +89,12 @@ fn stars_are_clamped_and_a_flag_is_a_label() {
     // Lightroom's flag is xmp:Label with text values, not a boolean, so the
     // bytes are Pick/Reject - that is what makes the file readable elsewhere.
     let (_d, p) = temp_image("a.jpg");
-    let r = Ratings { rating: Rating { stars: 9, flag: true }, tags: vec![], caption: String::new(), artist: String::new() };
+    let r = Ratings {
+        rating: Rating { stars: 9, flag: true },
+        tags: vec![],
+        caption: String::new(),
+        artist: String::new(),
+    };
     r.write(&p).unwrap();
     let bytes = std::fs::read(image_viewer::ratings::sidecar_path(&p).unwrap()).unwrap();
     let s = String::from_utf8_lossy(&bytes);
@@ -103,8 +108,22 @@ fn two_images_sharing_a_stem_get_separate_sidecars() {
     let p2 = d.path().join("photo.png");
     std::fs::write(&p2, b"\x89PNG\r\n\x1a\n").unwrap();
 
-    Ratings { rating: Rating { stars: 2, flag: false }, tags: vec![], caption: String::new(), artist: String::new() }.write(&p1).unwrap();
-    Ratings { rating: Rating { stars: 5, flag: false }, tags: vec![], caption: String::new(), artist: String::new() }.write(&p2).unwrap();
+    Ratings {
+        rating: Rating { stars: 2, flag: false },
+        tags: vec![],
+        caption: String::new(),
+        artist: String::new(),
+    }
+    .write(&p1)
+    .unwrap();
+    Ratings {
+        rating: Rating { stars: 5, flag: false },
+        tags: vec![],
+        caption: String::new(),
+        artist: String::new(),
+    }
+    .write(&p2)
+    .unwrap();
 
     assert_eq!(Ratings::read(&p1).unwrap().rating.stars, 2, "the .jpg kept its own");
     assert_eq!(Ratings::read(&p2).unwrap().rating.stars, 5, "the .png is untouched by it");
@@ -147,10 +166,14 @@ fn changing_a_rating_preserves_every_other_packet() {
     r.write(&p).unwrap();
 
     let after = std::fs::read_to_string(&side).unwrap();
-    assert!(after.contains("crs:ToneCurveName2012=\"Medium High Contrast\""),
-        "the Camera Raw packet must survive:\n{after}");
-    assert!(after.contains("crs:Exposure2012=\"+0.35\""),
-        "and so must every other attribute:\n{after}");
+    assert!(
+        after.contains("crs:ToneCurveName2012=\"Medium High Contrast\""),
+        "the Camera Raw packet must survive:\n{after}"
+    );
+    assert!(
+        after.contains("crs:Exposure2012=\"+0.35\""),
+        "and so must every other attribute:\n{after}"
+    );
     assert!(after.contains("xmp:Rating=\"5\""));
     assert!(!after.contains("xmp:Rating=\"1\""));
 }
@@ -187,9 +210,7 @@ fn a_damaged_sidecar_is_an_error_and_leaves_the_image_alone() {
     assert!(err.contains("xmp") || err.contains("sidecar"), "names the file: {err}");
 
     // The image is untouched: the viewer's own decode still works.
-    assert!(image_viewer::looks_like_supported_image(
-        &std::fs::read(&p).unwrap()
-    ));
+    assert!(image_viewer::looks_like_supported_image(&std::fs::read(&p).unwrap()));
 }
 
 /// A `Second` (yellow) label is a third state this app does not use. Changing
@@ -244,7 +265,14 @@ fn a_literal_rating_in_text_does_not_fool_the_parser() {
 #[test]
 fn a_write_leaves_no_temporary_file_behind() {
     let (_d, p) = temp_image("a.jpg");
-    Ratings { rating: Rating { stars: 3, flag: false }, tags: vec![], caption: String::new(), artist: String::new() }.write(&p).unwrap();
+    Ratings {
+        rating: Rating { stars: 3, flag: false },
+        tags: vec![],
+        caption: String::new(),
+        artist: String::new(),
+    }
+    .write(&p)
+    .unwrap();
     let side = image_viewer::ratings::sidecar_path(&p).unwrap();
     let leftovers: Vec<_> = std::fs::read_dir(side.parent().unwrap())
         .unwrap()

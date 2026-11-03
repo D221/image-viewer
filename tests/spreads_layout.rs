@@ -370,11 +370,7 @@ fn a_lone_portrait_page_still_keeps_its_half() {
             inner, SEAM,
             "rtl={rtl}: a lone portrait page's inner edge is still the seam, on its own half"
         );
-        assert!(
-            r[2] <= HALF,
-            "rtl={rtl}: and it still keeps to that half: {} wide",
-            r[2]
-        );
+        assert!(r[2] <= HALF, "rtl={rtl}: and it still keeps to that half: {} wide", r[2]);
         // **Flush against the seam, with the leftover at its _outer_ edge**, which is the
         // other half of the rule and is what makes this the cover layout rather than the
         // lone-spread one. This page fits at `min(400/400, 600/800) = 0.75`, so it is
@@ -429,7 +425,8 @@ fn a_lone_spread_is_fitted_to_the_whole_panel() {
     // user-visible claim: the same page, flagged, is never drawn smaller.
     for rtl in [false, true] {
         let flagged_rect = spread_rects(PANEL, &pages, flagged, rtl, true)[0];
-        let half_rect = spread_rects(PANEL, &pages, spread_fit(panel, &pages, false), rtl, false)[0];
+        let half_rect =
+            spread_rects(PANEL, &pages, spread_fit(panel, &pages, false), rtl, false)[0];
         assert!(
             flagged_rect[2] >= half_rect[2] && flagged_rect[3] >= half_rect[3],
             "rtl={rtl}: the flagged rect {flagged_rect:?} is smaller than the unflagged \
@@ -481,10 +478,7 @@ fn a_two_page_turn_is_unaffected() {
         "two wide pages still meet at the seam: a flag true on a turn of two is not a \
          request to fill the panel twice over"
     );
-    assert!(
-        overlap(wide_pair[0], wide_pair[1]) == 0.0,
-        "and do not overlap while doing it"
-    );
+    assert!(overlap(wide_pair[0], wide_pair[1]) == 0.0, "and do not overlap while doing it");
 }
 
 /// The discriminator is the **shape**, and these are the two cases where a geometric

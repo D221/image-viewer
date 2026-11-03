@@ -152,7 +152,9 @@ impl MyApp {
             return;
         };
         if is_archive_path(&path) {
-            self.error = Some("Cannot rate an archive member: ratings need a sidecar beside the file".into());
+            self.error = Some(
+                "Cannot rate an archive member: ratings need a sidecar beside the file".into(),
+            );
             return;
         }
         let mut rating = self.rating.clone();
@@ -178,7 +180,9 @@ impl MyApp {
             return;
         };
         if is_archive_path(&path) {
-            self.error = Some("Cannot rate an archive member: ratings need a sidecar beside the file".into());
+            self.error = Some(
+                "Cannot rate an archive member: ratings need a sidecar beside the file".into(),
+            );
             return;
         }
         let mut rating = self.rating.clone();
@@ -203,7 +207,8 @@ impl MyApp {
             return;
         };
         if is_archive_path(&path) {
-            self.error = Some("Cannot caption an archive member: sidecars need a file beside it".into());
+            self.error =
+                Some("Cannot caption an archive member: sidecars need a file beside it".into());
             return;
         }
         let mut rating = self.rating.clone();
@@ -226,7 +231,8 @@ impl MyApp {
             return;
         };
         if is_archive_path(&path) {
-            self.error = Some("Cannot credit an archive member: sidecars need a file beside it".into());
+            self.error =
+                Some("Cannot credit an archive member: sidecars need a file beside it".into());
             return;
         }
         let mut rating = self.rating.clone();
@@ -241,5 +247,4 @@ impl MyApp {
         self.request_rating();
         ctx.request_repaint();
     }
-
 }

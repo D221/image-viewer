@@ -121,10 +121,7 @@ pub fn decode_panel_px(
 
 /// Long side of the preview texture for a display area, in physical pixels.
 pub fn preview_target(panel_px: (u32, u32)) -> u32 {
-    panel_px
-        .0
-        .max(panel_px.1)
-        .clamp(256, PREVIEW_TEXTURE_DIM)
+    panel_px.0.max(panel_px.1).clamp(256, PREVIEW_TEXTURE_DIM)
 }
 
 /// The long side a preview should be decoded for, or `None` while the display area
@@ -413,4 +410,3 @@ impl ResizeTracker {
         self.pending = false;
     }
 }
-

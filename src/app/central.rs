@@ -15,10 +15,8 @@ impl MyApp {
         // Track the display area in physical pixels; previews are decoded to
         // match it. If the window grew, below-target textures are dropped so
         // schedule() re-decodes them at the new, larger target.
-        let panel_px = (
-            (panel.width() * ppp).round() as u32,
-            (panel.height() * ppp).round() as u32,
-        );
+        let panel_px =
+            ((panel.width() * ppp).round() as u32, (panel.height() * ppp).round() as u32);
         // Second phase of fit-window centering (see the consumption below):
         // place once the inner size matches what was asked, retry a few
         // frames while the resize is in flight, then place with whatever is
@@ -32,12 +30,10 @@ impl MyApp {
             if settled || tries == 0 {
                 self.pending_pos = None;
                 if let Some(m) = ui.input(|i| i.viewport().monitor_size) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
-                        egui::Pos2::new(
-                            ((m.x - want.0) / 2.0).max(0.0),
-                            ((m.y - want.1) / 2.0).max(0.0),
-                        ),
-                    ));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::Pos2::new(
+                        ((m.x - want.0) / 2.0).max(0.0),
+                        ((m.y - want.1) / 2.0).max(0.0),
+                    )));
                 }
             } else {
                 self.pending_pos = Some((want, tries - 1));
@@ -99,11 +95,8 @@ impl MyApp {
             self.spreads.lead_lone,
             &self.page_ctx(),
         );
-        let panel_px = image_viewer::decode_panel_px(
-            panel_px,
-            self.config.manga_mode,
-            lone_spread_fills_turn,
-        );
+        let panel_px =
+            image_viewer::decode_panel_px(panel_px, self.config.manga_mode, lone_spread_fills_turn);
         // Resize. The texture is re-fitted to the new area by the drawing code
         // below, which happens on this very frame and costs nothing — so the
         // picture is never blanked and never soft *as a choice*. The only thing
@@ -189,10 +182,7 @@ impl MyApp {
         // on an archive iff `self.cur` is an archive and `self.zip_archive` is
         // None (inside an archive, zip_archive is Some and the gallery *is* the
         // archive's pages).
-        let cursor_on_archive = self
-            .cur
-            .as_ref()
-            .is_some_and(|k| is_archive_path(&k.path))
+        let cursor_on_archive = self.cur.as_ref().is_some_and(|k| is_archive_path(&k.path))
             && self.zip_archive.is_none();
         if cursor_on_archive {
             let cur_path = self.cur.as_ref().unwrap().path.clone();
@@ -245,14 +235,10 @@ impl MyApp {
             // drop, and a spread whose second half evaporates and comes back
             // re-decoded is the symptom.
             pv.used = self.clock;
-            (
-                pv.orig,
-                pv.tex.id(),
-                pv.tex.size()[0] as f32,
-                pv.has_alpha,
-            )
+            (pv.orig, pv.tex.id(), pv.tex.size()[0] as f32, pv.has_alpha)
         };
-        let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown.path) {
+        let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown.path)
+        {
             // Paused: hold the chosen frame and schedule nothing. Playing:
             // advance to the current frame and repaint at its boundary.
             if let Some(held) = av.paused {
@@ -270,10 +256,10 @@ impl MyApp {
                 }
             } else {
                 let (idx, next_in) = image_viewer::anim_frame_state(
-                &av.anim,
-                av.start.elapsed(),
-                self.config.anim_speed,
-            );
+                    &av.anim,
+                    av.start.elapsed(),
+                    self.config.anim_speed,
+                );
                 if idx != av.last_index {
                     let f = &av.anim.frames[idx];
                     av.tex.set(
@@ -302,11 +288,8 @@ impl MyApp {
         // holds two, the other one. **Empty with the mode off**, so every branch
         // below falls through to the single-image path unchanged — that is the
         // shape of the gate, not a coincidence.
-        let pages: Vec<(ImgKey, (u32, u32), Xform)> = if self.config.manga_mode {
-            self.turn_pages(&shown, orig)
-        } else {
-            Vec::new()
-        };
+        let pages: Vec<(ImgKey, (u32, u32), Xform)> =
+            if self.config.manga_mode { self.turn_pages(&shown, orig) } else { Vec::new() };
         // **Transformed footprints, not stored dimensions** — and this is the one
         // line the whole turned-page behaviour turns on. `spread_rects` sizes a
         // page's slot by the dims it is handed and `paint_tex` rotates about
@@ -347,9 +330,7 @@ impl MyApp {
         // `view`, and a turn has to share them or the two halves would drift
         // apart as you zoom.
         let fit_scale = if pages.is_empty() {
-            (panel.width() / display_px.x)
-                .min(panel.height() / display_px.y)
-                .clamp(1e-4, 8.0)
+            (panel.width() / display_px.x).min(panel.height() / display_px.y).clamp(1e-4, 8.0)
         } else {
             image_viewer::spread_fit(
                 (panel.width(), panel.height()),
@@ -362,7 +343,11 @@ impl MyApp {
             (panel.width() / display_px.x).clamp(1e-4, 8.0)
         } else {
             let tw: f32 = spread_dims.iter().map(|&(w, _)| w).sum();
-            if tw > 0.0 { (panel.width() / tw).clamp(1e-4, 8.0) } else { 1.0 }
+            if tw > 0.0 {
+                (panel.width() / tw).clamp(1e-4, 8.0)
+            } else {
+                1.0
+            }
         };
         let max_scale = MAX_SCALE.max(fit_scale).max(fit_width_scale);
         // Fit window to image: reset (`T`, arrivals in the mode) sets
@@ -414,7 +399,8 @@ impl MyApp {
                         .input(|i| i.viewport().monitor_size)
                         .map(|m| (m.x, m.y))
                         .unwrap_or((inner.x, inner.y));
-                    let mut ratio = if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
+                    let mut ratio =
+                        if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
                     if reset {
                         self.fit_window_pending = false;
                         // T mode: fit the window to the image at 1:1, but if the
@@ -479,8 +465,15 @@ impl MyApp {
                 }
             }
         }
-        let mut scale = if self.config.fit_width_mode { fit_width_scale } else if self.view.fit { fit_scale } else { self.view.scale };
-        let mut offset = if self.config.fit_width_mode || self.view.fit { Vec2::ZERO } else { self.view.offset };
+        let mut scale = if self.config.fit_width_mode {
+            fit_width_scale
+        } else if self.view.fit {
+            fit_scale
+        } else {
+            self.view.scale
+        };
+        let mut offset =
+            if self.config.fit_width_mode || self.view.fit { Vec2::ZERO } else { self.view.offset };
         // Free zoom-out: the floor is effectively zero rather than the fit
         // scale, so the picture can shrink below the window. Centering below
         // fit comes from the pan bounds, not from snapping back.
@@ -558,7 +551,12 @@ impl MyApp {
             }
             if key_fit_width {
                 self.toggle_fit_width_mode();
-                target_scale = if self.config.fit_width_mode { fit_width_scale } else { self.view.scale = 1.0 / ppp; 1.0 / ppp };
+                target_scale = if self.config.fit_width_mode {
+                    fit_width_scale
+                } else {
+                    self.view.scale = 1.0 / ppp;
+                    1.0 / ppp
+                };
             }
         }
         if resp.double_clicked() {
@@ -582,13 +580,24 @@ impl MyApp {
                     if let Some(pv) = self.previews.get(key) {
                         if let Some(full) = &pv.full {
                             let center = panel.center();
-                            let sx = ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0).round() as i32;
-                            let sy = ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0).round() as i32;
-                            if (0..full.width as i32).contains(&sx) && (0..full.height as i32).contains(&sy) {
-                                let c = &full.rgba[((sy as usize * full.width as usize + sx as usize) * 4)..];
-                                self.notice = Some(format!("#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}", c[0], c[1], c[2], c[0], c[1], c[2], sx, sy));
+                            let sx = ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0)
+                                .round() as i32;
+                            let sy = ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0)
+                                .round() as i32;
+                            if (0..full.width as i32).contains(&sx)
+                                && (0..full.height as i32).contains(&sy)
+                            {
+                                let c = &full.rgba
+                                    [((sy as usize * full.width as usize + sx as usize) * 4)..];
+                                self.notice = Some(format!(
+                                    "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
+                                    c[0], c[1], c[2], c[0], c[1], c[2], sx, sy
+                                ));
                                 if let Ok(mut cb) = arboard::Clipboard::new() {
-                                    let _ = cb.set_text(&format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
+                                    let _ = cb.set_text(&format!(
+                                        "#{:02X}{:02X}{:02X}",
+                                        c[0], c[1], c[2]
+                                    ));
                                 }
                             } else {
                                 self.notice = Some("Click outside the picture".into());
@@ -778,12 +787,7 @@ impl MyApp {
             Vec::new()
         } else {
             image_viewer::spread_rects(
-                [
-                    panel.min.x + offset.x,
-                    panel.min.y + offset.y,
-                    panel.width(),
-                    panel.height(),
-                ],
+                [panel.min.x + offset.x, panel.min.y + offset.y, panel.width(), panel.height()],
                 &spread_dims,
                 scale,
                 self.config.manga_rtl,
@@ -793,12 +797,7 @@ impl MyApp {
             // `x` and `y` snapped, and only those: 1:1 has to stay pixel-sharp,
             // and snapping the far edge as well would move the size the tiles and
             // the source-pixel mapping below are told to expect.
-            .map(|r| {
-                Rect::from_min_size(
-                    Pos2::new(snap(r[0]), snap(r[1])),
-                    Vec2::new(r[2], r[3]),
-                )
-            })
+            .map(|r| Rect::from_min_size(Pos2::new(snap(r[0]), snap(r[1])), Vec2::new(r[2], r[3])))
             .collect()
         };
         // Close the seam. Snapping each page's `x` **independently** leaves a
@@ -873,10 +872,7 @@ impl MyApp {
         let rect = match page_rects.first() {
             Some(r) => *r,
             None => Rect::from_min_size(
-                Pos2::new(
-                    snap(centre.x - src_size.x * 0.5),
-                    snap(centre.y - src_size.y * 0.5),
-                ),
+                Pos2::new(snap(centre.x - src_size.x * 0.5), snap(centre.y - src_size.y * 0.5)),
                 src_size,
             ),
         };
@@ -947,10 +943,7 @@ impl MyApp {
                             &painter,
                             checker.id(),
                             *partner_rect,
-                            Rect::from_min_max(
-                                Pos2::ZERO,
-                                Pos2::new(ps.x / 32.0, ps.y / 32.0),
-                            ),
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(ps.x / 32.0, ps.y / 32.0)),
                             partner_xform,
                         );
                     }
@@ -962,10 +955,8 @@ impl MyApp {
         // Transparent images get a checkerboard backdrop underneath.
         if pv_has_alpha {
             if let Some(checker) = &self.checker {
-                let uv = Rect::from_min_max(
-                    Pos2::ZERO,
-                    Pos2::new(src_size.x / 32.0, src_size.y / 32.0),
-                );
+                let uv =
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(src_size.x / 32.0, src_size.y / 32.0));
                 paint_tex(&painter, checker.id(), rect, uv, xform);
             }
         }
@@ -1133,10 +1124,20 @@ impl MyApp {
                     let kx = tp.src.x / fw.max(1) as f32;
                     let ky = tp.src.y / fh.max(1) as f32;
                     let (x0, x1) = image_viewer::tile_axis_range(
-                        vis.min.x, vis.max.x, paint.min.x, scale, kx, fw,
+                        vis.min.x,
+                        vis.max.x,
+                        paint.min.x,
+                        scale,
+                        kx,
+                        fw,
                     );
                     let (y0, y1) = image_viewer::tile_axis_range(
-                        vis.min.y, vis.max.y, paint.min.y, scale, ky, fh,
+                        vis.min.y,
+                        vis.max.y,
+                        paint.min.y,
+                        scale,
+                        ky,
+                        fh,
                     );
                     if x1 > x0 && y1 > y0 {
                         for ty in (y0 / TILE)..=((y1 - 1) / TILE) {
@@ -1149,13 +1150,7 @@ impl MyApp {
                                     budget -= 1;
                                     let tex = make_tile(&ctx, &tp.data, tx, ty, tile_options);
                                     perf::count(perf::C_TILES_CREATED, 1);
-                                    tiles.insert(
-                                        (tx, ty),
-                                        Tile {
-                                            tex,
-                                            last_drawn: frame,
-                                        },
-                                    );
+                                    tiles.insert((tx, ty), Tile { tex, last_drawn: frame });
                                 }
                                 let tile = tiles.get_mut(&(tx, ty)).unwrap();
                                 tile.last_drawn = frame;

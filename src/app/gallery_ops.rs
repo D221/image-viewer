@@ -121,18 +121,14 @@ impl MyApp {
             self.waiting_load = false;
             // A re-exported file usually has new dimensions, so re-fit instead
             // of keeping a view scale chosen for the old pixels.
-            self.view = View {
-                fit: true,
-                scale: 1.0,
-                offset: Vec2::ZERO,
-            };
+            self.view = View { fit: true, scale: 1.0, offset: Vec2::ZERO };
             self.full_due = Some(Instant::now() + FULL_DWELL);
             self.schedule();
             ctx.request_repaint();
         }
     }
 
-/// One sorted folder listing for the whole app: flat or recursive. Every
+    /// One sorted folder listing for the whole app: flat or recursive. Every
     /// gallery build that faces the filesystem goes through here (startup
     /// takes this function directly, since `self` does not exist yet), so a
     /// new scan flavor cannot land in one place and miss the others.
@@ -269,8 +265,9 @@ impl MyApp {
             let cur = self.cur.clone();
             // By *file*: a hidden document releases all of its pages, not just the
             // one that happened to be cached.
-            self.previews
-                .retain(|k, _| now.contains(&k.path) || Some(&k.path) == cur.as_ref().map(|c| &c.path));
+            self.previews.retain(|k, _| {
+                now.contains(&k.path) || Some(&k.path) == cur.as_ref().map(|c| &c.path)
+            });
             self.thumbs.retain(|p, _| now.contains(p));
             // Same reason, for the grid's ratings (and their in-flight marks):
             // a hidden file's sidecar answer is unreachable until it is
@@ -323,10 +320,8 @@ impl MyApp {
         }
         match trash::delete(&p) {
             Ok(()) => {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                let name =
+                    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.remove_current_from_gallery(ctx);
                 self.notice = Some(format!("Deleted {name}"));
                 // Remember what was deleted so it can be restored. Cap the
@@ -371,14 +366,11 @@ impl MyApp {
                 }
             };
             let Some(item) = items.iter().find(|i| {
-                i.name
-                    .to_str()
-                    .map_or(false, |n| Path::new(n).file_name() == Some(std::ffi::OsStr::new(&name)))
+                i.name.to_str().map_or(false, |n| {
+                    Path::new(n).file_name() == Some(std::ffi::OsStr::new(&name))
+                })
             }) else {
-                let _ = tx.send(UndoDeleteResult::NotFound {
-                    name,
-                    original: original.clone(),
-                });
+                let _ = tx.send(UndoDeleteResult::NotFound { name, original: original.clone() });
                 return;
             };
             match trash::os_limited::restore_all(std::iter::once(item.clone())) {
@@ -408,11 +400,7 @@ impl MyApp {
             return;
         }
         let Some(dest_dir) = rfd::FileDialog::new()
-            .set_title(if copy {
-                "Copy image to…"
-            } else {
-                "Move image to…"
-            })
+            .set_title(if copy { "Copy image to…" } else { "Move image to…" })
             .pick_folder()
         else {
             return;
@@ -425,11 +413,8 @@ impl MyApp {
             self.error = Some(format!("Target already exists: {}", dest.display()));
             return;
         }
-        let result = if copy {
-            std::fs::copy(&p, &dest).map(|_| ())
-        } else {
-            std::fs::rename(&p, &dest)
-        };
+        let result =
+            if copy { std::fs::copy(&p, &dest).map(|_| ()) } else { std::fs::rename(&p, &dest) };
         match result {
             Ok(()) => {
                 let verb = if copy { "Copied" } else { "Moved" };
@@ -441,10 +426,7 @@ impl MyApp {
                 }
             }
             Err(e) => {
-                self.error = Some(format!(
-                    "{} failed: {e}",
-                    if copy { "Copy" } else { "Move" }
-                ))
+                self.error = Some(format!("{} failed: {e}", if copy { "Copy" } else { "Move" }))
             }
         }
     }
@@ -488,10 +470,7 @@ impl MyApp {
                 // the new key, so the renamed image keeps its preview.
                 self.gallery.files[i] = new_path.clone();
                 let old_key = ImgKey { path: p.clone(), page: self.gallery.current_page() };
-                let new_key = ImgKey {
-                    path: new_path.clone(),
-                    page: self.gallery.current_page(),
-                };
+                let new_key = ImgKey { path: new_path.clone(), page: self.gallery.current_page() };
                 if let Some(prev) = self.previews.remove(&old_key) {
                     self.previews.insert(new_key.clone(), prev);
                 }
@@ -516,6 +495,4 @@ impl MyApp {
             }
         }
     }
-
 }
-

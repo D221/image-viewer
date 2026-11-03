@@ -80,10 +80,7 @@ pub struct ImageEdits {
 
 impl Default for ImageEdits {
     fn default() -> Self {
-        Self {
-            map: std::collections::HashMap::new(),
-            cap: 4096,
-        }
+        Self { map: std::collections::HashMap::new(), cap: 4096 }
     }
 }
 
@@ -215,11 +212,7 @@ pub struct EditHistory {
 
 impl Default for EditHistory {
     fn default() -> Self {
-        Self {
-            past: HashMap::new(),
-            redo: HashMap::new(),
-            cap: 50,
-        }
+        Self { past: HashMap::new(), redo: HashMap::new(), cap: 50 }
     }
 }
 
@@ -263,10 +256,7 @@ impl EditHistory {
     /// checked first.
     pub fn undo(&mut self, path: &Path, current: Edit) -> Option<Edit> {
         let previous = self.past.get_mut(path)?.pop()?;
-        self.redo
-            .entry(path.to_path_buf())
-            .or_default()
-            .push(current);
+        self.redo.entry(path.to_path_buf()).or_default().push(current);
         Some(previous)
     }
 
@@ -275,10 +265,7 @@ impl EditHistory {
     /// future is empty, which is the ordinary answer after a new edit.
     pub fn redo(&mut self, path: &Path, current: Edit) -> Option<Edit> {
         let next = self.redo.get_mut(path)?.pop()?;
-        self.past
-            .entry(path.to_path_buf())
-            .or_default()
-            .push(current);
+        self.past.entry(path.to_path_buf()).or_default().push(current);
         Some(next)
     }
 
@@ -287,4 +274,3 @@ impl EditHistory {
         self.past.get(path).map_or(0, Vec::len)
     }
 }
-

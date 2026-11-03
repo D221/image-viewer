@@ -29,7 +29,11 @@ fn photo(w: u32, h: u32) -> image::DynamicImage {
         let r = 128.0 + 100.0 * (fx * 9.0).sin() * (fy * 4.0).cos();
         let g = 90.0 + 80.0 * (fx * 3.0).cos() + 40.0 * (fy * 11.0).sin();
         let b = 140.0 + 70.0 * (fx * 7.0).sin() * (fy * 7.0).sin();
-        image::Rgb([r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8])
+        image::Rgb([
+            r.clamp(0.0, 255.0) as u8,
+            g.clamp(0.0, 255.0) as u8,
+            b.clamp(0.0, 255.0) as u8,
+        ])
     }))
 }
 
@@ -131,10 +135,7 @@ fn lossless_save_vs_the_obvious_alternative() {
         let turned = image::imageops::rotate90(&dec.to_rgb8());
         let mut re = Vec::new();
         image::DynamicImage::ImageRgb8(turned)
-            .write_to(
-                &mut std::io::Cursor::new(&mut re),
-                image::ImageFormat::Jpeg,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut re), image::ImageFormat::Jpeg)
             .unwrap();
         let reencode_ms = t.elapsed().as_secs_f64() * 1000.0;
 

@@ -211,18 +211,8 @@ fn a_wanted_job_that_was_already_running_is_re_queued_if_it_gives_up() {
 
     // A is now in flight and abandoning. Want A again (as a neighbour) + B.
     let jobs = vec![
-        Job {
-            key: ImgKey::first(&f[0]),
-            kind: Kind::Preview,
-            prio: 12,
-            target_dim: 1024,
-        },
-        Job {
-            key: ImgKey::first(&f[1]),
-            kind: Kind::Preview,
-            prio: 0,
-            target_dim: 1024,
-        },
+        Job { key: ImgKey::first(&f[0]), kind: Kind::Preview, prio: 12, target_dim: 1024 },
+        Job { key: ImgKey::first(&f[1]), kind: Kind::Preview, prio: 0, target_dim: 1024 },
     ];
     h.loader.replace(jobs);
 
@@ -238,14 +228,8 @@ fn a_wanted_job_that_was_already_running_is_re_queued_if_it_gives_up() {
     );
     // B also gives up on its first attempt (the fake abandons every path's first
     // try), so it runs twice as well. The point of this test is A, not B.
-    assert!(
-        h.runs_of(&f[1], Kind::Preview) >= 1,
-        "B was queued and must run"
-    );
-    assert!(
-        h.delivered.contains(&(f[0].clone(), Kind::Preview)),
-        "A's retry must deliver"
-    );
+    assert!(h.runs_of(&f[1], Kind::Preview) >= 1, "B was queued and must run");
+    assert!(h.delivered.contains(&(f[0].clone(), Kind::Preview)), "A's retry must deliver");
 }
 
 #[test]
@@ -317,10 +301,7 @@ fn a_re_queued_job_keeps_its_priority_and_target_size() {
             while abandon && !go2.load(std::sync::atomic::Ordering::Acquire) {
                 std::hint::spin_loop();
             }
-            (
-                (job.path().to_path_buf(), job.kind, Done::Delivered),
-                !abandon,
-            )
+            ((job.path().to_path_buf(), job.kind, Done::Delivered), !abandon)
         },
         |_j, e| panic!("{e}"),
         || {},
@@ -511,10 +492,7 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
     // actually running.
     let deadline = Instant::now() + Duration::from_secs(10);
     while h.loader.running() == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "no job ever started for the final window"
-        );
+        assert!(Instant::now() < deadline, "no job ever started for the final window");
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(
@@ -602,15 +580,8 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
     // scope must not be retried, so abandoned outnumbers delivered during a
     // fast browse. What matters is that at least one give-up was followed by a
     // successful retry, which is the property the stranding fix provides.
-    let recovered = h
-        .abandoned
-        .iter()
-        .filter(|k| h.delivered.contains(*k))
-        .count();
-    assert!(
-        recovered > 0,
-        "nothing that gave up was ever delivered, so no retry ever succeeded"
-    );
+    let recovered = h.abandoned.iter().filter(|k| h.delivered.contains(*k)).count();
+    assert!(recovered > 0, "nothing that gave up was ever delivered, so no retry ever succeeded");
     eprintln!(
         "flip-through: {} steps, {} distinct jobs, {} runs, {} abandoned, {} delivered, {:?}",
         steps.len(),
@@ -625,13 +596,11 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
 fn the_plan_skips_cached_and_known_bad_paths() {
     let f = files(10);
     let cached: HashSet<ImgKey> = [&f[0], &f[1]].into_iter().map(|p| ImgKey::first(p)).collect();
-    let failed: HashSet<(ImgKey, Kind)> = [(ImgKey::first(&f[5]), Kind::Preview)].into_iter().collect();
+    let failed: HashSet<(ImgKey, Kind)> =
+        [(ImgKey::first(&f[5]), Kind::Preview)].into_iter().collect();
     let jobs = plan_jobs(&plan(&f, 0, &cached, &failed));
 
-    assert!(
-        !jobs.iter().any(|j| j.path() == f[0]),
-        "already cached, must not be requested again"
-    );
+    assert!(!jobs.iter().any(|j| j.path() == f[0]), "already cached, must not be requested again");
     assert!(
         !jobs.iter().any(|j| j.path() == f[5]),
         "known-bad preview must not be retried every frame"
@@ -728,10 +697,7 @@ fn a_partner_keeps_its_own_page_number() {
     let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
     // A same-document partner on page 2. The window never builds such a key — it
     // prefetches page 0 — so this case cannot be satisfied by any window entry.
-    let partner = ImgKey {
-        path: f[1].clone(),
-        page: 2,
-    };
+    let partner = ImgKey { path: f[1].clone(), page: 2 };
     let mut p = plan(&f, 0, &cached, &failed);
     p.partner = Some(partner.clone());
     let jobs = plan_jobs(&p);
@@ -850,10 +816,8 @@ fn no_partner_leaves_the_plan_exactly_as_it_was() {
     p.wants_full = true;
     p.partner = None;
 
-    let listed: Vec<(ImgKey, Kind, u32, u32)> = plan_jobs(&p)
-        .iter()
-        .map(|j| (j.key.clone(), j.kind, j.prio, j.target_dim))
-        .collect();
+    let listed: Vec<(ImgKey, Kind, u32, u32)> =
+        plan_jobs(&p).iter().map(|j| (j.key.clone(), j.kind, j.prio, j.target_dim)).collect();
     assert_eq!(
         listed,
         vec![
@@ -907,10 +871,7 @@ fn a_partner_without_a_full_decode_gets_a_full_job() {
     // A same-document partner on page 2, so the key carries its page: `Job::path()`
     // drops it, and the job would then decode page 0 of the right file - a different
     // picture, painted without error.
-    let partner = ImgKey {
-        path: f[1].clone(),
-        page: 2,
-    };
+    let partner = ImgKey { path: f[1].clone(), page: 2 };
     let mut p = plan(&f, 0, &cached, &failed);
     p.partner = Some(partner.clone());
     p.partner_needs_full = true;
@@ -920,10 +881,7 @@ fn a_partner_without_a_full_decode_gets_a_full_job() {
         .iter()
         .find(|j| j.kind == Kind::Full)
         .expect("the partner's half is on screen, so it must be sharpened too");
-    assert_eq!(
-        full.key, partner,
-        "planned under the whole key it was given, page number included"
-    );
+    assert_eq!(full.key, partner, "planned under the whole key it was given, page number included");
     assert_eq!(
         full.prio,
         image_viewer::PRIO_FULL,
@@ -1035,9 +993,7 @@ fn no_partner_full_job_when_manga_mode_is_off() {
     p.partner_needs_full = false;
 
     let listed = |jobs: &[Job]| {
-        jobs.iter()
-            .map(|j| (j.key.clone(), j.kind, j.prio, j.target_dim))
-            .collect::<Vec<_>>()
+        jobs.iter().map(|j| (j.key.clone(), j.kind, j.prio, j.target_dim)).collect::<Vec<_>>()
     };
     assert_eq!(
         listed(&plan_jobs(&p)),
@@ -1072,10 +1028,7 @@ fn no_partner_full_job_when_manga_mode_is_off() {
         "so with a partner and no full buffer the plan really is one job longer"
     );
     assert_eq!(
-        plan_jobs(&p)
-            .iter()
-            .filter(|j| j.kind == Kind::Full)
-            .count(),
+        plan_jobs(&p).iter().filter(|j| j.kind == Kind::Full).count(),
         2,
         "the cursor page's own and the partner's, and nothing else anywhere in the plan"
     );
@@ -1105,10 +1058,7 @@ fn exif_is_wanted_only_while_the_panel_that_shows_it_is_drawn() {
         !image_viewer::wants_exif(false, true),
         "a hidden panel must not pay for a read nobody can see"
     );
-    assert!(
-        !image_viewer::wants_exif(true, false),
-        "already loaded: a second read is pure waste"
-    );
+    assert!(!image_viewer::wants_exif(true, false), "already loaded: a second read is pure waste");
     assert!(!image_viewer::wants_exif(false, false));
 }
 
@@ -1134,25 +1084,15 @@ fn a_hidden_panel_drops_the_metadata_job_and_nothing_else() {
     };
     let shown = exif_of(&visible);
     assert_eq!(shown.len(), 1, "a visible panel gets exactly one read");
-    assert_eq!(
-        shown[0].key,
-        ImgKey::first(&f[0]),
-        "EXIF is read once per file, not per page"
-    );
+    assert_eq!(shown[0].key, ImgKey::first(&f[0]), "EXIF is read once per file, not per page");
     assert_eq!(shown[0].prio, image_viewer::PRIO_CURRENT_EXIF);
-    assert!(
-        exif_of(&hidden).is_empty(),
-        "a hidden panel must not queue a metadata read"
-    );
+    assert!(exif_of(&hidden).is_empty(), "a hidden panel must not queue a metadata read");
 
     // The gate must remove that job and *only* that job. Comparing job for job
     // is the point: "we made the plan smaller" is not evidence that the pictures
     // still got planned.
     let rest = |jobs: Vec<Job>| -> Vec<(ImgKey, Kind, u32)> {
-        jobs.into_iter()
-            .filter(|j| j.kind != Kind::Exif)
-            .map(|j| (j.key, j.kind, j.prio))
-            .collect()
+        jobs.into_iter().filter(|j| j.kind != Kind::Exif).map(|j| (j.key, j.kind, j.prio)).collect()
     };
     assert_eq!(
         rest(visible),
@@ -1189,18 +1129,11 @@ fn a_metadata_read_dropped_by_a_rebuild_can_be_asked_for_again() {
     // not "about to be taken".
     let busy_by = Instant::now() + Duration::from_secs(10);
     while h.loader.running() == 0 {
-        assert!(
-            Instant::now() < busy_by,
-            "the worker never picked anything up"
-        );
+        assert!(Instant::now() < busy_by, "the worker never picked anything up");
         std::thread::sleep(Duration::from_millis(1));
     }
     h.loader.push(exif.clone());
-    assert_eq!(
-        h.loader.queued(),
-        1,
-        "the read should be waiting behind the busy worker"
-    );
+    assert_eq!(h.loader.queued(), 1, "the read should be waiting behind the busy worker");
     h.loader.replace(vec![]); // a navigation: exif is not in this plan
     h.wait_until_idle("after the rebuild dropped the read");
     assert_eq!(
@@ -1422,7 +1355,8 @@ fn an_oversize_inside_the_filter_band_costs_no_decode() {
     // chosen here: a texture more than that above the target is one whose
     // pre-reduction could not fire.
     assert_eq!(
-        image_viewer::PREFILTER_FACTOR, 2,
+        image_viewer::PREFILTER_FACTOR,
+        2,
         "if the prefilter's own factor moves, `prefilter_dim` and the over-sized arm \
          move with it and these numbers have to be re-measured"
     );
@@ -1488,8 +1422,7 @@ fn a_painted_page_comes_from_a_texture_inside_the_filtered_band() {
         // What the decode at that target actually returns for this page: a
         // proportional reduction, because the source is larger than the target on
         // both axes. 2223/3109 * 914 = 653.7 -> 653.
-        let drawn_long =
-            (page.0 as f64 * panel.0 as f64 / page.1 as f64).max(panel.1 as f64);
+        let drawn_long = (page.0 as f64 * panel.0 as f64 / page.1 as f64).max(panel.1 as f64);
         let tex_long = page.1.min(target);
         let ratio = tex_long as f64 / drawn_long;
         assert!(

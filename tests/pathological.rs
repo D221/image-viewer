@@ -31,7 +31,12 @@ fn synth(w: u32, h: u32) -> RgbImage {
     img
 }
 
-fn write(dir: &std::path::Path, name: &str, img: &RgbImage, fmt: ImageFormat) -> std::path::PathBuf {
+fn write(
+    dir: &std::path::Path,
+    name: &str,
+    img: &RgbImage,
+    fmt: ImageFormat,
+) -> std::path::PathBuf {
     let p = dir.join(name);
     let mut bytes = Vec::new();
     match fmt {

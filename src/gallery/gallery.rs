@@ -78,14 +78,7 @@ pub struct FileShape {
 
 impl Default for FileShape {
     fn default() -> Self {
-        Self {
-            w: 0,
-            h: 0,
-            orientation: 0,
-            date_taken: String::new(),
-            mtime: 0,
-            len: 0,
-        }
+        Self { w: 0, h: 0, orientation: 0, date_taken: String::new(), mtime: 0, len: 0 }
     }
 }
 
@@ -137,10 +130,7 @@ pub(crate) fn rating_term_matches(term: &RatingTerm, ratings: &Ratings) -> bool 
         RatingTerm::StarsAtLeast(n) => ratings.rating.stars >= *n,
         RatingTerm::Flagged => ratings.rating.flag,
         RatingTerm::Unflagged => !ratings.rating.flag,
-        RatingTerm::Tag(name) => ratings
-            .tags
-            .iter()
-            .any(|t| t.to_lowercase().contains(name)),
+        RatingTerm::Tag(name) => ratings.tags.iter().any(|t| t.to_lowercase().contains(name)),
     }
 }
 
@@ -197,10 +187,7 @@ impl Gallery {
     /// The current page's position in the flat page sequence, which is what the
     /// pairing walk is expressed in terms of.
     pub fn page_pos(&self) -> PagePos {
-        PagePos {
-            index: self.index,
-            page: self.page,
-        }
+        PagePos { index: self.index, page: self.page }
     }
 
     pub fn current(&self) -> Option<&Path> {
@@ -267,10 +254,7 @@ impl Gallery {
     /// still on screen, or one from a gallery that has since been rebuilt.
     pub fn pos_of(&self, key: &ImgKey) -> Option<PagePos> {
         let index = self.files.iter().position(|f| f == &key.path)?;
-        Some(PagePos {
-            index,
-            page: key.page,
-        })
+        Some(PagePos { index, page: key.page })
     }
 
     /// Is the cursor on the first position of this listing?
@@ -309,11 +293,7 @@ impl Gallery {
     /// How many pages the current file has, as far as this gallery knows. 1 until
     /// [`Self::learn_pages`] has been asked about the file.
     pub fn pages_in_current(&self) -> u32 {
-        self.current()
-            .and_then(|p| self.page_counts.get(p))
-            .copied()
-            .unwrap_or(1)
-            .max(1)
+        self.current().and_then(|p| self.page_counts.get(p)).copied().unwrap_or(1).max(1)
     }
 
     /// Find out how many pages `path` has and remember it.
@@ -459,10 +439,7 @@ impl Gallery {
         let Some(path) = self.files.get(pos.index).cloned() else {
             return;
         };
-        let key = ImgKey {
-            path: path.clone(),
-            page: pos.page,
-        };
+        let key = ImgKey { path: path.clone(), page: pos.page };
         if self.shapes.contains_key(&key) {
             return;
         }
@@ -512,14 +489,7 @@ impl Gallery {
                 let date_taken = if jpeg { exif_date_taken(&path) } else { String::new() };
                 self.shape_cache.insert(
                     path_str(&path),
-                    FileShape {
-                        w,
-                        h,
-                        orientation: tag,
-                        date_taken,
-                        mtime,
-                        len: metadata.len(),
-                    },
+                    FileShape { w, h, orientation: tag, date_taken, mtime, len: metadata.len() },
                 );
                 self.shape_cache_dirty = true;
                 self.save_shape_cache();
@@ -761,21 +731,12 @@ impl Gallery {
             return None;
         }
         if page + 1 < self.pages_in(index) {
-            return Some(PagePos {
-                index,
-                page: page + 1,
-            });
+            return Some(PagePos { index, page: page + 1 });
         }
         // Last page (or an ordinary file): on to the next one, at its first page.
         match index.checked_add(1) {
-            Some(i) if i < self.files.len() => Some(PagePos {
-                index: i,
-                page: 0,
-            }),
-            _ if self.loop_back => Some(PagePos {
-                index: 0,
-                page: 0,
-            }),
+            Some(i) if i < self.files.len() => Some(PagePos { index: i, page: 0 }),
+            _ if self.loop_back => Some(PagePos { index: 0, page: 0 }),
             _ => None,
         }
     }
@@ -803,25 +764,16 @@ impl Gallery {
             return None;
         }
         if page > 0 {
-            return Some(PagePos {
-                index,
-                page: page - 1,
-            });
+            return Some(PagePos { index, page: page - 1 });
         }
         // The new file's page count is only known if it was visited, which it was,
         // since the user is stepping back through where they came. `pages_in`
         // falls back to 1 for anything unknown, so this is always in range.
         match index.checked_sub(1) {
-            Some(i) => Some(PagePos {
-                index: i,
-                page: self.pages_in(i).saturating_sub(1),
-            }),
+            Some(i) => Some(PagePos { index: i, page: self.pages_in(i).saturating_sub(1) }),
             None if self.loop_back => {
                 let last = self.files.len() - 1;
-                Some(PagePos {
-                    index: last,
-                    page: self.pages_in(last).saturating_sub(1),
-                })
+                Some(PagePos { index: last, page: self.pages_in(last).saturating_sub(1) })
             }
             None => None,
         }
@@ -835,12 +787,7 @@ impl Gallery {
     /// cursor is not on, and answering with the current file's page count would
     /// make a three-page document's last page look like an ordinary file's.
     pub fn pages_in(&self, index: usize) -> u32 {
-        self.files
-            .get(index)
-            .and_then(|p| self.page_counts.get(p))
-            .copied()
-            .unwrap_or(1)
-            .max(1)
+        self.files.get(index).and_then(|p| self.page_counts.get(p)).copied().unwrap_or(1).max(1)
     }
 
     /// The page `by` pages from `pos`, without honouring `loop_back`.
@@ -877,18 +824,19 @@ impl Gallery {
                 }
                 // Last page (or an ordinary file): on to the next one, at its
                 // first page. `None` at the last file rather than wrapping.
-                1 => cur.index.checked_add(1).filter(|&i| i < self.files.len()).map(|index| PagePos {
-                    index,
-                    page: 0,
-                })?,
+                1 => cur
+                    .index
+                    .checked_add(1)
+                    .filter(|&i| i < self.files.len())
+                    .map(|index| PagePos { index, page: 0 })?,
                 -1 if cur.page > 0 => PagePos { index: cur.index, page: cur.page - 1 },
                 // From page 0 of a file: the *last* page of the previous one, not
                 // its first, matching `prev`. `None` at the first file rather
                 // than wrapping.
-                -1 => cur.index.checked_sub(1).map(|index| PagePos {
-                    index,
-                    page: self.pages_in(index) - 1,
-                })?,
+                -1 => cur
+                    .index
+                    .checked_sub(1)
+                    .map(|index| PagePos { index, page: self.pages_in(index) - 1 })?,
                 _ => return None,
             };
         }
@@ -1020,10 +968,7 @@ impl PageCtx for Gallery {
     }
 
     fn key(&self, pos: PagePos) -> Option<ImgKey> {
-        self.files.get(pos.index).map(|path| ImgKey {
-            path: path.clone(),
-            page: pos.page,
-        })
+        self.files.get(pos.index).map(|path| ImgKey { path: path.clone(), page: pos.page })
     }
 
     /// The cached display dimensions, and **not** a re-read.
@@ -1152,4 +1097,3 @@ impl Gallery {
         self.shape_cache_dirty = false;
     }
 }
-

@@ -253,12 +253,8 @@ pub(crate) fn decode_page(
 
     if jpeg && !full_is_cheap {
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
-            let mut preview = normalized(ImageData {
-                width: w,
-                height: h,
-                rgba,
-                load_time: start.elapsed(),
-            });
+            let mut preview =
+                normalized(ImageData { width: w, height: h, rgba, load_time: start.elapsed() });
             apply_exif_orientation(&mut preview, tag);
             // The store, for the next time this picture is wanted. The pixels
             // handed over are the **source's**: the wide-gamut conversion is
@@ -365,7 +361,11 @@ pub(crate) fn decode_page(
 /// no `full` tier, and no `below_target` — the preview *is* the decode. The
 /// viewport (width/height attributes) gives the natural aspect ratio; missing
 /// or zero means the target is used square.
-pub fn decode_svg(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<ImageData, LoadError> {
+pub fn decode_svg(
+    bytes: &[u8],
+    max_dim: u32,
+    start: std::time::Instant,
+) -> Result<ImageData, LoadError> {
     let opt = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_data(bytes, &opt)
         .map_err(|e| LoadError::Other(format!("svg: {e}")))?;
@@ -397,9 +397,8 @@ pub fn decode_svg(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Resu
 /// True if the bytes look like a JPEG XL image (naked codestream or container).
 pub fn is_jxl_bytes(bytes: &[u8]) -> bool {
     bytes.starts_with(&[0xFF, 0x0A])
-        || bytes.starts_with(&[
-            0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A,
-        ])
+        || bytes
+            .starts_with(&[0x00, 0x00, 0x00, 0x0C, b'J', b'X', b'L', b' ', 0x0D, 0x0A, 0x87, 0x0A])
 }
 
 /// The 4CC brand of an ISOBMFF file (HEIC/HEIF/AVIF family), if any.
@@ -416,8 +415,17 @@ pub fn is_heif_bytes(bytes: &[u8]) -> bool {
     isobmff_brand(bytes).is_some_and(|brand| {
         matches!(
             brand,
-            b"avif" | b"avis" | b"heic" | b"heix" | b"mif1" | b"msf1" | b"heim" | b"heis"
-                | b"hevc" | b"hevx" | b"av01"
+            b"avif"
+                | b"avis"
+                | b"heic"
+                | b"heix"
+                | b"mif1"
+                | b"msf1"
+                | b"heim"
+                | b"heis"
+                | b"hevc"
+                | b"hevx"
+                | b"av01"
         )
     })
 }
@@ -487,8 +495,8 @@ pub(crate) fn unsupported_error(bytes: &[u8]) -> LoadError {
         // remaining `ftyp` is something else in the same container family,
         // overwhelmingly video or audio.
         let name = match brand {
-            b"isom" | b"iso2" | b"iso3" | b"iso4" | b"iso5" | b"iso6" | b"mp41"
-            | b"mp42" | b"mp4v" | b"avc1" => "MP4 video",
+            b"isom" | b"iso2" | b"iso3" | b"iso4" | b"iso5" | b"iso6" | b"mp41" | b"mp42"
+            | b"mp4v" | b"avc1" => "MP4 video",
             b"M4V " | b"M4VH" => "M4V video",
             b"M4A " => "M4A audio",
             b"qt  " => "QuickTime video",
@@ -497,10 +505,8 @@ pub(crate) fn unsupported_error(bytes: &[u8]) -> LoadError {
         };
         if name.is_empty() {
             let brand = String::from_utf8_lossy(brand);
-            let brand: String = brand
-                .chars()
-                .map(|c| if c.is_ascii_graphic() { c } else { '?' })
-                .collect();
+            let brand: String =
+                brand.chars().map(|c| if c.is_ascii_graphic() { c } else { '?' }).collect();
             return LoadError::Other(format!(
                 "unsupported file: ISO-BMFF container (brand '{brand}'), not a decodable image"
             ));
@@ -562,15 +568,14 @@ pub(crate) fn unsupported_error(bytes: &[u8]) -> LoadError {
 /// Decode bytes to RGBA, capped at `max_dim` on the long side. JPEGs use the
 /// turbojpeg DCT-scaling fast path; everything else goes through the `image` crate
 /// or the dedicated pure-Rust decoders for formats it can't handle.
-pub(crate) fn decode_bytes(bytes: &[u8], max_dim: u32, start: std::time::Instant) -> Result<ImageData, LoadError> {
+pub(crate) fn decode_bytes(
+    bytes: &[u8],
+    max_dim: u32,
+    start: std::time::Instant,
+) -> Result<ImageData, LoadError> {
     if is_jpeg_bytes(bytes) {
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(bytes, max_dim) {
-            return Ok(ImageData {
-                width: w,
-                height: h,
-                rgba,
-                load_time: start.elapsed(),
-            });
+            return Ok(ImageData { width: w, height: h, rgba, load_time: start.elapsed() });
         }
         eprintln!("turbojpeg failed, falling back to image crate");
     }
@@ -616,4 +621,3 @@ pub fn load_image(path: &Path, max_dim: u32) -> Result<ImageData, LoadError> {
     }
     Ok(data)
 }
-

@@ -45,7 +45,8 @@ fn self_consistent(d: &ImageData, what: &str) {
 fn test_embedded_thumbnail_is_used_for_small_targets() {
     // A 1200x900 source with a 160x120 thumbnail. Orientation 1, so there is
     // no rotation question at all.
-    let bytes = jpeg_with_thumbnail(1200, 900, 1, &exif_fixtures::jpeg(160, 120), Endian::Little, None);
+    let bytes =
+        jpeg_with_thumbnail(1200, 900, 1, &exif_fixtures::jpeg(160, 120), Endian::Little, None);
     let r = load(&bytes, 256);
     assert_eq!((r.preview.width, r.preview.height), (160, 120));
     // No full decode happened, so there is no full image and it is below target.
@@ -60,7 +61,8 @@ fn test_embedded_thumbnail_is_used_for_small_targets() {
 fn test_embedded_thumbnail_ignored_for_large_targets() {
     // Above the gate the difference in sharpness would be visible, so the file
     // has to be decoded for real.
-    let bytes = jpeg_with_thumbnail(1200, 900, 1, &exif_fixtures::jpeg(160, 120), Endian::Little, None);
+    let bytes =
+        jpeg_with_thumbnail(1200, 900, 1, &exif_fixtures::jpeg(160, 120), Endian::Little, None);
     let r = load(&bytes, 4096);
     assert!(r.full.is_some(), "large target must decode the real image");
     self_consistent(&r.preview, "preview");
@@ -81,7 +83,8 @@ fn test_embedded_thumbnail_rotation_from_aspect_ratio() {
     // Orientation 6 = rotate 90 CW to display. The stored main image is
     // 1200x900 (landscape); a correctly-oriented thumbnail is therefore
     // portrait 120x160, and an unrotated one would be landscape 160x120.
-    let main = jpeg_with_thumbnail(1200, 900, 6, &exif_fixtures::jpeg(120, 160), Endian::Little, None);
+    let main =
+        jpeg_with_thumbnail(1200, 900, 6, &exif_fixtures::jpeg(120, 160), Endian::Little, None);
     let r = load(&main, 256);
     assert_eq!((r.preview.width, r.preview.height), (120, 160));
     assert_eq!(r.orig, Some((900, 1200)), "orig is reported oriented");
@@ -89,7 +92,8 @@ fn test_embedded_thumbnail_rotation_from_aspect_ratio() {
 
     // Same orientation, but this camera stored the thumbnail unrotated
     // (landscape) — so it does need the tag applied, ending up portrait.
-    let unrotated = jpeg_with_thumbnail(1200, 900, 6, &exif_fixtures::jpeg(160, 120), Endian::Little, None);
+    let unrotated =
+        jpeg_with_thumbnail(1200, 900, 6, &exif_fixtures::jpeg(160, 120), Endian::Little, None);
     let r = load(&unrotated, 256);
     assert_eq!((r.preview.width, r.preview.height), (120, 160));
     self_consistent(&r.preview, "preview");
@@ -99,12 +103,10 @@ fn test_embedded_thumbnail_rotation_from_aspect_ratio() {
 fn test_ambiguous_rotation_falls_back_to_a_real_decode() {
     // Orientation 3 (180) preserves the aspect ratio, so the evidence cannot
     // separate the hypotheses. We must not guess: decode properly instead.
-    let bytes = jpeg_with_thumbnail(1200, 900, 3, &exif_fixtures::jpeg(120, 160), Endian::Little, None);
+    let bytes =
+        jpeg_with_thumbnail(1200, 900, 3, &exif_fixtures::jpeg(120, 160), Endian::Little, None);
     let r = load(&bytes, 256);
-    assert!(
-        r.full.is_some(),
-        "ambiguous orientation must fall back, not guess"
-    );
+    assert!(r.full.is_some(), "ambiguous orientation must fall back, not guess");
     self_consistent(&r.preview, "preview");
 }
 
@@ -112,7 +114,8 @@ fn test_ambiguous_rotation_falls_back_to_a_real_decode() {
 fn test_near_square_source_falls_back_rather_than_guess() {
     // A square source makes both rotation hypotheses look the same, so there is
     // nothing to decide from. Fall back.
-    let bytes = jpeg_with_thumbnail(600, 595, 6, &exif_fixtures::jpeg(158, 160), Endian::Little, None);
+    let bytes =
+        jpeg_with_thumbnail(600, 595, 6, &exif_fixtures::jpeg(158, 160), Endian::Little, None);
     let r = load(&bytes, 256);
     assert!(r.full.is_some(), "near-square source must not be guessed at");
     self_consistent(&r.preview, "preview");
@@ -120,7 +123,8 @@ fn test_near_square_source_falls_back_rather_than_guess() {
 
 #[test]
 fn test_big_endian_exif_is_handled() {
-    let bytes = jpeg_with_thumbnail(1200, 900, 1, &exif_fixtures::jpeg(160, 120), Endian::Big, None);
+    let bytes =
+        jpeg_with_thumbnail(1200, 900, 1, &exif_fixtures::jpeg(160, 120), Endian::Big, None);
     let r = load(&bytes, 256);
     assert_eq!((r.preview.width, r.preview.height), (160, 120));
     self_consistent(&r.preview, "preview");
@@ -160,7 +164,8 @@ fn test_truncated_thumbnail_does_not_panic() {
 fn test_thumbnail_as_large_as_the_image_is_rejected() {
     // A "thumbnail" nearly the size of the source is not a thumbnail; using it
     // would be a pointless upscale.
-    let bytes = jpeg_with_thumbnail(400, 300, 1, &exif_fixtures::jpeg(390, 290), Endian::Little, None);
+    let bytes =
+        jpeg_with_thumbnail(400, 300, 1, &exif_fixtures::jpeg(390, 290), Endian::Little, None);
     let r = load(&bytes, 256);
     assert!(r.full.is_some());
     self_consistent(&r.preview, "preview");

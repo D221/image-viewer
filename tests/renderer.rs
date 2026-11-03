@@ -5,7 +5,7 @@
 //! the probing is reduced to a list of `(backend, survived)` pairs and the
 //! interesting function is which one gets picked from it.
 
-use image_viewer::{pick_probed, path_arg, RendererPref, WgpuBackend, PROBE_ORDER};
+use image_viewer::{path_arg, pick_probed, RendererPref, WgpuBackend, PROBE_ORDER};
 use std::path::PathBuf;
 
 fn pref(choice: WgpuBackend, probed: Option<WgpuBackend>) -> RendererPref {
@@ -67,27 +67,18 @@ fn auto_probes_gl_first_and_vulkan_last() {
 
 #[test]
 fn the_first_surviving_probe_wins() {
-    let all_ok = vec![
-        (WgpuBackend::Dx12, true),
-        (WgpuBackend::Gl, true),
-        (WgpuBackend::Vulkan, true),
-    ];
+    let all_ok =
+        vec![(WgpuBackend::Dx12, true), (WgpuBackend::Gl, true), (WgpuBackend::Vulkan, true)];
     assert_eq!(pick_probed(&all_ok), WgpuBackend::Gl, "GL leads: it is the cheapest to create");
 
     // GL unavailable: DX12 is next in order, even though Vulkan also works.
-    let no_gl = vec![
-        (WgpuBackend::Dx12, true),
-        (WgpuBackend::Gl, false),
-        (WgpuBackend::Vulkan, true),
-    ];
+    let no_gl =
+        vec![(WgpuBackend::Dx12, true), (WgpuBackend::Gl, false), (WgpuBackend::Vulkan, true)];
     assert_eq!(pick_probed(&no_gl), WgpuBackend::Dx12);
 
     // Only Vulkan works. This is the case the whole design exists for.
-    let only_vulkan = vec![
-        (WgpuBackend::Dx12, false),
-        (WgpuBackend::Gl, false),
-        (WgpuBackend::Vulkan, true),
-    ];
+    let only_vulkan =
+        vec![(WgpuBackend::Dx12, false), (WgpuBackend::Gl, false), (WgpuBackend::Vulkan, true)];
     assert_eq!(pick_probed(&only_vulkan), WgpuBackend::Vulkan);
 }
 
@@ -96,11 +87,8 @@ fn the_probe_order_beats_the_order_the_results_arrive_in() {
     // The parent runs the probes in `PROBE_ORDER` anyway, but a crash makes the
     // parent *skip* entries, so the list it ends up with can be out of order or
     // incomplete. Preference must come from PROBE_ORDER, not from the input.
-    let reversed = vec![
-        (WgpuBackend::Vulkan, true),
-        (WgpuBackend::Gl, true),
-        (WgpuBackend::Dx12, true),
-    ];
+    let reversed =
+        vec![(WgpuBackend::Vulkan, true), (WgpuBackend::Gl, true), (WgpuBackend::Dx12, true)];
     assert_eq!(pick_probed(&reversed), WgpuBackend::Gl);
 
     // Incomplete: GL was never tried, DX12 and Vulkan both report fine.
@@ -114,11 +102,8 @@ fn if_nothing_works_we_still_have_to_pick_something() {
     // untrustworthy — most likely the exe cannot be re-launched. Picking nothing
     // would leave `Backends` empty and fail in a far more confusing way, so the
     // least-bad answer is the cheapest one: same reasoning as `PROBE_ORDER`.
-    let none = vec![
-        (WgpuBackend::Dx12, false),
-        (WgpuBackend::Gl, false),
-        (WgpuBackend::Vulkan, false),
-    ];
+    let none =
+        vec![(WgpuBackend::Dx12, false), (WgpuBackend::Gl, false), (WgpuBackend::Vulkan, false)];
     assert_eq!(pick_probed(&none), WgpuBackend::Gl);
     assert_eq!(pick_probed(&[]), WgpuBackend::Gl);
 }
@@ -151,17 +136,11 @@ fn if_nothing_works_we_still_have_to_pick_something() {
 #[test]
 fn a_probe_that_stopped_at_the_first_success_decides_the_same_way() {
     for mask in 0u8..8 {
-        let full: Vec<(WgpuBackend, bool)> = PROBE_ORDER
-            .iter()
-            .map(|&b| (b, mask & bit(b) != 0))
-            .collect();
+        let full: Vec<(WgpuBackend, bool)> =
+            PROBE_ORDER.iter().map(|&b| (b, mask & bit(b) != 0)).collect();
         let expected = pick_probed(&full);
 
-        let stop = full
-            .iter()
-            .position(|(_, ok)| *ok)
-            .map(|i| i + 1)
-            .unwrap_or(full.len());
+        let stop = full.iter().position(|(_, ok)| *ok).map(|i| i + 1).unwrap_or(full.len());
         let short = full[..stop].to_vec();
         assert_eq!(
             pick_probed(&short),
@@ -321,10 +300,7 @@ fn exactly_one_backend_bit_is_ever_set() {
         "DX12 bit drifted from wgpu"
     );
     // `Auto` is resolved before it gets here, but must not produce an empty set.
-    assert_eq!(
-        image_viewer::wgpu_backend_set(WgpuBackend::Auto),
-        Backends::DX12.bits()
-    );
+    assert_eq!(image_viewer::wgpu_backend_set(WgpuBackend::Auto), Backends::DX12.bits());
 }
 
 #[test]

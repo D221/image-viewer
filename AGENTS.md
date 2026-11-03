@@ -5,6 +5,7 @@ Windows-only Rust desktop app: egui/eframe 0.36 on wgpu. One crate, no workspace
 ## Commands
 
 - `cargo test --no-fail-fast` — the whole suite. Plain `cargo test` stops at the first failing target.
+- `cargo fmt` — the tree is rustfmt-clean under `rustfmt.toml`; `cargo fmt --check` shows what it would change. Run it before committing.
 - `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
 - `cargo bench` runs nothing. The benchmarks are `#[ignore]`d test targets:
   `cargo test --release --test bench_browse -- --ignored --nocapture`
@@ -47,7 +48,7 @@ Raising a ceiling is a decision, not a default — don't do it by accident.
 
 - Every suite builds its own fixtures in `tempfile::tempdir()`. `test-images/` is gitignored — a test reading it passes on your machine and dies with `NotFound` in a fresh clone. The only readers of `test-images/` are the criterion targets (which want a real large photo), `test_gps_decode` (skips if `geo.jpg` is absent) and `bench_browse::real_scan_cells` (returns early when the dir is absent).
 - `tests/thumb_cache.rs` is the model for a cache that can be wrong in several ways: one test per guard, each verified to fail with the guard removed, a damaged-entry test that enumerates damage, the cache root passed in explicitly, and **no timing assertion**.
-- The suites that assert against **source text** (`keybindings.rs`, `renderer.rs`, `spreads_dims.rs`, `spreads_goto.rs`, `spreads_latches.rs`, `spreads_pan.rs`, `spreads_zoom.rs`, `unit.rs`) each compile their own copy of the helpers in `tests/common/spreads_fixtures.rs` - one test target cannot import from another. `drops.rs` is the lifetime-rule equivalent. A scan that checks a call's *presence* has already failed here - when the defect is a value computed at the wrong time, **position is the property, not presence**. Strip comments before scanning source; comments quote the very call being sought.
+- The suites that assert against **source text** (`keybindings.rs`, `renderer.rs`, `spreads_dims.rs`, `spreads_goto.rs`, `spreads_latches.rs`, `spreads_pan.rs`, `spreads_zoom.rs`, `unit.rs`) each compile their own copy of the helpers in `tests/common/spreads_fixtures.rs` - one test target cannot import from another. `drops.rs` is the lifetime-rule equivalent. A scan that checks a call's *presence* has already failed here - when the defect is a value computed at the wrong time, **position is the property, not presence**. Strip comments before scanning source; comments quote the very call being sought. A needle longer than one line must be compared against whitespace-squashed text (`squash` in `unit.rs`, `code_only` where it already strips comments), or the test silently encodes today's rustfmt wrap points and `cargo fmt` breaks it.
 - **A test that passes on the broken code is decoration.** For every trap with a test, the test was verified to fail with the bug reintroduced. Check premises against a real `egui::Context` / real queue, not a comment. Load the `verifying-a-change` skill before committing.
 
 ## egui 0.36 / wgpu quirks

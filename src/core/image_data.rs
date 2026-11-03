@@ -5,7 +5,6 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-
 /// Decoded image data plus load timing metadata.
 #[derive(Debug, Clone)]
 pub struct ImageData {
@@ -34,11 +33,7 @@ impl Default for Histogram {
     // `[[u32; 256]; 3]` has no `Default` impl to derive, so this is written
     // out rather than derived.
     fn default() -> Self {
-        Histogram {
-            bins: [[0; 256]; 3],
-            black: 0,
-            white: 0,
-        }
+        Histogram { bins: [[0; 256]; 3], black: 0, white: 0 }
     }
 }
 
@@ -72,4 +67,3 @@ pub fn histogram_rgba(rgba: &[u8], width: u32, height: u32) -> Histogram {
     }
     h
 }
-

@@ -73,11 +73,7 @@ fn where_does_startup_go() {
         std::hint::black_box(&g);
     });
     println!("  {:<38} {:>7.1} ms", "Gallery::load_all_from_folder", second);
-    println!(
-        "  {:<38} {:>7.1} ms   (startup pays the scan twice)",
-        "  -> duplicate scan",
-        second
-    );
+    println!("  {:<38} {:>7.1} ms   (startup pays the scan twice)", "  -> duplicate scan", second);
 
     // 4. Re-stat every file. This is what the 2 s folder watcher does, and it runs
     //    on the UI thread; if it is slow it can collide with a decode.

@@ -33,10 +33,7 @@ use std::sync::mpsc;
 /// moved or unmounted, and opening it would show an empty gallery with no way to
 /// tell "gone" from "empty".
 pub fn startup_folder(saved: Option<&str>) -> PathBuf {
-    saved
-        .map(PathBuf::from)
-        .filter(|p| p.is_dir())
-        .unwrap_or_else(|| PathBuf::from("test-images"))
+    saved.map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| PathBuf::from("test-images"))
 }
 
 /// Start the launch listing on a worker thread and hand back its result.

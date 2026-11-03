@@ -121,8 +121,7 @@ impl WgpuBackend {
 /// wgpu access-violates during adapter enumeration 3 times out of 3 even though
 /// `vulkaninfo` reports a healthy device. That is survivable here only because each
 /// probe runs in its own process — see [`pick_probed`].
-pub const PROBE_ORDER: [WgpuBackend; 3] =
-    [WgpuBackend::Gl, WgpuBackend::Dx12, WgpuBackend::Vulkan];
+pub const PROBE_ORDER: [WgpuBackend; 3] = [WgpuBackend::Gl, WgpuBackend::Dx12, WgpuBackend::Vulkan];
 
 /// The backend to use, given which probes survived.
 ///
@@ -159,10 +158,7 @@ pub struct RendererPref {
 
 impl Default for RendererPref {
     fn default() -> Self {
-        Self {
-            choice: WgpuBackend::Auto,
-            probed: None,
-        }
+        Self { choice: WgpuBackend::Auto, probed: None }
     }
 }
 
@@ -171,9 +167,7 @@ impl RendererPref {
     /// if no probe was run).
     pub fn resolve(&self, fresh: Option<WgpuBackend>) -> WgpuBackend {
         match self.choice {
-            WgpuBackend::Auto => fresh
-                .or(self.probed)
-                .unwrap_or(WgpuBackend::Dx12),
+            WgpuBackend::Auto => fresh.or(self.probed).unwrap_or(WgpuBackend::Dx12),
             other => other,
         }
     }
@@ -212,7 +206,7 @@ pub fn wgpu_backend_set(requested: WgpuBackend) -> u32 {
         // `wgpu_options`. `tests/renderer.rs` now compares against
         // `Backends::VULKAN/GL/DX12` directly; do not hand-transcribe these.
         WgpuBackend::Auto | WgpuBackend::Dx12 => 1 << 3, // DX12
-        WgpuBackend::Gl => 1 << 4,                        // GL
+        WgpuBackend::Gl => 1 << 4,                       // GL
         WgpuBackend::Vulkan => 1 << 1,                   // VULKAN
     }
 }
@@ -257,4 +251,3 @@ where
         .find(|s| !s.starts_with('-') && !s.is_empty())
         .map(std::path::PathBuf::from)
 }
-

@@ -41,9 +41,7 @@ fn content_box(panel: Rect4, pages: &[(f32, f32)], scale: f32, rtl: bool) -> [f3
 /// disagreement is visible. `the_pan_range_is_the_footprint_the_caller_folded` is that
 /// test.
 fn folded_footprint(pages: &[(f32, f32)]) -> (f32, f32) {
-    pages
-        .iter()
-        .fold((0.0f32, 0.0f32), |(w, h), &(pw, ph)| (w + pw, h.max(ph)))
+    pages.iter().fold((0.0f32, 0.0f32), |(w, h), &(pw, ph)| (w + pw, h.max(ph)))
 }
 
 /// The pan range reaches the **content's** edges: dragged to one end of it, an edge of
@@ -252,7 +250,9 @@ fn the_pan_bound_is_symmetric_only_when_the_content_is_centred() {
 
     // --- the single-image path, unchanged and not approximately unchanged.
     for rtl in [false, true] {
-        for (foot, scale) in [((1600.0, 1200.0), 1.0f32), ((1600.0, 1200.0), 0.4), ((400.0, 300.0), 2.0)] {
+        for (foot, scale) in
+            [((1600.0, 1200.0), 1.0f32), ((1600.0, 1200.0), 0.4), ((400.0, 300.0), 2.0)]
+        {
             let (low, high) = spread_pan_bounds(PANEL, foot, &[], scale, rtl, false);
             let half = [
                 ((foot.0 * scale - PANEL[2]) * 0.5).max(0.0),
@@ -322,11 +322,7 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
                     rtl,
                     false,
                 );
-                let inner = if rtl {
-                    rects[0][0]
-                } else {
-                    rects[0][0] + rects[0][2]
-                };
+                let inner = if rtl { rects[0][0] } else { rects[0][0] + rects[0][2] };
                 assert!(
                     (inner - 400.0).abs() < 1e-3,
                     "rtl={rtl} s={scale}: at offset {o} the page's inner edge is at {inner}, not \
@@ -360,7 +356,8 @@ fn panning_does_not_move_a_lone_page_off_its_seam() {
 
         let pair = [(400.0, 800.0), (700.0, 800.0)];
         for scale in [0.75f32, 1.0, 1.5] {
-            let (low, high) = spread_pan_bounds(PANEL, folded_footprint(&pair), &pair, scale, rtl, false);
+            let (low, high) =
+                spread_pan_bounds(PANEL, folded_footprint(&pair), &pair, scale, rtl, false);
             pair_had_room |= low[0] != 0.0 || high[0] != 0.0;
         }
     }
@@ -439,20 +436,14 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
 
             let wanted = zoom_offset_about(PANEL, &pages, from, to, rtl, anchor, (0.0, 0.0));
             let (low, high) = spread_pan_bounds(PANEL, foot, &pages, to, rtl, false);
-            let clamped = (
-                wanted.0.clamp(low[0], high[0]),
-                wanted.1.clamp(low[1], high[1]),
-            );
+            let clamped = (wanted.0.clamp(low[0], high[0]), wanted.1.clamp(low[1], high[1]));
 
             // The content point under the pointer, and where it lands after the clamp.
             let (cf, ct) = (
                 spread_centre(PANEL, &pages, from, rtl, false),
                 spread_centre(PANEL, &pages, to, rtl, false),
             );
-            let q = (
-                (anchor.0 - cf.0 - 0.0) / from,
-                (anchor.1 - cf.1 - 0.0) / from,
-            );
+            let q = ((anchor.0 - cf.0 - 0.0) / from, (anchor.1 - cf.1 - 0.0) / from);
             let moved = |o: (f32, f32)| {
                 let (x, y) = (ct.0 + o.0 + q.0 * to, ct.1 + o.1 + q.1 * to);
                 ((x - anchor.0).powi(2) + (y - anchor.1).powi(2)).sqrt()
@@ -503,10 +494,7 @@ fn zooming_about_the_partner_half_leaves_that_point_under_the_pointer() {
                 ((foot.0 * to - PANEL[2]) * 0.5).max(0.0),
                 ((foot.1 * to - PANEL[3]) * 0.5).max(0.0),
             ];
-            let old_clamped = (
-                wanted.0.clamp(-old[0], old[0]),
-                wanted.1.clamp(-old[1], old[1]),
-            );
+            let old_clamped = (wanted.0.clamp(-old[0], old[0]), wanted.1.clamp(-old[1], old[1]));
             assert_eq!(
                 old_clamped,
                 (want_x.signum() * old[0], -old[1]),
@@ -668,11 +656,8 @@ fn a_pan_range_is_always_ordered_and_finite() {
 fn the_pan_clamp_asks_the_library_for_the_range() {
     let src = main_src();
     let body = fn_body(&src, "fn central(");
-    let code = body
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let code =
+        body.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
 
     assert!(
         code.contains("spread_pan_bounds"),

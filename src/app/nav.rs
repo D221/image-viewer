@@ -76,10 +76,7 @@ impl MyApp {
     /// `partner` - and a `Gallery` asked on its own answers `None` for
     /// `override_shape`. See [`AppPageCtx`].
     pub(crate) fn page_ctx(&self) -> AppPageCtx<'_> {
-        AppPageCtx {
-            gallery: &self.gallery,
-            spreads: &self.spreads,
-        }
+        AppPageCtx { gallery: &self.gallery, spreads: &self.spreads }
     }
 
     /// Put the cursor on the anchor of the turn it is already on. Nothing unless
@@ -119,7 +116,11 @@ impl MyApp {
     /// `tests/spreads_nav.rs`, which is what lets this method be two lines without being
     /// untested logic.
     pub(crate) fn turn_forward(&mut self) -> bool {
-        let to = image_viewer::next_turn(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
+        let to = image_viewer::next_turn(
+            self.gallery.page_pos(),
+            self.spreads.lead_lone,
+            &self.page_ctx(),
+        );
         self.goto_turn(to)
     }
 
@@ -132,7 +133,11 @@ impl MyApp {
     /// and the wrap is the navigation layer's decision, which `prev_anchor`
     /// deliberately does not make. See that function's doc comment.
     pub(crate) fn turn_backward(&mut self) -> bool {
-        let to = image_viewer::prev_turn(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
+        let to = image_viewer::prev_turn(
+            self.gallery.page_pos(),
+            self.spreads.lead_lone,
+            &self.page_ctx(),
+        );
         self.goto_turn(to)
     }
 
@@ -324,10 +329,7 @@ impl MyApp {
         self.spreads.nudge_lead_lone(by);
         self.save_spreads();
         self.goto(ctx);
-        self.notice = Some(format!(
-            "{} pages open alone at the front",
-            self.spreads.lead_lone
-        ));
+        self.notice = Some(format!("{} pages open alone at the front", self.spreads.lead_lone));
     }
 
     /// `X`: flip the cursor page between a page that takes a turn to itself and one
@@ -492,12 +494,8 @@ impl MyApp {
         // not stamped yet (just appeared, or a fresh filter) costs `0` —
         // admitted — which is the fail-open reading: the budget is calibrated
         // to what the session has seen, not to a guess.
-        let file_bytes: Vec<u64> = self
-            .gallery
-            .files
-            .iter()
-            .map(|p| self.stamps.get(p).map_or(0, |s| s.len))
-            .collect();
+        let file_bytes: Vec<u64> =
+            self.gallery.files.iter().map(|p| self.stamps.get(p).map_or(0, |s| s.len)).collect();
         // The plan is computed by the library so it can be tested; all this does
         // is describe the current state to it.
         //
@@ -559,5 +557,4 @@ impl MyApp {
     }
 
     // ---- results from workers --------------------------------------------
-
 }

@@ -33,20 +33,10 @@ fn pixels(w: u32, h: u32) -> ImageData {
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            rgba.extend_from_slice(&[
-                (x % 256) as u8,
-                (y % 256) as u8,
-                ((x ^ y) % 256) as u8,
-                255,
-            ]);
+            rgba.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, ((x ^ y) % 256) as u8, 255]);
         }
     }
-    ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// The metadata a decode would have reported for a large, turned, wide-gamut
@@ -74,9 +64,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        Fixture {
-            dir: tempfile::tempdir().unwrap(),
-        }
+        Fixture { dir: tempfile::tempdir().unwrap() }
     }
     fn root(&self) -> PathBuf {
         self.dir.path().join("previews")
@@ -307,10 +295,7 @@ fn the_store_is_trimmed_to_its_cap() {
     // decides which of four entries written in the same millisecond is older,
     // and a test that depends on that is a test that fails on another disk.
     let left = image_viewer::prune_cache(&f.root(), before / 4);
-    assert!(
-        left <= before / 4,
-        "left {left} bytes of {before} after trimming to a quarter"
-    );
+    assert!(left <= before / 4, "left {left} bytes of {before} after trimming to a quarter");
     assert!(left < before, "something was trimmed");
     // And the store still works afterwards: a trim that leaves broken entries
     // would be worse than no trim.
@@ -367,10 +352,7 @@ fn only_a_preview_without_a_full_buffer_is_worth_storing() {
 
 /// A stand-in animation, for the one arm that has to recognise one.
 fn animation() -> image_viewer::Animation {
-    image_viewer::Animation {
-        frames: Vec::new(),
-        delays: Vec::new(),
-    }
+    image_viewer::Animation { frames: Vec::new(), delays: Vec::new() }
 }
 
 /// The decode path's wiring, as text, because it is about *position*.
@@ -396,10 +378,7 @@ fn the_store_is_asked_before_the_file_is_read_and_written_off_the_decode() {
     );
 
     // The write is handed over, not done here.
-    assert!(
-        body.contains("maybe_store_preview("),
-        "the decode hands its preview to the store"
-    );
+    assert!(body.contains("maybe_store_preview("), "the decode hands its preview to the store");
     let store_fn = code_only(&fn_body("maybe_store_preview"));
     assert!(
         store_fn.contains("store_preview("),
@@ -444,10 +423,8 @@ fn code_only(body: &str) -> String {
 /// `AGENTS.md`), so a scan of one file is not enough: **the scan follows the
 /// code**, and the property it checks is about the arrangement, not about where
 /// the text happens to sit.
-const SOURCES: &[&str] = &[
-    include_str!("../src/decode/decode_page.rs"),
-    include_str!("../src/cache/preview_store.rs"),
-];
+const SOURCES: &[&str] =
+    &[include_str!("../src/decode/decode_page.rs"), include_str!("../src/cache/preview_store.rs")];
 
 /// The body of `fn name`, in whichever source file has it.
 fn fn_body(name: &str) -> String {

@@ -91,7 +91,7 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("save", "Ctrl+S", "Save transformed copy"),
     ("save_screen", "Ctrl+Shift+S", "Save screen-size copy"),
     ("save_as", "Ctrl+Shift+A", "Save as (choose file, quality, size)"),
-("crop", "C", "Crop mode"),
+    ("crop", "C", "Crop mode"),
     ("rating_up", "Plus", "Rating up"),
     ("rating_down", "Minus", "Rating down"),
     ("flag", "B", "Flag / unflag"),
@@ -125,33 +125,101 @@ pub const KEY_ACTIONS: &[(&str, &str, &str)] = &[
     ("history_forward", "Alt+ArrowRight", "Forward in history"),
 ];
 
-
-
 /// Every key name the matcher understands: the spelling capture stores
 /// and settings shows. The binary must map each of these both ways
 /// (pinned by scan); a name missing either way silently falls back to the
 /// shipped default.
 pub const KEY_NAMES: &[&str] = &[
-    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q",
-    "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    "Num0", "Num1", "Num2", "Num3", "Num4", "Num5", "Num6", "Num7", "Num8", "Num9",
-    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-    "ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown",
-    "Space", "Enter", "Escape", "Tab", "Backspace", "Delete", "Insert",
-    "Home", "End", "PageUp", "PageDown",
-    "Comma", "Period", "Slash", "Semicolon", "Quote",
-    "OpenBracket", "CloseBracket", "Backslash", "Backtick",
-    "Minus", "Equals", "Plus",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "Num0",
+    "Num1",
+    "Num2",
+    "Num3",
+    "Num4",
+    "Num5",
+    "Num6",
+    "Num7",
+    "Num8",
+    "Num9",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9",
+    "F10",
+    "F11",
+    "F12",
+    "ArrowRight",
+    "ArrowLeft",
+    "ArrowUp",
+    "ArrowDown",
+    "Space",
+    "Enter",
+    "Escape",
+    "Tab",
+    "Backspace",
+    "Delete",
+    "Insert",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "Comma",
+    "Period",
+    "Slash",
+    "Semicolon",
+    "Quote",
+    "OpenBracket",
+    "CloseBracket",
+    "Backslash",
+    "Backtick",
+    "Minus",
+    "Equals",
+    "Plus",
 ];
 
 /// Shipped chord for `action`, or `""` when unknown.
 pub fn default_binding(action: &str) -> &'static str {
-    KEY_ACTIONS
-        .iter()
-        .find(|(id, _, _)| *id == action)
-        .map(|(_, chord, _)| *chord)
-        .unwrap_or("")
+    KEY_ACTIONS.iter().find(|(id, _, _)| *id == action).map(|(_, chord, _)| *chord).unwrap_or("")
 }
 
 /// Effective chord for `action`: the user's override when present and
@@ -161,7 +229,10 @@ pub fn default_binding(action: &str) -> &'static str {
 /// (`next_alt`: deliberately unbound so Space can be the zoom toggle), in
 /// which case the chain ends at *unbound*, because there is no shipped chord
 /// for a typo to fall back to.
-pub fn resolve_binding(bindings: &std::collections::HashMap<String, String>, action: &str) -> String {
+pub fn resolve_binding(
+    bindings: &std::collections::HashMap<String, String>,
+    action: &str,
+) -> String {
     match bindings.get(action).map(|s| s.trim()) {
         Some(s) if !s.is_empty() => s.to_owned(),
         _ => default_binding(action).to_owned(),
@@ -214,16 +285,7 @@ pub fn split_chord(raw: &str) -> Option<(bool, bool, bool, String)> {
         }
     }
     let key = key?;
-    Some((
-        ctrl,
-        shift,
-        alt,
-        if key.len() == 1 {
-            key.to_ascii_uppercase()
-        } else {
-            key
-        },
-    ))
+    Some((ctrl, shift, alt, if key.len() == 1 { key.to_ascii_uppercase() } else { key }))
 }
 
 /// Expand `{file}`, `{dir}` and `{name}` in `template` against `file`.
@@ -231,15 +293,9 @@ pub fn split_chord(raw: &str) -> Option<(bool, bool, bool, String)> {
 /// `{x}` in a program path survives instead of silently vanishing.
 pub fn expand_template(template: &str, file: &std::path::Path) -> String {
     let s = template.replace("{file}", &file.to_string_lossy().into_owned());
-    let dir = file
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let dir = file.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let s = s.replace("{dir}", &dir);
-    let name = file
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     s.replace("{name}", &name)
 }
 
@@ -272,20 +328,14 @@ pub fn parse_exif_datetime(s: &str) -> Option<std::time::SystemTime> {
     // Colons on the wire, dashes after parsing — accept either.
     let sep = if date.contains('-') { '-' } else { ':' };
     let mut d = date.split(sep);
-    let (y, mo, day): (i64, u64, u64) = (
-        d.next()?.parse().ok()?,
-        d.next()?.parse().ok()?,
-        d.next()?.parse().ok()?,
-    );
+    let (y, mo, day): (i64, u64, u64) =
+        (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
     if d.next().is_some() {
         return None;
     }
     let mut t = time.split(':');
-    let (h, mi, sec): (u64, u64, u64) = (
-        t.next()?.parse().ok()?,
-        t.next()?.parse().ok()?,
-        t.next()?.parse().ok()?,
-    );
+    let (h, mi, sec): (u64, u64, u64) =
+        (t.next()?.parse().ok()?, t.next()?.parse().ok()?, t.next()?.parse().ok()?);
     if t.next().is_some() {
         return None;
     }
@@ -319,10 +369,7 @@ pub fn parse_exif_datetime(s: &str) -> Option<std::time::SystemTime> {
 /// read-only and fails here, which is a confusing permission error for a
 /// feature about dates.
 pub fn touch_file_mtime(path: &std::path::Path, to: std::time::SystemTime) -> std::io::Result<()> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(path)?
-        .set_modified(to)
+    std::fs::OpenOptions::new().write(true).open(path)?.set_modified(to)
 }
 
 /// Slideshow pacing: true once `secs` have passed since `last`.
@@ -468,11 +515,7 @@ impl Config {
     pub fn save(&self, path: &Path) {
         if let Some(parent) = path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "Failed to create config directory {}: {}",
-                    parent.display(),
-                    err
-                );
+                eprintln!("Failed to create config directory {}: {}", parent.display(), err);
                 return;
             }
         }
@@ -493,18 +536,11 @@ impl Config {
             return dir.join("config.json");
         }
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            PathBuf::from(appdata)
-                .join("image-viewer")
-                .join("config.json")
+            PathBuf::from(appdata).join("image-viewer").join("config.json")
         } else if let Some(home) = std::env::var_os("HOME") {
-            PathBuf::from(home)
-                .join(".config")
-                .join("image-viewer")
-                .join("config.json")
+            PathBuf::from(home).join(".config").join("image-viewer").join("config.json")
         } else {
             PathBuf::from("config.json")
         }
     }
 }
-
-

@@ -55,12 +55,7 @@ impl Crop {
         if self.x >= w || self.y >= h {
             return None;
         }
-        Some(Crop {
-            x: self.x,
-            y: self.y,
-            w: self.w.min(w - self.x),
-            h: self.h.min(h - self.y),
-        })
+        Some(Crop { x: self.x, y: self.y, w: self.w.min(w - self.x), h: self.h.min(h - self.y) })
     }
 
     /// Grow the rectangle onto the MCU grid, and clamp it to the image.
@@ -151,12 +146,7 @@ impl Crop {
         let mut min_y = u32::MAX;
         let mut max_x = 0u32;
         let mut max_y = 0u32;
-        for (cx, cy) in [
-            (self.x, self.y),
-            (x1, self.y),
-            (self.x, y1),
-            (x1, y1),
-        ] {
+        for (cx, cy) in [(self.x, self.y), (x1, self.y), (self.x, y1), (x1, y1)] {
             let (dx, dy) = inv.map(cx, cy, dw, dh);
             min_x = min_x.min(dx);
             min_y = min_y.min(dy);
@@ -274,10 +264,7 @@ pub fn protected_preview_keys(
     }
     let i = index.min(n - 1);
     if let Some(f) = files.get(i) {
-        out.insert(ImgKey {
-            path: f.clone(),
-            page,
-        });
+        out.insert(ImgKey { path: f.clone(), page });
     }
     for k in 0..=2 * radius {
         if let Some(f) = files.get((i + n * 2 + k - radius) % n) {
@@ -289,4 +276,3 @@ pub fn protected_preview_keys(
     }
     out
 }
-

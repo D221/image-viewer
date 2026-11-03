@@ -23,11 +23,7 @@ impl Default for ZoomPan {
 
 impl ZoomPan {
     pub fn new() -> Self {
-        Self {
-            zoom: 1.0,
-            pan_x: 0.0,
-            pan_y: 0.0,
-        }
+        Self { zoom: 1.0, pan_x: 0.0, pan_y: 0.0 }
     }
 
     /// Apply a scroll delta to zoom, clamped to [0.1, 8.0].
@@ -85,13 +81,8 @@ pub fn dms_to_deg(parts: Option<&[URational]>) -> Option<f64> {
 
 /// GPS altitude in meters (below-sea-level encoded as negative by the ref tag).
 pub fn gps_altitude(exif: &nom_exif::Exif) -> Option<f64> {
-    let alt = exif
-        .get(ExifTag::GPSAltitude)
-        .and_then(|e| e.as_urational())
-        .and_then(|r| r.to_f64())?;
-    let below = exif
-        .get(ExifTag::GPSAltitudeRef)
-        .and_then(|v| v.as_u8())
-        .unwrap_or(0);
+    let alt =
+        exif.get(ExifTag::GPSAltitude).and_then(|e| e.as_urational()).and_then(|r| r.to_f64())?;
+    let below = exif.get(ExifTag::GPSAltitudeRef).and_then(|v| v.as_u8()).unwrap_or(0);
     Some(if below == 1 { -alt } else { alt })
 }

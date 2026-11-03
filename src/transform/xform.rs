@@ -5,7 +5,6 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-
 // ---------------------------------------------------------------------------
 // Lossless transform: the algebra of the eight lattice symmetries
 // ---------------------------------------------------------------------------
@@ -52,10 +51,7 @@ impl Xform {
 
     /// Do the axes swap? True for everything that turns the picture on its side.
     pub fn swaps_axes(self) -> bool {
-        matches!(
-            self,
-            Xform::Rot90 | Xform::Rot270 | Xform::Transpose | Xform::Transverse
-        )
+        matches!(self, Xform::Rot90 | Xform::Rot270 | Xform::Transpose | Xform::Transverse)
     }
 
     /// Dimensions of the result, given the input.
@@ -175,8 +171,8 @@ impl Xform {
         let (iw, ih) = (7u32, 5u32);
         let (mw, mh) = self.out_dims(iw, ih); // `self`'s output = `next`'s input
         let (ow, oh) = next.out_dims(mw, mh); // the composition's output
-        // `map` takes the *input* dimensions, which is the easy thing to get
-        // wrong here and produces underflow rather than a wrong answer.
+                                              // `map` takes the *input* dimensions, which is the easy thing to get
+                                              // wrong here and produces underflow rather than a wrong answer.
         let probe = |ox: u32, oy: u32| {
             let (bx, by) = next.map(ox, oy, mw, mh);
             self.map(bx, by, iw, ih)
@@ -248,4 +244,3 @@ impl Xform {
         Some((ow, oh, out))
     }
 }
-

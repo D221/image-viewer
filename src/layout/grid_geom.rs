@@ -5,7 +5,6 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-
 /// Side of one gallery-grid (G) thumbnail. The shipped size and the default
 /// every config without the key comes up on; the live value is
 /// [`Config::grid_cell`], which this only feeds.
@@ -37,12 +36,7 @@ pub fn grid_cols(panel_w: f32, cell: f32) -> usize {
 /// `view_h <= 0` means the viewport was never measured (the grid just
 /// opened), so there is no visible range to test against: pin the row to the
 /// top, which is also what opening on a deep selection has always done.
-pub fn grid_follow_offset(
-    sel_row: usize,
-    pitch: f32,
-    view_h: f32,
-    cur_offset: f32,
-) -> Option<f32> {
+pub fn grid_follow_offset(sel_row: usize, pitch: f32, view_h: f32, cur_offset: f32) -> Option<f32> {
     let row_top = sel_row as f32 * pitch;
     if view_h <= 0.0 {
         return Some(row_top);
@@ -56,4 +50,3 @@ pub fn grid_follow_offset(
         None
     }
 }
-

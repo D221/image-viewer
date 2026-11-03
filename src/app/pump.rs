@@ -30,11 +30,7 @@ impl MyApp {
             match m {
                 Msg::Preview { key, result } => match result {
                     Ok(p) => {
-                        let name = key
-                            .path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy();
+                        let name = key.path.file_name().unwrap_or_default().to_string_lossy();
                         let px = (p.image.size[0] as u32, p.image.size[1] as u32);
                         // Sampling is decided **at upload**, naming the two
                         // sampler axes rather than a zoom level, so the arrival
@@ -177,14 +173,7 @@ impl MyApp {
                             perf::record_since(perf::GALLERY_TO_THUMBS, t);
                         }
                         self.clock += 1;
-                        self.thumbs.insert(
-                            path.clone(),
-                            Thumb {
-                                tex,
-                                texels,
-                                used: self.clock,
-                            },
-                        );
+                        self.thumbs.insert(path.clone(), Thumb { tex, texels, used: self.clock });
                         self.thumb_tries.remove(&path);
                         self.evict_thumbs();
                     }
@@ -208,8 +197,7 @@ impl MyApp {
                         if Some(&key) == self.cur.as_ref() {
                             self.lat.full(Instant::now());
                             let load_ms = data.load_time.as_millis() as u64;
-                            let exif_tag =
-                                self.previews.get(&key).map_or(0, |pv| pv.exif_tag);
+                            let exif_tag = self.previews.get(&key).map_or(0, |pv| pv.exif_tag);
                             self.full = Some(FullImage {
                                 path: key.path.clone(),
                                 page: key.page,
@@ -393,11 +381,7 @@ impl MyApp {
     /// Cells re-request on demand, so eviction only costs a re-decode.
     pub(crate) fn evict_thumbs(&mut self) {
         while self.thumbs.len() > THUMB_CACHE_CAP {
-            let victim = self
-                .thumbs
-                .iter()
-                .min_by_key(|(_, v)| v.used)
-                .map(|(p, _)| p.clone());
+            let victim = self.thumbs.iter().min_by_key(|(_, v)| v.used).map(|(p, _)| p.clone());
             match victim {
                 Some(v) => {
                     self.thumbs.remove(&v);
@@ -521,5 +505,4 @@ impl MyApp {
     }
 
     // ---- file pickers -----------------------------------------------------
-
 }

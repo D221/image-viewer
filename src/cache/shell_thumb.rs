@@ -160,7 +160,11 @@ pub fn shell_thumbnail_allowing_extraction(path: &Path, target: u32) -> Option<I
 }
 
 #[cfg(windows)]
-pub(crate) fn shell_thumbnail_flagged(path: &Path, target: u32, cache_only: bool) -> Option<ImageData> {
+pub(crate) fn shell_thumbnail_flagged(
+    path: &Path,
+    target: u32,
+    cache_only: bool,
+) -> Option<ImageData> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::Foundation::SIZE;
     use windows_sys::Win32::UI::Shell::{
@@ -181,11 +185,7 @@ pub(crate) fn shell_thumbnail_flagged(path: &Path, target: u32, cache_only: bool
     // the prefix and without touching the file system, so it is also cheaper
     // (no syscall per cell).
     let abs = shell_api_path(path)?;
-    let wide: Vec<u16> = abs
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let wide: Vec<u16> = abs.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
 
     let _com = ComApartment::init()?;
     let mut factory: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -210,15 +210,7 @@ pub(crate) fn shell_thumbnail_flagged(path: &Path, target: u32, cache_only: bool
     }
     let mut hbm: HBITMAP = std::ptr::null_mut();
     let hr = unsafe {
-        get_image(
-            factory,
-            SIZE {
-                cx: target as i32,
-                cy: target as i32,
-            },
-            flags,
-            &mut hbm,
-        )
+        get_image(factory, SIZE { cx: target as i32, cy: target as i32 }, flags, &mut hbm)
     };
     unsafe { release(factory) };
     if hr < 0 || hbm.is_null() {
@@ -405,12 +397,8 @@ pub(crate) unsafe fn shell_bitmap_to_image(
         return None;
     }
 
-    let mut data = ImageData {
-        width: w,
-        height: h,
-        rgba: bgra_to_rgba(&bgra),
-        load_time: start.elapsed(),
-    };
+    let mut data =
+        ImageData { width: w, height: h, rgba: bgra_to_rgba(&bgra), load_time: start.elapsed() };
     // The same rule the decode path follows: whatever the decoder produced, the
     // cell is never larger than its target. A cached 1024px thumbnail would
     // otherwise cost 4 MB of texture per cell against the 512-entry cap.
@@ -461,9 +449,7 @@ impl ShellAsk {
 
     /// The empty record: nothing asked, nothing given up on.
     pub const fn new() -> Self {
-        ShellAsk {
-            folders: Vec::new(),
-        }
+        ShellAsk { folders: Vec::new() }
     }
 
     /// Is the shell still worth asking about `path`?
@@ -600,4 +586,3 @@ pub fn load_grid_thumbnail(path: &Path, target: u32) -> Result<ImageData, LoadEr
         }
     }
 }
-

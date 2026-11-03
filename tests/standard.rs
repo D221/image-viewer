@@ -18,15 +18,9 @@ fn standardized_compare_load_methods() {
     let (w, h) = (2400u32, 1600u32);
     let mut img = image::RgbImage::new(w, h);
     for (x, y, px) in img.enumerate_pixels_mut() {
-        *px = image::Rgb([
-            (x % 256) as u8,
-            (y % 256) as u8,
-            ((x + y) % 256) as u8,
-        ]);
+        *px = image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8]);
     }
-    image::DynamicImage::ImageRgb8(img)
-        .save(&path)
-        .expect("write fixture jpeg");
+    image::DynamicImage::ImageRgb8(img).save(&path).expect("write fixture jpeg");
 
     // Strategy 1: downscale to 1600
     let d1 = load_image(&path, 1600).unwrap();
@@ -71,7 +65,10 @@ fn standardized_compare_load_methods() {
 
     // The full decode is the source dimensions, unchanged.
     assert_eq!((d3.width, d3.height), (w, h));
-    eprintln!("DBG d1={}x{} d2={}x{} d3={}x{}", d1.width, d1.height, d2.width, d2.height, d3.width, d3.height);
+    eprintln!(
+        "DBG d1={}x{} d2={}x{} d3={}x{}",
+        d1.width, d1.height, d2.width, d2.height, d3.width, d3.height
+    );
     // The full decode is the source dimensions, unchanged.
     assert_eq!((d3.width, d3.height), (w, h));
 

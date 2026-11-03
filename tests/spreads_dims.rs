@@ -40,7 +40,7 @@ fn write_jpeg_with_orientation(path: &std::path::Path, w: u32, h: u32, tag: u16)
     tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // Orientation
     tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
     tiff.extend_from_slice(&1u32.to_be_bytes()); // one value
-    // A SHORT's value lives in the first 2 bytes of its 4-byte field.
+                                                 // A SHORT's value lives in the first 2 bytes of its 4-byte field.
     tiff.extend_from_slice(&tag.to_be_bytes());
     tiff.extend_from_slice(&[0, 0]);
     tiff.extend_from_slice(&0u32.to_be_bytes()); // no IFD1
@@ -100,10 +100,7 @@ fn page_dims_reads_stored_dimensions_without_decoding() {
     // Now break the pixels. IHDR is at a fixed offset and stays intact; the
     // entropy-coded data after it does not.
     let mut bytes = std::fs::read(&p).unwrap();
-    let idat = bytes
-        .windows(4)
-        .position(|w| w == b"IDAT")
-        .expect("the fixture has no IDAT chunk");
+    let idat = bytes.windows(4).position(|w| w == b"IDAT").expect("the fixture has no IDAT chunk");
     for b in bytes[idat + 4..].iter_mut() {
         *b ^= 0xA5;
     }
@@ -256,8 +253,7 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut bytes)).unwrap();
         for &(w, h) in &[(900u32, 1200u32), (1600, 900)] {
             let px: Vec<u8> = (0..(w * h)).flat_map(|_| [9u8, 9, 9, 255]).collect();
-            enc.write_image::<colortype::RGBA8>(w, h, &px)
-                .expect("one chained page");
+            enc.write_image::<colortype::RGBA8>(w, h, &px).expect("one chained page");
         }
     }
     std::fs::write(&p, &bytes).unwrap();
@@ -287,10 +283,7 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
     // rather than "the next-page learn filled it".
     gal.learn_shapes(PagePos { index: 0, page: 0 });
     gal.learn_shapes(PagePos { index: 0, page: 1 });
-    assert_eq!(
-        PageCtx::dims(&gal, PagePos { index: 0, page: 0 }),
-        Some((900, 1200))
-    );
+    assert_eq!(PageCtx::dims(&gal, PagePos { index: 0, page: 0 }), Some((900, 1200)));
     assert_eq!(
         PageCtx::dims(&gal, PagePos { index: 0, page: 1 }),
         Some((1600, 900)),
@@ -339,8 +332,7 @@ fn a_page_of_a_document_is_judged_by_its_own_dimensions() {
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut bytes)).unwrap();
         for &(w, h) in &[(900u32, 1200u32), (900, 1200), (900, 1200), (1600, 900)] {
             let px: Vec<u8> = (0..(w * h)).flat_map(|_| [9u8, 9, 9, 255]).collect();
-            enc.write_image::<colortype::RGBA8>(w, h, &px)
-                .expect("one chained page");
+            enc.write_image::<colortype::RGBA8>(w, h, &px).expect("one chained page");
         }
     }
     std::fs::write(&p, &bytes).unwrap();
@@ -407,8 +399,7 @@ fn two_page_tiff_with_a_spread_on_page_1(dir: &std::path::Path) -> std::path::Pa
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut bytes)).unwrap();
         for &(w, h) in &[(900u32, 1200u32), (1600, 900)] {
             let px: Vec<u8> = (0..(w * h)).flat_map(|_| [9u8, 9, 9, 255]).collect();
-            enc.write_image::<colortype::RGBA8>(w, h, &px)
-                .expect("one chained page");
+            enc.write_image::<colortype::RGBA8>(w, h, &px).expect("one chained page");
         }
     }
     std::fs::write(&p, &bytes).unwrap();
@@ -560,11 +551,7 @@ fn a_decode_never_displaces_a_learned_dimension() {
     gal.learn_shapes(PagePos { index: 0, page: 0 });
     let at = |page: u32| PagePos { index: 0, page };
     assert_eq!(gal.known_shapes(), 1, "the control: one page is known");
-    assert_eq!(
-        PageCtx::dims(&gal, at(0)),
-        Some((900, 1200)),
-        "learned from the header"
-    );
+    assert_eq!(PageCtx::dims(&gal, at(0)), Some((900, 1200)), "learned from the header");
 
     // A decode of the same page reports a half-size version - what an animation over
     // 4096, or a TIFF page past the first, would arrive with.
@@ -578,13 +565,7 @@ fn a_decode_never_displaces_a_learned_dimension() {
 
     // And a page with no entry is still filled, so the guard above is a guard and
     // not a no-op.
-    gal.note_shapes(
-        ImgKey {
-            path: p.clone(),
-            page: 4,
-        },
-        (300, 400),
-    );
+    gal.note_shapes(ImgKey { path: p.clone(), page: 4 }, (300, 400));
     assert_eq!(PageCtx::dims(&gal, at(4)), Some((300, 400)), "a gap is still filled");
     assert_eq!(gal.known_shapes(), 2);
 }
@@ -661,10 +642,8 @@ fn forget_shapes_makes_the_dimension_change_again() {
 #[test]
 fn a_gallery_walks_pages_the_same_way_the_planner_sees_them() {
     let dir = tempfile::tempdir().unwrap();
-    let paths: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg"]
-        .iter()
-        .map(|n| dir.path().join(n))
-        .collect();
+    let paths: Vec<std::path::PathBuf> =
+        ["a.jpg", "b.jpg", "c.jpg"].iter().map(|n| dir.path().join(n)).collect();
     for p in &paths {
         std::fs::write(p, b"not really a jpeg").unwrap();
     }
@@ -691,16 +670,8 @@ fn a_gallery_walks_pages_the_same_way_the_planner_sees_them() {
     );
 
     for pair in forwards.windows(2) {
-        assert_eq!(
-            PageCtx::step(&gal, pair[0], 1),
-            Some(pair[1]),
-            "step forwards from {pair:?}"
-        );
-        assert_eq!(
-            PageCtx::step(&gal, pair[1], -1),
-            Some(pair[0]),
-            "step back from {pair:?}"
-        );
+        assert_eq!(PageCtx::step(&gal, pair[0], 1), Some(pair[1]), "step forwards from {pair:?}");
+        assert_eq!(PageCtx::step(&gal, pair[1], -1), Some(pair[0]), "step back from {pair:?}");
     }
 
     // And `prev` retraces the entire walk, which is the half `step` could have
@@ -715,8 +686,14 @@ fn a_gallery_walks_pages_the_same_way_the_planner_sees_them() {
 
     // Multi-page steps, because `prev_anchor`'s walk steps by a whole turn and a
     // turn is 1 or 2. Same reason `step_no_wrap` is a loop rather than a `match`.
-    assert_eq!(PageCtx::step(&gal, PagePos { index: 0, page: 0 }, 2), Some(PagePos { index: 1, page: 0 }));
-    assert_eq!(PageCtx::step(&gal, PagePos { index: 2, page: 2 }, -2), Some(PagePos { index: 2, page: 0 }));
+    assert_eq!(
+        PageCtx::step(&gal, PagePos { index: 0, page: 0 }, 2),
+        Some(PagePos { index: 1, page: 0 })
+    );
+    assert_eq!(
+        PageCtx::step(&gal, PagePos { index: 2, page: 2 }, -2),
+        Some(PagePos { index: 2, page: 0 })
+    );
     // Off either end is `None`, not a wrap, with looping off.
     assert_eq!(PageCtx::step(&gal, PagePos { index: 2, page: 2 }, 1), None);
     assert_eq!(PageCtx::step(&gal, PagePos { index: 0, page: 0 }, -1), None);
@@ -757,10 +734,8 @@ fn a_gallery_walks_pages_the_same_way_the_planner_sees_them() {
 #[test]
 fn an_unknown_preceding_page_count_makes_flat_unavailable() {
     let dir = tempfile::tempdir().unwrap();
-    let paths: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
-        .iter()
-        .map(|n| dir.path().join(n))
-        .collect();
+    let paths: Vec<std::path::PathBuf> =
+        ["a.jpg", "b.jpg", "c.jpg", "d.jpg"].iter().map(|n| dir.path().join(n)).collect();
     for p in &paths {
         std::fs::write(p, b"not really a jpeg").unwrap();
     }

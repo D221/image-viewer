@@ -26,9 +26,7 @@ impl MyApp {
         archive.hash(&mut h);
         mtime.hash(&mut h);
         size.hash(&mut h);
-        std::env::temp_dir()
-            .join("image-viewer")
-            .join(format!("{:016x}", h.finish()))
+        std::env::temp_dir().join("image-viewer").join(format!("{:016x}", h.finish()))
     }
 
     /// Open a zip/cbz/7z/rar image archive: extract supported entries to a
@@ -68,11 +66,8 @@ impl MyApp {
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned());
                     if let Some(name) = last {
-                        if let Some(i) = self
-                            .gallery
-                            .files
-                            .iter()
-                            .position(|f| file_name_of(f) == *name)
+                        if let Some(i) =
+                            self.gallery.files.iter().position(|f| file_name_of(f) == *name)
                         {
                             self.gallery.index = i;
                         }
@@ -192,11 +187,7 @@ impl MyApp {
                 &mut g,
             );
         }
-        if let Some(i) = g
-            .files
-            .iter()
-            .position(|f| file_name_of(f) == file_name_of(&archive))
-        {
+        if let Some(i) = g.files.iter().position(|f| file_name_of(f) == file_name_of(&archive)) {
             g.index = i;
         }
         self.adopt_gallery(g, ctx);
@@ -264,9 +255,7 @@ impl MyApp {
     }
 
     pub(crate) fn pick_folder(&mut self, ctx: &Context) {
-        if let Some(folder) = rfd::FileDialog::new()
-            .set_title("Select image folder")
-            .pick_folder()
+        if let Some(folder) = rfd::FileDialog::new().set_title("Select image folder").pick_folder()
         {
             self.close_transients();
             self.config.folder = Some(folder.to_string_lossy().to_string());
@@ -280,10 +269,7 @@ impl MyApp {
             .set_title("Select image file")
             .add_filter(
                 "Images",
-                &[
-                    "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", "cbz",
-                    "zip",
-                ],
+                &["jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", "cbz", "zip"],
             )
             .pick_file()
         {
@@ -307,11 +293,7 @@ impl MyApp {
             self.open_archive(ctx, &path);
             return;
         }
-        let ext = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
         if image_viewer::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
             // **`true`**: Explorer's extraction of a zip member is a temp file it
             // deletes after the drop returns, and a drag out of *any* container
@@ -331,5 +313,4 @@ impl MyApp {
     }
 
     // ---- folder watcher ----------------------------------------------------
-
 }

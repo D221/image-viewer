@@ -696,4 +696,3 @@ pub fn prev_turn(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<PagePo
     ctx.step(at, -1)?;
     last_anchor(lead_lone, ctx)
 }
-

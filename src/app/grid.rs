@@ -82,110 +82,116 @@ impl MyApp {
             self.grid_sel_scrolled = sel;
         }
         let grid_out = sa.show_rows(ui, row_h, total_rows, |ui, rows| {
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for col in 0..cols {
-                            let idx = row * cols + col;
-                            let is_back_cell = in_archive && idx == 0;
-                            let resp = if is_back_cell {
-                                // "Go back" cell: draw an arrow up and the folder name
-                                let folder_name = self
-                                    .folder
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| self.folder.to_string_lossy().into_owned());
-                                let name = format!("^ {}", folder_name);
-                                let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(cell, cell + GRID_LABEL_H),
-                                    egui::Sense::click(),
-                                );
-                                let fill = if idx == sel {
-                                    egui::Color32::from_rgb(28, 58, 118)
-                                } else {
-                                    egui::Color32::from_rgb(38, 38, 38)
-                                };
-                                let stroke = if idx == sel {
-                                    egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 255))
-                                } else {
-                                    egui::Stroke::NONE
-                                };
-                                if ui.is_rect_visible(rect) {
-                                    ui.painter().rect(rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
-                                }
-                                let inner = rect.shrink(4.0);
-                                let mut child = ui.new_child(
-                                    egui::UiBuilder::new()
-                                        .max_rect(inner)
-                                        .layout(egui::Layout::top_down(egui::Align::Center)),
-                                );
-                                let img_area = egui::Rect::from_min_size(
-                                    egui::Pos2::new(inner.min.x, inner.min.y),
-                                    egui::vec2(inner.width(), cell),
-                                );
-                                child.allocate_exact_size(img_area.size(), egui::Sense::hover());
-                                child.painter().text(
-                                    img_area.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    "^",
-                                    egui::FontId::proportional(24.0),
-                                    ui.visuals().text_color(),
-                                );
-                                child.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&name)
-                                            .small()
-                                            .color(egui::Color32::from_gray(200)),
-                                    )
-                                    .truncate(),
-                                );
-                                resp
+            for row in rows {
+                ui.horizontal(|ui| {
+                    for col in 0..cols {
+                        let idx = row * cols + col;
+                        let is_back_cell = in_archive && idx == 0;
+                        let resp = if is_back_cell {
+                            // "Go back" cell: draw an arrow up and the folder name
+                            let folder_name = self
+                                .folder
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| self.folder.to_string_lossy().into_owned());
+                            let name = format!("^ {}", folder_name);
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(cell, cell + GRID_LABEL_H),
+                                egui::Sense::click(),
+                            );
+                            let fill = if idx == sel {
+                                egui::Color32::from_rgb(28, 58, 118)
                             } else {
-                                // Adjust index for the "go back" cell offset
-                                let file_idx = idx - if in_archive { 1 } else { 0 };
-                                let Some(path) = gallery.files.get(file_idx) else {
-                                    continue;
-                                };
-                                // Fill the ratings map in the same pass that
-                                // queues thumbnails: one worker read per newly
-                                // visible cell, never a sidecar stat per cell
-                                // per frame. The pending mark is what makes it
-                                // once per cell — without it a cell whose
-                                // answer has not landed yet would spawn a
-                                // thread every frame. Archives get no ratings.
-                                if !is_archive_path(path)
-                                    && !grid_ratings.contains_key(path)
-                                    && !grid_rating_pending.contains(path)
-                                {
-                                    grid_rating_pending.insert(path.clone());
-                                    let owned = path.clone();
-                                    let tx = drop_tx.clone();
-                                    let wake = drop_wake.clone();
-                                    std::thread::spawn(move || {
-                                        let result = image_viewer::Ratings::read(&owned);
-                                        let _ = tx.send(Msg::GridRating { path: owned, result });
-                                        wake.request_repaint();
-                                    });
-                                }
-                                let resp = grid_cell(
-                                    ui,
-                                    path,
-                                    cell,
-                                    idx == sel,
-                                    clock,
-                                    thumbs,
-                                    thumb_tries,
-                                    loader,
-                                    grid_ratings,
-                                );
-                                resp
+                                egui::Color32::from_rgb(38, 38, 38)
                             };
-                            if resp.clicked() && clicked.is_none() {
-                                clicked = Some(idx);
+                            let stroke = if idx == sel {
+                                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 255))
+                            } else {
+                                egui::Stroke::NONE
+                            };
+                            if ui.is_rect_visible(rect) {
+                                ui.painter().rect(
+                                    rect,
+                                    0.0,
+                                    fill,
+                                    stroke,
+                                    egui::StrokeKind::Inside,
+                                );
                             }
+                            let inner = rect.shrink(4.0);
+                            let mut child = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(inner)
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                            );
+                            let img_area = egui::Rect::from_min_size(
+                                egui::Pos2::new(inner.min.x, inner.min.y),
+                                egui::vec2(inner.width(), cell),
+                            );
+                            child.allocate_exact_size(img_area.size(), egui::Sense::hover());
+                            child.painter().text(
+                                img_area.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "^",
+                                egui::FontId::proportional(24.0),
+                                ui.visuals().text_color(),
+                            );
+                            child.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&name)
+                                        .small()
+                                        .color(egui::Color32::from_gray(200)),
+                                )
+                                .truncate(),
+                            );
+                            resp
+                        } else {
+                            // Adjust index for the "go back" cell offset
+                            let file_idx = idx - if in_archive { 1 } else { 0 };
+                            let Some(path) = gallery.files.get(file_idx) else {
+                                continue;
+                            };
+                            // Fill the ratings map in the same pass that
+                            // queues thumbnails: one worker read per newly
+                            // visible cell, never a sidecar stat per cell
+                            // per frame. The pending mark is what makes it
+                            // once per cell — without it a cell whose
+                            // answer has not landed yet would spawn a
+                            // thread every frame. Archives get no ratings.
+                            if !is_archive_path(path)
+                                && !grid_ratings.contains_key(path)
+                                && !grid_rating_pending.contains(path)
+                            {
+                                grid_rating_pending.insert(path.clone());
+                                let owned = path.clone();
+                                let tx = drop_tx.clone();
+                                let wake = drop_wake.clone();
+                                std::thread::spawn(move || {
+                                    let result = image_viewer::Ratings::read(&owned);
+                                    let _ = tx.send(Msg::GridRating { path: owned, result });
+                                    wake.request_repaint();
+                                });
+                            }
+                            let resp = grid_cell(
+                                ui,
+                                path,
+                                cell,
+                                idx == sel,
+                                clock,
+                                thumbs,
+                                thumb_tries,
+                                loader,
+                                grid_ratings,
+                            );
+                            resp
+                        };
+                        if resp.clicked() && clicked.is_none() {
+                            clicked = Some(idx);
                         }
-                    });
-                }
-            });
+                    }
+                });
+            }
+        });
         // Measure every frame, decide only on selection change: the stored
         // offset and viewport are what the follow decision reads next frame.
         self.grid_scroll = grid_out.state.offset.y;
@@ -203,5 +209,4 @@ impl MyApp {
             }
         }
     }
-
 }

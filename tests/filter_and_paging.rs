@@ -86,12 +86,7 @@ fn test_filter_is_a_case_insensitive_name_substring() {
 
     // Extension is part of the name, so it matches too.
     g.set_filtered(
-        &[
-            p("Beach.jpg"),
-            p("beach2.JPG"),
-            p("Mountain.png"),
-            p("portrait.jpeg"),
-        ],
+        &[p("Beach.jpg"), p("beach2.JPG"), p("Mountain.png"), p("portrait.jpeg")],
         ".jpeg",
     );
     let names: Vec<String> = g.files.iter().map(|f| file_name_of(f)).collect();
@@ -318,28 +313,16 @@ fn the_filter_can_narrow_by_rating_flag_and_tag() {
 
     let all: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
-        .map(|e| {
-            e.unwrap()
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| !n.ends_with(".xmp"))
         .collect();
     assert_eq!(all.len(), 3);
 
     assert_eq!(names_matching(dir.path(), "stars:4"), vec!["a.jpg"]);
-    assert_eq!(
-        names_matching(dir.path(), "stars:3+"),
-        vec!["a.jpg", "b.jpg"]
-    );
+    assert_eq!(names_matching(dir.path(), "stars:3+"), vec!["a.jpg", "b.jpg"]);
     assert_eq!(names_matching(dir.path(), "flagged"), vec!["a.jpg"]);
     assert_eq!(names_matching(dir.path(), "tag:family"), vec!["c.jpg"]);
-    assert_eq!(
-        names_matching(dir.path(), "tag:HOLIDAY").len(),
-        2,
-        "case-insensitive"
-    );
+    assert_eq!(names_matching(dir.path(), "tag:HOLIDAY").len(), 2, "case-insensitive");
 }
 
 /// Files without a sidecar — and files with a damaged one — degrade to
@@ -370,14 +353,8 @@ fn the_filter_treats_missing_and_damaged_sidecars_as_unrated() {
     assert!(image_viewer::ratings::Ratings::read(&broken).is_err());
 
     // ...but unrated for filtering, so the image stays reachable.
-    assert_eq!(
-        names_matching(dir.path(), "unflagged"),
-        vec!["broken.jpg", "plain.jpg"]
-    );
-    assert_eq!(
-        names_matching(dir.path(), "stars:0"),
-        vec!["broken.jpg", "plain.jpg", "rated.jpg"]
-    );
+    assert_eq!(names_matching(dir.path(), "unflagged"), vec!["broken.jpg", "plain.jpg"]);
+    assert_eq!(names_matching(dir.path(), "stars:0"), vec!["broken.jpg", "plain.jpg", "rated.jpg"]);
     assert_eq!(names_matching(dir.path(), "flagged"), vec!["rated.jpg"]);
     assert_eq!(names_matching(dir.path(), "stars:4"), vec!["rated.jpg"]);
 }

@@ -147,8 +147,8 @@ pub fn invert3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
     let cof = |row: usize, col: usize| -> f64 {
         let rows: Vec<usize> = (0..3).filter(|r| *r != row).collect();
         let cols: Vec<usize> = (0..3).filter(|c| *c != col).collect();
-        let minor = m[rows[0]][cols[0]] * m[rows[1]][cols[1]]
-            - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
+        let minor =
+            m[rows[0]][cols[0]] * m[rows[1]][cols[1]] - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
         if (row + col) % 2 == 0 {
             minor
         } else {
@@ -300,9 +300,7 @@ pub(crate) fn apply_wide_gamut_conversion(out: &mut PreviewAndFull) {
 /// File name as a lossy string, the key `last_by_folder` resume stores and the
 /// thing a gallery filter matches against.
 pub fn file_name_of(p: &Path) -> String {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
 /// Errors that can occur while loading an image.
@@ -332,10 +330,7 @@ pub fn exif_orientation(path: &Path) -> u16 {
 pub fn exif_date_taken(path: &Path) -> String {
     nom_exif::read_exif(path)
         .ok()
-        .and_then(|exif| {
-            exif.get(nom_exif::ExifTag::DateTimeOriginal)
-                .map(|v| v.to_string())
-        })
+        .and_then(|exif| exif.get(nom_exif::ExifTag::DateTimeOriginal).map(|v| v.to_string()))
         .unwrap_or_default()
 }
 
@@ -402,10 +397,8 @@ pub fn decode_user_comment(payload: &[u8]) -> Option<String> {
     }
     let (code, text) = payload.split_at(8);
     if code == b"UNICODE\0" {
-        let units: Vec<u16> = text
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let units: Vec<u16> =
+            text.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let s: String = char::decode_utf16(units.iter().copied())
             .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
             .collect();
@@ -425,8 +418,7 @@ pub fn exif_comment(exif: &nom_exif::Exif) -> Option<String> {
     {
         return Some(s);
     }
-    exif
-        .get(nom_exif::ExifTag::UserComment)
+    exif.get(nom_exif::ExifTag::UserComment)
         .and_then(|v| v.as_undefined())
         .and_then(decode_user_comment)
 }
@@ -446,4 +438,3 @@ pub(crate) fn clean_comment_text(bytes: &[u8]) -> Option<String> {
         Some(s)
     }
 }
-

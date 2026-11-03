@@ -41,7 +41,9 @@ pub(crate) type RestartSlot = std::sync::Arc<std::sync::Mutex<Option<image_viewe
 /// set), and a key being present does not mean wgpu can use the driver behind it.
 ///
 /// The chosen backend is printed so a crash is never a mystery.
-pub(crate) fn wgpu_options(backend: image_viewer::WgpuBackend) -> eframe::egui_wgpu::WgpuConfiguration {
+pub(crate) fn wgpu_options(
+    backend: image_viewer::WgpuBackend,
+) -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{
         wgpu::{Backends, InstanceDescriptor},
         WgpuSetup, WgpuSetupCreateNew,
@@ -115,10 +117,7 @@ pub(crate) fn probe_one(backend: image_viewer::WgpuBackend) -> i32 {
     // surface creation will still pass this probe.
     let verdict = pollster::block_on(async {
         let instance = Instance::new(desc);
-        let adapter = match instance
-            .request_adapter(&RequestAdapterOptions::default())
-            .await
-        {
+        let adapter = match instance.request_adapter(&RequestAdapterOptions::default()).await {
             Ok(a) => a,
             Err(e) => return Err(format!("no adapter: {e}")),
         };
@@ -203,7 +202,9 @@ pub(crate) fn probe_backends() -> Vec<(image_viewer::WgpuBackend, bool)> {
 /// Resolve the backend to use at launch, probing only if the preference needs
 /// it. Returns the backend and, if a probe ran and found something, the answer
 /// to cache in the config.
-pub(crate) fn resolve_renderer(pref: &image_viewer::RendererPref) -> (image_viewer::WgpuBackend, Option<image_viewer::WgpuBackend>) {
+pub(crate) fn resolve_renderer(
+    pref: &image_viewer::RendererPref,
+) -> (image_viewer::WgpuBackend, Option<image_viewer::WgpuBackend>) {
     if !pref.needs_probe() {
         return (pref.resolve(None), None);
     }
@@ -236,4 +237,3 @@ pub(crate) const THUMB_CACHE_CAP: usize = 512;
 /// placeholder). Enough for transient failures, bounded so a corrupt file
 /// can't keep the worker pool busy.
 pub(crate) const THUMB_TRIES: u8 = 3;
-

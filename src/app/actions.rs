@@ -18,10 +18,7 @@ impl MyApp {
             if !self.spawn_guard("Explore") {
                 return;
             }
-            let folder = p
-                .parent()
-                .map(|d| d.to_path_buf())
-                .unwrap_or_else(|| p.to_path_buf());
+            let folder = p.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| p.to_path_buf());
             if let Err(e) = open::that_detached(&folder) {
                 self.error = Some(format!("Open folder failed: {e}"));
             }
@@ -33,10 +30,7 @@ impl MyApp {
     /// `SPAWN_COOLDOWN` ago. Global across all spawn sites on purpose: per
     /// command would let cycling Ctrl+1..9 evade it.
     pub(crate) fn spawn_guard(&mut self, what: &str) -> bool {
-        if self
-            .last_external_spawn
-            .is_some_and(|t| t.elapsed() < SPAWN_COOLDOWN)
-        {
+        if self.last_external_spawn.is_some_and(|t| t.elapsed() < SPAWN_COOLDOWN) {
             self.notice = Some(format!("{what} ignored — ran a moment ago"));
             return false;
         }
@@ -58,14 +52,8 @@ impl MyApp {
             self.view.fit = false;
         }
         self.config.save(&self.config_path);
-        self.notice = Some(
-            if self.config.fit_mode {
-                "Fit view: on"
-            } else {
-                "Fit view: off"
-            }
-            .into(),
-        );
+        self.notice =
+            Some(if self.config.fit_mode { "Fit view: on" } else { "Fit view: off" }.into());
     }
 
     /// Fit-width as a mode: every image scaled so its width fills the window,
@@ -81,12 +69,7 @@ impl MyApp {
         }
         self.config.save(&self.config_path);
         self.notice = Some(
-            if self.config.fit_width_mode {
-                "Fit width: on"
-            } else {
-                "Fit width: off"
-            }
-            .into(),
+            if self.config.fit_width_mode { "Fit width: on" } else { "Fit width: off" }.into(),
         );
     }
 
@@ -126,12 +109,7 @@ impl MyApp {
         self.fit_window_pending = true;
         self.fit_iters = 6;
         self.notice = Some(
-            if self.config.fit_window_mode {
-                "Fit window: on"
-            } else {
-                "Fit window: off"
-            }
-            .into(),
+            if self.config.fit_window_mode { "Fit window: on" } else { "Fit window: off" }.into(),
         );
     }
 
@@ -159,18 +137,14 @@ impl MyApp {
     /// nothing, which is also what the grid does with it.
     pub(crate) fn step_animation(&mut self, forward: bool) {
         let shown_path = self.shown.as_ref().map(|k| k.path.clone());
-        let Some(av) = self
-            .anim
-            .as_mut()
-            .filter(|a| Some(&a.path) == shown_path.as_ref())
-        else {
+        let Some(av) = self.anim.as_mut().filter(|a| Some(&a.path) == shown_path.as_ref()) else {
             return;
         };
         let n = av.anim.frames.len();
         let speed = image_viewer::clamp_anim_speed(self.config.anim_speed);
-        let cur = av
-            .paused
-            .unwrap_or_else(|| image_viewer::anim_frame_state(&av.anim, av.start.elapsed(), speed).0);
+        let cur = av.paused.unwrap_or_else(|| {
+            image_viewer::anim_frame_state(&av.anim, av.start.elapsed(), speed).0
+        });
         av.paused = Some(image_viewer::step_frame(n, cur.min(n.saturating_sub(1)), forward));
     }
 
@@ -180,11 +154,7 @@ impl MyApp {
     pub(crate) fn toggle_animation_play(&mut self) {
         let now = Instant::now();
         let shown_path = self.shown.as_ref().map(|k| k.path.clone());
-        let Some(av) = self
-            .anim
-            .as_mut()
-            .filter(|a| Some(&a.path) == shown_path.as_ref())
-        else {
+        let Some(av) = self.anim.as_mut().filter(|a| Some(&a.path) == shown_path.as_ref()) else {
             return;
         };
         if let Some(held) = av.paused.take() {
@@ -226,12 +196,10 @@ impl MyApp {
         }
         match image_viewer::print_file(&path) {
             Ok(()) => {
-                self.notice = Some(
-                    format!(
-                        "Sent {} to print",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    ),
-                );
+                self.notice = Some(format!(
+                    "Sent {} to print",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
             }
             Err(e) => self.error = Some(format!("Print failed: {e}")),
         }

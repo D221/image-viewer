@@ -71,11 +71,7 @@ impl<'a> Tiff<'a> {
             return None;
         }
         let v = [self.b[a], self.b[b - 1]];
-        Some(if self.le {
-            u16::from_le_bytes(v)
-        } else {
-            u16::from_be_bytes(v)
-        })
+        Some(if self.le { u16::from_le_bytes(v) } else { u16::from_be_bytes(v) })
     }
 
     fn u32_at(&self, off: usize) -> Option<u32> {
@@ -85,11 +81,7 @@ impl<'a> Tiff<'a> {
             return None;
         }
         let v = [self.b[a], self.b[a + 1], self.b[a + 2], self.b[a + 3]];
-        Some(if self.le {
-            u32::from_le_bytes(v)
-        } else {
-            u32::from_be_bytes(v)
-        })
+        Some(if self.le { u32::from_le_bytes(v) } else { u32::from_be_bytes(v) })
     }
 
     /// Offset of the IFD after the one at `off`, i.e. the "next IFD" pointer
@@ -144,12 +136,7 @@ pub(crate) fn find_embedded_thumbnail(bytes: &[u8]) -> Option<ThumbRef> {
         b"MM" => false,
         _ => return None,
     };
-    let t = Tiff {
-        b: bytes,
-        base,
-        end,
-        le,
-    };
+    let t = Tiff { b: bytes, base, end, le };
     // IFD0 sits at the offset in the header; IFD1 (the thumbnail) is reachable
     // only through IFD0's *next-IFD* pointer, which is after its entry table.
     let ifd0 = t.u32_at(4)? as usize;
@@ -163,9 +150,9 @@ pub(crate) fn find_embedded_thumbnail(bytes: &[u8]) -> Option<ThumbRef> {
     let mut len = None;
     for (tag, val) in entries {
         match tag {
-            0x0103 => compression = t.u16_at(val),          // Compression
-            0x0201 => off = t.u32_at(val),                  // ThumbnailOffset
-            0x0202 => len = t.u32_at(val),                  // ThumbnailLength
+            0x0103 => compression = t.u16_at(val), // Compression
+            0x0201 => off = t.u32_at(val),         // ThumbnailOffset
+            0x0202 => len = t.u32_at(val),         // ThumbnailLength
             _ => {}
         }
     }
@@ -186,17 +173,17 @@ pub(crate) fn find_embedded_thumbnail(bytes: &[u8]) -> Option<ThumbRef> {
     let slice = &bytes[start..stop];
     // It has to actually be a JPEG: SOI at the front, EOI at the back. A
     // truncated block is common in the wild and must not reach a decoder.
-    if slice.len() < 4 || slice[0] != 0xFF || slice[1] != 0xD8 || slice[stop - start - 2] != 0xFF
+    if slice.len() < 4
+        || slice[0] != 0xFF
+        || slice[1] != 0xD8
+        || slice[stop - start - 2] != 0xFF
         || slice[stop - start - 1] != 0xD9
     {
         return None;
     }
     // SOF0..SOF15 (minus the non-frame markers DHT/JPG/DAC) carry the size.
     let dims = find_sof_dims(slice);
-    Some(ThumbRef {
-        range: (start, stop),
-        dims,
-    })
+    Some(ThumbRef { range: (start, stop), dims })
 }
 
 /// Read `(width, height)` out of a JPEG's first SOF marker.
@@ -344,4 +331,3 @@ pub fn apply_exif_orientation(data: &mut ImageData, tag: u16) {
     data.height = rotated.height();
     data.rgba = rotated.into_raw();
 }
-

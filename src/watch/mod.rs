@@ -144,23 +144,17 @@ pub fn parse_notify_buffer(buf: &[u8]) -> Vec<FsChange> {
     let mut out = Vec::new();
     let mut off = 0usize;
     while let Some(header) = buf.get(off..off + 12) {
-        let u32_at = |i: usize| {
-            u32::from_le_bytes([header[i], header[i + 1], header[i + 2], header[i + 3]])
-        };
+        let u32_at =
+            |i: usize| u32::from_le_bytes([header[i], header[i + 1], header[i + 2], header[i + 3]]);
         let next = u32_at(0) as usize;
         let action = u32_at(4);
         let name_len = u32_at(8) as usize;
         let Some(name_bytes) = buf.get(off + 12..off + 12 + name_len) else {
             break;
         };
-        let units: Vec<u16> = name_bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        out.push(FsChange {
-            action,
-            name: String::from_utf16_lossy(&units),
-        });
+        let units: Vec<u16> =
+            name_bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        out.push(FsChange { action, name: String::from_utf16_lossy(&units) });
         // `NextEntryOffset == 0` marks the last record; anything that cannot
         // advance the cursor ends the walk rather than looping forever.
         if next == 0 || next < 12 {
@@ -242,97 +236,88 @@ impl DirWatcher {
         let st = stop.clone();
         let fin = finished.clone();
         let liv = alive.clone();
-        let thread = std::thread::Builder::new()
-            .name("folder-watch".into())
-            .spawn(move || {
-                use std::sync::atomic::Ordering::Relaxed;
-                let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
-                wide.push(0);
-                // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a *directory* be
-                // opened as a file handle; the share mode is everything,
-                // because the app keeps reading and writing these files.
-                let handle: HANDLE = unsafe {
-                    CreateFileW(
-                        wide.as_ptr(),
-                        FILE_LIST_DIRECTORY,
-                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        std::ptr::null(),
-                        OPEN_EXISTING,
-                        FILE_FLAG_BACKUP_SEMANTICS,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if handle == INVALID_HANDLE_VALUE {
-                    let _ = ready_tx.send(Err(std::io::Error::last_os_error()));
-                    fin.store(true, Relaxed);
-                    liv.store(false, Relaxed);
-                    return;
-                }
-                let _ = ready_tx.send(Ok(()));
-                // 32 KiB: one bulk copy can emit an event per file, and an
-                // overflow is the one failure that loses information — the
-                // backend is required to report it as `ERROR_NOTIFY_ENUM_DIR`,
-                // which becomes `CHANGE_OVERFLOW` below.
-                let mut buf = vec![0u8; 32 * 1024];
-                loop {
-                    if st.load(Relaxed) {
-                        break;
-                    }
-                    let mut bytes = 0u32;
-                    let filter = FILE_NOTIFY_CHANGE_FILE_NAME
-                        | FILE_NOTIFY_CHANGE_SIZE
-                        | FILE_NOTIFY_CHANGE_LAST_WRITE;
-                    let ok = unsafe {
-                        ReadDirectoryChangesW(
-                            handle,
-                            buf.as_mut_ptr().cast(),
-                            buf.len() as u32,
-                            recursive as i32,
-                            filter,
-                            &mut bytes,
-                            std::ptr::null_mut(),
-                            None,
-                        )
-                    };
-                    if st.load(Relaxed) {
-                        break; // the blocking call was cancelled by `Drop`
-                    }
-                    if ok == 0 {
-                        let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                        if err == 1022 {
-                            // ERROR_NOTIFY_ENUM_DIR: events were dropped.
-                            let _ = tx.send(vec![FsChange {
-                                action: CHANGE_OVERFLOW,
-                                name: String::new(),
-                            }]);
-                            wake();
-                            continue;
-                        }
-                        break; // the handle or the watch is gone
-                    }
-                    let changes = parse_notify_buffer(&buf[..bytes as usize]);
-                    if !changes.is_empty() {
-                        ev.fetch_add(changes.len() as u64, Relaxed);
-                        if tx.send(changes).is_err() {
-                            break; // the app dropped the receiver
-                        }
-                        wake();
-                    }
-                }
-                unsafe { CloseHandle(handle) };
+        let thread = std::thread::Builder::new().name("folder-watch".into()).spawn(move || {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+            wide.push(0);
+            // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a *directory* be
+            // opened as a file handle; the share mode is everything,
+            // because the app keeps reading and writing these files.
+            let handle: HANDLE = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    FILE_LIST_DIRECTORY,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    std::ptr::null_mut(),
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                let _ = ready_tx.send(Err(std::io::Error::last_os_error()));
                 fin.store(true, Relaxed);
                 liv.store(false, Relaxed);
-            })?;
+                return;
+            }
+            let _ = ready_tx.send(Ok(()));
+            // 32 KiB: one bulk copy can emit an event per file, and an
+            // overflow is the one failure that loses information — the
+            // backend is required to report it as `ERROR_NOTIFY_ENUM_DIR`,
+            // which becomes `CHANGE_OVERFLOW` below.
+            let mut buf = vec![0u8; 32 * 1024];
+            loop {
+                if st.load(Relaxed) {
+                    break;
+                }
+                let mut bytes = 0u32;
+                let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+                    | FILE_NOTIFY_CHANGE_SIZE
+                    | FILE_NOTIFY_CHANGE_LAST_WRITE;
+                let ok = unsafe {
+                    ReadDirectoryChangesW(
+                        handle,
+                        buf.as_mut_ptr().cast(),
+                        buf.len() as u32,
+                        recursive as i32,
+                        filter,
+                        &mut bytes,
+                        std::ptr::null_mut(),
+                        None,
+                    )
+                };
+                if st.load(Relaxed) {
+                    break; // the blocking call was cancelled by `Drop`
+                }
+                if ok == 0 {
+                    let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                    if err == 1022 {
+                        // ERROR_NOTIFY_ENUM_DIR: events were dropped.
+                        let _ = tx
+                            .send(vec![FsChange { action: CHANGE_OVERFLOW, name: String::new() }]);
+                        wake();
+                        continue;
+                    }
+                    break; // the handle or the watch is gone
+                }
+                let changes = parse_notify_buffer(&buf[..bytes as usize]);
+                if !changes.is_empty() {
+                    ev.fetch_add(changes.len() as u64, Relaxed);
+                    if tx.send(changes).is_err() {
+                        break; // the app dropped the receiver
+                    }
+                    wake();
+                }
+            }
+            unsafe { CloseHandle(handle) };
+            fin.store(true, Relaxed);
+            liv.store(false, Relaxed);
+        })?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(DirWatcher {
-                rx,
-                events,
-                stop,
-                finished,
-                alive,
-                thread: Some(thread),
-            }),
+            Ok(Ok(())) => {
+                Ok(DirWatcher { rx, events, stop, finished, alive, thread: Some(thread) })
+            }
             Ok(Err(e)) => {
                 let _ = thread.join();
                 Err(e)
@@ -449,7 +434,6 @@ impl DirWatcher {
         false
     }
 }
-
 
 pub fn thumb_cache_entry(root: &Path, path: &Path) -> PathBuf {
     use std::hash::{Hash, Hasher};
@@ -585,7 +569,11 @@ pub fn write_cached_thumbnail(root: &Path, path: &Path, target: u32, data: &Imag
 /// What a cell costs on disk, measured: **13-80 KB, call it 1.5 bytes per pixel**.
 /// Deflate is simply not good at photographic content, which is what a thumbnail
 /// of a photo is, and [`THUMB_CACHE_MAX_BYTES`] is chosen with that in mind.
-pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, image::ImageError> {
+pub(crate) fn encode_png(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, image::ImageError> {
     use image::codecs::png::{FilterType, PngEncoder};
     use image::ExtendedColorType;
     use image::ImageEncoder;
@@ -640,11 +628,9 @@ pub(crate) fn maybe_trim_thumb_cache(root: &Path) {
         return;
     }
     let root = root.to_path_buf();
-    let _ = std::thread::Builder::new()
-        .name("iv-thumb-trim".into())
-        .spawn(move || {
-            prune_cache(&root, THUMB_CACHE_MAX_BYTES);
-        });
+    let _ = std::thread::Builder::new().name("iv-thumb-trim".into()).spawn(move || {
+        prune_cache(&root, THUMB_CACHE_MAX_BYTES);
+    });
 }
 
 /// Delete oldest-first until the cache is under `cap * THUMB_TRIM_TO_NUM/DEN`.
@@ -713,4 +699,3 @@ pub fn forget_thumbnail(path: &Path) {
     }
     let _ = std::fs::remove_file(thumb_cache_entry(&thumb_cache_root(), path));
 }
-

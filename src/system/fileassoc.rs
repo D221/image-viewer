@@ -16,34 +16,27 @@ pub fn progid() -> String {
     let n = std::env::current_exe()
         .ok()
         .and_then(|p| {
-            p.parent()
-                .and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
+            p.parent().and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
         })
         .unwrap_or_else(|| "app".into());
     format!("ImageViewer.{}", sanitize(&n))
 }
 
 fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+    s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
 }
 
 fn exts() -> &'static [&'static str] {
     &[
-        "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif",
-    "tif", "tiff", "bmp", "dib", "ico", "cur", "qoi", "svg",
+        "jpg", "jpeg", "png", "webp", "gif", "jxl", "avif", "heic", "heif", "tif", "tiff", "bmp",
+        "dib", "ico", "cur", "qoi", "svg",
     ]
 }
 
 fn open_key(sub: &str, writable: bool) -> R<winreg::RegKey> {
     use winreg::enums::*;
     let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
-    let access = if writable {
-        KEY_SET_VALUE | KEY_CREATE_SUB_KEY
-    } else {
-        KEY_READ
-    };
+    let access = if writable { KEY_SET_VALUE | KEY_CREATE_SUB_KEY } else { KEY_READ };
     io(hkcu.open_subkey_with_flags(sub, access))
 }
 
@@ -66,10 +59,7 @@ fn open_key(sub: &str, writable: bool) -> R<winreg::RegKey> {
 /// working.
 fn icon_value(exe: &std::path::Path) -> (String, &'static str) {
     if exe_has_icon(exe) {
-        (
-            format!("\"{}\",0", exe.to_string_lossy()),
-            "the icon in the exe",
-        )
+        (format!("\"{}\",0", exe.to_string_lossy()), "the icon in the exe")
     } else {
         (
             format!(r"%SystemRoot%\System32\imageres.dll,-102"),
@@ -99,7 +89,9 @@ fn exe_has_icon(exe: &std::path::Path) -> bool {
     let mut wide: Vec<u16> = exe.as_os_str().encode_wide().collect();
     wide.push(0);
     // A negative index asks "how many?", which needs no icon out.
-    let n = unsafe { ExtractIconExW(wide.as_ptr(), -1, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
+    let n = unsafe {
+        ExtractIconExW(wide.as_ptr(), -1, core::ptr::null_mut(), core::ptr::null_mut(), 0)
+    };
     if n == 0 {
         return false;
     }
@@ -261,9 +253,7 @@ pub fn declare_taskbar_identity() -> R<()> {
         .and_then(|k| k.get_value::<String, _>("IconUri").ok());
     let stale = match stored_icon.as_deref() {
         None => true,
-        Some(uri) => {
-            !std::path::Path::new(uri.trim_matches('"')).exists() || uri.starts_with('"')
-        }
+        Some(uri) => !std::path::Path::new(uri.trim_matches('"')).exists() || uri.starts_with('"'),
     };
 
     if stale {
@@ -348,4 +338,3 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 }
-

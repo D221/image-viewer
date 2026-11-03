@@ -60,14 +60,8 @@ fn the_record_offsets_chain_the_names() {
     assert_eq!(
         parsed,
         vec![
-            FsChange {
-                action: FILE_ACTION_ADDED,
-                name: "a.jpg".into()
-            },
-            FsChange {
-                action: FILE_ACTION_MODIFIED,
-                name: "sub\\b.png".into()
-            },
+            FsChange { action: FILE_ACTION_ADDED, name: "a.jpg".into() },
+            FsChange { action: FILE_ACTION_MODIFIED, name: "sub\\b.png".into() },
         ]
     );
 }
@@ -125,10 +119,7 @@ fn an_empty_buffer_has_no_records() {
 /// the temporary is added and modified, the *target* is removed, then the
 /// temporary is renamed onto it.
 fn rename_over_batch() -> Vec<FsChange> {
-    let r = |action, name: &str| FsChange {
-        action,
-        name: name.into(),
-    };
+    let r = |action, name: &str| FsChange { action, name: name.into() };
     vec![
         r(FILE_ACTION_ADDED, "page.jpg.tmp"),
         r(FILE_ACTION_MODIFIED, "page.jpg.tmp"),
@@ -146,9 +137,7 @@ fn a_replaced_name_keeps_the_record_that_says_it_came_back() {
         "the replace target's removal is folded away: it was never gone"
     );
     assert!(
-        folded
-            .iter()
-            .any(|c| c.action == FILE_ACTION_RENAMED_NEW_NAME && c.name == "page.jpg"),
+        folded.iter().any(|c| c.action == FILE_ACTION_RENAMED_NEW_NAME && c.name == "page.jpg"),
         "the record that says the target's bytes are new must survive"
     );
 }
@@ -158,20 +147,15 @@ fn a_real_deletion_is_not_folded_away() {
     // The fold is keyed on *the same name returning in the same batch*. A file
     // that just went is the one case a rescan is for, and dropping it would
     // leave a vanished file in the gallery until the next launch.
-    let folded = coalesce_changes(vec![FsChange {
-        action: FILE_ACTION_REMOVED,
-        name: "gone.jpg".into(),
-    }]);
+    let folded =
+        coalesce_changes(vec![FsChange { action: FILE_ACTION_REMOVED, name: "gone.jpg".into() }]);
     assert_eq!(folded.len(), 1);
     assert_eq!(folded[0].action, FILE_ACTION_REMOVED);
 }
 
 #[test]
 fn repeated_records_are_dropped_exactly() {
-    let r = |action, name: &str| FsChange {
-        action,
-        name: name.into(),
-    };
+    let r = |action, name: &str| FsChange { action, name: name.into() };
     let folded = coalesce_changes(vec![
         r(FILE_ACTION_MODIFIED, "a.jpg"),
         r(FILE_ACTION_MODIFIED, "a.jpg"),
@@ -229,10 +213,7 @@ fn the_change_table_is_what_makes_a_watch_useful() {
     }
     // A modified file we never listed, which *is* an image, means our listing
     // missed it (events were dropped, or it appeared between scans): rescan.
-    assert_eq!(
-        classify_change(FILE_ACTION_MODIFIED, false, true),
-        Membership
-    );
+    assert_eq!(classify_change(FILE_ACTION_MODIFIED, false, true), Membership);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,11 +343,7 @@ fn a_watch_on_a_quiet_folder_drops_without_hanging() {
         std::thread::sleep(Duration::from_millis(25));
         drop(w);
     }
-    assert!(
-        t0.elapsed() < Duration::from_secs(5),
-        "five stops took {:?}",
-        t0.elapsed()
-    );
+    assert!(t0.elapsed() < Duration::from_secs(5), "five stops took {:?}", t0.elapsed());
 }
 
 #[test]
@@ -421,7 +398,9 @@ fn a_failed_start_is_an_error_and_not_a_silent_empty_watch() {
     let file = dir.path().join("not-a-folder.jpg");
     std::fs::write(&file, b"x").unwrap();
     assert!(DirWatcher::start(file, false, || {}).is_err());
-    assert!(DirWatcher::start(Path::new("Z:\\no-such-folder-iv").to_path_buf(), false, || {}).is_err());
+    assert!(
+        DirWatcher::start(Path::new("Z:\\no-such-folder-iv").to_path_buf(), false, || {}).is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -429,9 +408,7 @@ fn a_failed_start_is_an_error_and_not_a_silent_empty_watch() {
 // ---------------------------------------------------------------------------
 
 fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"));
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} is gone; update this test to match"));
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     let mut seen_open = false;
@@ -482,9 +459,7 @@ fn the_app_polls_only_when_no_watch_is_running() {
     // unconditionally would keep the 2 s idle repaint the watch exists to
     // remove, and would look identical from outside.
     let body = fn_body(&src, "fn maybe_rescan(");
-    let watch = body
-        .find("if self.watcher.is_some() {")
-        .expect("the watch branch");
+    let watch = body.find("if self.watcher.is_some() {").expect("the watch branch");
     let poll = body.find("self.check_changed(ctx)").expect("the fallback poll");
     let ret = body.find("            return;").expect("the watch branch returns");
     assert!(
@@ -496,9 +471,7 @@ fn the_app_polls_only_when_no_watch_is_running() {
     // switch, the recursive toggle and opening an archive all restart or stop it
     // without a call site to forget.
     let sync = fn_body(&src, "fn sync_watcher(");
-    let archive = sync
-        .find("if self.zip_archive.is_some()")
-        .expect("the archive guard");
+    let archive = sync.find("if self.zip_archive.is_some()").expect("the archive guard");
     let start = sync.find("DirWatcher::start").expect("the watch is started");
     assert!(
         archive < start,

@@ -9,7 +9,7 @@
 //! crate, and `CONFIG_WITH_EVERY_FLAG_FLIPPED` is defined here.
 
 use image_viewer::{
-    GallerySpreads, LEAD_LONE_DEFAULT, load_spread_overrides, save_spread_overrides, Shape,
+    load_spread_overrides, save_spread_overrides, GallerySpreads, Shape, LEAD_LONE_DEFAULT,
 };
 use Shape::{Double, Single};
 
@@ -69,10 +69,7 @@ fn a_bom_prefixed_config_still_loads_its_settings() {
     std::fs::write(&path, &body).unwrap();
 
     let cfg = image_viewer::Config::load(&path);
-    assert!(
-        !cfg.load_all_on_startup,
-        "load_all_on_startup: the BOM ate the file"
-    );
+    assert!(!cfg.load_all_on_startup, "load_all_on_startup: the BOM ate the file");
     assert!(!cfg.linear_resample, "linear_resample");
     assert!(!cfg.loop_back, "loop_back");
     assert!(!cfg.thumbnail_cache, "thumbnail_cache");
@@ -81,14 +78,8 @@ fn a_bom_prefixed_config_still_loads_its_settings() {
     // reader cannot skim past all nine.
     assert!(cfg.wheel_navigation, "wheel_navigation");
     assert!(cfg.convert_wide_gamut, "convert_wide_gamut");
-    assert!(
-        cfg.manga_mode,
-        "manga_mode: the whole feature, back to its default"
-    );
-    assert!(
-        !cfg.manga_rtl,
-        "manga_rtl: and the reading direction with it"
-    );
+    assert!(cfg.manga_mode, "manga_mode: the whole feature, back to its default");
+    assert!(!cfg.manga_rtl, "manga_rtl: and the reading direction with it");
 
     // The same file without the BOM parses to the same thing, so the strip is the
     // only difference between them. This is what makes the assertions above about
@@ -172,11 +163,7 @@ fn a_bom_prefixed_spreads_store_does_not_cost_anybody_their_choices() {
         "a BOM-prefixed store is not being read, so this gallery's pairing decisions are \
          gone for the session"
     );
-    assert_eq!(
-        load_spread_overrides(&store, &other).pages,
-        h.pages,
-        "the second gallery's too"
-    );
+    assert_eq!(load_spread_overrides(&store, &other).pages, h.pages, "the second gallery's too");
 
     // Half two: a save against it keeps every other entry.
     let mut g2 = g.clone();

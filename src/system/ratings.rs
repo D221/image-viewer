@@ -117,7 +117,8 @@ fn attr_value_range(text: &str, name: &str) -> Option<(usize, usize)> {
         let lt = text[i..].find('<')? + i;
         let gt = tag_end(text, lt)?;
         let rest = &text[lt..];
-        let is_tag = !(rest.starts_with("<!--") || rest.starts_with("<?") || rest.starts_with("<![CDATA["));
+        let is_tag =
+            !(rest.starts_with("<!--") || rest.starts_with("<?") || rest.starts_with("<![CDATA["));
         if is_tag {
             let tag = &text[lt + 1..gt - 1];
             let tag_bytes = tag.as_bytes();
@@ -134,10 +135,7 @@ fn attr_value_range(text: &str, name: &str) -> Option<(usize, usize)> {
                     j += 1;
                     continue;
                 }
-                if tag[j..].starts_with(name)
-                    && j > 0
-                    && tag_bytes[j - 1].is_ascii_whitespace()
-                {
+                if tag[j..].starts_with(name) && j > 0 && tag_bytes[j - 1].is_ascii_whitespace() {
                     let mut k = j + name.len();
                     while k < tag_bytes.len() && tag_bytes[k].is_ascii_whitespace() {
                         k += 1;
@@ -197,7 +195,11 @@ fn insert_into_tag(text: &str, tag_end: usize, addition: &str) -> String {
 }
 
 fn xmlns_uri(name: &str) -> &'static str {
-    if name == "xmlns:iviewer" { IVIEWER_NS } else { XMP_NS }
+    if name == "xmlns:iviewer" {
+        IVIEWER_NS
+    } else {
+        XMP_NS
+    }
 }
 
 /// Replace the value of `name` in place, or insert ` name="value"` into the
@@ -360,20 +362,10 @@ fn merge(existing: &str, new: &Ratings) -> String {
     // removes the attribute, a non-empty one sets it. They use our own
     // namespace, declared on the first Description tag.
     if !new.caption.is_empty() || new.caption != old.caption {
-        out = set_description_attr(
-            &out,
-            "iviewer:Caption",
-            &new.caption,
-            "xmlns:iviewer",
-        );
+        out = set_description_attr(&out, "iviewer:Caption", &new.caption, "xmlns:iviewer");
     }
     if !new.artist.is_empty() || new.artist != old.artist {
-        out = set_description_attr(
-            &out,
-            "iviewer:Creator",
-            &new.artist,
-            "xmlns:iviewer",
-        );
+        out = set_description_attr(&out, "iviewer:Creator", &new.artist, "xmlns:iviewer");
     }
 
     // Only touch the label when the flag changed, so a `Second` (or an
@@ -469,7 +461,8 @@ impl Ratings {
     /// untouched, since a rating is a file we made, not a property of the
     /// picture.
     pub fn read(image: &Path) -> Result<Ratings, String> {
-        let sidecar = sidecar_path(image).ok_or_else(|| "no ratings inside archives".to_string())?;
+        let sidecar =
+            sidecar_path(image).ok_or_else(|| "no ratings inside archives".to_string())?;
         if !sidecar.exists() {
             return Ok(Ratings::default());
         }
@@ -479,7 +472,8 @@ impl Ratings {
 
     /// Write the sidecar for `image` atomically (`.tmp` then rename).
     pub fn write(&self, image: &Path) -> Result<(), String> {
-        let sidecar = sidecar_path(image).ok_or_else(|| "no ratings inside archives".to_string())?;
+        let sidecar =
+            sidecar_path(image).ok_or_else(|| "no ratings inside archives".to_string())?;
         let existing = std::fs::read_to_string(&sidecar).unwrap_or_default();
         let text = merge(&existing, self);
         let mut tmp = sidecar.as_os_str().to_os_string();

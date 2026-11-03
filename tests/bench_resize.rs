@@ -27,11 +27,7 @@ struct Shown {
 impl Shown {
     fn new(source: u32, target: u32) -> Self {
         // A single-pass decode returns the source capped to the target.
-        Self {
-            preview: source.min(target),
-            source,
-            decoded_for: target,
-        }
+        Self { preview: source.min(target), source, decoded_for: target }
     }
 }
 
@@ -83,13 +79,7 @@ fn new_policy_decodes(sizes: &[u32], source: u32, decode_frames: usize) -> usize
                 inflight = Some((left - 1, for_target));
             }
         }
-        let want = needs_refine(
-            shown.preview,
-            shown.source,
-            shown.decoded_for,
-            t,
-            RESIZE_PX_FLOOR,
-        );
+        let want = needs_refine(shown.preview, shown.source, shown.decoded_for, t, RESIZE_PX_FLOOR);
         if tr.frame(t, want) == ResizeAction::Refine {
             decodes += 1;
             inflight = Some((decode_frames, t));

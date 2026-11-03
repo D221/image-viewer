@@ -1,6 +1,5 @@
 use image_viewer::{load_image, Gallery, ZoomPan};
 
-
 /// `set_linear_resample` / `set_downscale_filter` are process-wide globals, and
 /// `cargo test` runs the tests in a file concurrently. Anything that asserts
 /// on a *specific* filter path has to take this lock and put the globals back,
@@ -20,12 +19,7 @@ static FILTER_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// pre-`MIN_FILTER_SCALE` behaviour** and is the arm several tests compare
 /// against, so it has to be reachable without a second build - which is why the
 /// floor is a runtime atomic and not a bare constant read at the call site.
-fn with_resample_at<T>(
-    linear: bool,
-    strength: f32,
-    floor: f32,
-    f: impl FnOnce() -> T,
-) -> T {
+fn with_resample_at<T>(linear: bool, strength: f32, floor: f32, f: impl FnOnce() -> T) -> T {
     let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
     let (was_linear, was_strength, was_floor) = (
         image_viewer::linear_resample_enabled(),
@@ -45,12 +39,7 @@ fn with_resample_at<T>(
 /// Run `f` with the downscale filter globals forced to `linear`, restoring the
 /// previous setting afterwards.
 fn with_linear_resample<T>(linear: bool, f: impl FnOnce() -> T) -> T {
-    with_resample_at(
-        linear,
-        cached_default_strength(),
-        image_viewer::MIN_FILTER_SCALE,
-        f,
-    )
+    with_resample_at(linear, cached_default_strength(), image_viewer::MIN_FILTER_SCALE, f)
 }
 
 /// Run `f` at an explicit strength, everything else shipped.
@@ -139,11 +128,7 @@ fn collect_src(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(Str
         if path.is_dir() {
             collect_src(root, &path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
             out.push((rel, std::fs::read_to_string(&path).unwrap()));
         }
     }
@@ -158,11 +143,7 @@ fn test_load_misnamed_png_with_jpg_extension() {
     let fake = tmp.path().join("misnamed.jpg");
     let img = image::DynamicImage::new_rgba8(64, 32);
     let mut real_png = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut real_png),
-        image::ImageFormat::Png,
-    )
-    .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut real_png), image::ImageFormat::Png).unwrap();
     std::fs::write(&fake, &real_png).unwrap();
 
     let data = load_image(&fake, 1600).expect("misnamed PNG should load");
@@ -182,11 +163,7 @@ fn test_preview_full_single_decode_small_file() {
     let tmp = tempfile::tempdir().unwrap();
     let img = image::DynamicImage::new_rgba8(2560, 1440);
     let mut jpeg = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut jpeg),
-        image::ImageFormat::Jpeg,
-    )
-    .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
     let p = tmp.path().join("wall.jpg");
     std::fs::write(&p, &jpeg).unwrap();
 
@@ -208,11 +185,7 @@ fn test_preview_full_single_decode_png() {
     let tmp = tempfile::tempdir().unwrap();
     let img = image::DynamicImage::new_rgba8(1024, 512);
     let mut png = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut png),
-        image::ImageFormat::Png,
-    )
-    .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     let p = tmp.path().join("photo.jpg"); // misnamed on purpose
     std::fs::write(&p, &png).unwrap();
 
@@ -232,11 +205,7 @@ fn test_preview_below_target_flagged() {
     let tmp = tempfile::tempdir().unwrap();
     let img = image::DynamicImage::new_rgba8(2048, 1024);
     let mut png = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut png),
-        image::ImageFormat::Png,
-    )
-    .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
     let p = tmp.path().join("big.png");
     std::fs::write(&p, &png).unwrap();
 
@@ -320,27 +289,12 @@ fn test_scan_folder_jxl_avif_heic() {
 
 #[test]
 fn test_natural_sort() {
-    let mut names = vec![
-        "IMG_10.jpg",
-        "a.jpg",
-        "IMG_2.jpg",
-        "B.jpg",
-        "IMG_1.jpg",
-        "file10.txt",
-        "file9.txt",
-    ];
+    let mut names =
+        vec!["IMG_10.jpg", "a.jpg", "IMG_2.jpg", "B.jpg", "IMG_1.jpg", "file10.txt", "file9.txt"];
     names.sort_by(|a, b| image_viewer::natural_cmp(a, b));
     assert_eq!(
         names,
-        vec![
-            "a.jpg",
-            "B.jpg",
-            "file9.txt",
-            "file10.txt",
-            "IMG_1.jpg",
-            "IMG_2.jpg",
-            "IMG_10.jpg",
-        ]
+        vec!["a.jpg", "B.jpg", "file9.txt", "file10.txt", "IMG_1.jpg", "IMG_2.jpg", "IMG_10.jpg",]
     );
 
     // Leading zeros keep grouping stable.
@@ -446,12 +400,8 @@ fn test_linear_resize_preserves_a_monotonic_ramp() {
             rgba.extend_from_slice(&[v, v, v, 255]);
         }
     }
-    let data = image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    };
+    let data =
+        image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO };
     for target in [32u32, 7, 3] {
         let out = with_linear_resample(true, || image_viewer::downscale_image(&data, target));
         for row in out.rgba.chunks_exact(out.width as usize * 4) {
@@ -517,9 +467,8 @@ fn test_downscale_output_buffer_matches_its_dimensions() {
         for (w, h) in shapes {
             let data = mk(w, h);
             for target in targets {
-                let out = with_linear_resample(linear, || {
-                    image_viewer::downscale_image(&data, target)
-                });
+                let out =
+                    with_linear_resample(linear, || image_viewer::downscale_image(&data, target));
                 let want = (out.width as usize) * (out.height as usize) * 4;
                 assert_eq!(
                     out.rgba.len(),
@@ -538,7 +487,6 @@ fn test_downscale_output_buffer_matches_its_dimensions() {
         }
     }
 }
-
 
 #[test]
 fn test_normalized_fixes_mismatched_buffer() {
@@ -622,8 +570,8 @@ fn test_extract_zip() {
 
 #[test]
 fn test_gps_decode() {
-    use nom_exif::URational;
     use nom_exif::ExifTag;
+    use nom_exif::URational;
     // Reuse geo.jpg (Vilnius: 54.72261N, 25.25693E, 195 m) when present,
     // else synthesize the same values.
     let path = std::path::Path::new("test-images\\geo.jpg");
@@ -640,11 +588,7 @@ fn test_gps_decode() {
 
     // Unit-check the DMS conversion and hemisphere sign directly.
     let dms = |d: u32, m: u32, s: (u32, u32)| {
-        vec![
-            URational::new(d, 1),
-            URational::new(m, 1),
-            URational::new(s.0, s.1),
-        ]
+        vec![URational::new(d, 1), URational::new(m, 1), URational::new(s.0, s.1)]
     };
     let parts = dms(54, 43, (2140, 100));
     let deg = image_viewer::dms_to_deg(Some(&parts)).unwrap();
@@ -685,11 +629,7 @@ fn test_load_gif_first_frame() {
     let tmp = tempfile::tempdir().unwrap();
     let img = image::DynamicImage::new_rgba8(48, 24);
     let mut gif = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut gif),
-        image::ImageFormat::Gif,
-    )
-    .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut gif), image::ImageFormat::Gif).unwrap();
     let p = tmp.path().join("frame.gif");
     std::fs::write(&p, &gif).unwrap();
 
@@ -715,14 +655,12 @@ fn test_animated_gif_decode() {
             Delay::from_numer_denom_ms(100, 1),
         ))
         .unwrap();
-        enc.encode_frame(
-            Frame::from_parts(
-                RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255])),
-                0,
-                0,
-                Delay::from_numer_denom_ms(200, 1),
-            ),
-        )
+        enc.encode_frame(Frame::from_parts(
+            RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255])),
+            0,
+            0,
+            Delay::from_numer_denom_ms(200, 1),
+        ))
         .unwrap();
     }
     let tmp = tempfile::tempdir().unwrap();
@@ -746,11 +684,7 @@ fn test_animated_gif_decode() {
 fn make_jpeg_with_orientation(tag: u16) -> Vec<u8> {
     let img = image::DynamicImage::new_rgb8(3, 2);
     let mut jpeg = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut jpeg),
-        image::ImageFormat::Jpeg,
-    )
-    .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
 
     // TIFF header + IFD0 with a single SHORT entry: Orientation = tag.
     let mut tiff = Vec::new();
@@ -884,7 +818,6 @@ fn test_fit_to_window() {
     assert!(zoom_pan.pan_y == 0.0);
 }
 
-
 use image_viewer::{grid_cols, grid_row_h, GRID_CELL, GRID_LABEL_H};
 
 /// The grid geometry follows the cell size instead of the constant: 150pt is
@@ -910,26 +843,14 @@ fn grid_follow_scroll_leaves_a_visible_selection_alone() {
     assert_eq!(image_viewer::grid_follow_offset(1, 100.0, 500.0, 100.0), None);
     assert_eq!(image_viewer::grid_follow_offset(5, 100.0, 500.0, 100.0), None);
     // Below the view: align the row's bottom with the view's bottom.
-    assert_eq!(
-        image_viewer::grid_follow_offset(7, 100.0, 500.0, 100.0),
-        Some(300.0)
-    );
+    assert_eq!(image_viewer::grid_follow_offset(7, 100.0, 500.0, 100.0), Some(300.0));
     // Above the view: align the row's top with the view's top.
-    assert_eq!(
-        image_viewer::grid_follow_offset(0, 100.0, 500.0, 100.0),
-        Some(0.0)
-    );
+    assert_eq!(image_viewer::grid_follow_offset(0, 100.0, 500.0, 100.0), Some(0.0));
     // No measurement yet (grid just opened): pin the row to the top, which
     // is today's open behavior and the only sane thing with no viewport.
-    assert_eq!(
-        image_viewer::grid_follow_offset(9, 100.0, 0.0, 0.0),
-        Some(900.0)
-    );
+    assert_eq!(image_viewer::grid_follow_offset(9, 100.0, 0.0, 0.0), Some(900.0));
     // Never a negative offset, whatever the stored numbers say.
-    assert_eq!(
-        image_viewer::grid_follow_offset(0, 100.0, 500.0, -600.0),
-        Some(0.0)
-    );
+    assert_eq!(image_viewer::grid_follow_offset(0, 100.0, 500.0, -600.0), Some(0.0));
 }
 
 /// A shuffled show saves the folder's order on start and both off-ramps
@@ -1002,9 +923,8 @@ fn the_grid_follows_through_measured_offsets_not_a_pinned_row() {
 /// over 64 files, where shuffling to identity has probability 1/64!.
 #[test]
 fn shuffle_keeps_every_file_and_reorders() {
-    let mut files: Vec<std::path::PathBuf> = (0..64)
-        .map(|i| std::path::PathBuf::from(format!("{i:03}.jpg")))
-        .collect();
+    let mut files: Vec<std::path::PathBuf> =
+        (0..64).map(|i| std::path::PathBuf::from(format!("{i:03}.jpg"))).collect();
     let before = files.clone();
     image_viewer::shuffle(&mut files);
     let (mut a, mut b) = (before.clone(), files.clone());
@@ -1041,9 +961,11 @@ fn grid_row(
     hits: &mut Vec<usize>,
     gap: &mut f32,
 ) {
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show_rows(ui, grid_row_h(GRID_CELL), 1, |ui, _| {
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+        ui,
+        grid_row_h(GRID_CELL),
+        1,
+        |ui, _| {
             ui.horizontal(|ui| {
                 *gap = ui.spacing().item_spacing.x;
                 for i in 0..cols {
@@ -1086,7 +1008,8 @@ fn grid_row(
                     }
                 }
             });
-        });
+        },
+    );
 }
 
 #[test]
@@ -1187,11 +1110,7 @@ fn test_wgpu_backend_set_enables_exactly_one_backend() {
     // One bit, always. Which one is the launch loop's decision, made by probing
     // each in a child process; see `tests/renderer.rs` for the policy.
     for b in [WgpuBackend::Auto, WgpuBackend::Dx12, WgpuBackend::Gl, WgpuBackend::Vulkan] {
-        assert_eq!(
-            wgpu_backend_set(b).count_ones(),
-            1,
-            "{b:?} enabled more than one backend"
-        );
+        assert_eq!(wgpu_backend_set(b).count_ones(), 1, "{b:?} enabled more than one backend");
     }
     // `Auto` is resolved before it reaches here, but must not produce an empty
     // set — that fails with a much more confusing error than a wrong backend.
@@ -1215,10 +1134,7 @@ fn test_path_arg_skips_flags() {
     use image_viewer::path_arg;
 
     // The plain case: one positional path.
-    assert_eq!(
-        path_arg(["C:\\photos"]).as_deref(),
-        Some(std::path::Path::new("C:\\photos"))
-    );
+    assert_eq!(path_arg(["C:\\photos"]).as_deref(), Some(std::path::Path::new("C:\\photos")));
 
     // Regression: `--perf` is a flag, not a path. `args().nth(1)` took it as one,
     // it matched neither file nor dir, and the app silently fell back to the
@@ -1277,11 +1193,7 @@ fn test_fit_scale_no_upscale_centres_thumbnails() {
     // Never upscale: a small image is centred at native size rather than
     // blown up into a blurry square.
     for natural in [(40.0_f32, 30.0_f32), (1.0, 1.0), (150.0, 150.0)] {
-        assert_eq!(
-            fit_scale_no_upscale(natural, area),
-            1.0,
-            "{natural:?} must not be upscaled"
-        );
+        assert_eq!(fit_scale_no_upscale(natural, area), 1.0, "{natural:?} must not be upscaled");
     }
 
     // Degenerate inputs must not produce NaN (that would silently blank cells).
@@ -1317,10 +1229,8 @@ fn test_grid_thumbnail_is_centred_and_textured() {
     // A cell's thumbnail area, as gallery_grid lays it out.
     let area = Rect::from_min_size(egui::Pos2::new(20.0, 20.0), Vec2::new(142.0, 150.0));
     let natural = Vec2::new(texels[0] as f32, texels[1] as f32);
-    let scale = image_viewer::fit_scale_no_upscale(
-        (natural.x, natural.y),
-        (area.width(), area.height()),
-    );
+    let scale =
+        image_viewer::fit_scale_no_upscale((natural.x, natural.y), (area.width(), area.height()));
     let draw_size = (natural * scale).min(area.size());
     let draw = Rect::from_center_size(area.center(), draw_size);
 
@@ -1355,10 +1265,7 @@ fn test_grid_thumbnail_is_centred_and_textured() {
 
     // Textured: a collapsed UV samples one texel and stretches it, which is
     // what a "solid colour" thumbnail is.
-    assert!(
-        uv.width() > 0.0 && uv.height() > 0.0,
-        "UV must be non-degenerate, got {uv:?}"
-    );
+    assert!(uv.width() > 0.0 && uv.height() > 0.0, "UV must be non-degenerate, got {uv:?}");
     // Aspect kept.
     let drawn = rect.width() / rect.height();
     let source = texels[0] as f32 / texels[1] as f32;
@@ -1539,16 +1446,15 @@ fn no_ui_text_uses_a_glyph_the_font_lacks() {
 
         let mut seen: std::collections::BTreeMap<char, String> = Default::default();
         for file in ["src/main.rs", "src/lib.rs"] {
-            let text = std::fs::read_to_string(file)
-                .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+            let text =
+                std::fs::read_to_string(file).unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
             for (i, line) in text.lines().enumerate() {
                 let code = strip_line_comment(line);
                 for c in code.chars() {
                     if c.is_ascii() || c == '\u{FFFD}' {
                         continue;
                     }
-                    seen.entry(c)
-                        .or_insert_with(|| format!("{file}:{}", i + 1));
+                    seen.entry(c).or_insert_with(|| format!("{file}:{}", i + 1));
                 }
             }
         }
@@ -1556,9 +1462,8 @@ fn no_ui_text_uses_a_glyph_the_font_lacks() {
         ui.ctx().fonts_mut(|f| {
             for (c, origin) in &seen {
                 let s = c.to_string();
-                let absent = sizes
-                    .iter()
-                    .any(|sz| !f.has_glyphs(&egui::FontId::proportional(*sz), &s));
+                let absent =
+                    sizes.iter().any(|sz| !f.has_glyphs(&egui::FontId::proportional(*sz), &s));
                 if absent {
                     missing.push((*c, origin.clone()));
                 }
@@ -1785,10 +1690,7 @@ fn a_config_written_before_workers_still_loads_and_stays_auto() {
     let cfg: image_viewer::Config =
         serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
             .expect("an old config must load");
-    assert_eq!(
-        cfg.workers, 0,
-        "an old config must come up on auto (0), not on a fixed count"
-    );
+    assert_eq!(cfg.workers, 0, "an old config must come up on auto (0), not on a fixed count");
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
     assert_eq!(fresh.workers, 0, "a first run must also come up on auto");
@@ -1803,10 +1705,7 @@ fn the_worker_count_setting_is_wired_to_pool_startup() {
         src.contains("resolve_worker_count("),
         "pool startup must go through resolve_worker_count, not compute the clamp inline"
     );
-    assert!(
-        src.contains("config.workers"),
-        "pool startup must read the setting"
-    );
+    assert!(src.contains("config.workers"), "pool startup must read the setting");
     assert!(
         src.contains("&mut self.config.workers"),
         "the settings panel must have a control bound to it"
@@ -1854,20 +1753,10 @@ fn sort_descending_reverses_each_mode() {
     std::fs::write(tmp.path().join("c.jpg"), vec![0u8; 500]).ok();
 
     // Name: ascending is natural, descending its exact reverse.
-    let asc = image_viewer::scan_folder_sorted_dir(
-        tmp.path(),
-        image_viewer::SortMode::Name,
-        false,
-    );
-    let desc = image_viewer::scan_folder_sorted_dir(
-        tmp.path(),
-        image_viewer::SortMode::Name,
-        true,
-    );
+    let asc = image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Name, false);
+    let desc = image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Name, true);
     let names = |fs: &[std::path::PathBuf]| {
-        fs.iter()
-            .map(|p| p.file_name().unwrap().to_owned())
-            .collect::<Vec<_>>()
+        fs.iter().map(|p| p.file_name().unwrap().to_owned()).collect::<Vec<_>>()
     };
     assert_eq!(
         names(&asc).iter().map(|s| s.to_str().unwrap()).collect::<Vec<_>>(),
@@ -1878,21 +1767,17 @@ fn sort_descending_reverses_each_mode() {
     assert_eq!(desc, rev, "descending Name must be ascending reversed");
 
     // Size: shipped order is largest-first; descending puts smallest first.
-    let desc =
-        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Size, true);
+    let desc = image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Size, true);
     assert_eq!(desc[0].file_name().unwrap(), "a.jpg");
-    let asc =
-        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Size, false);
+    let asc = image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Size, false);
     let mut rev = asc.clone();
     rev.reverse();
     assert_eq!(desc, rev, "descending Size must be ascending reversed");
 
     // Date: order depends on mtime granularity, but descending must still be
     // the exact reverse of whatever ascending produced.
-    let asc =
-        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Date, false);
-    let desc =
-        image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Date, true);
+    let asc = image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Date, false);
+    let desc = image_viewer::scan_folder_sorted_dir(tmp.path(), image_viewer::SortMode::Date, true);
     let mut rev = asc.clone();
     rev.reverse();
     assert_eq!(desc, rev, "descending Date must be ascending reversed");
@@ -1904,10 +1789,7 @@ fn a_config_written_before_sort_descending_still_loads_and_stays_off() {
     let cfg: image_viewer::Config =
         serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
             .expect("an old config must load");
-    assert!(
-        !cfg.sort_descending,
-        "an old config must keep the shipped orders"
-    );
+    assert!(!cfg.sort_descending, "an old config must keep the shipped orders");
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
     assert!(!fresh.sort_descending, "a first run must also keep them");
@@ -1941,12 +1823,8 @@ fn shift_copy_puts_the_path_on_the_clipboard() {
     );
     // The call site, not the definition: the arm around it must branch on the
     // shift state, since both chords arrive as the same event.
-    let call = src
-        .find("self.copy_path_to_clipboard(ctx)")
-        .expect("the Copy arm must call it");
-    let arm = src[..call]
-        .rfind("clip_img")
-        .expect("the call must sit in the Copy arm");
+    let call = src.find("self.copy_path_to_clipboard(ctx)").expect("the Copy arm must call it");
+    let arm = src[..call].rfind("clip_img").expect("the call must sit in the Copy arm");
     assert!(
         src[arm..call].contains("clip_shift"),
         "the Copy arm must read the shift state to tell Ctrl+Shift+C apart \
@@ -2005,10 +1883,7 @@ fn exif_comment_reads_description_from_a_real_file() {
 
     // Synthetic payloads without a file: ASCII prefix + text, and an
     // all-NUL body is no comment rather than an empty line.
-    assert_eq!(
-        image_viewer::decode_user_comment(b"ASCII\0\0\0hello").as_deref(),
-        Some("hello")
-    );
+    assert_eq!(image_viewer::decode_user_comment(b"ASCII\0\0\0hello").as_deref(), Some("hello"));
     assert_eq!(image_viewer::decode_user_comment(b"ASCII\0\0\0\0\0\0"), None);
 }
 
@@ -2048,10 +1923,7 @@ fn the_colour_line_rides_on_the_preview_not_the_metadata_read() {
 
     // The panel draws it from the shown image's cached preview.
     let coloured = src.contains("preview.colour.panel_line()");
-    assert!(
-        coloured,
-        "the metadata panel must draw the colour line from the cached preview"
-    );
+    assert!(coloured, "the metadata panel must draw the colour line from the cached preview");
     assert!(
         src.contains("self.shown.as_ref().and_then(|k| self.previews.get(k))"),
         "the colour line must be read off `shown`'s cached preview, not re-derived \
@@ -2068,10 +1940,7 @@ fn the_screen_save_key_is_wired_to_a_scaled_save() {
         src.contains("save_transformed_scaled("),
         "Ctrl+Shift+S must go through the scaled save, not the full-res one"
     );
-    assert!(
-        src.contains("save_scaled_copy()"),
-        "there must be a screen-size save action"
-    );
+    assert!(src.contains("save_scaled_copy()"), "there must be a screen-size save action");
 }
 
 /// Toasts (Tier 1 #11): a resort must say what order it produced. Notices are
@@ -2079,9 +1948,7 @@ fn the_screen_save_key_is_wired_to_a_scaled_save() {
 #[test]
 fn resort_names_the_order_it_produced() {
     let src = main_src();
-    let at = src
-        .find("if resort {")
-        .expect("the settings panel must have a resort arm");
+    let at = src.find("if resort {").expect("the settings panel must have a resort arm");
     let arm = &src[at..(at + 600).min(src.len())];
     assert!(
         arm.contains("self.notice = Some("),
@@ -2113,18 +1980,9 @@ fn the_single_instance_toggle_is_wired() {
 /// the second loses, which is the whole semantic the gate relies on.
 #[test]
 fn second_claim_of_the_same_name_loses() {
-    let name = format!(
-        "Local\\image-viewer-claim-test-{}",
-        std::process::id()
-    );
-    assert!(
-        image_viewer::claim_single_instance(&name),
-        "first claim of a fresh name must win"
-    );
-    assert!(
-        !image_viewer::claim_single_instance(&name),
-        "second claim of a held name must lose"
-    );
+    let name = format!("Local\\image-viewer-claim-test-{}", std::process::id());
+    assert!(image_viewer::claim_single_instance(&name), "first claim of a fresh name must win");
+    assert!(!image_viewer::claim_single_instance(&name), "second claim of a held name must lose");
 }
 
 /// The startup brick: a `\\.\`-prefixed device path is not an object name,
@@ -2151,10 +2009,7 @@ fn key_overrides_win_and_blanks_fall_back() {
     keys.insert("next".into(), "   ".into());
     assert_eq!(image_viewer::resolve_binding(&keys, "next"), "ArrowRight");
     assert_eq!(image_viewer::resolve_binding(&keys, "nope"), "");
-    assert_eq!(
-        image_viewer::canonical_chord("shift+ctrl+s"),
-        Some("Ctrl+Shift+S".into())
-    );
+    assert_eq!(image_viewer::canonical_chord("shift+ctrl+s"), Some("Ctrl+Shift+S".into()));
     assert_eq!(image_viewer::canonical_chord("Space"), Some("Space".into()));
     assert_eq!(image_viewer::canonical_chord("Ctrl++"), None);
     assert_eq!(
@@ -2216,10 +2071,7 @@ fn capture_and_labels_are_wired() {
         if name.len() == 1 {
             continue;
         }
-        assert!(
-            src.contains(&format!("\"{name}\" =>")),
-            "key name `{name}` has no parse arm"
-        );
+        assert!(src.contains(&format!("\"{name}\" =>")), "key name `{name}` has no parse arm");
         assert!(
             src.contains(&format!("Key::{name} => \"{name}\"")),
             "key name `{name}` has no reverse arm"
@@ -2301,6 +2153,19 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {
     Some(&src[start..end])
 }
 
+/// `src` with every run of whitespace removed.
+///
+/// A needle that spans more than one line only matches if it happens to be
+/// wrapped the way rustfmt wraps it today, so any scan that asks "is this
+/// expression there" would break on a reformat that changes nothing else. Run
+/// both sides through this and the wrap points stop mattering; only the tokens
+/// are compared. Do not use it on a needle that must be single-line or on a
+/// scan whose subject *is* the layout - the position tests below compare
+/// offsets in the squashed text for the same reason.
+fn squash(src: &str) -> String {
+    src.split_whitespace().collect()
+}
+
 /// Crop is the one site where "record before the change" is not adjacent to the
 /// change: `set_crop` runs **per drag frame**, so recording at the mutation would
 /// push ~200 entries for one gesture and make undo useless after a single drag.
@@ -2322,15 +2187,10 @@ fn a_crop_gesture_records_once_on_press() {
     // entered every frame the button is held, so the record must also sit after
     // the `primary_pressed()` test that makes it a press.
     let press = fn_body(&src, "fn central(").expect("central");
-    let pressed = press
-        .find("primary_pressed()")
-        .expect("the crop press must test for the press frame");
-    let record = press
-        .find("self.history.record(")
-        .expect("the crop press must record");
-    let set_crop = press
-        .find("self.edits.set_crop(")
-        .expect("the crop drag must set");
+    let pressed =
+        press.find("primary_pressed()").expect("the crop press must test for the press frame");
+    let record = press.find("self.history.record(").expect("the crop press must record");
+    let set_crop = press.find("self.edits.set_crop(").expect("the crop drag must set");
     assert!(
         pressed < record && record < set_crop,
         "the record must be on the press path, after the press test and before \
@@ -2418,17 +2278,14 @@ fn leaving_an_archive_does_not_re_enter_it() {
     let goto = fn_body(&src, "fn goto(&mut self, ctx: &Context)").expect("goto");
     // Goto must not enter archives at all — the one-shot is gone because
     // the whole branch is gone.
-    assert!(
-        goto.contains("just_left") == false,
-        "goto must not contain the old one-shot"
-    );
+    assert!(goto.contains("just_left") == false, "goto must not contain the old one-shot");
     // The body shows the position logic without any archive entry: it sets
-        // `is_nav`, `lat.begin`, then `snap_to_turn_anchor` — no `open_archive`.
-        // The absence of an archive branch *is* the test.
-        assert!(
-            goto.contains("self.snap_to_turn_anchor()"),
-            "goto runs the position setup without an archive branch"
-        );
+    // `is_nav`, `lat.begin`, then `snap_to_turn_anchor` — no `open_archive`.
+    // The absence of an archive branch *is* the test.
+    assert!(
+        goto.contains("self.snap_to_turn_anchor()"),
+        "goto runs the position setup without an archive branch"
+    );
 
     let step = fn_body(&src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");
     assert!(
@@ -2451,8 +2308,9 @@ fn the_show_archives_toggle_is_wired() {
         src.contains("image_viewer::set_show_archives(config.show_archives)"),
         "start-up must tell the library before the first scan"
     );
-    let before = src.find("set_show_archives(config.show_archives)").expect("start-up call");
-    let scan = src.find("let files = Self::sorted_scan(").expect("the start-up scan");
+    let flat = squash(&src);
+    let before = flat.find("set_show_archives(config.show_archives)").expect("start-up call");
+    let scan = flat.find("letfiles=Self::sorted_scan(").expect("the start-up scan");
     assert!(
         before < scan,
         "the setting has to be set before the scan that reads it, or the first \
@@ -2460,19 +2318,10 @@ fn the_show_archives_toggle_is_wired() {
     );
 
     let panel = fn_body(&src, "impl eframe::App for MyApp").expect("the app impl");
-    assert!(
-        panel.contains("&mut self.config.show_archives"),
-        "the toggle must exist in Settings"
-    );
-    let toggle = panel
-        .find("&mut self.config.show_archives")
-        .expect("the checkbox");
-    let setter = panel
-        .find("set_show_archives(self.config.show_archives)")
-        .expect("the setter");
-    let rescan = panel[toggle..]
-        .find("self.rescan(ctx, true)")
-        .expect("the rescan");
+    assert!(panel.contains("&mut self.config.show_archives"), "the toggle must exist in Settings");
+    let toggle = panel.find("&mut self.config.show_archives").expect("the checkbox");
+    let setter = panel.find("set_show_archives(self.config.show_archives)").expect("the setter");
+    let rescan = panel[toggle..].find("self.rescan(ctx, true)").expect("the rescan");
     assert!(
         toggle < setter && setter < toggle + rescan,
         "save, then tell the library, then rescan — a rescan before the setter \
@@ -2503,14 +2352,10 @@ fn archives_are_entered_explicitly_and_never_decoded() {
         goto.contains("self.snap_to_turn_anchor()"),
         "goto runs the position setup without an archive branch"
     );
-    assert!(
-        goto.contains("open_archive") == false,
-        "goto must not call open_archive"
-    );
+    assert!(goto.contains("open_archive") == false, "goto must not call open_archive");
 
     // Entry is in `step` (arrowing) and `pick_grid_selection` (grid).
-    let step = fn_body(&src, "fn step(&mut self, ctx: &Context, forward: bool)")
-        .expect("step");
+    let step = fn_body(&src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");
     assert!(
         step.contains("enter_archive_if_present(ctx)"),
         "arrowing onto an archive must call the entry helper"
@@ -2526,7 +2371,8 @@ fn archives_are_entered_explicitly_and_never_decoded() {
     // The decode side: plan_jobs refuses archives (library rule, tested there).
     // These are the paths that bypass plan_jobs and need their own guard.
     assert!(
-        src.contains("let is_archive = is_archive_path(path);") && src.contains("!is_archive &&"),
+        src.contains("let is_archive = is_archive_path(path);")
+            && squash(&src).contains("!is_archive&&"),
         "a grid cell must not ask for a thumbnail of a container"
     );
     assert!(
@@ -2597,10 +2443,7 @@ fn exif_dates_parse_strictly_and_touch_lands() {
         "2024:03:17 14:34:56 extra",
         "",
     ] {
-        assert!(
-            image_viewer::parse_exif_datetime(bad).is_none(),
-            "{bad:?} must not parse"
-        );
+        assert!(image_viewer::parse_exif_datetime(bad).is_none(), "{bad:?} must not parse");
     }
 
     let dir = tempfile::tempdir().unwrap();
@@ -2666,14 +2509,8 @@ fn stepping_wraps_and_presets_clamp() {
     };
     // 100 + floored-20 + 0 before frame 2: the middle delay floors like
     // `total_duration` floors it, or resume disagrees with paint.
-    assert_eq!(
-        image_viewer::anim_frame_start(&anim, 2),
-        std::time::Duration::from_millis(120)
-    );
-    assert_eq!(
-        image_viewer::anim_frame_start(&anim, 99),
-        std::time::Duration::from_millis(170)
-    );
+    assert_eq!(image_viewer::anim_frame_start(&anim, 2), std::time::Duration::from_millis(120));
+    assert_eq!(image_viewer::anim_frame_start(&anim, 99), std::time::Duration::from_millis(170));
 
     assert_eq!(image_viewer::zoom_preset(&[1.0, 2.0, 4.0, 8.0], 0), 1.0);
     assert_eq!(image_viewer::zoom_preset(&[1.0, 2.0, 4.0, 8.0], 9), 8.0);
@@ -2718,10 +2555,7 @@ fn tile_math_positions_tiles_in_buffer_pixels_at_source_pitch() {
     // 8521px buffer at scale 0.125. The visible 0..1067.5pt is buffer
     // 0..4268, not source 0..8534 — naming it in source pixels cuts every
     // tile from twice as far along as it is drawn.
-    assert_eq!(
-        image_viewer::tile_axis_range(0.0, 1067.5, 0.0, 0.125, 2.0, 8521),
-        (0, 4270)
-    );
+    assert_eq!(image_viewer::tile_axis_range(0.0, 1067.5, 0.0, 0.125, 2.0, 8521), (0, 4270));
     // And the rect pitches the buffer span back up: tile (2,0) covers buffer
     // 2048..3072, i.e. source 4096..6144, i.e. screen 512..768.
     assert_eq!(
@@ -2733,10 +2567,7 @@ fn tile_math_positions_tiles_in_buffer_pixels_at_source_pitch() {
     let (x0, x1) = image_viewer::tile_axis_range(512.0, 768.0, 0.0, 0.125, 2.0, 8521);
     assert_eq!((x0, x1), (2048, 3072));
     // Clamping is against the buffer, not the source.
-    assert_eq!(
-        image_viewer::tile_axis_range(-100.0, 99999.0, 0.0, 0.125, 2.0, 8521),
-        (0, 8521)
-    );
+    assert_eq!(image_viewer::tile_axis_range(-100.0, 99999.0, 0.0, 0.125, 2.0, 8521), (0, 8521));
 }
 
 /// The tile loop goes through the ratio-aware math, not around it: the old
@@ -2771,9 +2602,7 @@ fn the_tile_loop_positions_through_the_ratio_aware_math() {
 #[test]
 fn histogram_counts_bins_and_clipped_pixels_exactly() {
     // Solid red 2x2: R[255]=4, G[0]=4, B[0]=4, nothing clipped.
-    let red = vec![
-        255u8, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
-    ];
+    let red = vec![255u8, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255];
     let h = image_viewer::histogram_rgba(&red, 2, 2);
     assert_eq!(h.bins[0][255], 4);
     assert_eq!(h.bins[1][0], 4);
@@ -2782,9 +2611,7 @@ fn histogram_counts_bins_and_clipped_pixels_exactly() {
     assert_eq!(h.black, 0);
     assert_eq!(h.white, 0);
     // Half pure black, half pure white: clipping is exact.
-    let bw = vec![
-        0u8, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-    ];
+    let bw = vec![0u8, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255];
     let h = image_viewer::histogram_rgba(&bw, 2, 2);
     assert_eq!(h.black, 2);
     assert_eq!(h.white, 2);
@@ -2886,9 +2713,7 @@ fn a_failed_image_shows_its_error_instead_of_loading_forever() {
     // guarding it. `panel.left_top()` is the paint call itself, unique in
     // the file.
     let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
-    let at = central
-        .find("self.cur != self.shown")
-        .expect("the overlay condition");
+    let at = central.find("self.cur != self.shown").expect("the overlay condition");
     let tail = &central[at..];
     let gate = tail.find("Kind::Preview))").expect("the failed check");
     let paint = tail.find("panel.left_top()").expect("the overlay paint");
@@ -2921,10 +2746,7 @@ fn the_stored_failure_message_cannot_outlive_its_failure() {
         "the message must be stored on the failure arm, beside the failed \
          entry it describes"
     );
-    for site in [
-        "self.load_errors.retain(|k, _| k.path != p)",
-        "self.load_errors.clear()",
-    ] {
+    for site in ["self.load_errors.retain(|k, _| k.path != p)", "self.load_errors.clear()"] {
         assert!(
             src.contains(site),
             "every site that clears `failed` must clear the message too, or \
@@ -2941,12 +2763,8 @@ fn the_stored_failure_message_cannot_outlive_its_failure() {
 fn anim_frame_state_keeps_time_and_scales() {
     use image_viewer::ImageData;
     use std::time::Duration;
-    let frame = || ImageData {
-        width: 1,
-        height: 1,
-        rgba: vec![0, 0, 0, 255],
-        load_time: Duration::ZERO,
-    };
+    let frame =
+        || ImageData { width: 1, height: 1, rgba: vec![0, 0, 0, 255], load_time: Duration::ZERO };
     let anim = image_viewer::Animation {
         frames: vec![frame(), frame()],
         delays: vec![Duration::from_millis(100), Duration::from_millis(200)],
@@ -3002,9 +2820,7 @@ fn wallpaper_shown_is_wired() {
         src.contains("fn set_wallpaper_shown(&mut self"),
         "there must be a processed-wallpaper action"
     );
-    let at = src
-        .find("fn set_wallpaper_shown(&mut self)")
-        .expect("the action must exist");
+    let at = src.find("fn set_wallpaper_shown(&mut self)").expect("the action must exist");
     let body = &src[at..(at + 3500).min(src.len())];
     assert!(
         body.contains("region_for_save(") && body.contains("wallpaper.png"),
@@ -3038,31 +2854,24 @@ fn wallpaper_work_is_on_a_worker_and_the_last_press_wins() {
     let src = main_src();
 
     for name in ["fn set_wallpaper(", "fn set_wallpaper_shown("] {
-        let at = src
-            .find(name)
-            .unwrap_or_else(|| panic!("{name} must exist"));
+        let at = src.find(name).unwrap_or_else(|| panic!("{name} must exist"));
         // Brace-match the body: the functions are adjacent to other methods,
         // and a substring window drifted past this once and still passed.
         let body = fn_body(&src[at..], name).expect("balanced braces");
-        let spawn = body
-            .find("std::thread::spawn")
-            .unwrap_or_else(|| panic!("{name} must spawn a worker"));
+        let spawn =
+            body.find("std::thread::spawn").unwrap_or_else(|| panic!("{name} must spawn a worker"));
         // The heavy half: read, decode, transform, encode, and the shell call
         // itself — every one of them after the spawn, or the rule is not kept.
-        for heavy in ["load_image(", "load_image_full(", "region_for_save(", "wallpaper::set_from_path("] {
+        for heavy in
+            ["load_image(", "load_image_full(", "region_for_save(", "wallpaper::set_from_path("]
+        {
             if let Some(h) = body.find(heavy) {
-                assert!(
-                    spawn < h,
-                    "{name}: {heavy} must run on the worker, after thread::spawn"
-                );
+                assert!(spawn < h, "{name}: {heavy} must run on the worker, after thread::spawn");
             }
         }
         // The label: an in-flight wallpaper request is otherwise invisible
         // until the desktop changes, which reads as a dropped keystroke.
-        assert!(
-            body.contains("\"Setting wallpaper…\""),
-            "{name} must show its in-flight notice"
-        );
+        assert!(body.contains("\"Setting wallpaper…\""), "{name} must show its in-flight notice");
         // The token: the worker must abort at an early check and again at the
         // set, so a superseded press never points the desktop at a picture the
         // user's last action replaced.
@@ -3075,9 +2884,7 @@ fn wallpaper_work_is_on_a_worker_and_the_last_press_wins() {
 
     // The result's stale drop: a superseded answer must be recognised by its
     // order and silently discarded, not shown over the last press's text.
-    let pump = src
-        .find("fn pump(")
-        .expect("pump must exist");
+    let pump = src.find("fn pump(").expect("pump must exist");
     // Brace-match from the signature; pump is long and full of closures.
     let pb = fn_body(&src[pump..], "fn pump(").expect("pump braces balance");
     assert!(
@@ -3092,7 +2899,8 @@ fn wallpaper_work_is_on_a_worker_and_the_last_press_wins() {
 
 /// Fit window keeps the chrome it measures and clamps to the monitor.
 #[test]
-fn fit_window_hugs_content_and_clamps() {    // 800x600 window, 700x500 central: 100x100 of chrome, kept.
+fn fit_window_hugs_content_and_clamps() {
+    // 800x600 window, 700x500 central: 100x100 of chrome, kept.
     assert_eq!(
         image_viewer::fit_window_size((400.0, 300.0), (800.0, 600.0), (700.0, 500.0), None),
         (500.0, 400.0)
@@ -3151,25 +2959,15 @@ fn the_decoration_toggle_lands_the_frame_where_the_client_was() {
 fn the_title_bar_toggle_keeps_the_client_area() {
     let src = main_src();
 
-    let at = src
-        .find(".checkbox(&mut self.config.hide_title_bar,")
-        .expect("the checkbox exists");
+    let at = src.find(".checkbox(&mut self.config.hide_title_bar,").expect("the checkbox exists");
     let after = &src[at..];
-    let arm_end = after
-        .find("\n                });")
-        .expect("the checkbox's arm closes");
+    let arm_end = after.find("\n                });").expect("the checkbox's arm closes");
     let arm = &after[..arm_end];
 
-    let geometry = arm
-        .find(".zip(v.outer_rect)")
-        .expect("the arm measures the client and outer rects");
-    let first_cmd = arm
-        .find("send_viewport_cmd")
-        .expect("the arm sends commands");
-    assert!(
-        geometry < first_cmd,
-        "the client area must be measured before any command is sent"
-    );
+    let geometry =
+        arm.find(".zip(v.outer_rect)").expect("the arm measures the client and outer rects");
+    let first_cmd = arm.find("send_viewport_cmd").expect("the arm sends commands");
+    assert!(geometry < first_cmd, "the client area must be measured before any command is sent");
 
     assert!(
         arm.contains("image_viewer::outer_top_for_decoration_toggle("),
@@ -3226,12 +3024,7 @@ fn recursive_scan_walks_the_tree() {
     assert_eq!(flat, vec!["c.jpg"], "flat scan must not descend");
     let walked: Vec<String> = image_viewer::scan_folder_recursive(root)
         .iter()
-        .map(|p| {
-            p.strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/")
-        })
+        .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
         .collect();
     assert_eq!(
         walked,
@@ -3267,11 +3060,10 @@ fn recursive_scan_walks_the_tree() {
 /// A real 2x2 PNG, built here rather than vendored: `image` can write PNG, so
 /// `tests/fixtures/` is for formats nothing in the dependency set can produce.
 fn archive_test_png() -> Vec<u8> {
-    let img = image::RgbaImage::from_fn(2, 2, |x, y| image::Rgba([x as u8 * 80, y as u8 * 80, 40, 255]));
+    let img =
+        image::RgbaImage::from_fn(2, 2, |x, y| image::Rgba([x as u8 * 80, y as u8 * 80, 40, 255]));
     let mut out = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut out, image::ImageFormat::Png)
-        .unwrap();
+    image::DynamicImage::ImageRgba8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
     out.into_inner()
 }
 
@@ -3317,8 +3109,9 @@ fn write_test_7z(path: &std::path::Path, members: &[(&str, Vec<u8>)]) {
 /// test that forgot would silently decide the answer for the ones after it.
 #[test]
 fn the_show_archives_setting_hides_archives_and_spares_images() {
-    use image_viewer::{is_browsable, scan_folder, scan_folder_recursive, set_show_archives,
-        show_archives_enabled};
+    use image_viewer::{
+        is_browsable, scan_folder, scan_folder_recursive, set_show_archives, show_archives_enabled,
+    };
     // Restore whatever the rest of the suite expects, however this test ends.
     struct Restore;
     impl Drop for Restore {
@@ -3350,12 +3143,7 @@ fn the_show_archives_setting_hides_archives_and_spares_images() {
 
     let names = |v: Vec<std::path::PathBuf>| -> Vec<String> {
         v.iter()
-            .map(|p| {
-                p.strip_prefix(dir.path())
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/"))
             .collect()
     };
     assert_eq!(
@@ -3424,21 +3212,11 @@ fn archives_are_listed_and_images_still_are() {
     let walked: Vec<String> = image_viewer::scan_folder_recursive(root)
         .iter()
         .filter(|p| image_viewer::is_archive_path(p))
-        .map(|p| {
-            p.strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/")
-        })
+        .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
         .collect();
     assert_eq!(
         walked,
-        vec![
-            "vol1.7z",
-            "vol1.cbz",
-            "vol1.zip",
-            "vol2/v2.cbz"
-        ],
+        vec!["vol1.7z", "vol1.cbz", "vol1.zip", "vol2/v2.cbz"],
         "archives with images are found at every level; empty inner.cbz excluded; the txt never is"
     );
 
@@ -3495,8 +3273,8 @@ fn every_archive_format_yields_the_same_flattened_gallery() {
     let mut results = Vec::new();
     for name in ["v.cbz", "v.7z"] {
         let dest = root.join(format!("out-{name}"));
-        let (extracted, skipped) =
-            image_viewer::extract_archive(&root.join(name), &dest).unwrap_or_else(|e| {
+        let (extracted, skipped) = image_viewer::extract_archive(&root.join(name), &dest)
+            .unwrap_or_else(|e| {
                 panic!("{name} extracted nothing: {e}");
             });
         let mut got: Vec<String> = image_viewer::scan_folder(&dest)
@@ -3540,11 +3318,9 @@ fn every_archive_format_yields_the_same_flattened_gallery() {
     // `extract_archive` dispatches on the extension and refuses anything else
     // by name, so an unhandled container is an error rather than an empty
     // gallery that looks like an archive with no images in it.
-    let err = image_viewer::extract_archive(
-        std::path::Path::new("x.tar.zst"),
-        &root.join("out-none"),
-    )
-    .unwrap_err();
+    let err =
+        image_viewer::extract_archive(std::path::Path::new("x.tar.zst"), &root.join("out-none"))
+            .unwrap_err();
     assert!(err.contains("zst"), "the error names the format: {err}");
 }
 
@@ -3603,10 +3379,7 @@ fn a_rar_this_build_cannot_read_says_so() {
 #[test]
 fn the_fit_window_key_is_wired_to_a_live_resize() {
     let src = main_src();
-    assert!(
-        src.contains("self.fit_window_to_image()"),
-        "`T` must arm the fit"
-    );
+    assert!(src.contains("self.fit_window_to_image()"), "`T` must arm the fit");
     assert!(
         src.contains("ViewportCommand::InnerSize("),
         "central must send a live resize with the drawn size"
@@ -3616,23 +3389,16 @@ fn the_fit_window_key_is_wired_to_a_live_resize() {
         "the resize must go through the chrome-measuring helper"
     );
     assert!(
-        src.contains("self.view.fit = false")
-            && src.contains("self.view.scale = 1.0 / ppp"),
+        src.contains("self.view.fit = false") && src.contains("self.view.scale = 1.0 / ppp"),
         "`T` must reset to absolute 100%, never a shrink-to-fit"
     );
     // Same frame: the reset must land before `scale` is read from the view,
     // or the window is sized for a zoom the picture draws a frame later.
     // T mode is always absolute: no shrink path exists, and `fit_zoom` is
     // gone entirely rather than merely uncalled.
-    assert!(
-        !src.contains("fit_zoom("),
-        "the shrink path is deleted, not bypassed"
-    );
+    assert!(!src.contains("fit_zoom("), "the shrink path is deleted, not bypassed");
     let lib = lib_src();
-    assert!(
-        !lib.contains("fn fit_zoom("),
-        "the shrink helper must go with its only caller"
-    );
+    assert!(!lib.contains("fn fit_zoom("), "the shrink helper must go with its only caller");
     // Converge on the symptom (drawn vs panel), and re-arm while it
     // disagrees: a one-shot loop that clears its flags up front runs once
     // no matter what `fit_iters` allows, which is how the bars survived a
@@ -3675,8 +3441,7 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
         "user zooms in the mode must re-hug the new size"
     );
     assert!(
-        src.contains("ViewportCommand::OuterPosition(")
-            && src.contains("((m.x - want.0) / 2.0"),
+        src.contains("ViewportCommand::OuterPosition(") && src.contains("((m.x - want.0) / 2.0"),
         "resizes must center on the monitor"
     );
 }
@@ -3690,9 +3455,7 @@ fn the_fit_window_mode_is_sticky_centered_and_follows() {
 #[test]
 fn adoption_follows_the_view_modes() {
     let src = main_src();
-    let at = src
-        .find("fn sync_shown(&mut self")
-        .expect("sync_shown must exist");
+    let at = src.find("fn sync_shown(&mut self").expect("sync_shown must exist");
     let body = &src[at..(at + 2500).min(src.len())];
     assert!(
         body.contains("self.config.fit_mode") && body.contains("self.view.fit = true"),
@@ -3710,7 +3473,8 @@ fn view_modes_are_exclusive() {
             && src.contains("fn toggle_fit_mode(&mut self"),
         "toggle_fit_mode must exist"
     );
-    let at = src.find("self.config.fit_mode = !self.config.fit_mode").expect("toggle arm must exist");
+    let at =
+        src.find("self.config.fit_mode = !self.config.fit_mode").expect("toggle arm must exist");
     let body = &src[at..(at + 1200).min(src.len())];
     assert!(
         body.contains("self.config.fit_window_mode = false"),
@@ -3752,9 +3516,7 @@ fn fit_window_pins_chrome_places_late_and_shows_state() {
         src.contains("pending_pos"),
         "centering must wait for the resize to settle, not race it"
     );
-    let at = src
-        .find("self.config.fit_window_mode,")
-        .expect("the mode toggle must exist");
+    let at = src.find("self.config.fit_window_mode,").expect("the mode toggle must exist");
     let from = at.saturating_sub(200);
     let arm = &src[from..(at + 400).min(src.len())];
     assert!(
@@ -3886,9 +3648,7 @@ fn esc_defaults_to_closing_and_crop_comes_first() {
         "a fresh config must keep the shipped Esc-closes behaviour"
     );
     let src = main_src();
-    let at = src
-        .find("if esc {")
-        .expect("the Esc chain must exist");
+    let at = src.find("if esc {").expect("the Esc chain must exist");
     let arm = &src[at..(at + 8000).min(src.len())];
 
     // Order: save-as panel → typing → crop → archive → fullscreen → quit, each
@@ -3902,12 +3662,20 @@ fn esc_defaults_to_closing_and_crop_comes_first() {
     let fullscreen = arm.find("in_fullscreen").expect("fullscreen branch");
     let close = arm.find("ViewportCommand::Close").expect("quit branch");
     assert!(
-        panel < typing && typing < crop && crop < archive && archive < fullscreen
+        panel < typing
+            && typing < crop
+            && crop < archive
+            && archive < fullscreen
             && fullscreen < close,
         "Esc chain must be: save-as panel → typing → crop → archive → fullscreen \
          → quit, got order: panel={} typing={} crop={} archive={} fullscreen={} \
          close={}",
-        panel, typing, crop, archive, fullscreen, close
+        panel,
+        typing,
+        crop,
+        archive,
+        fullscreen,
+        close
     );
 
     // The quit branch must still consult the toggle (it does, but it's now
@@ -3930,17 +3698,12 @@ fn printing_is_wired_to_ctrl_p() {
         "printing must go through the native print verb"
     );
     let src = main_src();
-    assert!(
-        src.contains("fn print_current(&mut self"),
-        "there must be a print action"
-    );
+    assert!(src.contains("fn print_current(&mut self"), "there must be a print action");
     assert!(
         src.contains("action_pressed_fresh(ctx, &kb, \"print\")"),
         "print must go through the edge-triggered matcher, not a bespoke chord"
     );
-    let body_at = src
-        .find("fn print_current(&mut self)")
-        .expect("the print action must exist");
+    let body_at = src.find("fn print_current(&mut self)").expect("the print action must exist");
     let body = &src[body_at..(body_at + 1500).min(src.len())];
     assert!(
         body.contains("spawn_guard("),
@@ -3974,9 +3737,7 @@ fn touch_dates_are_wired_to_menu_buttons() {
 #[test]
 fn the_bottom_bar_menus_carry_the_buttons_actions() {
     let src = main_src();
-    let at = src
-        .find(r#"egui::Panel::bottom("menu")"#)
-        .expect("the bottom panel exists");
+    let at = src.find(r#"egui::Panel::bottom("menu")"#).expect("the bottom panel exists");
     // To the end of the panel: the bar is the last pane this section shows,
     // and the body after it starts a new pane, so slicing to the next
     // `egui::Panel::` keeps the scan inside the bar.
@@ -3991,14 +3752,9 @@ fn the_bottom_bar_menus_carry_the_buttons_actions() {
         // Prefix match on purpose: the source label carries the "⏷" menu
         // marker, which is decoration and not part of the scan's contract,
         // and the needle stops before the label's closing quote.
-        let start = bar
-            .find(&format!("ui.menu_button(\"{name}"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "the {name} menu exists [bar head: {:?}]",
-                    &bar[..bar.len().min(160)]
-                )
-            });
+        let start = bar.find(&format!("ui.menu_button(\"{name}")).unwrap_or_else(|| {
+            panic!("the {name} menu exists [bar head: {:?}]", &bar[..bar.len().min(160)])
+        });
         let block_end = menus[i + 1..]
             .iter()
             .find_map(|next| {
@@ -4046,10 +3802,7 @@ fn the_bottom_bar_menus_carry_the_buttons_actions() {
             ],
         };
         for callee in want {
-            assert!(
-                block.contains(callee),
-                "the {name} menu must own {callee}"
-            );
+            assert!(block.contains(callee), "the {name} menu must own {callee}");
             // Close-before-act: the popup must not linger over the picture
             // the action leaves behind.
             let call_at = block.find(callee).unwrap();
@@ -4072,9 +3825,7 @@ fn the_bottom_bar_menus_carry_the_buttons_actions() {
     // Prefix again: the row ends where the first menu begins, and the
     // label now carries the "⏷" marker, so the find stops before the
     // label's closing quote.
-    let row = &bar[..bar
-        .find(r#"ui.menu_button("Transform"#)
-        .unwrap_or(bar.len())];
+    let row = &bar[..bar.find(r#"ui.menu_button("Transform"#).unwrap_or(bar.len())];
     for want in [
         "self.pick_folder(ctx)",
         "self.pick_file(ctx)",
@@ -4100,10 +3851,7 @@ fn portable_mode_follows_the_marker_file() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(image_viewer::portable_dir_from(dir.path()), None);
     std::fs::write(dir.path().join("portable.txt"), b"").unwrap();
-    assert_eq!(
-        image_viewer::portable_dir_from(dir.path()),
-        Some(dir.path().to_path_buf())
-    );
+    assert_eq!(image_viewer::portable_dir_from(dir.path()), Some(dir.path().to_path_buf()));
 }
 
 /// All three persistent roots must consult portable mode, or portable is a
@@ -4111,17 +3859,10 @@ fn portable_mode_follows_the_marker_file() {
 #[test]
 fn persistent_roots_consult_portable_mode() {
     let lib = lib_src();
-    for f in [
-        "pub fn default_path()",
-        "pub fn thumb_cache_root()",
-        "pub fn spreads_root()",
-    ] {
+    for f in ["pub fn default_path()", "pub fn thumb_cache_root()", "pub fn spreads_root()"] {
         let at = lib.find(f).unwrap_or_else(|| panic!("{f} is gone"));
         let body = &lib[at..(at + 600).min(lib.len())];
-        assert!(
-            body.contains("portable_dir()"),
-            "{f} must check portable mode first"
-        );
+        assert!(body.contains("portable_dir()"), "{f} must check portable mode first");
     }
 }
 
@@ -4146,9 +3887,7 @@ fn copy_original_shares_the_copy_path() {
 #[test]
 fn the_settings_panel_scrolls() {
     let src = main_src();
-    let at = src
-        .find("Panel::right(\"settings\")")
-        .expect("the settings panel must exist");
+    let at = src.find("Panel::right(\"settings\")").expect("the settings panel must exist");
     let arm = &src[at..(at + 1200).min(src.len())];
     // The settings pane sits inside a vertical ScrollArea so all expanded
     // sections still fit on short windows; each section is its own
@@ -4158,10 +3897,7 @@ fn the_settings_panel_scrolls() {
         "settings content must sit in a vertical ScrollArea, or it runs off \
          the bottom of short windows"
     );
-    assert!(
-        arm.contains("CollapsingHeader::new"),
-        "settings sections must be collapsible groups"
-    );
+    assert!(arm.contains("CollapsingHeader::new"), "settings sections must be collapsible groups");
 }
 
 /// Rebindable keys must be **wired**, and `main.rs` is unreachable from every
@@ -4193,18 +3929,12 @@ fn the_rebindable_keys_are_wired_to_the_direction_rule() {
 #[test]
 fn the_user_commands_are_wired_to_ctrl_digits() {
     let src = main_src();
-    assert!(
-        src.contains("fn run_user_command(&mut self"),
-        "there must be a user-command runner"
-    );
+    assert!(src.contains("fn run_user_command(&mut self"), "there must be a user-command runner");
     assert!(
         src.contains("expand_user_command(&cmd, &path)"),
         "the runner must expand {{file}}/{{dir}}/{{name}}, not spawn raw config text"
     );
-    assert!(
-        src.contains("egui::Key::Num1"),
-        "Ctrl+1..9 must trigger the commands"
-    );
+    assert!(src.contains("egui::Key::Num1"), "Ctrl+1..9 must trigger the commands");
 }
 
 /// Spawning must be edge-triggered: `key_pressed` also fires for OS
@@ -4215,9 +3945,7 @@ fn the_user_commands_are_wired_to_ctrl_digits() {
 #[test]
 fn the_user_command_chord_ignores_key_repeat() {
     let src = main_src();
-    let at = src
-        .find("fn action_pressed_fresh(")
-        .expect("the edge-triggered matcher must exist");
+    let at = src.find("fn action_pressed_fresh(").expect("the edge-triggered matcher must exist");
     let body = &src[at..(at + 1200).min(src.len())];
     assert!(
         body.contains("repeat: false"),
@@ -4287,9 +4015,7 @@ fn the_settings_panel_shows_the_build_id() {
 fn beta_features_are_marked_beta_in_red() {
     let src = main_src();
     for base in ["Double page mode", "User commands (Ctrl+1..9):"] {
-        let at = src
-            .find(base)
-            .unwrap_or_else(|| panic!("{base} is gone from the settings panel"));
+        let at = src.find(base).unwrap_or_else(|| panic!("{base} is gone from the settings panel"));
         let arm = &src[at..(at + 600).min(src.len())];
         assert!(
             arm.contains("(beta)") && arm.contains("warn_fg_color"),
@@ -4327,9 +4053,8 @@ fn side_panes_hide_individually_and_gate_their_reads() {
     // so gating the left one on its flag hid the right one too — and every
     // presence check above passed on that code. The left `if` must close
     // (a `}` at its own indent) before the right panel is shown.
-    let left_at = src
-        .find("if self.show_panels && self.show_left {")
-        .expect("the left pane gate must exist");
+    let left_at =
+        src.find("if self.show_panels && self.show_left {").expect("the left pane gate must exist");
     let right_at = src[left_at..]
         .find("Panel::right(\"settings\")")
         .map(|i| left_at + i)
@@ -4426,7 +4151,7 @@ fn save_as_and_paste_are_wired() {
          cannot be opened while the grid is up"
     );
 
-// **Esc closes the panel, and it is checked before `typing` as well as
+    // **Esc closes the panel, and it is checked before `typing` as well as
     // before the quit.** This is a reported bug, and the arm order is the whole
     // content of the fix: the panel's path box holds focus the moment it opens,
     // so `typing` is true, so Esc landed in the search box's arm - clearing the
@@ -4442,18 +4167,12 @@ fn save_as_and_paste_are_wired() {
     // for an if/else chain: what matters is where the arms sit *relative to each
     // other*, so the offsets are taken from `if esc {` and compared.
     let esc_at = src.find("if esc {").expect("the Esc chain");
-    let esc_panel = src[esc_at..]
-        .find("if self.save_as.open {")
-        .map(|i| i + esc_at)
-        .expect("panel esc arm");
-    let esc_typing = src[esc_at..]
-        .find("} else if typing {")
-        .map(|i| i + esc_at)
-        .expect("typing esc arm");
-    let esc_quit = src[esc_at..]
-        .find("self.config.esc_closes_app")
-        .map(|i| i + esc_at)
-        .expect("quit arm");
+    let esc_panel =
+        src[esc_at..].find("if self.save_as.open {").map(|i| i + esc_at).expect("panel esc arm");
+    let esc_typing =
+        src[esc_at..].find("} else if typing {").map(|i| i + esc_at).expect("typing esc arm");
+    let esc_quit =
+        src[esc_at..].find("self.config.esc_closes_app").map(|i| i + esc_at).expect("quit arm");
     assert!(
         esc_panel < esc_typing,
         "the save-as panel's Esc arm must come before the `typing` arm: the \
@@ -4465,7 +4184,6 @@ fn save_as_and_paste_are_wired() {
         "and before the quit branch: Esc on a modal that can write a file must \
          never close the app"
     );
-
 }
 
 /// The undo stack is two per-path vectors and a rule about when each moves.
@@ -4567,7 +4285,13 @@ fn the_history_is_capped_and_drops_the_oldest_step() {
     // The crop also keeps each state non-identity, so a future "do not record a
     // no-op edit" optimisation could not silently zero this fixture out.
     for i in 0..60u8 {
-        h.record(p, Edit { xform: image_viewer::Xform::Identity, crop: Crop::new(0, 0, 1 + u32::from(i), 1) });
+        h.record(
+            p,
+            Edit {
+                xform: image_viewer::Xform::Identity,
+                crop: Crop::new(0, 0, 1 + u32::from(i), 1),
+            },
+        );
     }
     let cap = h.len_for(p);
     assert_eq!(cap, 50, "the stack is bounded");
@@ -4614,9 +4338,7 @@ fn the_transform_tail_records_before_it_edits() {
     let src = main_src();
     let body = fn_body(&src, "fn apply_to_current(").expect("apply_to_current");
     let at = body.find("history.record(").expect("record must be called");
-    let edit = body
-        .find("f(&mut self.edits, &p.path)")
-        .expect("the edit itself");
+    let edit = body.find("f(&mut self.edits, &p.path)").expect("the edit itself");
     assert!(
         at < edit,
         "record must run BEFORE the edit is applied, or undo restores the state \
@@ -4691,9 +4413,7 @@ fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
 fn archives_are_refused_a_rating() {
     let lib = lib_src();
     assert!(
-        fn_body(&lib, "pub fn sidecar_path(")
-            .expect("sidecar_path")
-            .contains("is_archive_path"),
+        fn_body(&lib, "pub fn sidecar_path(").expect("sidecar_path").contains("is_archive_path"),
         "sidecar_path must return None for an archive member, which is what \
          refuses the write"
     );
@@ -4712,10 +4432,7 @@ fn the_grid_reads_ratings_from_a_map_not_the_filesystem() {
         "grid_cell must not read sidecars - that is a filesystem read per cell \
          per frame; it takes them from the ratings map"
     );
-    assert!(
-        cell.contains("ratings") || cell.contains("rating"),
-        "and it must read a ratings map"
-    );
+    assert!(cell.contains("ratings") || cell.contains("rating"), "and it must read a ratings map");
 }
 
 // ---------------------------------------------------------------------------
@@ -4727,11 +4444,7 @@ fn the_grid_reads_ratings_from_a_map_not_the_filesystem() {
 #[test]
 fn a_remembered_view_is_the_view_that_was_left() {
     let key = image_viewer::ImgKey::first(std::path::Path::new("p/manga.tiff"));
-    let left = image_viewer::SavedView {
-        fit: false,
-        scale: 1.3729,
-        offset: (17.25, -9.75),
-    };
+    let left = image_viewer::SavedView { fit: false, scale: 1.3729, offset: (17.25, -9.75) };
     let mut m = image_viewer::ViewMemory::new();
     m.remember(key.clone(), left);
     assert_eq!(m.restore(&key), Some(left));
@@ -4743,32 +4456,13 @@ fn a_remembered_view_is_the_view_that_was_left() {
 #[test]
 fn the_next_page_of_a_document_is_not_the_last_page_s_view() {
     let p = std::path::Path::new("p/vol.tiff");
-    let page0 = image_viewer::ImgKey {
-        path: p.to_path_buf(),
-        page: 0,
-    };
-    let page2 = image_viewer::ImgKey {
-        path: p.to_path_buf(),
-        page: 2,
-    };
+    let page0 = image_viewer::ImgKey { path: p.to_path_buf(), page: 0 };
+    let page2 = image_viewer::ImgKey { path: p.to_path_buf(), page: 2 };
     let mut m = image_viewer::ViewMemory::new();
-    m.remember(
-        page0,
-        image_viewer::SavedView {
-            fit: false,
-            scale: 3.0,
-            offset: (41.0, 0.0),
-        },
-    );
-    assert!(
-        m.restore(&page2).is_none(),
-        "page 2 must not inherit page 0's view"
-    );
+    m.remember(page0, image_viewer::SavedView { fit: false, scale: 3.0, offset: (41.0, 0.0) });
+    assert!(m.restore(&page2).is_none(), "page 2 must not inherit page 0's view");
     // And the file that was NOT visited is equally empty.
-    assert!(
-        m.restore(&image_viewer::ImgKey::first(std::path::Path::new("p/other.jpg")))
-            .is_none()
-    );
+    assert!(m.restore(&image_viewer::ImgKey::first(std::path::Path::new("p/other.jpg"))).is_none());
 }
 
 /// The no-memory arm is **today's behaviour, unchanged**: fit and zoom carried
@@ -4783,11 +4477,7 @@ fn an_unvisited_image_gets_the_carry() {
     assert_eq!(saved.scale, 2.1875);
     assert_eq!(saved.offset, (0.0, 0.0), "the pan does not travel");
     // A remembered one is handed back whole, so the carry gets nothing mixed in.
-    let left = image_viewer::SavedView {
-        fit: true,
-        scale: 0.75,
-        offset: (-3.5, 12.0),
-    };
+    let left = image_viewer::SavedView { fit: true, scale: 0.75, offset: (-3.5, 12.0) };
     assert_eq!(
         image_viewer::arriving_view(Some(left), false, 2.1875),
         left,
@@ -4801,20 +4491,10 @@ fn an_unvisited_image_gets_the_carry() {
 #[test]
 fn a_reexport_drops_the_whole_file_but_not_the_neighbours() {
     let vol1 = std::path::Path::new("p/vol1.cbz"); // archive members share a temp path
-    let k1 = image_viewer::ImgKey {
-        path: vol1.to_path_buf(),
-        page: 0,
-    };
-    let k1b = image_viewer::ImgKey {
-        path: vol1.to_path_buf(),
-        page: 1,
-    };
+    let k1 = image_viewer::ImgKey { path: vol1.to_path_buf(), page: 0 };
+    let k1b = image_viewer::ImgKey { path: vol1.to_path_buf(), page: 1 };
     let k2 = image_viewer::ImgKey::first(std::path::Path::new("p/photo.jpg"));
-    let view = image_viewer::SavedView {
-        fit: false,
-        scale: 1.0,
-        offset: (8.0, 8.0),
-    };
+    let view = image_viewer::SavedView { fit: false, scale: 1.0, offset: (8.0, 8.0) };
     let mut m = image_viewer::ViewMemory::new();
     m.remember(k1.clone(), view);
     m.remember(k1b.clone(), view);
@@ -4823,7 +4503,8 @@ fn a_reexport_drops_the_whole_file_but_not_the_neighbours() {
     assert!(m.restore(&k1).is_none());
     assert!(m.restore(&k1b).is_none());
     assert_eq!(m.restore(&k2), Some(view), "the neighbour keeps its own");
-}/// `#[serde(default)]` is load-bearing here like on every other added
+}
+/// `#[serde(default)]` is load-bearing here like on every other added
 /// `Config` field — an old config without this key must load and keep the
 /// shipped behaviour off.
 #[test]
@@ -4882,9 +4563,8 @@ fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
     let remember = block
         .find("self.views.remember(")
         .unwrap_or_else(|| panic!("the outgoing view must be remembered in the block"));
-    let key_move = block
-        .find("self.pan_key = self.cur.clone();")
-        .expect("the block must still move pan_key");
+    let key_move =
+        block.find("self.pan_key = self.cur.clone();").expect("the block must still move pan_key");
     let restore = block
         .find("self.views.restore(")
         .unwrap_or_else(|| panic!("the arriving view must be restored in the block"));
@@ -4898,10 +4578,7 @@ fn view_memory_is_wired_to_the_cursor_change_and_the_setting() {
         "restore AFTER the key changes, or it asks about the image being left"
     );
     let ones = block.matches("self.config.remember_view").count();
-    assert!(
-        ones >= 2,
-        "both arms must be gated on the setting, found {ones}"
-    );
+    assert!(ones >= 2, "both arms must be gated on the setting, found {ones}");
     // The arriving view goes through the pure decision, not a hand-rolled arm.
     assert!(
         block.contains("image_viewer::arriving_view("),
@@ -4942,10 +4619,7 @@ fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
         .find("self.stamps.get(p)")
         .expect("schedule must read the stamp registry for the file lengths");
     let plan = body.find("plan_jobs(").expect("schedule must plan");
-    assert!(
-        collect < plan,
-        "the slice is worthless if collected after the plan is built"
-    );
+    assert!(collect < plan, "the slice is worthless if collected after the plan is built");
     assert!(
         body.contains("file_bytes: &file_bytes,"),
         "the plan must be handed the collected slice"
@@ -4960,12 +4634,8 @@ fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
     );
     // And the constant sits with the radius it bounds, so the two knobs that
     // shape one window are found together.
-    let radius = src
-        .find("pub(crate) const PRELOAD_RADIUS: usize = 3;")
-        .expect("the radius");
-    let budget = src
-        .find("const PRELOAD_BUDGET_BYTES: u64 =")
-        .expect("the budget");
+    let radius = src.find("pub(crate) const PRELOAD_RADIUS: usize = 3;").expect("the radius");
+    let budget = src.find("const PRELOAD_BUDGET_BYTES: u64 =").expect("the budget");
     assert!(
         radius < budget && budget - radius < 4000,
         "the radius and the budget tune the same window and are documented together"
@@ -4984,10 +4654,7 @@ fn the_preload_budget_is_wired_from_the_watcher_s_stamp_registry() {
 fn an_old_config_without_the_panel_master_lands_on_the_default() {
     let old = r#"{"load_all_on_startup": true}"#;
     let c: image_viewer::Config = serde_json::from_str(old).unwrap();
-    assert!(
-        c.show_panels,
-        "no show_panels key must land on the default, which is on"
-    );
+    assert!(c.show_panels, "no show_panels key must land on the default, which is on");
     let off = r#"{"load_all_on_startup": true, "show_panels": false}"#;
     let c2: image_viewer::Config = serde_json::from_str(off).unwrap();
     assert!(!c2.show_panels, "an explicit false must be honoured");
@@ -5031,9 +4698,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
     let saved = helper
         .find("self.config.show_panels = self.show_panels;")
         .expect("the helper must mirror the flip into the config");
-    let write = helper
-        .find("self.config.save(")
-        .expect("the helper must save on the press");
+    let write = helper.find("self.config.save(").expect("the helper must save on the press");
     assert!(flip < saved && saved < write, "flip, mirror, save, in order");
 
     // Both `I` sites (key and Plates row) route through it. A site that
@@ -5058,10 +4723,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
         .find("let show_panels = config.show_panels;")
         .expect("the constructor must read the saved master");
     let literal = ctor.find("let mut app = Self {").expect("the struct literal");
-    assert!(
-        capture < literal,
-        "the capture happens before `config` moves into the struct"
-    );
+    assert!(capture < literal, "the capture happens before `config` moves into the struct");
 
     // No site forces the master back on. Both were hardcoded `true` once;
     // the whole-config save on exit would have recorded the force.
@@ -5073,10 +4735,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
     // And the fullscreen overlay pairs against the stash: one entering arm
     // that stashes, two leaving arms (F11 again, and Esc) that restore.
     let f11 = block_after(&dispatch, "if f11 {").expect("the F11 block");
-    assert!(
-        !f11.contains("config.save"),
-        "the fullscreen dance must not write the config"
-    );
+    assert!(!f11.contains("config.save"), "the fullscreen dance must not write the config");
     assert!(
         f11.contains("panels_before_fullscreen = Some(self.show_panels)"),
         "entering stash the master"
@@ -5085,9 +4744,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
         f11.contains("panels_before_fullscreen.take().unwrap_or(true)"),
         "F11 exit restores the stash"
     );
-    let restores = dispatch
-        .matches("panels_before_fullscreen.take().unwrap_or(true)")
-        .count();
+    let restores = dispatch.matches("panels_before_fullscreen.take().unwrap_or(true)").count();
     assert_eq!(
         restores, 2 as usize,
         "the Esc exit restores too — one restore, one fullscreen with no way back"

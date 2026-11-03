@@ -30,14 +30,10 @@ pub fn startup_index(files: &[PathBuf], named: Option<&Path>, resume: Option<&st
         return files.iter().position(|f| f == want).unwrap_or(0);
     }
     if let Some(last) = resume {
-        let want = Path::new(last)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned());
+        let want = Path::new(last).file_name().map(|n| n.to_string_lossy().into_owned());
         if let Some(i) = want.and_then(|n| {
             files.iter().position(|f| {
-                f.file_name()
-                    .map(|x| x.to_string_lossy() == n.as_str())
-                    .unwrap_or(false)
+                f.file_name().map(|x| x.to_string_lossy() == n.as_str()).unwrap_or(false)
             })
         }) {
             return i;
@@ -56,8 +52,5 @@ pub fn startup_index(files: &[PathBuf], named: Option<&Path>, resume: Option<&st
 /// means there is only ever one thing to store, one thing to display, and one
 /// thing to hand TurboJPEG.
 pub fn display_xform(exif_tag: u16, user: Xform) -> Xform {
-    Xform::from_exif(exif_tag)
-        .unwrap_or(Xform::Identity)
-        .then(user)
+    Xform::from_exif(exif_tag).unwrap_or(Xform::Identity).then(user)
 }
-

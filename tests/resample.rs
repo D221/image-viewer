@@ -32,12 +32,7 @@ static FILTER_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// pre-`MIN_FILTER_SCALE` behaviour** and is the arm several tests compare
 /// against, so it has to be reachable without a second build - which is why the
 /// floor is a runtime atomic and not a bare constant read at the call site.
-fn with_resample_at<T>(
-    linear: bool,
-    strength: f32,
-    floor: f32,
-    f: impl FnOnce() -> T,
-) -> T {
+fn with_resample_at<T>(linear: bool, strength: f32, floor: f32, f: impl FnOnce() -> T) -> T {
     let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
     let (was_linear, was_strength, was_floor) = (
         image_viewer::linear_resample_enabled(),
@@ -57,12 +52,7 @@ fn with_resample_at<T>(
 /// Run `f` with the downscale filter globals forced to `linear`, restoring the
 /// previous setting afterwards.
 fn with_linear_resample<T>(linear: bool, f: impl FnOnce() -> T) -> T {
-    with_resample_at(
-        linear,
-        cached_default_strength(),
-        image_viewer::MIN_FILTER_SCALE,
-        f,
-    )
+    with_resample_at(linear, cached_default_strength(), image_viewer::MIN_FILTER_SCALE, f)
 }
 
 /// Run `f` at an explicit strength and the shipped settings otherwise.
@@ -128,11 +118,7 @@ fn collect_src(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(Str
         if path.is_dir() {
             collect_src(root, &path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
             out.push((rel, std::fs::read_to_string(&path).unwrap()));
         }
     }
@@ -181,12 +167,7 @@ fn probe_sinusoid(w: u32, h: u32, p: f32, amp: f32) -> image_viewer::ImageData {
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// Dot lattice: 1-px dots of `hi` every `p` source px, `lo` between them. A
@@ -202,12 +183,7 @@ fn probe_dots(w: u32, h: u32, p: f32, lo: u8, hi: u8) -> image_viewer::ImageData
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// Stochastic 50% black/white dither, the shape a screentone's fine dither
@@ -232,12 +208,7 @@ fn probe_dither(w: u32, h: u32) -> image_viewer::ImageData {
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// p95 - p5 of the red channel down the middle row: the amplitude statistic.
@@ -246,11 +217,7 @@ fn probe_dither(w: u32, h: u32) -> image_viewer::ImageData {
 fn probe_amplitude(d: &image_viewer::ImageData) -> f32 {
     let w = d.width as usize;
     let mid = (d.rgba.len() / 4 / w / 2) * w * 4;
-    let mut v: Vec<u8> = d.rgba[mid..mid + w * 4]
-        .iter()
-        .step_by(4)
-        .copied()
-        .collect();
+    let mut v: Vec<u8> = d.rgba[mid..mid + w * 4].iter().step_by(4).copied().collect();
     v.sort_unstable();
     let p = |q: f32| v[((v.len() - 1) as f32 * q).round() as usize] as f32;
     p(0.95) - p(0.05)
@@ -294,12 +261,7 @@ fn probe_square_lattice(w: u32, h: u32, p: f32, d: f32, lo: u8, hi: u8) -> image
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// p95-p5 of the red channel over the whole output. Two-dimensional on purpose:
@@ -504,14 +466,8 @@ fn probe_resize(src: &image_viewer::ImageData) -> image_viewer::ImageData {
 
 /// Resize at an explicit strength and explicit target. Both the probe geometry
 /// and the strength are arguments so one table can carry the whole sweep.
-fn resize_at(
-    src: &image_viewer::ImageData,
-    target: u32,
-    strength: f32,
-) -> image_viewer::ImageData {
-    with_resample(true, strength, || {
-        image_viewer::downscale_image(src, target)
-    })
+fn resize_at(src: &image_viewer::ImageData, target: u32, strength: f32) -> image_viewer::ImageData {
+    with_resample(true, strength, || image_viewer::downscale_image(src, target))
 }
 
 /// Resize at an explicit target with the shipped settings - **including the
@@ -522,21 +478,13 @@ fn resize_at(
 /// same reason the floor is pinned: reading a process-wide global inside a
 /// concurrently-run test file means testing whichever arm ran last.
 fn resize_shipped(src: &image_viewer::ImageData, target: u32) -> image_viewer::ImageData {
-    with_resample(true, cached_default_strength(), || {
-        image_viewer::downscale_image(src, target)
-    })
+    with_resample(true, cached_default_strength(), || image_viewer::downscale_image(src, target))
 }
 
 /// Resize at an explicit target and floor, at an explicit strength. `floor 0.0`
 /// is the pre-`MIN_FILTER_SCALE` path.
-fn resize_floor(
-    src: &image_viewer::ImageData,
-    target: u32,
-    floor: f32,
-) -> image_viewer::ImageData {
-    with_floor_at(cached_default_strength(), floor, || {
-        image_viewer::downscale_image(src, target)
-    })
+fn resize_floor(src: &image_viewer::ImageData, target: u32, floor: f32) -> image_viewer::ImageData {
+    with_floor_at(cached_default_strength(), floor, || image_viewer::downscale_image(src, target))
 }
 
 /// The reported case: a 1440p landscape photo on a 1920-long panel, so
@@ -574,21 +522,13 @@ fn print_prefilter_pins() {
     print!("sinusoid 100 codes: ");
     for p in [2.5f32, 3.0, 3.5, 4.0, 5.0, 6.0] {
         let src = probe_sinusoid(PROBE_W, PROBE_H, p, 100.0);
-        print!(
-            "{}:{:.0} ",
-            p,
-            probe_amplitude(&probe_resize(&src))
-        );
+        print!("{}:{:.0} ", p, probe_amplitude(&probe_resize(&src)));
     }
     println!();
     print!("dots 0/100 codes:  ");
     for p in [2.5f32, 3.0, 3.5, 4.0, 5.0, 6.0, 8.0] {
         let src = probe_dots(PROBE_W, PROBE_H, p, 0, 100);
-        print!(
-            "{}:{:.0} ",
-            p,
-            probe_amplitude(&probe_resize(&src))
-        );
+        print!("{}:{:.0} ", p, probe_amplitude(&probe_resize(&src)));
     }
     println!();
     print!("8x reduction:      ");
@@ -650,9 +590,7 @@ const SWEEP_STRENGTHS: &[f32] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 #[test]
 #[ignore]
 fn print_square_lattice_sweep() {
-    println!(
-        "== synthetic square lattice, {PROBE_W}x{PROBE_H} -> {PROBE_TARGET} =="
-    );
+    println!("== synthetic square lattice, {PROBE_W}x{PROBE_H} -> {PROBE_TARGET} ==");
     println!(
         "{:>8} {:>6} | {:>9} {:>9} | {:>9} {:>9} | {:>9}",
         "strength", "pitch", "amp", "amp x", "beat", "beat x", "grad x"
@@ -711,18 +649,11 @@ fn print_real_page_strength_sweep() {
             "{:>8} | {:>10} {:>6} | {:>10} {:>6} | {:>8} {:>6}",
             "strength", "tone HF", "x", "edge grad", "x", "p95-5", "x"
         );
-        let (t_base, e_base, a_base) = (
-            masked_grad(&base, &tone),
-            masked_grad(&base, &edge),
-            alias_amp(&base),
-        );
+        let (t_base, e_base, a_base) =
+            (masked_grad(&base, &tone), masked_grad(&base, &edge), alias_amp(&base));
         for &strength in SWEEP_STRENGTHS {
             let out = resize_at(&page, target, strength);
-            let (t, e, a) = (
-                masked_grad(&out, &tone),
-                masked_grad(&out, &edge),
-                alias_amp(&out),
-            );
+            let (t, e, a) = (masked_grad(&out, &tone), masked_grad(&out, &edge), alias_amp(&out));
             println!(
                 "{strength:>8.2} | {t:>10.3} {:>6.3} | {e:>10.3} {:>6.3} | {a:>8.1} {:>6.3}",
                 t / t_base.max(1e-6),
@@ -744,12 +675,7 @@ fn probe_step(w: u32, h: u32, x0: u32) -> image_viewer::ImageData {
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// 10-90% rise distance of the step edge, in **output pixels**, averaged over
@@ -817,9 +743,8 @@ fn step_rise(out: &image_viewer::ImageData) -> f32 {
 #[test]
 #[ignore]
 fn export_strength_crops() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("strength-probe");
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("strength-probe");
     std::fs::create_dir_all(&dir).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     // Crops as fractions of the output, so one entry works at either page size.
@@ -861,10 +786,8 @@ fn export_strength_crops() {
         // A side-by-side strip of the same crop at every strength, so the
         // comparison is one image rather than four read one at a time - which is
         // how a difference gets looked at honestly.
-        let arms: Vec<image_viewer::ImageData> = [1.0f32, 1.5, 1.75, 2.0]
-            .iter()
-            .map(|&s| resize_at(&page, target, s))
-            .collect();
+        let arms: Vec<image_viewer::ImageData> =
+            [1.0f32, 1.5, 1.75, 2.0].iter().map(|&s| resize_at(&page, target, s)).collect();
         let base = &arms[0];
         let w = base.width as usize;
         let h = base.height as usize;
@@ -889,10 +812,7 @@ fn export_strength_crops() {
         }
         let stem = name.trim_end_matches(".jpg");
         let p = dir.join(format!("{stem}-strip.png"));
-        image::RgbaImage::from_raw(strip_w as u32, sh as u32, strip)
-            .unwrap()
-            .save(&p)
-            .unwrap();
+        image::RgbaImage::from_raw(strip_w as u32, sh as u32, strip).unwrap().save(&p).unwrap();
         println!("wrote {} (left to right: 1.00, 1.50, 1.75, 2.00)", p.display());
     }
 }
@@ -908,9 +828,7 @@ fn print_step_edge_profile() {
         let out = resize_at(&src, PROBE_TARGET, s);
         let w = out.width as usize;
         let mid = out.height as usize / 2;
-        let prof: Vec<u8> = (w / 2 - 5..w / 2 + 5)
-            .map(|x| out.rgba[(mid * w + x) * 4])
-            .collect();
+        let prof: Vec<u8> = (w / 2 - 5..w / 2 + 5).map(|x| out.rgba[(mid * w + x) * 4]).collect();
         println!("  strength {s}: {} values around the edge: {:?}", out.width, prof);
     }
 }
@@ -984,18 +902,13 @@ fn print_tone_residual_spectrum() {
             "== {name} -> {}x{}, flat-tone 2-D spectrum of mean amplitude per output px ==",
             base.width, base.height
         );
-        let arms: Vec<image_viewer::ImageData> = SWEEP_STRENGTHS
-            .iter()
-            .map(|&s| resize_at(&page, target, s))
-            .collect();
+        let arms: Vec<image_viewer::ImageData> =
+            SWEEP_STRENGTHS.iter().map(|&s| resize_at(&page, target, s)).collect();
         let mut names: Vec<String> = SWEEP_STRENGTHS.iter().map(|s| format!("{s:.2}")).collect();
         names.push("mean".into());
         println!("{:>6} | {}", "period", names.join(" | "));
         for &p_out in &[1.5f32, 2.0, 2.5, 3.0, 4.0, 6.0, 8.0] {
-            let row: Vec<f32> = arms
-                .iter()
-                .map(|d| tone_spectrum_amp(d, &tone, p_out))
-                .collect();
+            let row: Vec<f32> = arms.iter().map(|d| tone_spectrum_amp(d, &tone, p_out)).collect();
             let mean = row.iter().sum::<f32>() / row.len() as f32;
             let cells: Vec<String> = row
                 .iter()
@@ -1098,10 +1011,7 @@ fn the_tone_spectrum_metric_reports_codes() {
         let out = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
         let p_out = p / (PROBE_W as f32 / out.width as f32);
         let mask = vec![true; (out.width * out.height) as usize];
-        let (a, b) = (
-            tone_spectrum_amp(&out, &mask, p_out),
-            beat_amp(&out, p_out),
-        );
+        let (a, b) = (tone_spectrum_amp(&out, &mask, p_out), beat_amp(&out, p_out));
         assert!(
             a > 0.5,
             "lattice pitch {p} dot {d} at its own output pitch {p_out:.3}: \
@@ -1201,15 +1111,8 @@ fn smooth_low_passes_a_square_lattice_harder_than_fast() {
     // Pins are the Smooth numbers plus one code, the same slack the prefilter
     // tests use: the most a different target's f32 contraction could move a
     // weighted sum. At every pitch the ratio is 0.00-0.17x.
-    let cases = [
-        (2.5f32, 2.0f32),
-        (3.0, 1.0),
-        (3.5, 2.0),
-        (4.0, 2.0),
-        (5.0, 1.0),
-        (6.0, 1.0),
-        (8.0, 5.0),
-    ];
+    let cases =
+        [(2.5f32, 2.0f32), (3.0, 1.0), (3.5, 2.0), (4.0, 2.0), (5.0, 1.0), (6.0, 1.0), (8.0, 5.0)];
     for (pitch, max_codes) in cases {
         let src = probe_square_lattice(PROBE_W, PROBE_H, pitch, 1.0, 0, 100);
         let fast = resize_at(&src, PROBE_TARGET, image_viewer::FAST_STRENGTH);
@@ -1303,14 +1206,7 @@ fn smooth_costs_edge_sharpness_and_the_cost_is_bounded() {
         rgba,
         load_time: std::time::Duration::ZERO,
     };
-    let crop = |d: &image_viewer::ImageData| {
-        (
-            d.width / 4,
-            d.height / 4,
-            d.width / 2,
-            d.height / 2,
-        )
-    };
+    let crop = |d: &image_viewer::ImageData| (d.width / 4, d.height / 4, d.width / 2, d.height / 2);
     let (b_fast, b_smooth) = (
         resize_at(&bars, PROBE_TARGET, image_viewer::FAST_STRENGTH),
         resize_at(&bars, PROBE_TARGET, image_viewer::SMOOTH_STRENGTH),
@@ -1382,9 +1278,7 @@ fn one_strength_reaches_both_halves_of_the_resize() {
     // nested block at column 0 would end the slice early and the scan would pass
     // on a truncated function.
     let body_of = |name: &str| -> &str {
-        let start = src
-            .find(&format!("fn {name}("))
-            .unwrap_or_else(|| panic!("{name} exists"));
+        let start = src.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("{name} exists"));
         let body = &src[start..];
         let mut depth = 0i32;
         let end = body
@@ -1475,13 +1369,9 @@ fn the_smooth_toggle_is_wired_and_invalidates_the_previews() {
     // field and require it to set `refilter`. Locating it by field name rather
     // than by a fixed offset is what makes this survive the panel being
     // reordered, which it will be.
-    let at = src
-        .find("&mut self.config.smooth_downscale")
-        .expect("the checkbox exists");
+    let at = src.find("&mut self.config.smooth_downscale").expect("the checkbox exists");
     let after = &src[at..];
-    let arm_end = after
-        .find("}\n                ")
-        .expect("the changed() arm closes");
+    let arm_end = after.find("}\n                ").expect("the changed() arm closes");
     let arm = &after[..arm_end];
     assert!(
         arm.contains("set_downscale_smoothing("),
@@ -1494,10 +1384,7 @@ fn the_smooth_toggle_is_wired_and_invalidates_the_previews() {
          kernel stay on screen and the toggle appears broken (AGENTS.md records \
          exactly this for linear_resample)"
     );
-    assert!(
-        src.contains("if refilter {"),
-        "the refilter flag must still be acted on"
-    );
+    assert!(src.contains("if refilter {"), "the refilter flag must still be acted on");
 }
 
 /// A config written before this setting existed still loads, and gets **`false`**.
@@ -1533,10 +1420,7 @@ fn a_config_written_before_smooth_downscale_still_loads_and_stays_off() {
     // to be forgotten.
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
-    assert!(
-        !fresh.smooth_downscale,
-        "a first run must also come up with Smooth OFF"
-    );
+    assert!(!fresh.smooth_downscale, "a first run must also come up with Smooth OFF");
 }
 
 #[test]
@@ -1548,16 +1432,10 @@ fn a_config_written_before_pixel_art_still_loads_and_stays_off() {
     let cfg: image_viewer::Config =
         serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
             .expect("an old config must load");
-    assert!(
-        !cfg.pixel_art,
-        "an old config without the key must come up with Pixel art OFF"
-    );
+    assert!(!cfg.pixel_art, "an old config without the key must come up with Pixel art OFF");
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
-    assert!(
-        !fresh.pixel_art,
-        "a first run must also come up with Pixel art OFF"
-    );
+    assert!(!fresh.pixel_art, "a first run must also come up with Pixel art OFF");
 }
 
 /// The decision the toggle names: nearest on **magnify**, linear on
@@ -1609,9 +1487,7 @@ fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
         .find("&mut self.config.pixel_art")
         .expect("the settings panel must have a checkbox bound to it");
     let after = &main[at..];
-    let arm_end = after
-        .find("}\n                ")
-        .expect("the changed() arm closes");
+    let arm_end = after.find("}\n                ").expect("the changed() arm closes");
     let arm = &after[..arm_end];
     assert!(
         arm.contains("refilter = true"),
@@ -1625,13 +1501,8 @@ fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
     // in-play animation frame sets, the per-frame tile options — all go
     // through the one mapping; a site that went around it would sample that
     // texture linearly for as long as it lives.
-    let uses = main
-        .matches("content_texture_options(self.config.pixel_art)")
-        .count();
-    assert_eq!(
-        uses, 4,
-        "every content upload must consult the toggle at upload time"
-    );
+    let uses = main.matches("content_texture_options(self.config.pixel_art)").count();
+    assert_eq!(uses, 4, "every content upload must consult the toggle at upload time");
     assert!(
         main.contains("options: TextureOptions,")
             && main.contains("make_tile(&ctx, &tp.data, tx, ty, tile_options);"),
@@ -1640,12 +1511,9 @@ fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
     );
 
     // The deliberate counter-examples: the grid cell and the checkerboard.
-    let thumb_at = main
-        .find("let texels = p.image.size;")
-        .expect("the thumb upload exists");
-    let thumb_arm_len = main[thumb_at..]
-        .find("self.thumbs.insert")
-        .expect("the thumb arm ends at its insert");
+    let thumb_at = main.find("let texels = p.image.size;").expect("the thumb upload exists");
+    let thumb_arm_len =
+        main[thumb_at..].find("self.thumbs.insert").expect("the thumb arm ends at its insert");
     let thumb_arm = &main[thumb_at..thumb_at + thumb_arm_len];
     assert!(
         !thumb_arm.contains("content_texture_options("),
@@ -1673,16 +1541,10 @@ fn a_config_written_before_grid_cell_size_still_loads_at_150() {
     let cfg: image_viewer::Config =
         serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
             .expect("an old config must load");
-    assert_eq!(
-        cfg.grid_cell, 150.0,
-        "an old config without the key must come up at 150pt cells"
-    );
+    assert_eq!(cfg.grid_cell, 150.0, "an old config without the key must come up at 150pt cells");
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
-    assert_eq!(
-        fresh.grid_cell, 150.0,
-        "a first run must also come up at 150pt cells"
-    );
+    assert_eq!(fresh.grid_cell, 150.0, "a first run must also come up at 150pt cells");
 }
 
 #[test]
@@ -1693,16 +1555,10 @@ fn a_config_written_before_slideshow_shuffle_still_loads_with_it_off() {
     let cfg: image_viewer::Config =
         serde_json::from_str(r#"{"load_all_on_startup":false,"folder":null}"#)
             .expect("an old config must load");
-    assert!(
-        !cfg.slideshow_shuffle,
-        "an old config without the key must not start shuffling shows"
-    );
+    assert!(!cfg.slideshow_shuffle, "an old config without the key must not start shuffling shows");
     let tmp = tempfile::tempdir().unwrap();
     let fresh = image_viewer::Config::load(&tmp.path().join("absent.json"));
-    assert!(
-        !fresh.slideshow_shuffle,
-        "a first run must also come up with shuffle off"
-    );
+    assert!(!fresh.slideshow_shuffle, "a first run must also come up with shuffle off");
 }
 
 /// **The regression guard: `Smooth` must not be the default, and the reason must
@@ -1780,10 +1636,8 @@ fn smooth_is_not_the_default_because_it_moves_energy_between_pitches() {
     let mut best: Option<(f32, f32, f32, f32)> = None;
     for i in 0..=59 {
         let p = 1.05 + i as f32 * 0.05;
-        let (a, b) = (
-            screentone_lattice_amplitude(&fast, p),
-            screentone_lattice_amplitude(&smooth, p),
-        );
+        let (a, b) =
+            (screentone_lattice_amplitude(&fast, p), screentone_lattice_amplitude(&smooth, p));
         // A ratio against a signal that is not there is not a measurement. At
         // exactly 2.00 output px both projections read 0.000 for every strength,
         // because that is the output Nyquist and the pattern is below it — the
@@ -1807,7 +1661,11 @@ fn smooth_is_not_the_default_because_it_moves_energy_between_pitches() {
          pattern (Fast {:.3} -> Smooth {:.3} codes, ratio {:.2}); it left {:.2}. \
          The fixture no longer shows widening helping anywhere, so it is not a \
          multi-pitch trade any more and this guard is decoration.",
-        bst.1, bst.2, bst.3, bst.0, bst.0
+        bst.1,
+        bst.2,
+        bst.3,
+        bst.0,
+        bst.0
     );
     assert!(
         w.0 >= 1.50,
@@ -1815,7 +1673,11 @@ fn smooth_is_not_the_default_because_it_moves_energy_between_pitches() {
          pattern (Fast {:.3} -> Smooth {:.3} codes, ratio {:.2}); it left {:.2}. \
          This is the regression: the same widening that removes one pitch's beat \
          creates another's, which is why the setting cannot be the default.",
-        w.1, w.2, w.3, w.0, w.0
+        w.1,
+        w.2,
+        w.3,
+        w.0,
+        w.0
     );
 }
 
@@ -1855,8 +1717,7 @@ fn probe_multi_pitch_screentone(
         for x in 0..w as usize {
             let (fx, fy) = (x as f32, y as f32);
             // Base grid.
-            let g1 = if fx % base_pitch < base_pitch * 0.375
-                && fy % base_pitch < base_pitch * 0.375
+            let g1 = if fx % base_pitch < base_pitch * 0.375 && fy % base_pitch < base_pitch * 0.375
             {
                 1.0f32
             } else {
@@ -1865,11 +1726,8 @@ fn probe_multi_pitch_screentone(
             // Angled screen: its own period along its own axis.
             let u = (fx * cos30 + fy * sin30) % screen_pitch;
             let v = (-fx * sin30 + fy * cos30) % screen_pitch;
-            let g2 = if u < screen_pitch * 0.314 && v < screen_pitch * 0.314 {
-                1.0f32
-            } else {
-                0.0
-            };
+            let g2 =
+                if u < screen_pitch * 0.314 && v < screen_pitch * 0.314 { 1.0f32 } else { 0.0 };
             // Stochastic dither, +/- 6 codes.
             let d = (next() - 0.5) * 12.0;
             let v = (150.0 - 46.0 * g1 - 34.0 * g2 + d).round().clamp(0.0, 255.0) as u8;
@@ -1877,12 +1735,7 @@ fn probe_multi_pitch_screentone(
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// Amplitude of a 2-D pattern at output period `p_out`, in codes, by least
@@ -1904,14 +1757,7 @@ fn the_prefilter_low_passes_the_alias_band_far_deeper_than_a_box() {
     //   4.0: 29 -> 11   5.0: 28 -> 23   6.0: 41 -> 35
     // Pins are the kernel numbers plus one code, which is the most a different
     // target's f32 contraction could move a weighted sum.
-    let cases = [
-        (2.5f32, 5.0f32),
-        (3.0, 3.0),
-        (3.5, 6.0),
-        (4.0, 12.0),
-        (5.0, 24.0),
-        (6.0, 36.0),
-    ];
+    let cases = [(2.5f32, 5.0f32), (3.0, 3.0), (3.5, 6.0), (4.0, 12.0), (5.0, 24.0), (6.0, 36.0)];
     for (period, max_codes) in cases {
         let src = probe_sinusoid(PROBE_W, PROBE_H, period, 100.0);
         let out = probe_resize(&src);
@@ -2024,10 +1870,7 @@ fn a_flat_field_survives_the_prefilter_unchanged() {
         };
         let out = probe_resize(&src);
         let m = probe_mean(&out);
-        assert!(
-            (m - v as f32).abs() <= 1.0,
-            "flat field {v} came out at mean {m:.2}"
-        );
+        assert!((m - v as f32).abs() <= 1.0, "flat field {v} came out at mean {m:.2}");
     }
 }
 
@@ -2038,15 +1881,15 @@ fn the_prefilter_intermediate_is_at_most_twice_the_target() {
     // full-resolution source: on a 6.9 MP page that is 26.7 MB instead of
     // 55 MB, and deleting the step doubles the conversion cost as well.
     let cases = [
-        (890u32, 309u32, 618u32),   // the probe geometry: 2x the target
-        (2223, 772, 1544),          // the real 2223x3109 page at its 772 wide
-        (3109, 1080, 2160),         // ... and its height
-        (100, 1000, 100),           // no shrink: the dimension itself
-        (1, 1, 1),                  // 1 px
-        (7, 3, 6),                  // odd small
-        (4096, 2048, 4096),         // exactly 2x
-        (4097, 2048, 4096),         // just over
-        (u32::MAX, 4096, 8192),     // saturating_mul must not wrap
+        (890u32, 309u32, 618u32), // the probe geometry: 2x the target
+        (2223, 772, 1544),        // the real 2223x3109 page at its 772 wide
+        (3109, 1080, 2160),       // ... and its height
+        (100, 1000, 100),         // no shrink: the dimension itself
+        (1, 1, 1),                // 1 px
+        (7, 3, 6),                // odd small
+        (4096, 2048, 4096),       // exactly 2x
+        (4097, 2048, 4096),       // just over
+        (u32::MAX, 4096, 8192),   // saturating_mul must not wrap
         (u32::MAX, u32::MAX, u32::MAX),
     ];
     for (dim, target, want) in cases {
@@ -2131,12 +1974,7 @@ fn probe_sine(w: u32, h: u32, period: f32, amp: f32) -> image_viewer::ImageData 
             rgba[o..o + 4].copy_from_slice(&[v, v, v, 255]);
         }
     }
-    image_viewer::ImageData {
-        width: w,
-        height: h,
-        rgba,
-        load_time: std::time::Duration::ZERO,
-    }
+    image_viewer::ImageData { width: w, height: h, rgba, load_time: std::time::Duration::ZERO }
 }
 
 /// p95-p5 of the red channel, in codes: how much of a 100-codes-peak-to-peak
@@ -2240,12 +2078,9 @@ fn the_shipped_resize_is_byte_identical_to_no_floor_at_all() {
     // A spread half-panel (1350x1920 -> 1080), the 1440p geometry from the user
     // report, and two reductions either side of `PREFILTER_FACTOR`, so the claim
     // covers both sides of the threshold the floor was bridging.
-    for (w, h, target) in [
-        (QHD_W, QHD_H, QHD_TARGET),
-        (1350, 1920, 1080),
-        (2560, 1440, 1920),
-        (1000, 1414, 1080),
-    ] {
+    for (w, h, target) in
+        [(QHD_W, QHD_H, QHD_TARGET), (1350, 1920, 1080), (2560, 1440, 1920), (1000, 1414, 1080)]
+    {
         let src = probe_square_lattice(w, h, 4.0, 1.0, 0, 100);
         let shipped = resize_shipped(&src, target);
         let off = resize_floor(&src, target, 0.0);
@@ -2259,11 +2094,7 @@ fn the_shipped_resize_is_byte_identical_to_no_floor_at_all() {
             "the shipped resize still differs from an explicit 0.0 floor at \
              {w}x{h} -> {target}; first differing byte at index {:?}. The shipped \
              pipeline must be byte-identical to the pre-b237e7a path.",
-            shipped
-                .rgba
-                .iter()
-                .zip(off.rgba.iter())
-                .position(|(a, b)| a != b)
+            shipped.rgba.iter().zip(off.rgba.iter()).position(|(a, b)| a != b)
         );
     }
 }
@@ -2364,9 +2195,7 @@ fn the_min_filter_scale_is_a_no_op_where_the_prefilter_already_fires() {
 fn the_floor_reaches_both_final_axes_and_only_those() {
     let src = lib_src();
     let body_of = |name: &str| -> &str {
-        let start = src
-            .find(&format!("fn {name}("))
-            .unwrap_or_else(|| panic!("{name} exists"));
+        let start = src.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("{name} exists"));
         let body = &src[start..];
         let mut depth = 0i32;
         let end = body
@@ -2567,16 +2396,12 @@ fn print_min_filter_scale() {
     // Arms as `(name, resize)` so each column's images come from the *same*
     // arm. Selecting per-image by string comparison was the first version and it
     // is the shape of mistake that reports a number for the wrong arm.
-    let arms: Vec<(&str, Box<dyn Fn(&image_viewer::ImageData) -> image_viewer::ImageData>)> =
-        vec![
-            ("floor off", Box::new(|d| resize_floor(d, QHD_TARGET, 0.0))),
-            ("floor 2.0", Box::new(|d| resize_shipped(d, QHD_TARGET))),
-            ("floor 2.5", Box::new(|d| resize_floor(d, QHD_TARGET, 2.5))),
-            (
-                "Smooth",
-                Box::new(|d| resize_at(d, QHD_TARGET, image_viewer::SMOOTH_STRENGTH)),
-            ),
-        ];
+    let arms: Vec<(&str, Box<dyn Fn(&image_viewer::ImageData) -> image_viewer::ImageData>)> = vec![
+        ("floor off", Box::new(|d| resize_floor(d, QHD_TARGET, 0.0))),
+        ("floor 2.0", Box::new(|d| resize_shipped(d, QHD_TARGET))),
+        ("floor 2.5", Box::new(|d| resize_floor(d, QHD_TARGET, 2.5))),
+        ("Smooth", Box::new(|d| resize_at(d, QHD_TARGET, image_viewer::SMOOTH_STRENGTH))),
+    ];
     println!(
         "{:>14} {:>10} {:>10} {:>10} {:>10}",
         "arm", "step rise", "lattice", "tone sum", "tone peak"
@@ -2608,15 +2433,24 @@ fn print_min_filter_scale() {
     for r in [1.1f64, 1.2, 1.333, 1.5, 1.778, 2.0, 2.5, 2.879, 4.0] {
         let target = ((QHD_W as f64 / r).round() as u32).max(2);
         let arms: Vec<(&str, Box<dyn Fn() -> ()>)> = vec![
-            ("off", Box::new(|| {
-                let _ = resize_floor(&src, target, 0.0);
-            })),
-            ("2.0", Box::new(|| {
-                let _ = resize_shipped(&src, target);
-            })),
-            ("smooth", Box::new(|| {
-                let _ = resize_at(&src, target, image_viewer::SMOOTH_STRENGTH);
-            })),
+            (
+                "off",
+                Box::new(|| {
+                    let _ = resize_floor(&src, target, 0.0);
+                }),
+            ),
+            (
+                "2.0",
+                Box::new(|| {
+                    let _ = resize_shipped(&src, target);
+                }),
+            ),
+            (
+                "smooth",
+                Box::new(|| {
+                    let _ = resize_at(&src, target, image_viewer::SMOOTH_STRENGTH);
+                }),
+            ),
         ];
         // **Interleaved, and every arm warmed before any is timed.** Arms run
         // one-after-another report a drift larger than the effect - a run in this
@@ -2632,9 +2466,7 @@ fn print_min_filter_scale() {
                 // One measurement per round, rotating which arm goes first, so
                 // neither arm is systematically measured at the same point in the
                 // machine's thermal or allocator state.
-                let order: Vec<usize> = (0..arms.len())
-                    .map(|k| (k + i) % arms.len())
-                    .collect();
+                let order: Vec<usize> = (0..arms.len()).map(|k| (k + i) % arms.len()).collect();
                 for j in order {
                     let t0 = std::time::Instant::now();
                     arms[j].1();
@@ -2674,10 +2506,8 @@ fn every_downscale_filter_survives_the_widened_prefilter() {
         let was = image_viewer::linear_resample_enabled();
         image_viewer::set_linear_resample(true);
         image_viewer::set_downscale_filter(f);
-        let out = image_viewer::downscale_image(
-            &probe_dots(PROBE_W, PROBE_H, 3.0, 0, 255),
-            PROBE_TARGET,
-        );
+        let out =
+            image_viewer::downscale_image(&probe_dots(PROBE_W, PROBE_H, 3.0, 0, 255), PROBE_TARGET);
         image_viewer::set_downscale_filter(image_viewer::DownscaleFilter::Hermite);
         image_viewer::set_linear_resample(was);
         assert_eq!(
@@ -2700,15 +2530,11 @@ fn test_preview_load_survives_gamma_space_resize() {
     for (x, y, px) in img.enumerate_pixels_mut() {
         *px = image::Rgba([(x % 256) as u8, (y % 256) as u8, 128, 255]);
     }
-    image::DynamicImage::ImageRgba8(img)
-        .save(&p)
-        .expect("write fixture");
+    image::DynamicImage::ImageRgba8(img).save(&p).expect("write fixture");
 
     for target in [256u32, 300, 512, 800, 980, 1024] {
-        let r = with_linear_resample(false, || {
-            image_viewer::load_image_preview_full(&p, target)
-        })
-        .unwrap_or_else(|e| panic!("{p:?} @ {target} failed to load: {e}"));
+        let r = with_linear_resample(false, || image_viewer::load_image_preview_full(&p, target))
+            .unwrap_or_else(|e| panic!("{p:?} @ {target} failed to load: {e}"));
         for (label, d) in [("preview", &r.preview), ("full", r.full.as_ref().unwrap())] {
             assert_eq!(
                 d.rgba.len(),

@@ -71,20 +71,10 @@ pub fn region_for_save(
         None => (w, h, oriented.rgba.clone()),
     };
     if user == Xform::Identity {
-        return Some(ImageData {
-            width: cw,
-            height: ch,
-            rgba: cut,
-            load_time: oriented.load_time,
-        });
+        return Some(ImageData { width: cw, height: ch, rgba: cut, load_time: oriented.load_time });
     }
     let (ow, oh, px) = user.apply_rgba(cw, ch, &cut)?;
-    Some(ImageData {
-        width: ow,
-        height: oh,
-        rgba: px,
-        load_time: oriented.load_time,
-    })
+    Some(ImageData { width: ow, height: oh, rgba: px, load_time: oriented.load_time })
 }
 
 /// Why a transform could not be saved, when it could not.
@@ -175,11 +165,7 @@ pub(crate) fn lossless_raster(bytes: &[u8]) -> Option<image::ImageFormat> {
 ///
 /// The output's EXIF orientation is set to 1, because the pixels now *are* the
 /// display orientation. See [`neutralize_exif_orientation`].
-pub fn save_transformed(
-    src: &Path,
-    user: Xform,
-    crop: Option<Crop>,
-) -> Result<PathBuf, SaveError> {
+pub fn save_transformed(src: &Path, user: Xform, crop: Option<Crop>) -> Result<PathBuf, SaveError> {
     let bytes = std::fs::read(src).map_err(SaveError::Read)?;
     let is_jpeg = is_jpeg_bytes(&bytes);
     let exif_tag = if is_jpeg { exif_orientation(src) } else { 0 };
@@ -195,9 +181,8 @@ pub fn save_transformed(
         None => None,
         Some(c) => {
             if is_jpeg {
-                let mut dec = turbojpeg::Decompressor::new().map_err(|e| {
-                    SaveError::Decode(format!("could not open a decoder: {e}"))
-                })?;
+                let mut dec = turbojpeg::Decompressor::new()
+                    .map_err(|e| SaveError::Decode(format!("could not open a decoder: {e}")))?;
                 let header = dec.read_header(&bytes).map_err(|e| {
                     SaveError::Decode(format!("could not read the JPEG header: {e}"))
                 })?;
@@ -417,20 +402,10 @@ pub fn save_transformed_to(
     // thumbnail. The scale is therefore computed here rather than handed over,
     // so "leave it alone" is a value the pipeline can actually express.
     let scaled = if max_long == 0 || ow.max(oh) <= max_long {
-        ImageData {
-            width: ow,
-            height: oh,
-            rgba: px,
-            load_time: std::time::Duration::ZERO,
-        }
+        ImageData { width: ow, height: oh, rgba: px, load_time: std::time::Duration::ZERO }
     } else {
         downscale_image(
-            &ImageData {
-                width: ow,
-                height: oh,
-                rgba: px,
-                load_time: std::time::Duration::ZERO,
-            },
+            &ImageData { width: ow, height: oh, rgba: px, load_time: std::time::Duration::ZERO },
             max_long,
         )
     };
@@ -439,11 +414,8 @@ pub fn save_transformed_to(
     if fmt == image::ImageFormat::Jpeg {
         // JPEG has no alpha: drop it the same way every 32→24-bit save path
         // here does, rather than asking the encoder to guess.
-        let rgb: Vec<u8> = scaled
-            .rgba
-            .chunks_exact(4)
-            .flat_map(|px| [px[0], px[1], px[2]])
-            .collect();
+        let rgb: Vec<u8> =
+            scaled.rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
         let mut cursor = std::io::Cursor::new(&mut buf);
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut cursor, quality);
         enc.encode(&rgb, sw, sh, image::ExtendedColorType::Rgb8)
@@ -478,12 +450,7 @@ pub fn save_transformed_to(
         neutralize_exif_orientation(&mut buf);
     }
     std::fs::write(dest, &buf).map_err(SaveError::Write)?;
-    Ok(ScaledSave {
-        dest: dest.to_path_buf(),
-        width: sw,
-        height: sh,
-        lossless,
-    })
+    Ok(ScaledSave { dest: dest.to_path_buf(), width: sw, height: sh, lossless })
 }
 
 /// The output format, decided by the destination's extension.
@@ -499,11 +466,7 @@ pub fn save_transformed_to(
 /// nothing (a bigger file) rather than the one that costs them a generation of
 /// compression.
 pub(crate) fn format_for_dest(dest: &Path) -> Result<image::ImageFormat, SaveError> {
-    let ext = dest
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     match ext.as_str() {
         "jpg" | "jpeg" => Ok(image::ImageFormat::Jpeg),
         "png" => Ok(image::ImageFormat::Png),
@@ -713,4 +676,3 @@ pub fn neutralize_exif_orientation(jpeg: &mut [u8]) -> bool {
 
 /// Tag 0x0112, the orientation.
 pub(crate) const EXIF_TAG_ORIENTATION: u16 = 0x0112;
-

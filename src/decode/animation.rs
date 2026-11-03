@@ -18,11 +18,7 @@ impl Animation {
     /// Total loop duration. Zero-delay frames are floored to 20 ms (50 fps),
     /// matching how browsers clamp pathological GIF timing.
     pub fn total_duration(&self) -> Duration {
-        let ms: u64 = self
-            .delays
-            .iter()
-            .map(|d| d.as_millis().max(20) as u64)
-            .sum();
+        let ms: u64 = self.delays.iter().map(|d| d.as_millis().max(20) as u64).sum();
         Duration::from_millis(ms)
     }
 }
@@ -50,10 +46,7 @@ pub fn anim_frame_state(anim: &Animation, elapsed: Duration, speed: f32) -> (usi
         }
         acc += dm;
     }
-    (
-        anim.frames.len().saturating_sub(1),
-        Duration::from_millis(20).div_f32(speed),
-    )
+    (anim.frames.len().saturating_sub(1), Duration::from_millis(20).div_f32(speed))
 }
 
 /// One frame step for a paused animation (`,` / `.`, YouTube-style):
@@ -166,10 +159,7 @@ pub fn fit_window_size(
     central: (f32, f32),
     monitor: Option<(f32, f32)>,
 ) -> (f32, f32) {
-    let chrome = (
-        (inner.0 - central.0).max(0.0),
-        (inner.1 - central.1).max(0.0),
-    );
+    let chrome = ((inner.0 - central.0).max(0.0), (inner.1 - central.1).max(0.0));
     let mut out = (content.0 + chrome.0, content.1 + chrome.1);
     if let Some(m) = monitor {
         out.0 = out.0.min(m.0);
@@ -249,20 +239,15 @@ pub(crate) fn first_frame(
     use image::AnimationDecoder;
     let cur = std::io::Cursor::new(bytes);
     let frame = match format {
-        AnimatedFormat::Gif => image::codecs::gif::GifDecoder::new(cur)
-            .ok()?
-            .into_frames()
-            .next()?,
-        AnimatedFormat::Png => image::codecs::png::PngDecoder::new(cur)
-            .ok()?
-            .apng()
-            .ok()?
-            .into_frames()
-            .next()?,
-        AnimatedFormat::Webp => image::codecs::webp::WebPDecoder::new(cur)
-            .ok()?
-            .into_frames()
-            .next()?,
+        AnimatedFormat::Gif => {
+            image::codecs::gif::GifDecoder::new(cur).ok()?.into_frames().next()?
+        }
+        AnimatedFormat::Png => {
+            image::codecs::png::PngDecoder::new(cur).ok()?.apng().ok()?.into_frames().next()?
+        }
+        AnimatedFormat::Webp => {
+            image::codecs::webp::WebPDecoder::new(cur).ok()?.into_frames().next()?
+        }
     };
     let frame = frame.ok()?;
     let mut data = ImageData {
@@ -318,15 +303,17 @@ pub fn is_animated(bytes: &[u8], format: AnimatedFormat) -> bool {
             };
             png.is_apng().unwrap_or(false)
         }
-        AnimatedFormat::Webp => image::codecs::webp::WebPDecoder::new(cur)
-            .map(|d| d.has_animation())
-            .unwrap_or(false),
+        AnimatedFormat::Webp => {
+            image::codecs::webp::WebPDecoder::new(cur).map(|d| d.has_animation()).unwrap_or(false)
+        }
     }
 }
 
 /// True when the first two frames both decode. Two `next` calls and no loop, so it
 /// terminates on any input including a file whose frame data runs out.
-pub(crate) fn two_ok_frames<'a, I: Iterator<Item = image::ImageResult<image::Frame>>>(mut it: I) -> bool {
+pub(crate) fn two_ok_frames<'a, I: Iterator<Item = image::ImageResult<image::Frame>>>(
+    mut it: I,
+) -> bool {
     matches!(it.next(), Some(Ok(_))) && matches!(it.next(), Some(Ok(_)))
 }
 
@@ -436,4 +423,3 @@ pub(crate) fn decode_embedded_thumbnail(
     }
     Some(data)
 }
-

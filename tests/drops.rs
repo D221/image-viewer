@@ -92,9 +92,7 @@ fn source(bytes_marker: &str) -> Source {
             bytes_marker.bytes().next().unwrap_or(b'x'),
         ]);
     }
-    image::DynamicImage::ImageRgb8(img)
-        .save(&path)
-        .expect("write the fixture");
+    image::DynamicImage::ImageRgb8(img).save(&path).expect("write the fixture");
     Source { _dir: dir, path }
 }
 
@@ -130,21 +128,10 @@ fn a_dropped_file_survives_its_source_being_deleted() {
     // Exactly what Explorer does with its extraction: the whole directory.
     let parent = src.path.parent().unwrap().to_path_buf();
     std::fs::remove_dir_all(&parent).expect("delete the source directory");
-    assert!(
-        !src.path.exists(),
-        "precondition: the source is really gone"
-    );
+    assert!(!src.path.exists(), "precondition: the source is really gone");
 
-    assert!(
-        copy.file.exists(),
-        "the copy must survive: {}",
-        copy.file.display()
-    );
-    assert_eq!(
-        pixels(&copy.file),
-        pixels(&copy.file),
-        "the copy must decode"
-    );
+    assert!(copy.file.exists(), "the copy must survive: {}", copy.file.display());
+    assert_eq!(pixels(&copy.file), pixels(&copy.file), "the copy must decode");
     forget_drop_copy(&copy);
     assert!(
         !copy.dir.exists(),
@@ -205,9 +192,7 @@ fn a_changed_source_does_not_land_on_top_of_the_previous_copy() {
     for (x, _y, px) in img.enumerate_pixels_mut() {
         *px = image::Rgb([(x % 256) as u8, 9, 11]);
     }
-    image::DynamicImage::ImageRgb8(img)
-        .save(&src.path)
-        .expect("re-export");
+    image::DynamicImage::ImageRgb8(img).save(&src.path).expect("re-export");
     let second = own_dropped(&src.path).expect("own again");
 
     assert_ne!(
@@ -261,9 +246,7 @@ fn collect_src(dir: &std::path::Path, texts: &mut Vec<String>) {
 /// how a scan passes vacuously: it can return a fragment that happens to
 /// contain what it is looking for while the real call is somewhere else.
 fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"));
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} is gone; update this test to match"));
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     let mut seen_open = false;
@@ -415,10 +398,7 @@ fn the_off_thread_copy_lands_where_the_blocking_one_did() {
     forget_drop_copy(&blocking);
 
     let plan = plan_drop_copy(&src.path).expect("plan the copy");
-    assert!(
-        !plan.reuse,
-        "with no copy on disk the plan must not claim one is waiting"
-    );
+    assert!(!plan.reuse, "with no copy on disk the plan must not claim one is waiting");
     let made = plan.materialise(&src.path).expect("materialise the copy");
     assert_eq!(made.dir, plan.dir, "the plan must name the directory it writes to");
     assert_eq!(made.file, plan.file, "the plan must name the file it writes");
@@ -504,10 +484,7 @@ fn a_copy_of_the_wrong_length_is_not_reused() {
     );
 
     let second = own_dropped(&src.path).expect("own again");
-    assert!(
-        !second.reused,
-        "a copy of the wrong length is not a copy of this file"
-    );
+    assert!(!second.reused, "a copy of the wrong length is not a copy of this file");
     assert_eq!(pixels(&second.file), want, "the damage must be repaired");
     forget_drop_copy(&second);
 }
@@ -643,9 +620,9 @@ fn a_stale_copy_is_dropped_rather_than_opened() {
         pump[at..].contains("continue"),
         "the stale branch must skip the open, not merely notice itself:\n{pump}"
     );
-    let forget = pump[at..].find("forget_drop_copy").unwrap_or_else(|| {
-        panic!("a stale copy's directory must be reclaimed:\n{pump}")
-    });
+    let forget = pump[at..]
+        .find("forget_drop_copy")
+        .unwrap_or_else(|| panic!("a stale copy's directory must be reclaimed:\n{pump}"));
     let guard = pump[at..].find("self.drop_copy.as_ref()").unwrap_or_else(|| {
         panic!(
             "the reclamation must be conditional on the app not already holding \
@@ -668,15 +645,9 @@ fn a_stale_copy_is_dropped_rather_than_opened() {
 fn only_a_dropped_file_is_copied() {
     let src = main_src();
     let body = fn_body(&src, "fn load_dropped");
-    let dir_branch = body
-        .find("self.open_folder(ctx, path)")
-        .expect("a folder branch");
-    let archive_branch = body
-        .find("self.open_archive(ctx, &path)")
-        .expect("an archive branch");
-    let file_branch = body
-        .find("self.open_file(ctx, path, true)")
-        .expect("a file branch");
+    let dir_branch = body.find("self.open_folder(ctx, path)").expect("a folder branch");
+    let archive_branch = body.find("self.open_archive(ctx, &path)").expect("an archive branch");
+    let file_branch = body.find("self.open_file(ctx, path, true)").expect("a file branch");
     // Each branch returns before the next, so the copy is reached only from the
     // file branch. The three being distinct statements is what this rests on.
     assert!(

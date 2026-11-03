@@ -10,7 +10,6 @@
 use crate::*;
 
 impl MyApp {
-
     /// Run the nth user command (Ctrl+1..9, Tier 1 #2) against the file on
     /// screen: `{file}`, `{dir}` and `{name}` expand in the program and args
     /// ([`image_viewer::expand_user_command`], tested), then the process is
@@ -20,7 +19,8 @@ impl MyApp {
     /// second rather than one per frame. A missing entry
     /// is a notice rather than an error: pressing Ctrl+3 with two commands is
     /// a mistyped chord, not a failure.
-    pub(crate) fn run_user_command(&mut self, n: usize) {        let Some(cmd) = self.config.user_commands.get(n).cloned() else {
+    pub(crate) fn run_user_command(&mut self, n: usize) {
+        let Some(cmd) = self.config.user_commands.get(n).cloned() else {
             self.notice = Some(format!("No user command {}", n + 1));
             return;
         };
@@ -51,11 +51,7 @@ impl MyApp {
             Ok(_) => {
                 self.notice = Some(format!(
                     "Ran {}",
-                    if cmd.name.trim().is_empty() {
-                        prog
-                    } else {
-                        cmd.name
-                    }
+                    if cmd.name.trim().is_empty() { prog } else { cmd.name }
                 ));
             }
             Err(e) => self.error = Some(format!("Could not run '{}': {e}", cmd.name)),
@@ -161,8 +157,13 @@ impl MyApp {
     /// crash — the config is the way back. `None` clears the probe cache, so
     /// switching back to Automatic re-probes rather than trusting an answer
     /// obtained before the user had an opinion.
-    pub(crate) fn request_renderer_restart(&mut self, ctx: &Context, backend: image_viewer::WgpuBackend) {
-        if backend == self.renderer && self.config.renderer.choice != image_viewer::WgpuBackend::Auto
+    pub(crate) fn request_renderer_restart(
+        &mut self,
+        ctx: &Context,
+        backend: image_viewer::WgpuBackend,
+    ) {
+        if backend == self.renderer
+            && self.config.renderer.choice != image_viewer::WgpuBackend::Auto
         {
             return;
         }
@@ -197,7 +198,8 @@ impl MyApp {
     pub(crate) fn save_transformed_copy(&mut self) {
         let Some(cur) = self.cur.clone() else {
             return;
-        };let p = cur.path.clone();
+        };
+        let p = cur.path.clone();
         if self.anim.as_ref().is_some_and(|a| a.path == p) {
             self.error = Some("Cannot save a transformed animation: it has many frames".into());
             return;
@@ -221,11 +223,7 @@ impl MyApp {
         let edit = self.edits.get(&p);
         match image_viewer::save_transformed(&p, edit.xform, edit.crop) {
             Ok(dest) => {
-                let name = dest
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+                let name = dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 self.notice = Some(if edit.is_identity() {
                     format!("Saved {name}")
                 } else {
@@ -269,12 +267,7 @@ impl MyApp {
         let edit = self.edits.get(&p);
         match image_viewer::save_transformed_scaled(&p, edit.xform, edit.crop, dw.max(dh)) {
             Ok(out) => {
-                let name = out
-                    .dest
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
+                let name = out.dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 self.notice = Some(if out.lossless {
                     format!("Saved {name} ({}x{}, lossless)", out.width, out.height)
                 } else {
@@ -371,10 +364,7 @@ impl MyApp {
                     let msg = if edited {
                         copied_notice(out.width, out.height, &edit)
                     } else {
-                        format!(
-                            "Copied {}x{} animation frame to clipboard",
-                            out.width, out.height
-                        )
+                        format!("Copied {}x{} animation frame to clipboard", out.width, out.height)
                     };
                     match set_clipboard_rgba(out.width, out.height, out.rgba) {
                         Ok(()) => self.notice = Some(msg),
@@ -413,9 +403,7 @@ impl MyApp {
     /// instead of writing a file the desktop is about to be pointed at. The
     /// same "the last action wins" rule `pending_drop` records.
     pub(crate) fn next_wallpaper_order(&mut self) -> (u64, Arc<std::sync::atomic::AtomicU64>) {
-        let order =
-            self.wallpaper_order
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let order = self.wallpaper_order.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         (order, self.wallpaper_order.clone())
     }
 
@@ -439,11 +427,8 @@ impl MyApp {
         // in a temp dir that dies with the app, and the destination folder
         // comes from the config.
         let in_archive = self.zip_archive.is_some();
-        let folder = self
-            .config_path
-            .parent()
-            .map(|d| d.to_path_buf())
-            .unwrap_or_else(std::env::temp_dir);
+        let folder =
+            self.config_path.parent().map(|d| d.to_path_buf()).unwrap_or_else(std::env::temp_dir);
         let (order, issued) = self.next_wallpaper_order();
         self.notice = Some("Setting wallpaper…".into());
         let tx = self.drop_tx.clone();
@@ -453,8 +438,7 @@ impl MyApp {
         // copy beside the config; everything else goes to the shell as-is.
         let target = image_viewer::wallpaper_target(&p, &folder, in_archive);
         let converted = image_viewer::wide_gamut_conversion()
-            && image_viewer::color_info(&p).space
-                == image_viewer::ColorSpace::WideGamut;
+            && image_viewer::color_info(&p).space == image_viewer::ColorSpace::WideGamut;
         let needs_write = in_archive || converted;
         std::thread::spawn(move || {
             // An immediately-called closure keeps the body one phrasing over
@@ -528,7 +512,8 @@ impl MyApp {
             return;
         }
         if self.anim.as_ref().is_some_and(|a| a.path == p) {
-            self.error = Some("Cannot wallpaper a transformed animation: it has many frames".into());
+            self.error =
+                Some("Cannot wallpaper a transformed animation: it has many frames".into());
             return;
         }
         // Same composition the save uses (stored pixels, EXIF part folded
@@ -570,9 +555,7 @@ impl MyApp {
                         .ok_or_else(|| "the crop fell outside the image".to_string())?;
                     let img = image::RgbaImage::from_raw(out.width, out.height, out.rgba)
                         .ok_or_else(|| "transformed buffer was malformed".to_string())?;
-                    image::DynamicImage::ImageRgba8(img)
-                        .save(&dest)
-                        .map_err(|e| e.to_string())
+                    image::DynamicImage::ImageRgba8(img).save(&dest).map_err(|e| e.to_string())
                 })();
                 match result {
                     Ok(()) => {}
@@ -585,12 +568,10 @@ impl MyApp {
                 if issued.load(std::sync::atomic::Ordering::SeqCst) != order {
                     return Err("superseded".into());
                 }
-                wallpaper::set_from_path(&dest.to_string_lossy())
-                    .map_err(|e| e.to_string())
+                wallpaper::set_from_path(&dest.to_string_lossy()).map_err(|e| e.to_string())
             })();
             let _ = tx.send(Msg::Wallpaper { order, result });
             wake.request_repaint();
         });
     }
-
 }

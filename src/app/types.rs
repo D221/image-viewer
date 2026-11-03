@@ -76,11 +76,7 @@ pub(crate) fn icc_scan(args: &[String]) -> eframe::Result<()> {
     // this build's blind spot, and "here is what I cannot tell you" is the most
     // useful thing an audit can say.
     let of_space = |space: image_viewer::ColorSpace| -> Vec<&std::path::PathBuf> {
-        found
-            .iter()
-            .filter(|(_, i)| i.space == space)
-            .map(|(p, _)| p)
-            .collect()
+        found.iter().filter(|(_, i)| i.space == space).map(|(p, _)| p).collect()
     };
     for (space, title) in [
         (
@@ -91,10 +87,7 @@ pub(crate) fn icc_scan(args: &[String]) -> eframe::Result<()> {
             image_viewer::ColorSpace::Unknown,
             "Unreadable profile - could not be classified either way",
         ),
-        (
-            image_viewer::ColorSpace::NonRgb,
-            "Not an RGB space",
-        ),
+        (image_viewer::ColorSpace::NonRgb, "Not an RGB space"),
         (
             image_viewer::ColorSpace::NotInspected,
             "Not inspected - this build does not read this format's colour",
@@ -130,17 +123,14 @@ pub(crate) const MAX_LISTED: usize = 500;
 /// otherwise need.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stamp {
-pub(crate) mtime: Option<std::time::SystemTime>,
-pub(crate) len: u64,
+    pub(crate) mtime: Option<std::time::SystemTime>,
+    pub(crate) len: u64,
 }
 
 impl Stamp {
     pub(crate) fn of(path: &Path) -> Stamp {
         match std::fs::metadata(path) {
-            Ok(m) => Stamp {
-                mtime: m.modified().ok(),
-                len: m.len(),
-            },
+            Ok(m) => Stamp { mtime: m.modified().ok(), len: m.len() },
             // A file we cannot stat is treated as distinct-but-stable rather
             // than as "changed every time", which would spin the reload path.
             Err(_) => Stamp { mtime: None, len: 0 },
@@ -153,10 +143,10 @@ impl Stamp {
 /// `texels` is the *decoded* pixel size of the uploaded texture, recorded at
 /// upload time so the cell layout never has to ask the texture manager.
 pub(crate) struct Thumb {
-pub(crate) tex: TextureHandle,
-pub(crate) texels: [usize; 2],
+    pub(crate) tex: TextureHandle,
+    pub(crate) texels: [usize; 2],
     /// LRU stamp (frame clock).
-pub(crate) used: u64,
+    pub(crate) used: u64,
 }
 
 /// Tracks one "user intent -> useful pixels" transition so the perf module can
@@ -169,26 +159,26 @@ pub(crate) used: u64,
 #[derive(Default)]
 pub(crate) struct Latency {
     /// When the user asked for the current image.
-pub(crate) t_request: Option<Instant>,
+    pub(crate) t_request: Option<Instant>,
     /// False for a fresh open, true for next/prev (reported separately).
-pub(crate) is_nav: bool,
+    pub(crate) is_nav: bool,
     /// Set when the requested image was painted during the last frame.
-pub(crate) painted: Option<Instant>,
-pub(crate) recorded_first: bool,
+    pub(crate) painted: Option<Instant>,
+    pub(crate) recorded_first: bool,
     /// A preview for the requested image exists (fit-to-window quality).
-pub(crate) t_preview: Option<Instant>,
+    pub(crate) t_preview: Option<Instant>,
     /// A full-resolution decode of it has landed.
-pub(crate) t_full: Option<Instant>,
+    pub(crate) t_full: Option<Instant>,
     /// A stall was already reported for this request (report once, not per
     /// frame).
-pub(crate) stall_logged: bool,
+    pub(crate) stall_logged: bool,
     /// Zoom / pan / gallery / scan in flight.
-pub(crate) t_zoom: Option<Instant>,
-pub(crate) t_pan: Option<Instant>,
-pub(crate) t_gallery: Option<Instant>,
-pub(crate) t_scan: Option<Instant>,
+    pub(crate) t_zoom: Option<Instant>,
+    pub(crate) t_pan: Option<Instant>,
+    pub(crate) t_gallery: Option<Instant>,
+    pub(crate) t_scan: Option<Instant>,
     /// Tiles wanted by a zoom/pan, satisfied when the visible set is complete.
-pub(crate) want_viewport_tiles: bool,
+    pub(crate) want_viewport_tiles: bool,
 }
 
 impl Latency {
@@ -216,11 +206,7 @@ impl Latency {
             if let (Some(req), Some(first)) = (self.t_request, self.painted) {
                 let _ = first;
                 perf::record(
-                    if self.is_nav {
-                        perf::NAV_TO_FULL
-                    } else {
-                        perf::SELECT_TO_FULL
-                    },
+                    if self.is_nav { perf::NAV_TO_FULL } else { perf::SELECT_TO_FULL },
                     now.duration_since(req).as_micros() as u64,
                 );
             }
@@ -239,11 +225,7 @@ impl Latency {
         {
             self.recorded_first = true;
             perf::record(
-                if self.is_nav {
-                    perf::NAV_TO_FIRST_PIXELS
-                } else {
-                    perf::SELECT_TO_FIRST_PIXELS
-                },
+                if self.is_nav { perf::NAV_TO_FIRST_PIXELS } else { perf::SELECT_TO_FIRST_PIXELS },
                 painted.duration_since(req).as_micros() as u64,
             );
         }
@@ -269,39 +251,39 @@ impl Latency {
 }
 
 pub(crate) struct PreviewData {
-pub(crate) image: ColorImage, // already converted on the worker thread
-pub(crate) orig: (u32, u32),  // source dimensions
-pub(crate) load_ms: u64,
+    pub(crate) image: ColorImage, // already converted on the worker thread
+    pub(crate) orig: (u32, u32),  // source dimensions
+    pub(crate) load_ms: u64,
     // Full-res image when it was already decoded in the same pass
     // (small files, and formats like PNG with no fast preview path).
-pub(crate) full: Option<Arc<ImageData>>,
+    pub(crate) full: Option<Arc<ImageData>>,
     // Decoded frames when the file is an animated GIF.
-pub(crate) anim: Option<Arc<Animation>>,
+    pub(crate) anim: Option<Arc<Animation>>,
     // Any pixel is translucent (draw checkerboard behind it).
-pub(crate) has_alpha: bool,
+    pub(crate) has_alpha: bool,
     // The `target_dim` this decode was asked for. Kept so staleness can be
     // judged against what we *asked for* rather than the pixels we got back —
     // comparing pixels re-decodes forever on a source smaller than the display.
-pub(crate) target: u32,
+    pub(crate) target: u32,
     // The file's EXIF orientation tag, and the block grid a lossless JPEG crop
     // has to align to. Both are read on the worker from the bytes the decode
     // already had in hand, and both exist for the crop UI: a rectangle drawn on
     // the *displayed* picture has to be expressed in *stored* coordinates, which
     // is a composition involving the tag, and it has to land on the block grid
     // or TurboJPEG will not cut it where the user drew.
-pub(crate) exif_tag: u16,
-pub(crate) crop_grid: (u32, u32),
+    pub(crate) exif_tag: u16,
+    pub(crate) crop_grid: (u32, u32),
     // Levels and clipped-pixel counts, counted on the worker from the same
     // preview buffer the texture was uploaded from: a few hundred kilobytes
     // walked once per decode, never per frame. Carried rather than recomputed
     // because the CPU pixels are dropped after upload.
-pub(crate) hist: image_viewer::Histogram,
+    pub(crate) hist: image_viewer::Histogram,
     // The file's colour classification, classified on the worker from the bytes
     // the decode already had in hand. It fills the metadata panel's colour line —
     // which used to be the metadata read's own second whole-file read of the
     // file, on the worker, per image — and it rides on the preview, so it is
     // cached alongside the texture and costs nothing to re-show.
-pub(crate) colour: image_viewer::ColorInfo,
+    pub(crate) colour: image_viewer::ColorInfo,
 }
 
 /// What one grid cell needs, and nothing else.
@@ -314,8 +296,8 @@ pub(crate) colour: image_viewer::ColorInfo,
 /// decoding 240 frames to show the first. Not having the fields is the point —
 /// there is no way to fill them by accident.
 pub(crate) struct ThumbData {
-pub(crate) image: ColorImage,
-pub(crate) load_ms: u64,
+    pub(crate) image: ColorImage,
+    pub(crate) load_ms: u64,
 }
 
 /// A byte count as something a person can read. Used by the settings panel to
@@ -393,7 +375,7 @@ pub(crate) enum Msg {
         order: u64,
         result: Result<(), String>,
     },
-    }
+}
 
 /// Start the worker pool for this app: real decoding, real panic capture, and
 /// a repaint request when something arrives.
@@ -402,40 +384,20 @@ pub(crate) fn new_loader(
     tx: Sender<Msg>,
     preferred_workers: usize,
 ) -> image_viewer::Loader {
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2);
+    let available = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
     let workers = image_viewer::resolve_worker_count(available, preferred_workers);
     let wake_ctx = ctx.clone();
-    image_viewer::Loader::spawn(
-        workers,
-        tx,
-        run_job,
-        fail_msg,
-        move || wake_ctx.request_repaint(),
-    )
+    image_viewer::Loader::spawn(workers, tx, run_job, fail_msg, move || wake_ctx.request_repaint())
 }
 
 /// A failure is still a *delivered* result: it gets reported and remembered,
 /// so the loader must not treat it as work left undone.
 pub(crate) fn fail_msg(job: &Job, err: String) -> (Msg, bool) {
     let msg = match job.kind {
-        Kind::Preview => Msg::Preview {
-            key: job.key.clone(),
-            result: Err(err),
-        },
-        Kind::Full => Msg::Full {
-            key: job.key.clone(),
-            result: Err(err),
-        },
-        Kind::Thumb => Msg::Thumb {
-            path: job.path().to_path_buf(),
-            result: Err(err),
-        },
-        Kind::Exif => Msg::Exif {
-            path: job.path().to_path_buf(),
-            info: None,
-        },
+        Kind::Preview => Msg::Preview { key: job.key.clone(), result: Err(err) },
+        Kind::Full => Msg::Full { key: job.key.clone(), result: Err(err) },
+        Kind::Thumb => Msg::Thumb { path: job.path().to_path_buf(), result: Err(err) },
+        Kind::Exif => Msg::Exif { path: job.path().to_path_buf(), info: None },
     };
     (msg, true)
 }
@@ -462,15 +424,10 @@ pub(crate) fn run_job(job: &Job) -> (Msg, bool) {
             path,
         },
         Kind::Full => Msg::Full {
-            result: load_image_full(&path, page)
-                .map(Arc::new)
-                .map_err(|e| e.to_string()),
+            result: load_image_full(&path, page).map(Arc::new).map_err(|e| e.to_string()),
             key: job.key.clone(),
         },
-        Kind::Exif => Msg::Exif {
-            info: extract_exif(&path),
-            path,
-        },
+        Kind::Exif => Msg::Exif { info: extract_exif(&path), path },
     };
     (msg, true)
 }
@@ -478,7 +435,11 @@ pub(crate) fn run_job(job: &Job) -> (Msg, bool) {
 /// Decode a preview sized for the current display area (in physical pixels).
 /// The result is the full-res image when it fits the target, otherwise a
 /// texture capped at the target long side — always sharp at fit-to-window.
-pub(crate) fn decode_preview(path: &Path, target_dim: u32, page: u32) -> Result<PreviewData, String> {
+pub(crate) fn decode_preview(
+    path: &Path,
+    target_dim: u32,
+    page: u32,
+) -> Result<PreviewData, String> {
     // Single pass: reads the file once. Large JPEGs get a cheap DCT-scaled
     // preview; everything else is fully decoded once and the preview is
     // derived from that, so the full image is already available.
@@ -656,10 +617,7 @@ pub(crate) fn extract_exif(path: &Path) -> Option<String> {
         if let Some(alt) = image_viewer::gps_altitude(&exif) {
             info.push(format!("Altitude: {alt:.0} m"));
         }
-        info.push(format!(
-            "Maps: https://maps.google.com/?q={:.6},{:.6}",
-            lat, lon
-        ));
+        info.push(format!("Maps: https://maps.google.com/?q={:.6},{:.6}", lat, lon));
     }
 
     if info.is_empty() {
@@ -714,4 +672,3 @@ pub(crate) fn flash_label(v: u16) -> &'static str {
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
-

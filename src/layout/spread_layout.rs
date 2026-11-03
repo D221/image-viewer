@@ -94,9 +94,7 @@ pub fn turn_is_a_lone_spread(page_count: usize, shape: Shape) -> bool {
 /// before its first frame exists, so this is the conservative answer and not a
 /// special case.
 pub fn lone_spread_fills_turn(pos: Option<PagePos>, lead_lone: u32, ctx: &dyn PageCtx) -> bool {
-    pos.is_some_and(|pos| {
-        turn_is_a_lone_spread(turn_len(pos, lead_lone, ctx), shape_of(pos, ctx))
-    })
+    pos.is_some_and(|pos| turn_is_a_lone_spread(turn_len(pos, lead_lone, ctx), shape_of(pos, ctx)))
 }
 
 /// The scale a whole turn is drawn at: the more constrained fit of every page
@@ -137,15 +135,12 @@ pub fn spread_fit(panel: (f32, f32), pages: &[(f32, f32)], lone_spread_fills_tur
     // this is the function that turns the answer into a width: a flag true on a turn of
     // two is a caller's bug, and honouring it would fit each page against the whole
     // panel and put them on top of each other.
-    let fit_w = if lone_spread_fills_turn && pages.len() == 1 {
-        panel.0
-    } else {
-        panel.0 / 2.0
-    };
+    let fit_w = if lone_spread_fills_turn && pages.len() == 1 { panel.0 } else { panel.0 / 2.0 };
     if fit_w <= 0.0 || panel.1 <= 0.0 || pages.is_empty() {
         return 1.0;
     }
-    pages.iter()
+    pages
+        .iter()
         .map(|&(w, h)| (fit_w / w.max(1.0)).min(panel.1 / h.max(1.0)))
         .fold(f32::INFINITY, f32::min)
         .clamp(1e-4, 8.0)
@@ -200,12 +195,22 @@ pub fn spread_rects(
     // single-image path already uses. Re-checked `len() == 1` here as in `spread_fit`,
     // because a flag true on a turn of two would stack both pages on the centre.
     let lone_spread = lone_spread_fills_turn && pages.len() == 1;
-    pages.iter().enumerate().map(|(i, &(pw, ph))| {
-        let w = pw * scale;
-        let on_right = if i == 0 { rtl } else { !rtl };
-        let x = if lone_spread { seam - w * 0.5 } else if on_right { seam } else { seam - w };
-        [x, panel[1], w, ph * scale]
-    }).collect()
+    pages
+        .iter()
+        .enumerate()
+        .map(|(i, &(pw, ph))| {
+            let w = pw * scale;
+            let on_right = if i == 0 { rtl } else { !rtl };
+            let x = if lone_spread {
+                seam - w * 0.5
+            } else if on_right {
+                seam
+            } else {
+                seam - w
+            };
+            [x, panel[1], w, ph * scale]
+        })
+        .collect()
 }
 
 /// Where a turn's content is centred when the view offset is zero, which is what a
@@ -425,4 +430,3 @@ pub fn xformed_footprint(w: f32, h: f32, xform: Xform) -> (f32, f32) {
         (w, h)
     }
 }
-

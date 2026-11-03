@@ -16,8 +16,8 @@ use image_viewer::{
     apply_exif_orientation, display_xform, exif_orientation, load_image,
     neutralize_exif_orientation, save_transformed, unique_dest, ImageEdits, Xform,
 };
-use std::path::PathBuf;
 use std::path::Path;
+use std::path::PathBuf;
 
 /// A picture whose every quadrant is a different flat colour, so any wrong
 /// turn, flip or transpose is obvious rather than merely plausible.
@@ -25,10 +25,10 @@ fn quadrants(w: u32, h: u32) -> image::DynamicImage {
     image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
         let (hx, hy) = (x * 2 >= w, y * 2 >= h);
         match (hx, hy) {
-            (false, false) => image::Rgb([255, 0, 0]),   // top-left: red
-            (true, false) => image::Rgb([0, 255, 0]),    // top-right: green
-            (false, true) => image::Rgb([0, 0, 255]),    // bottom-left: blue
-            (true, true) => image::Rgb([255, 255, 0]),  // bottom-right: yellow
+            (false, false) => image::Rgb([255, 0, 0]), // top-left: red
+            (true, false) => image::Rgb([0, 255, 0]),  // top-right: green
+            (false, true) => image::Rgb([0, 0, 255]),  // bottom-left: blue
+            (true, true) => image::Rgb([255, 255, 0]), // bottom-right: yellow
         }
     }))
 }
@@ -42,8 +42,7 @@ fn write_jpeg(
     exif_tag: u16,
 ) -> std::path::PathBuf {
     let mut bytes = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
-        .unwrap();
+    img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg).unwrap();
 
     if exif_tag != 0 {
         // APP1 layout: FFE1, length, "Exif\0\0", TIFF header, IFD0, one entry.
@@ -55,7 +54,7 @@ fn write_jpeg(
         tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // orientation
         tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
         tiff.extend_from_slice(&1u32.to_be_bytes()); // one value
-        // A SHORT's value lives in the first 2 bytes of the 4-byte field.
+                                                     // A SHORT's value lives in the first 2 bytes of the 4-byte field.
         tiff.extend_from_slice(&exif_tag.to_be_bytes());
         tiff.extend_from_slice(&[0, 0]);
         tiff.extend_from_slice(&0u32.to_be_bytes()); // no IFD1
@@ -83,7 +82,11 @@ fn write_jpeg(
 
 /// What the viewer would put on screen: EXIF applied at decode, then the
 /// quarter turns, done with the `image` crate exactly as the viewer does.
-fn what_the_viewer_shows(img: &image::DynamicImage, exif_tag: u16, quarters: u8) -> image::DynamicImage {
+fn what_the_viewer_shows(
+    img: &image::DynamicImage,
+    exif_tag: u16,
+    quarters: u8,
+) -> image::DynamicImage {
     let mut data = image_viewer::ImageData {
         width: img.width(),
         height: img.height(),
@@ -93,8 +96,9 @@ fn what_the_viewer_shows(img: &image::DynamicImage, exif_tag: u16, quarters: u8)
     apply_exif_orientation(&mut data, exif_tag);
     for _ in 0..(quarters & 3) {
         data = {
-            let img = image::RgbaImage::from_raw(data.width, data.height, std::mem::take(&mut data.rgba))
-                .unwrap();
+            let img =
+                image::RgbaImage::from_raw(data.width, data.height, std::mem::take(&mut data.rgba))
+                    .unwrap();
             let r = image::imageops::rotate90(&img);
             let mut d = image_viewer::ImageData {
                 width: r.width(),
@@ -111,11 +115,7 @@ fn what_the_viewer_shows(img: &image::DynamicImage, exif_tag: u16, quarters: u8)
 }
 
 fn assert_same_pixels(got: &image_viewer::ImageData, want: &image::DynamicImage, what: &str) {
-    assert_eq!(
-        (got.width, got.height),
-        (want.width(), want.height()),
-        "{what}: wrong dimensions"
-    );
+    assert_eq!((got.width, got.height), (want.width(), want.height()), "{what}: wrong dimensions");
     let want_rgba = want.to_rgba8();
     assert_eq!(got.rgba.len(), want_rgba.as_raw().len(), "{what}: wrong buffer length");
     // JPEG is lossy, so compare loosely: a transform that is *correct* still
@@ -158,11 +158,7 @@ fn a_saved_rotation_decodes_to_what_was_on_screen() {
             );
 
             let got = load_image(&dest, 4096).unwrap();
-            assert_same_pixels(
-                &got,
-                &want,
-                &format!("exif={exif_tag} user_q={quarters}"),
-            );
+            assert_same_pixels(&got, &want, &format!("exif={exif_tag} user_q={quarters}"));
         }
     }
 }
@@ -252,13 +248,10 @@ fn the_lossless_raster_formats_are_saved_and_come_back_the_right_way_round() {
         src.write_to(&mut std::io::Cursor::new(&mut b), fmt).unwrap();
         std::fs::write(&p, &b).unwrap();
 
-        let dest = save_transformed(&p, Xform::Rot90, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let dest =
+            save_transformed(&p, Xform::Rot90, None).unwrap_or_else(|e| panic!("{name}: {e}"));
         let got = load_image(&dest, 4096).unwrap_or_else(|e| panic!("{name} reload: {e:?}"));
-        assert_eq!(
-            (got.width, got.height),
-            (72, 40),
-            "{name}: a quarter turn must swap the axes"
-        );
+        assert_eq!((got.width, got.height), (72, 40), "{name}: a quarter turn must swap the axes");
 
         // And the result must be the source turned one quarter clockwise:
         // output (ox, oy) comes from source (oy, h - 1 - ox).
@@ -300,9 +293,7 @@ fn the_transform_algebra_matches_the_viewers_own_rotation() {
                         }
                     }
                 }
-                image::DynamicImage::ImageRgba8(
-                    image::RgbaImage::from_raw(ow, oh, out).unwrap(),
-                )
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(ow, oh, out).unwrap())
             };
 
             // By the viewer: exif at decode, then quarter turns.
@@ -326,12 +317,12 @@ fn composition_is_closed_over_all_sixty_four_pairs() {
             // Composition is verified by substitution on real pixels rather than
             // by re-deriving the group law.
             let (w, h) = (9u32, 5u32);
-            let rgba = image::RgbaImage::from_fn(w, h, |x, y| {
-                image::Rgba([x as u8, y as u8, 0, 255])
-            });
+            let rgba =
+                image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([x as u8, y as u8, 0, 255]));
             let (mw, mh) = a.out_dims(w, h);
             let (aw, ah, apx) = a.apply_rgba(w, h, rgba.as_raw()).unwrap();
-            let mid = image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(aw, ah, apx).unwrap());
+            let mid =
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(aw, ah, apx).unwrap());
             let via_ab = c.apply_rgba(w, h, rgba.as_raw()).unwrap();
             let via_ba = b.apply_rgba(mw, mh, mid.to_rgba8().as_raw()).unwrap();
             assert_eq!(
@@ -339,10 +330,7 @@ fn composition_is_closed_over_all_sixty_four_pairs() {
                 (via_ba.0, via_ba.1),
                 "{a:?} then {b:?}: the two routes disagree on shape"
             );
-            assert_eq!(
-                via_ab.2, via_ba.2,
-                "{a:?} then {b:?}: the two routes disagree on pixels"
-            );
+            assert_eq!(via_ab.2, via_ba.2, "{a:?} then {b:?}: the two routes disagree on pixels");
         }
     }
 }
@@ -385,19 +373,13 @@ fn a_saved_mirror_decodes_to_what_was_on_screen() {
                         }
                     }
                 }
-                image::DynamicImage::ImageRgba8(
-                    image::RgbaImage::from_raw(ow, oh, out).unwrap(),
-                )
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(ow, oh, out).unwrap())
             };
 
             let dest = save_transformed(&p, xf, None)
                 .unwrap_or_else(|e| panic!("exif={exif_tag} {xf:?}: {e}"));
             let got = load_image(&dest, 4096).unwrap();
-            assert_same_pixels(
-                &got,
-                &want,
-                &format!("exif={exif_tag} user={xf:?}"),
-            );
+            assert_same_pixels(&got, &want, &format!("exif={exif_tag} user={xf:?}"));
         }
     }
 }
@@ -414,14 +396,8 @@ fn the_mirror_half_of_the_algebra_matches_the_image_crate() {
     });
 
     for (xf, via_crate) in [
-        (
-            Xform::FlipH,
-            image::imageops::flip_horizontal(&src).into_raw(),
-        ),
-        (
-            Xform::FlipV,
-            image::imageops::flip_vertical(&src).into_raw(),
-        ),
+        (Xform::FlipH, image::imageops::flip_horizontal(&src).into_raw()),
+        (Xform::FlipV, image::imageops::flip_vertical(&src).into_raw()),
     ] {
         let (ow, oh, got) = xf.apply_rgba(w, h, src.as_raw()).unwrap();
         assert_eq!((ow, oh), (w, h), "{xf:?}: a mirror must not change the shape");
@@ -436,12 +412,9 @@ fn the_mirror_half_of_the_algebra_matches_the_image_crate() {
 /// somewhere else entirely.
 #[test]
 fn the_paint_matrix_reproduces_the_old_quarter_turn_behaviour() {
-    for (quarters, xf) in [
-        (0u32, Xform::Identity),
-        (1, Xform::Rot90),
-        (2, Xform::Rot180),
-        (3, Xform::Rot270),
-    ] {
+    for (quarters, xf) in
+        [(0u32, Xform::Identity), (1, Xform::Rot90), (2, Xform::Rot180), (3, Xform::Rot270)]
+    {
         // What `paint_tex` used to do: egui's `Rot2::from_angle`.
         let rot = egui::emath::Rot2::from_angle(quarters as f32 * std::f32::consts::FRAC_PI_2);
         let m = xf.paint_matrix();
@@ -479,11 +452,10 @@ fn the_paint_matrix_puts_each_pixel_where_map_says_it_belongs() {
             for ix in 0..w {
                 let p_in = egui::emath::vec2(ix as f32 + 0.5, iy as f32 + 0.5);
                 let d = p_in - c;
-                let p_out = c
-                    + egui::emath::vec2(
-                        m[0][0] * d.x + m[0][1] * d.y,
-                        m[1][0] * d.x + m[1][1] * d.y,
-                    );
+                let p_out = c + egui::emath::vec2(
+                    m[0][0] * d.x + m[0][1] * d.y,
+                    m[1][0] * d.x + m[1][1] * d.y,
+                );
                 let ox = (p_out.x - out_min.x).floor() as i64;
                 let oy = (p_out.y - out_min.y).floor() as i64;
                 assert!(
@@ -518,11 +490,7 @@ fn the_paint_matrix_puts_each_pixel_where_map_says_it_belongs() {
 fn every_transform_has_an_inverse_and_it_cancels_both_ways() {
     for xf in Xform::ALL {
         let inv = xf.inverse();
-        assert_eq!(
-            xf.then(inv),
-            Xform::Identity,
-            "{xf:?} then its inverse is not the identity"
-        );
+        assert_eq!(xf.then(inv), Xform::Identity, "{xf:?} then its inverse is not the identity");
         assert_eq!(
             inv.then(xf),
             Xform::Identity,
@@ -587,9 +555,7 @@ fn a_saved_crop_is_exactly_the_region_that_was_framed() {
                 let shown = display_xform_pixels(&src, exif_tag, user);
                 let rgba = shown.to_rgba8();
                 let (cw, ch, px) = crop_display(&rgba, rect);
-                image::DynamicImage::ImageRgba8(
-                    image::RgbaImage::from_raw(cw, ch, px).unwrap(),
-                )
+                image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(cw, ch, px).unwrap())
             };
 
             let dest = save_transformed(&p, user, Some(crop))
@@ -653,10 +619,7 @@ fn shift_gives_a_perfect_square_whatever_the_drag_did() {
     ] {
         let r = image_viewer::constrain_to_aspect(anchor, corner, Some(1.0));
         let ratio = aspect_of(r).unwrap_or_else(|| panic!("{anchor:?}->{corner:?} gave no frame"));
-        assert!(
-            (ratio - 1.0).abs() < 1e-4,
-            "{anchor:?}->{corner:?} gave {ratio}, not a square"
-        );
+        assert!((ratio - 1.0).abs() < 1e-4, "{anchor:?}->{corner:?} gave {ratio}, not a square");
     }
 }
 
@@ -677,11 +640,8 @@ fn a_held_shape_keeps_the_press_point_and_the_direction_of_the_drag() {
     // you drew top-left have to be the same size or the same crop needs two
     // different drags depending on the corner you happened to start from.
     let (w, h) = (r.2 - r.0, r.3 - r.1);
-    let up_left = image_viewer::constrain_to_aspect(
-        anchor,
-        (anchor.0 - w, anchor.1 - h),
-        Some(16.0 / 9.0),
-    );
+    let up_left =
+        image_viewer::constrain_to_aspect(anchor, (anchor.0 - w, anchor.1 - h), Some(16.0 / 9.0));
     assert_eq!(
         (up_left.2 - up_left.0, up_left.3 - up_left.1),
         (w, h),
@@ -715,11 +675,9 @@ fn the_led_axis_is_the_one_that_gives() {
 fn a_free_drag_is_left_exactly_as_it_was() {
     // `None` is not "approximately free" — the rectangle has to be bit-identical
     // to the drag, or every uncropped drag in the app shifts by a rounding step.
-    for (anchor, corner) in [
-        ((0.0, 0.0), (300.0, 100.0)),
-        ((10.0, 20.0), (5.0, 300.0)),
-        ((-4.0, -9.0), (11.0, 2.0)),
-    ] {
+    for (anchor, corner) in
+        [((0.0, 0.0), (300.0, 100.0)), ((10.0, 20.0), (5.0, 300.0)), ((-4.0, -9.0), (11.0, 2.0))]
+    {
         let (ax, ay) = anchor;
         let (cx, cy) = corner;
         assert_eq!(
@@ -776,14 +734,8 @@ fn same_as_the_image_follows_the_picture_as_it_is_shown() {
     // on 3:2 would not fit it — the caller passes the *displayed* size for
     // exactly this reason, so this is the assertion that the source is the
     // displayed picture and not the file.
-    assert_eq!(
-        image_viewer::CropAspect::Source.ratio((3000, 2000)),
-        Some(1.5)
-    );
-    assert_eq!(
-        image_viewer::CropAspect::Source.ratio((2000, 3000)),
-        Some(2.0 / 3.0)
-    );
+    assert_eq!(image_viewer::CropAspect::Source.ratio((3000, 2000)), Some(1.5));
+    assert_eq!(image_viewer::CropAspect::Source.ratio((2000, 3000)), Some(2.0 / 3.0));
     // A degenerate size cannot be divided by, and must not become NaN — a NaN
     // ratio would sail through `constrain_to_aspect`'s filter and produce a
     // rectangle of nonsense.
@@ -962,8 +914,7 @@ fn the_clipboard_matches_a_real_saved_file() {
             exif_tag,
             "{what}: the fixture's EXIF tag did not round-trip, so this proves nothing"
         );
-        let copied =
-            image_viewer::region_for_save(&buffer, exif_tag, user, Some(crop)).unwrap();
+        let copied = image_viewer::region_for_save(&buffer, exif_tag, user, Some(crop)).unwrap();
 
         let want = image::DynamicImage::ImageRgba8(
             image::RgbaImage::from_raw(saved.width, saved.height, saved.rgba).unwrap(),
@@ -995,8 +946,9 @@ fn a_crop_that_keeps_everything_is_not_a_crop() {
 fn a_real_crop_is_named_for_what_it_did() {
     let tmp = tempfile::tempdir().unwrap();
     let p = write_jpeg(tmp.path(), "shot.jpg", &quadrants(64, 48), 0);
-    let dest = save_transformed(&p, Xform::Rot90, Some(image_viewer::Crop::new(0, 0, 32, 32).unwrap()))
-        .unwrap();
+    let dest =
+        save_transformed(&p, Xform::Rot90, Some(image_viewer::Crop::new(0, 0, 32, 32).unwrap()))
+            .unwrap();
     assert_eq!(
         dest.file_name().unwrap().to_string_lossy(),
         "shot_cropped.jpg",
@@ -1042,10 +994,7 @@ fn an_empty_or_outside_crop_is_refused_rather_than_panicking() {
     assert!(outside.clamped_to(64, 48).is_none(), "entirely outside");
     // Partly outside is trimmed rather than refused.
     let partly = image_viewer::Crop::new(60, 40, 20, 20).unwrap();
-    assert_eq!(
-        partly.clamped_to(64, 48).unwrap(),
-        image_viewer::Crop::new(60, 40, 4, 8).unwrap()
-    );
+    assert_eq!(partly.clamped_to(64, 48).unwrap(), image_viewer::Crop::new(60, 40, 4, 8).unwrap());
 }
 
 /// `from_display_rect` and `map` have to agree, or the frame drawn on screen is
@@ -1239,10 +1188,7 @@ fn turning_after_cropping_keeps_the_same_pixels_framed() {
     // a different place on a turned, mirrored picture.
     let stored = (96u32, 64u32);
     let before = crop.to_display_rect(image_viewer::display_xform(0, Xform::Identity), stored);
-    let after = crop.to_display_rect(
-        image_viewer::display_xform(0, Xform::Transpose),
-        stored,
-    );
+    let after = crop.to_display_rect(image_viewer::display_xform(0, Xform::Transpose), stored);
     assert_ne!(before, after, "the frame must move with the picture");
 }
 
@@ -1251,10 +1197,7 @@ fn an_edit_says_what_it_did() {
     let none = image_viewer::Edit::default();
     assert!(none.is_identity());
     assert_eq!(none.label(), "no transform");
-    let turn = image_viewer::Edit {
-        xform: Xform::Rot90,
-        crop: None,
-    };
+    let turn = image_viewer::Edit { xform: Xform::Rot90, crop: None };
     assert!(!turn.is_identity());
     assert_eq!(turn.label(), "rotated 90° CW");
     let both = image_viewer::Edit {
@@ -1301,7 +1244,8 @@ fn without_a_named_file_the_resume_point_wins() {
 #[test]
 fn an_unmatched_named_or_resume_falls_back_to_the_first_image() {
     use image_viewer::startup_index;
-    let files: Vec<PathBuf> = ["a.jpg", "b.jpg"].iter().map(|n| PathBuf::from("/p").join(n)).collect();
+    let files: Vec<PathBuf> =
+        ["a.jpg", "b.jpg"].iter().map(|n| PathBuf::from("/p").join(n)).collect();
     // A named file that is not in the listing - deleted, or a filter hid it.
     assert_eq!(startup_index(&files, Some(&PathBuf::from("/p/gone.jpg")), None), 0);
     // A resume point naming something that is gone.
@@ -1378,7 +1322,6 @@ fn crop_display(rgba: &image::RgbaImage, rect: (u32, u32, u32, u32)) -> (u32, u3
     }
     (w, h, out)
 }
-
 
 /// The bug this pins: the transform used to be a single `u8` on the app, so
 /// turning one photo turned every photo you then navigated to.
@@ -1480,7 +1423,11 @@ fn a_mirror_leaves_the_footprint_alone_but_a_quarter_turn_does_not() {
         let (dw, dh) = image_viewer::xformed_footprint(w, h, xf);
         let expected = if xf.swaps_axes() { (h, w) } else { (w, h) };
         assert_eq!((dw, dh), expected, "{xf:?}: wrong footprint");
-        assert_eq!(xf.out_dims(96, 64), (dw as u32, dh as u32), "{xf:?}: footprint disagrees with out_dims");
+        assert_eq!(
+            xf.out_dims(96, 64),
+            (dw as u32, dh as u32),
+            "{xf:?}: footprint disagrees with out_dims"
+        );
     }
 }
 
@@ -1525,11 +1472,7 @@ fn the_record_is_bounded() {
             image_viewer::Edit { xform: Xform::ALL[1 + (i % 3)], crop: None },
         );
     }
-    assert!(
-        r.len() <= 4096,
-        "grew to {} entries with no bound",
-        r.len()
-    );
+    assert!(r.len() <= 4096, "grew to {} entries with no bound", r.len());
 }
 
 /// The save composes the EXIF tag with the *current image's* transform. If these
@@ -1603,9 +1546,7 @@ fn the_orientation_rewrite_survives_a_hostile_exif_block() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("plain.jpg");
     let mut b = Vec::new();
-    quadrants(8, 8)
-        .write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Jpeg)
-        .unwrap();
+    quadrants(8, 8).write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Jpeg).unwrap();
     std::fs::write(&p, &b).unwrap();
     let mut copy = b.clone();
     assert!(!neutralize_exif_orientation(&mut copy), "a JPEG with no EXIF claimed a change");
@@ -1614,10 +1555,7 @@ fn the_orientation_rewrite_survives_a_hostile_exif_block() {
 
 fn exif_orientation_from(bytes: &[u8]) -> u16 {
     // Only used on in-memory fixtures; reads the tag straight out of the buffer.
-    let i = bytes
-        .windows(6)
-        .position(|w| w == b"Exif\0\0")
-        .expect("no EXIF in fixture");
+    let i = bytes.windows(6).position(|w| w == b"Exif\0\0").expect("no EXIF in fixture");
     let base = i + 6;
     // This fixture is big-endian, which is how write_jpeg builds it.
     let ifd = base + u32::from_be_bytes(bytes[base + 4..base + 8].try_into().unwrap()) as usize;
@@ -1673,10 +1611,7 @@ fn screen_size_save_fits_the_display_and_says_re_encoded() {
         out.width,
         out.height
     );
-    assert!(
-        !out.lossless,
-        "a JPEG screen save is a re-encode, and must say so"
-    );
+    assert!(!out.lossless, "a JPEG screen save is a re-encode, and must say so");
     // And it must still be the turned picture, not the stored one.
     assert_eq!((out.width, out.height), (75, 100));
 }
@@ -1752,11 +1687,7 @@ fn save_as_writes_the_named_path_at_the_named_quality() {
     let out = save_transformed_to(&src, Xform::Rot90, None, &dest, 90, 0).unwrap();
     assert_eq!(out.dest, dest, "the file is where it was told to go");
     assert!(out.dest.is_file(), "and it exists");
-    assert_eq!(
-        (out.width, out.height),
-        (192, 256),
-        "turned, and unscaled (max_long = 0)"
-    );
+    assert_eq!((out.width, out.height), (192, 256), "turned, and unscaled (max_long = 0)");
     assert!(!out.lossless, "a JPEG encode is a re-encode");
     assert!(image_viewer::is_jpeg_bytes(&std::fs::read(&dest).unwrap()));
 
@@ -1808,9 +1739,7 @@ fn save_as_encodes_the_chosen_format_not_the_source_format() {
     let as_png = tmp.path().join("out.png");
     let out = save_transformed_to(&src, Xform::Identity, None, &as_png, 85, 0).unwrap();
     assert!(
-        std::fs::read(&as_png)
-            .unwrap()
-            .starts_with(b"\x89PNG\r\n\x1a\n"),
+        std::fs::read(&as_png).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"),
         "a .png destination is written as PNG"
     );
     assert!(out.lossless, "PNG has no lossy step");
@@ -1910,12 +1839,7 @@ fn an_unedited_save_is_a_copy_and_a_turned_one_is_a_rotated_one() {
     // A crop wins over the transform name, because a crop turns the picture too
     // and `_rotated` would then be true and useless — `_cropped` is what the
     // user actually did.
-    let c = Crop {
-        x: 0,
-        y: 0,
-        w: 10,
-        h: 10,
-    };
+    let c = Crop { x: 0, y: 0, w: 10, h: 10 };
     assert_eq!(save_infix(Xform::Identity, Some(c)), "cropped");
     assert_eq!(save_infix(Xform::Rot90, Some(c)), "cropped");
 }

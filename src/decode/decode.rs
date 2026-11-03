@@ -16,7 +16,10 @@ pub const MAX_FULL_PIXELS: u64 = 300_000_000;
 /// Decode a JPEG straight to RGBA at the smallest DCT reduction (1/8, 1/4, 1/2, 1)
 /// whose long side is still >= `max_dim`. The IDCT runs at reduced size, so a
 /// 95 MP file never has to be materialised at full resolution.
-pub(crate) fn decode_jpeg_scaled(bytes: &[u8], max_dim: u32) -> Result<(u32, u32, Vec<u8>), LoadError> {
+pub(crate) fn decode_jpeg_scaled(
+    bytes: &[u8],
+    max_dim: u32,
+) -> Result<(u32, u32, Vec<u8>), LoadError> {
     use turbojpeg::{Decompressor, Image, PixelFormat, ScalingFactor};
     let err = |e: turbojpeg::Error| LoadError::Jpeg(e.to_string());
 
@@ -84,9 +87,7 @@ pub fn image_dims_bytes(bytes: &[u8]) -> Option<(u32, u32)> {
             .map(|dec| image::ImageDecoder::dimensions(&dec));
     }
     if is_heif_bytes(bytes) {
-        return heic::ImageInfo::from_bytes(bytes)
-            .ok()
-            .map(|info| (info.width, info.height));
+        return heic::ImageInfo::from_bytes(bytes).ok().map(|info| (info.width, info.height));
     }
     image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -170,7 +171,6 @@ pub struct PreviewAndFull {
     /// [`apply_wide_gamut_conversion`]'s own gate.
     pub colour: ColorInfo,
 }
-
 
 /// True if the bytes look like a GIF (magic bytes).
 pub fn is_gif_bytes(bytes: &[u8]) -> bool {
@@ -491,9 +491,7 @@ pub(crate) fn page_dims_and_jpeg(path: &Path, page: u32) -> Option<((u32, u32), 
     }
     let buf = read_prefix(path).ok()?;
     let jpeg = is_jpeg_bytes(&buf);
-    image_dims_bytes(&buf)
-        .or_else(|| image_dims_path(path))
-        .map(|dims| (dims, jpeg))
+    image_dims_bytes(&buf).or_else(|| image_dims_path(path)).map(|dims| (dims, jpeg))
 }
 
 /// Page `page`'s stored dimensions out of a TIFF's IFD chain, or `None`.
@@ -508,10 +506,9 @@ pub(crate) fn page_dims_and_jpeg(path: &Path, page: u32) -> Option<((u32, u32), 
 /// itself, so a caller passing an absurd `page` gets `None` rather than a walk
 /// that does not terminate.
 pub(crate) fn tiff_page_dim(path: &Path, page: u32) -> Option<(u32, u32)> {
-    let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(
-        std::fs::File::open(path).ok()?,
-    ))
-    .ok()?;
+    let mut dec =
+        tiff::decoder::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).ok()?))
+            .ok()?;
     for _ in 0..page {
         if !dec.more_images() || dec.next_image().is_err() {
             return None;
@@ -582,8 +579,8 @@ pub(crate) fn decode_tiff_page(
         kind: tiff::ColorType,
         result: tiff::decoder::DecodingResult,
     ) -> Result<image::RgbaImage, LoadError> {
-        use tiff::ColorType as T;
         use tiff::decoder::DecodingResult as D;
+        use tiff::ColorType as T;
         let bad = |what: &str| {
             LoadError::Other(format!(
                 "TIFF page is {kind:?}, which is not supported past the first page ({what})"
@@ -704,4 +701,3 @@ pub(crate) fn decode_tiff_page(
     }
     Ok(normalized(data))
 }
-

@@ -25,10 +25,7 @@ pub(crate) fn grid_cell(
     loader: &Loader,
     ratings: &HashMap<PathBuf, image_viewer::Ratings>,
 ) -> egui::Response {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
 
     // Ask for the thumbnail whenever it is missing. `Loader::push` dedups
     // against queued + in-flight work, so this costs one lock per visible cell
@@ -40,7 +37,10 @@ pub(crate) fn grid_cell(
     // attempts, and a cell that can never draw. The cell is drawn from the
     // member count instead, which is a header read.
     let is_archive = is_archive_path(path);
-    if !is_archive && !thumbs.contains_key(path) && tries.get(path).copied().unwrap_or(0) < THUMB_TRIES {
+    if !is_archive
+        && !thumbs.contains_key(path)
+        && tries.get(path).copied().unwrap_or(0) < THUMB_TRIES
+    {
         loader.push(Job {
             // A grid cell is one picture, so it is always the file's first page.
             key: ImgKey::first(path),
@@ -67,10 +67,8 @@ pub(crate) fn grid_cell(
     // Allocate the cell *ourselves* with click sense. `Frame::show` would
     // size itself to the rest of the row and only register hover, which both
     // pushed the following cells offscreen and made clicks dead.
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(cell, cell + GRID_LABEL_H),
-        egui::Sense::click(),
-    );
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(cell, cell + GRID_LABEL_H), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         ui.painter().rect(rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
     }
@@ -86,9 +84,7 @@ pub(crate) fn grid_cell(
     // `new_child` returns an owned `Ui` and leaves the parent cursor alone,
     // which is exactly what 0.27's `child_ui` did.
     let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(inner)
-            .layout(egui::Layout::top_down(egui::Align::Center)),
+        egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)),
     );
 
     // Thumbnail area: full width, cell height. Only the *rect* is computed
@@ -110,13 +106,9 @@ pub(crate) fn grid_cell(
             // texture-manager state.
             let ppp = ui.ctx().pixels_per_point();
             let natural = egui::vec2(t.texels[0] as f32, t.texels[1] as f32) / ppp;
-            let scale = fit_scale_no_upscale(
-                (natural.x, natural.y),
-                (img_area.width(), img_area.height()),
-            );
-            let draw_size = (natural * scale)
-                .max(egui::Vec2::splat(1.0))
-                .min(img_area.size());
+            let scale =
+                fit_scale_no_upscale((natural.x, natural.y), (img_area.width(), img_area.height()));
+            let draw_size = (natural * scale).max(egui::Vec2::splat(1.0)).min(img_area.size());
             let draw = egui::Rect::from_center_size(img_area.center(), draw_size);
             if ui.is_rect_visible(draw) {
                 // Give the widget a Ui bounded to the centred rect: that is
@@ -188,8 +180,8 @@ pub(crate) fn grid_cell(
                 }
                 label
             })
-                .small()
-                .color(egui::Color32::from_gray(200)),
+            .small()
+            .color(egui::Color32::from_gray(200)),
         )
         .truncate(),
     );
@@ -209,17 +201,15 @@ pub(crate) fn grid_cell(
 /// has already paid for once. `Xform::from_exif` is the same source of truth the
 /// decode used, rather than a second opinion about which tags swap axes.
 pub(crate) fn stored_dims(pv: &Preview) -> (u32, u32) {
-    if Xform::from_exif(pv.exif_tag)
-        .unwrap_or(Xform::Identity)
-        .swaps_axes()
-    {
+    if Xform::from_exif(pv.exif_tag).unwrap_or(Xform::Identity).swaps_axes() {
         (pv.orig.1, pv.orig.0)
     } else {
         pv.orig
     }
 }
 
-pub(crate) fn make_checker_texture(ctx: &Context) -> TextureHandle {    const N: usize = 64; // texture side in px
+pub(crate) fn make_checker_texture(ctx: &Context) -> TextureHandle {
+    const N: usize = 64; // texture side in px
     const SQ: usize = 32; // square side in px
     let mut pixels = Vec::with_capacity(N * N);
     for y in 0..N {
@@ -231,11 +221,7 @@ pub(crate) fn make_checker_texture(ctx: &Context) -> TextureHandle {    const N:
     }
     ctx.load_texture(
         "checker",
-        ColorImage {
-            size: [N, N],
-            source_size: egui::vec2(N as f32, N as f32),
-            pixels,
-        },
+        ColorImage { size: [N, N], source_size: egui::vec2(N as f32, N as f32), pixels },
         TextureOptions::NEAREST_REPEAT,
     )
 }
@@ -303,8 +289,7 @@ pub(crate) fn paint_tex(
     mesh.add_rect_with_uv(rect, uv, Color32::WHITE);
     for v in &mut mesh.vertices {
         let d = v.pos - origin;
-        v.pos = origin
-            + Vec2::new(m[0][0] * d.x + m[0][1] * d.y, m[1][0] * d.x + m[1][1] * d.y);
+        v.pos = origin + Vec2::new(m[0][0] * d.x + m[0][1] * d.y, m[1][0] * d.x + m[1][1] * d.y);
     }
     painter.add(egui::Shape::mesh(mesh));
 }
@@ -353,19 +338,13 @@ pub(crate) fn make_tile(
     for y in y0..y0 + h {
         let row = &data.rgba[y * stride + x0 * 4..y * stride + (x0 + w) * 4];
         pixels.extend(
-            row.chunks_exact(4)
-                .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])),
+            row.chunks_exact(4).map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])),
         );
     }
-    let img = ColorImage {
-        size: [w, h],
-        source_size: egui::vec2(w as f32, h as f32),
-        pixels,
-    };
+    let img = ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels };
     ctx.load_texture(format!("tile {tx},{ty}"), img, options)
 }
 
 // ---------------------------------------------------------------------------
 // eframe glue
 // ---------------------------------------------------------------------------
-

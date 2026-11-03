@@ -7,11 +7,10 @@
 //! fields are `pub(crate)` for the same reason. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-use crate::*;
 use crate::app::gallery_ops::UndoDeleteResult;
+use crate::*;
 
 impl eframe::App for MyApp {
-
     /// Persist the last-viewed image per folder on app close, then clean up
     /// any extracted archive temp dir.
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
@@ -145,10 +144,7 @@ impl eframe::App for MyApp {
         // Read separately from `prev`/`next` so the shipped arrow keys keep
         // their step behaviour and `Alt+arrows` own history.
         let (history_back, history_forward) = ctx.input(|i| {
-            (
-                binding_down(i, &kb, "history_back"),
-                binding_down(i, &kb, "history_forward"),
-            )
+            (binding_down(i, &kb, "history_back"), binding_down(i, &kb, "history_forward"))
         });
 
         if f11 {
@@ -221,12 +217,10 @@ impl eframe::App for MyApp {
                 // relationship crop mode and the grid already have above it.
                 // One level down and Esc quits exactly as before.
                 if !self.leave_archive(ctx, false) {
-                    self.notice =
-                        Some("No folder to go back to (archive opened directly)".into());
+                    self.notice = Some("No folder to go back to (archive opened directly)".into());
                 }
             } else {
-                let in_fullscreen = ctx
-                    .input(|i| i.viewport().fullscreen.unwrap_or(false));
+                let in_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 if in_fullscreen {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     // What the master stood at *before this fullscreen*, not
@@ -293,12 +287,29 @@ impl eframe::App for MyApp {
         // full-res image because you were renaming a filter is not a thing
         // anyone asked for.
         let (clip_img, clip_shift) = ctx.input(|i| {
-            (
-                i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
-                i.modifiers.shift,
-            )
+            (i.events.iter().any(|e| matches!(e, egui::Event::Copy)), i.modifiers.shift)
         });
-        let (del, rename_key, explore, reload, wall, wall_shown, save_rot, save_screen, save_as, undo_key, redo_key, crop_key, rating_up, rating_down, flag_key, restore_delete, pane_left, pane_right, color_pick) = ctx.input(|i| {
+        let (
+            del,
+            rename_key,
+            explore,
+            reload,
+            wall,
+            wall_shown,
+            save_rot,
+            save_screen,
+            save_as,
+            undo_key,
+            redo_key,
+            crop_key,
+            rating_up,
+            rating_down,
+            flag_key,
+            restore_delete,
+            pane_left,
+            pane_right,
+            color_pick,
+        ) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "del"),
                 binding_down(i, &kb, "rename"),
@@ -369,9 +380,7 @@ impl eframe::App for MyApp {
             "user_1", "user_2", "user_3", "user_4", "user_5", "user_6", "user_7", "user_8",
             "user_9",
         ];
-        let user_cmd = USER_ACTIONS
-            .iter()
-            .position(|a| action_pressed_fresh(ctx, &kb, a));
+        let user_cmd = USER_ACTIONS.iter().position(|a| action_pressed_fresh(ctx, &kb, a));
         // Print: the OS `print` verb on the file on screen. Edge-triggered
         // for the same reason. Bare `P` is untouched (right pane), so this
         // chord and that key coexist.
@@ -456,24 +465,14 @@ impl eframe::App for MyApp {
                 self.suppress_resize_redecode = true;
                 self.show_left = !self.show_left;
                 self.notice = Some(
-                    if self.show_left {
-                        "Left pane shown"
-                    } else {
-                        "Left pane hidden"
-                    }
-                    .into(),
+                    if self.show_left { "Left pane shown" } else { "Left pane hidden" }.into(),
                 );
             }
             if pane_right {
                 self.suppress_resize_redecode = true;
                 self.show_right = !self.show_right;
                 self.notice = Some(
-                    if self.show_right {
-                        "Right pane shown"
-                    } else {
-                        "Right pane hidden"
-                    }
-                    .into(),
+                    if self.show_right { "Right pane shown" } else { "Right pane hidden" }.into(),
                 );
             }
             if grid {
@@ -569,11 +568,13 @@ impl eframe::App for MyApp {
                 // Paused: keep the loop ticking so the UI can repaint, but do
                 // not advance. Resuming restarts the interval, so a pause never
                 // steals time from the next slide.
-                if !self.slideshow_paused && image_viewer::slideshow_due(
-                    self.slideshow_last,
-                    Instant::now(),
-                    self.config.slideshow_secs,
-                ) {
+                if !self.slideshow_paused
+                    && image_viewer::slideshow_due(
+                        self.slideshow_last,
+                        Instant::now(),
+                        self.config.slideshow_secs,
+                    )
+                {
                     self.slideshow_last = Instant::now();
                     if !self.step(ctx, true) {
                         self.stop_slideshow();
@@ -603,9 +604,11 @@ impl eframe::App for MyApp {
                         ui.set_min_width(260.0);
                         ui.label("New name:");
                         let resp = ui.add(egui::TextEdit::singleline(name).desired_width(240.0));
-                        let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let enter =
+                            resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         confirm = enter || ui.button("Confirm").clicked();
-                        cancel = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+                        cancel = ui.button("Cancel").clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Escape));
                     });
             }
         }
@@ -631,12 +634,7 @@ impl eframe::App for MyApp {
                 Ok(UndoDeleteResult::Restored(original)) => {
                     let files = self.scan_current();
                     self.set_files(files, ctx);
-                    if let Some(pos) = self
-                        .gallery
-                        .files
-                        .iter()
-                        .position(|p| p == &original)
-                    {
+                    if let Some(pos) = self.gallery.files.iter().position(|p| p == &original) {
                         self.gallery.index = pos;
                         self.goto(ctx);
                     }
@@ -678,9 +676,7 @@ impl eframe::App for MyApp {
         let changed = self.config.window_size != new_size
             || self.config.window_pos != new_pos
             || self.config.window_maximized != new_maximized;
-        if changed
-            && self.last_geometry_save.elapsed() > Duration::from_secs(1)
-        {
+        if changed && self.last_geometry_save.elapsed() > Duration::from_secs(1) {
             self.config.window_size = new_size;
             self.config.window_pos = new_pos;
             self.config.window_maximized = new_maximized;
@@ -712,11 +708,7 @@ impl eframe::App for MyApp {
                     });
                 });
                 if !self.filter.is_empty() {
-                    ui.label(format!(
-                        "{} of {} shown",
-                        self.gallery.len(),
-                        self.all_files.len()
-                    ));
+                    ui.label(format!("{} of {} shown", self.gallery.len(), self.all_files.len()));
                 }
             });
         }
@@ -1127,10 +1119,7 @@ impl eframe::App for MyApp {
                 // dedups against queued and running work, and it is not in the
                 // queue's `wanted` set — which is fine, because a rebuild that
                 // drops it is followed by this same line on the next frame.
-                if image_viewer::wants_exif(
-                    self.show_panels && self.show_left,
-                    self.exif_loading,
-                ) {
+                if image_viewer::wants_exif(self.show_panels && self.show_left, self.exif_loading) {
                     // The panel pushes this rather than waiting for the plan, so
                     // it is the one metadata path `plan_jobs`' archive guard does
                     // not cover. An archive path names a container, not a
@@ -1173,10 +1162,7 @@ impl eframe::App for MyApp {
                 if let Some(p) = self.cur.as_ref() {
                     if let Ok(md) = std::fs::metadata(&p.path) {
                         ui.separator();
-                        ui.label(format!(
-                            "Size: {:.1} MB",
-                            md.len() as f64 / (1024.0 * 1024.0)
-                        ));
+                        ui.label(format!("Size: {:.1} MB", md.len() as f64 / (1024.0 * 1024.0)));
                     }
                 }
                 // Exposure histogram: levels counted on the worker from the
@@ -1187,11 +1173,8 @@ impl eframe::App for MyApp {
                 // cannot say. Of the shown image (first frame for an
                 // animation), at preview resolution: plenty for exposure,
                 // and a full-res walk would buy nothing but time.
-                if let Some(hist) = self
-                    .shown
-                    .as_ref()
-                    .and_then(|k| self.previews.get(k))
-                    .map(|pv| &pv.hist)
+                if let Some(hist) =
+                    self.shown.as_ref().and_then(|k| self.previews.get(k)).map(|pv| &pv.hist)
                 {
                     ui.separator();
                     ui.heading("Histogram");
@@ -1202,14 +1185,8 @@ impl eframe::App for MyApp {
                             egui::Sense::hover(),
                         );
                         let painter = ui.painter().with_clip_rect(rect);
-                        let max = hist
-                            .bins
-                            .iter()
-                            .flatten()
-                            .copied()
-                            .max()
-                            .unwrap_or(1)
-                            .max(1) as f32;
+                        let max =
+                            hist.bins.iter().flatten().copied().max().unwrap_or(1).max(1) as f32;
                         for (ch, color) in [
                             (0, egui::Color32::RED),
                             (1, egui::Color32::GREEN),
@@ -1219,15 +1196,11 @@ impl eframe::App for MyApp {
                                 .map(|i| {
                                     egui::Pos2::new(
                                         rect.min.x + i as f32 / 255.0 * rect.width(),
-                                        rect.max.y - hist.bins[ch][i] as f32 / max
-                                            * rect.height(),
+                                        rect.max.y - hist.bins[ch][i] as f32 / max * rect.height(),
                                     )
                                 })
                                 .collect();
-                            painter.add(egui::Shape::line(
-                                pts,
-                                egui::Stroke::new(1.0, color),
-                            ));
+                            painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
                         }
                         let pct = |n: u32| 100.0 * n as f64 / total as f64;
                         ui.label(format!(
@@ -1245,9 +1218,9 @@ impl eframe::App for MyApp {
             });
         }
 
-            let mut resort = false;
-            let mut refilter = false;
-            if self.show_panels && self.show_right {
+        let mut resort = false;
+        let mut refilter = false;
+        if self.show_panels && self.show_right {
             let mut pane = egui::Panel::right("settings");
             if self.config.fit_window_mode {
                 pane = pane.exact_size(300.0);
@@ -2260,37 +2233,34 @@ impl eframe::App for MyApp {
                 ui.small(format!("Build {}", env!("IV_BUILD_ID")));
                 });
             });
-            }
-            if resort {
-                self.notice = Some(format!(
-                    "Sorted by {:?}{}",
-                    self.config.sort,
-                    if self.config.sort_descending {
-                        ", descending"
-                    } else {
-                        ""
-                    }
-                ));
-                self.rescan(ctx, true);
-            }
-            if refilter {
-                // Realtime filter preview: drop every preview and re-queue at
-                // the current target; old textures remain on screen until the
-                // replacements arrive (no blank flash).
-                self.previews.clear();
-                self.full = None;
-                self.anim = None;
-                self.failed.clear();
-                self.load_errors.clear();
-                self.reset_display();
-                self.goto(ctx);
-            }
+        }
+        if resort {
+            self.notice = Some(format!(
+                "Sorted by {:?}{}",
+                self.config.sort,
+                if self.config.sort_descending { ", descending" } else { "" }
+            ));
+            self.rescan(ctx, true);
+        }
+        if refilter {
+            // Realtime filter preview: drop every preview and re-queue at
+            // the current target; old textures remain on screen until the
+            // replacements arrive (no blank flash).
+            self.previews.clear();
+            self.full = None;
+            self.anim = None;
+            self.failed.clear();
+            self.load_errors.clear();
+            self.reset_display();
+            self.goto(ctx);
+        }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(Color32::BLACK))
-            .show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show(
+            ui,
+            |ui| {
                 self.central(ui);
-            });
+            },
+        );
 
         // Who is asking for these repaints? egui tags every request with the
         // call site, so this names the culprit instead of guessing. No-op

@@ -5,17 +5,13 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-
 // Single-instance guard: a named kernel mutex. The name is session-local
 // (`Local\`, which any user can always create — `Global\` needs a privilege
 // a normal login does not have) and stable across runs so a second launch
 // finds the first one.
 extern "system" {
-    fn CreateMutexW(
-        attr: *const std::ffi::c_void,
-        initially_owned: i32,
-        name: *const u16,
-    ) -> usize;
+    fn CreateMutexW(attr: *const std::ffi::c_void, initially_owned: i32, name: *const u16)
+        -> usize;
     fn GetLastError() -> u32;
     fn ShellExecuteW(
         hwnd: usize,
@@ -25,10 +21,14 @@ extern "system" {
         directory: *const u16,
         show: i32,
     ) -> isize;
-    fn EnumWindows(callback: Option<unsafe extern "system" fn(isize, isize) -> i32>, param: isize) -> i32;
+    fn EnumWindows(
+        callback: Option<unsafe extern "system" fn(isize, isize) -> i32>,
+        param: isize,
+    ) -> i32;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
     fn GetCurrentProcessId() -> u32;
-    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32)
+        -> i32;
 }
 
 /// Callback for [`set_topmost`]: stash the first top-level window owned by
@@ -122,7 +122,9 @@ pub fn print_file(path: &std::path::Path) -> std::io::Result<()> {
     let verb: Vec<u16> = "print\0".encode_utf16().collect();
     let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     // SW_SHOWNORMAL: the handler decides the window, we only ask normally.
-    let rc = unsafe { ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1) };
+    let rc = unsafe {
+        ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), 1)
+    };
     if rc > 32 {
         Ok(())
     } else {
@@ -132,4 +134,3 @@ pub fn print_file(path: &std::path::Path) -> std::io::Result<()> {
         ))
     }
 }
-

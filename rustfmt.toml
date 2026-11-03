@@ -1,0 +1,12 @@
+# `cargo fmt` formats this tree; run it before committing, and
+# `cargo fmt --check` to see what it would change.
+#
+# The width is rustfmt's own 100. `Max` for the small heuristics is what keeps
+# the codebase's long single-line calls (this code is written at ~100 columns)
+# on one line instead of one argument per line, and it is what keeps every file
+# in `tests/source_size.rs` inside its ceiling after a reformat: at the default
+# heuristic the wrap-everything style pushed `tests/multiframe.rs` over the
+# 1,000-line target and grew eight other files past the ceilings recorded here.
+edition = "2021"
+max_width = 100
+use_small_heuristics = "Max"

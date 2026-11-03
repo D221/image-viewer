@@ -346,11 +346,12 @@ pub(crate) fn action_label(id: &str) -> &str {
 /// Button text with the live chord: `("Save transformed…", "save")` gives
 /// `"Save transformed… (Ctrl+S)"` today and `"Save transformed… (X)"` after
 /// a rebind. Buttons never lie about keys, however they are rebound.
-pub(crate) fn action_button_text(config: &image_viewer::Config, base: &str, action: &str) -> String {
-    format!(
-        "{base} ({})",
-        image_viewer::resolve_binding(&config.keybindings, action)
-    )
+pub(crate) fn action_button_text(
+    config: &image_viewer::Config,
+    base: &str,
+    action: &str,
+) -> String {
+    format!("{base} ({})", image_viewer::resolve_binding(&config.keybindings, action))
 }
 #[derive(Clone, Copy)]
 /// A resolved binding: the key plus the exact modifier set. Matching is
@@ -378,12 +379,7 @@ pub(crate) fn resolve_action(
     ] {
         if let Some((ctrl, shift, alt, name)) = image_viewer::split_chord(&candidate) {
             if let Some(key) = parse_key_full(&name) {
-                return Some(ResolvedBinding {
-                    key,
-                    ctrl,
-                    shift,
-                    alt,
-                });
+                return Some(ResolvedBinding { key, ctrl, shift, alt });
             }
         }
     }
@@ -393,7 +389,9 @@ pub(crate) fn resolve_action(
 /// Resolve every action once per frame: shipped defaults with user
 /// overrides applied. Owns everything, so callers keep no borrow on the
 /// config across the `&mut self` dispatch that follows.
-pub(crate) fn build_bindings(config: &image_viewer::Config) -> std::collections::HashMap<String, ResolvedBinding> {
+pub(crate) fn build_bindings(
+    config: &image_viewer::Config,
+) -> std::collections::HashMap<String, ResolvedBinding> {
     let mut m = std::collections::HashMap::new();
     for (id, _, _) in image_viewer::KEY_ACTIONS {
         if let Some(b) = resolve_action(&config.keybindings, id) {
@@ -425,7 +423,10 @@ pub(crate) fn binding_down(
     let Some(b) = bindings.get(action) else {
         return false;
     };
-    i.key_pressed(b.key) && i.modifiers.ctrl == b.ctrl && i.modifiers.shift == b.shift && i.modifiers.alt == b.alt
+    i.key_pressed(b.key)
+        && i.modifiers.ctrl == b.ctrl
+        && i.modifiers.shift == b.shift
+        && i.modifiers.alt == b.alt
 }
 
 /// Physical presses only: matches raw key events with `repeat: false` and
@@ -493,15 +494,7 @@ pub(crate) fn effective_nav_keys() -> Vec<(ResolvedBinding, NavInput)> {
         return NAV_KEYS
             .iter()
             .map(|(key, meaning)| {
-                (
-                    ResolvedBinding {
-                        key: *key,
-                        ctrl: false,
-                        shift: false,
-                        alt: false,
-                    },
-                    *meaning,
-                )
+                (ResolvedBinding { key: *key, ctrl: false, shift: false, alt: false }, *meaning)
             })
             .collect();
     }
@@ -592,4 +585,3 @@ pub(crate) const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\image-viewer-single-
 pub(crate) fn hold_single_instance() -> bool {
     image_viewer::claim_single_instance(SINGLE_INSTANCE_MUTEX_NAME)
 }
-

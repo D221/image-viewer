@@ -80,10 +80,7 @@ fn the_budget_changes_nothing_for_small_files() {
     let free = window_jobs(&plan_jobs(&base_plan(&f, &lens, u64::MAX, &cached, &failed)));
     let bounded =
         window_jobs(&plan_jobs(&base_plan(&f, &lens, 256 * 1024 * 1024, &cached, &failed)));
-    assert_eq!(
-        free, bounded,
-        "a 7 MB folder must plan the same window under a 256 MB budget"
-    );
+    assert_eq!(free, bounded, "a 7 MB folder must plan the same window under a 256 MB budget");
 }
 
 /// Nearest-first: with room for two of three decisions, the cursor's next and
@@ -98,12 +95,13 @@ fn the_budget_spends_nearest_first_and_a_skip_is_not_a_hole() {
     let f = files();
     let m: u64 = 1024 * 1024;
     let lens = vec![
-        3 * m, // idx0 = prev d2: 18 + 3 <= 22 — planned
+        3 * m,  // idx0 = prev d2: 18 + 3 <= 22 — planned
         10 * m, // idx1 = prev d1: admitted
-        0, // idx2 = the cursor, never walked
-        8 * m, // idx3 = next d1: admitted
-        9 * m, // idx4 = next d2: skipped, 18 + 9 > 22
-        100 * m, 100 * m, // idx5/6 = d3, priced out of the argument
+        0,      // idx2 = the cursor, never walked
+        8 * m,  // idx3 = next d1: admitted
+        9 * m,  // idx4 = next d2: skipped, 18 + 9 > 22
+        100 * m,
+        100 * m, // idx5/6 = d3, priced out of the argument
     ];
     let (cached, failed) = empty_caches();
     let jobs = window_jobs(&plan_jobs(&base_plan(&f, &lens, 22 * m, &cached, &failed)));
@@ -129,9 +127,13 @@ fn a_file_larger_than_the_budget_is_not_preloaded_at_all() {
     let f = files();
     let m: u64 = 1024 * 1024;
     let lens = vec![
-        0, 0, 0, 500 * m, // next d1: half a gig, past a 64 MB budget
-        10 * m, // prev d1: admitted
-        0, 0,
+        0,
+        0,
+        0,
+        500 * m, // next d1: half a gig, past a 64 MB budget
+        10 * m,  // prev d1: admitted
+        0,
+        0,
     ];
     let (cached, failed) = empty_caches();
     let jobs = window_jobs(&plan_jobs(&base_plan(&f, &lens, 64 * m, &cached, &failed)));
@@ -155,10 +157,7 @@ fn a_file_larger_than_the_budget_is_not_preloaded_at_all() {
 fn a_zero_budget_never_touches_current_partner_full_or_exif() {
     let f = files();
     let lens: Vec<u64> = vec![1; 7]; // every file costs; a zero budget affords nothing
-    let partner = Some(ImgKey {
-        path: f[3].clone(),
-        page: 0,
-    });
+    let partner = Some(ImgKey { path: f[3].clone(), page: 0 });
     let cached: HashSet<ImgKey> = HashSet::new();
     let failed: HashSet<(ImgKey, Kind)> = HashSet::new();
     let jobs = plan_jobs(&Plan {
@@ -180,32 +179,21 @@ fn a_zero_budget_never_touches_current_partner_full_or_exif() {
     let previews_current: Vec<_> = jobs
         .iter()
         .filter(|j| {
-            j.kind == Kind::Preview
-                && j.path() == Path::new("img_2.jpg")
+            j.kind == Kind::Preview && j.path() == Path::new("img_2.jpg")
                 || j.kind == Kind::Preview && j.key.page == 0 && j.path() == Path::new("img_3.jpg")
         })
         .collect();
-    assert!(
-        previews_current.len() >= 2,
-        "current and partner previews survive a zero budget"
-    );
+    assert!(previews_current.len() >= 2, "current and partner previews survive a zero budget");
     assert!(
         jobs.iter().any(|j| j.kind == Kind::Full && j.path() == Path::new("img_2.jpg")),
         "the current full survives the budget"
     );
     assert!(
-        jobs.iter()
-            .any(|j| j.kind == Kind::Full && j.path() == Path::new("img_3.jpg")),
+        jobs.iter().any(|j| j.kind == Kind::Full && j.path() == Path::new("img_3.jpg")),
         "the partner's full survives the budget"
     );
-    assert!(
-        jobs.iter().any(|j| j.kind == Kind::Exif),
-        "the EXIF read survives the budget"
-    );
-    assert!(
-        window_jobs(&jobs).is_empty(),
-        "only the window empties at a zero budget"
-    );
+    assert!(jobs.iter().any(|j| j.kind == Kind::Exif), "the EXIF read survives the budget");
+    assert!(window_jobs(&jobs).is_empty(), "only the window empties at a zero budget");
 }
 
 /// A file the scanner has not stamped yet (`file_bytes` shorter than the
@@ -221,9 +209,9 @@ fn an_unknown_file_is_admitted_and_spends_nothing() {
     let (cached, failed) = empty_caches();
     // Budget spent exactly by the two d1 neighbours; next-d2 priced out.
     let known = vec![
-        0, // idx0 = prev d2: a known zero at a fully-spent window
+        0,      // idx0 = prev d2: a known zero at a fully-spent window
         10 * m, // idx1 = prev d1
-        0, // idx2 = the cursor
+        0,      // idx2 = the cursor
         10 * m, // idx3 = next d1
         50 * m, // idx4 = next d2: skipped
     ];
@@ -233,13 +221,9 @@ fn an_unknown_file_is_admitted_and_spends_nothing() {
         got.iter().any(|n| n == "img_0.jpg"),
         "the known-zero prev d2 is admitted at a fully-spent window: {got:?}"
     );
-    let unlimited = names(&window_jobs(&plan_jobs(&base_plan(
-        &f, &known, u64::MAX, &cached, &failed,
-    ))));
-    assert_ne!(
-        got, unlimited,
-        "the priced-out next d2 is a budget decision, not a coincidence"
-    );
+    let unlimited =
+        names(&window_jobs(&plan_jobs(&base_plan(&f, &known, u64::MAX, &cached, &failed))));
+    assert_ne!(got, unlimited, "the priced-out next d2 is a budget decision, not a coincidence");
 
     // The registry has only caught up with the first two entries — the shape
     // of `schedule` handing a stamps map that has not walked the folder yet.

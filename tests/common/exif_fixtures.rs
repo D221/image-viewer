@@ -41,11 +41,7 @@ struct TiffBuilder {
 
 impl TiffBuilder {
     fn new(e: Endian) -> Self {
-        TiffBuilder {
-            e,
-            ifd0: Vec::new(),
-            ifd1: Vec::new(),
-        }
+        TiffBuilder { e, ifd0: Vec::new(), ifd1: Vec::new() }
     }
 
     /// One 12-byte IFD entry. `value` is the raw 4-byte value field.

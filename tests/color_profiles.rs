@@ -7,10 +7,10 @@
 //! Every fixture is synthesised, per the AGENTS.md rule that suites must not
 //! depend on `test-images/`.
 
-#[path = "common/icc_fixtures.rs"]
-mod icc_fixtures;
 #[path = "common/heif_fixtures.rs"]
 mod heif_fixtures;
+#[path = "common/icc_fixtures.rs"]
+mod icc_fixtures;
 
 use icc_fixtures::{
     icc_profile, jpeg_with_icc, png_with_iccp, png_with_srgb_chunk, P3_RED, SRGB_RED,
@@ -55,11 +55,7 @@ fn test_primaries_classify_when_there_is_no_description() {
     assert_eq!(anon_srgb.description, "");
 
     let anon_p3 = jpeg(&jpeg_with_icc(64, 48, &icc_profile(None, P3_RED, 0)));
-    assert_eq!(
-        anon_p3.space,
-        ColorSpace::WideGamut,
-        "P3 primaries, no name"
-    );
+    assert_eq!(anon_p3.space, ColorSpace::WideGamut, "P3 primaries, no name");
 
     // ...and the two must not be confused with each other.
     assert_ne!(anon_srgb.red_primaries, anon_p3.red_primaries);
@@ -93,12 +89,7 @@ fn test_multi_chunk_icc_profile_is_reassembled() {
     let big = icc_profile(Some("Display P3"), P3_RED, 200_000);
     assert!(big.len() > 120_000, "fixture must span several chunks");
     let info = jpeg(&jpeg_with_icc(32, 32, &big));
-    assert_eq!(
-        info.space,
-        ColorSpace::WideGamut,
-        "multi-chunk profile lost; got {:?}",
-        info.space
-    );
+    assert_eq!(info.space, ColorSpace::WideGamut, "multi-chunk profile lost; got {:?}", info.space);
     assert_eq!(info.profile_bytes, big.len());
 }
 
@@ -106,18 +97,13 @@ fn test_multi_chunk_icc_profile_is_reassembled() {
 fn test_no_profile_is_untagged_srgb() {
     // A JPEG with no APP2: sRGB by convention. Same for a PNG with no colour
     // chunks at all, and for a PNG that states sRGB outright.
-    assert_eq!(
-        jpeg(&jpeg_with_icc(32, 32, &[])).space,
-        ColorSpace::UntaggedSrgb
-    );
+    assert_eq!(jpeg(&jpeg_with_icc(32, 32, &[])).space, ColorSpace::UntaggedSrgb);
     assert_eq!(png(&png_with_srgb_chunk(32, 32)).space, ColorSpace::UntaggedSrgb);
     // A JPEG built by the encoder has no ICC of its own.
     let mut plain = Vec::new();
-    image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 8)).write_to(
-        &mut std::io::Cursor::new(&mut plain),
-        image::ImageFormat::Jpeg,
-    )
-    .unwrap();
+    image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 8))
+        .write_to(&mut std::io::Cursor::new(&mut plain), image::ImageFormat::Jpeg)
+        .unwrap();
     assert_eq!(jpeg(&plain).space, ColorSpace::UntaggedSrgb);
     assert_eq!(jpeg(&plain).profile_bytes, 0);
 }
@@ -146,11 +132,7 @@ fn test_other_containers_are_not_inspected_not_assumed() {
     // we do not read and is worth keeping in the list: a truncated or hand-edited
     // HEIF must not fall back to a claim. (`test_a_corrupt_heif_claims_nothing_about_its_colour`
     // covers that properly, with real containers cut short.)
-    for bytes in [
-        &b"\0\0\0\x18ftypheic"[..],
-        &b"\0\0\0\x18ftypavif"[..],
-        &b"\xff\x0a"[..],
-    ] {
+    for bytes in [&b"\0\0\0\x18ftypheic"[..], &b"\0\0\0\x18ftypavif"[..], &b"\xff\x0a"[..]] {
         let info = color_info_from_bytes(bytes, false, false);
         assert_eq!(
             info.space,
@@ -256,10 +238,7 @@ fn test_a_profile_is_reported_even_with_no_exif_block() {
     );
     let info = jpeg(&bytes);
     assert_eq!(info.space, ColorSpace::WideGamut);
-    assert!(
-        info.panel_line().is_some(),
-        "a P3 file with no EXIF must still produce a panel line"
-    );
+    assert!(info.panel_line().is_some(), "a P3 file with no EXIF must still produce a panel line");
 
     // An untagged file stays quiet — that is the overwhelming majority, and
     // "Colour profile: sRGB (untagged)" on every screenshot is noise.
@@ -269,25 +248,13 @@ fn test_a_profile_is_reported_even_with_no_exif_block() {
     // rather than a useless one.
     let tagged = jpeg(&jpeg_with_icc(32, 32, &icc_profile(Some("sRGB IEC61966-2.1"), SRGB_RED, 0)));
     assert_eq!(tagged.space, ColorSpace::Srgb);
-    assert!(
-        tagged.panel_line().is_some(),
-        "an explicitly tagged sRGB file is worth confirming"
-    );
+    assert!(tagged.panel_line().is_some(), "an explicitly tagged sRGB file is worth confirming");
 
     // Anything the user might act on does earn a line.
     for (what, info) in [
-        (
-            "wide gamut",
-            jpeg(&jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0))),
-        ),
-        (
-            "unreadable profile in a real jpeg",
-            jpeg(&jpeg_with_icc(32, 32, &vec![0u8; 300])),
-        ),
-        (
-            "format we do not read",
-            color_info_from_bytes(b"\0\0\0\x18ftypheic", false, false),
-        ),
+        ("wide gamut", jpeg(&jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)))),
+        ("unreadable profile in a real jpeg", jpeg(&jpeg_with_icc(32, 32, &vec![0u8; 300]))),
+        ("format we do not read", color_info_from_bytes(b"\0\0\0\x18ftypheic", false, false)),
     ] {
         assert!(
             info.panel_line().is_some(),
@@ -349,16 +316,11 @@ fn test_the_derived_matrix_reproduces_the_icc_primaries_we_measured() {
     // the assertion that caught the transposed product.
     let mapped = mul_v(&to_d50, [0.95047, 1.0, 1.08883]);
     for (got, want) in mapped.iter().zip([0.96422, 1.0, 0.82521]) {
-        assert!(
-            (got - want).abs() < 1e-5,
-            "the adaptation moved the white point to {mapped:?}"
-        );
+        assert!((got - want).abs() < 1e-5, "the adaptation moved the white point to {mapped:?}");
     }
 
-    for (what, primaries) in [
-        ("Display P3", image_viewer::P3_XY),
-        ("sRGB", image_viewer::SRGB_XY),
-    ] {
+    for (what, primaries) in [("Display P3", image_viewer::P3_XY), ("sRGB", image_viewer::SRGB_XY)]
+    {
         let rgb_to_xyz = image_viewer::rgb_to_xyz(primaries, image_viewer::D65_XY);
         let red_65 = [rgb_to_xyz[0][0], rgb_to_xyz[1][0], rgb_to_xyz[2][0]];
         let adapted = mul_v(&to_d50, red_65);
@@ -388,7 +350,8 @@ fn test_the_conversion_matrix_maps_white_to_white_and_inverts() {
     let m = image_viewer::p3_to_srgb_matrix();
 
     // White is white in both spaces, so a correct matrix cannot move it.
-    let white = [m[0][0] + m[0][1] + m[0][2], m[1][0] + m[1][1] + m[1][2], m[2][0] + m[2][1] + m[2][2]];
+    let white =
+        [m[0][0] + m[0][1] + m[0][2], m[1][0] + m[1][1] + m[1][2], m[2][0] + m[2][1] + m[2][2]];
     for (c, v) in white.iter().enumerate() {
         assert!((v - 1.0).abs() < 1e-9, "white channel {c} moved to {v}");
     }
@@ -419,12 +382,12 @@ fn test_the_conversion_leaves_neutrals_alone_and_moves_mid_tones() {
     // this one managed to assert nothing at all.
     let mut px: Vec<u8> = Vec::new();
     for (r, g, b, a) in [
-        (0u8, 0u8, 0u8, 0u8),   // black, fully transparent
-        (255, 255, 255, 255),   // white
-        (128, 128, 128, 128),   // mid grey, half alpha
-        (128, 64, 32, 255),     // a mid-tone: P3 and sRGB disagree about this one
-        (200, 150, 100, 255),   // and another
-        (0, 0, 255, 255),       // P3's blue primary, which is sRGB's blue primary
+        (0u8, 0u8, 0u8, 0u8), // black, fully transparent
+        (255, 255, 255, 255), // white
+        (128, 128, 128, 128), // mid grey, half alpha
+        (128, 64, 32, 255),   // a mid-tone: P3 and sRGB disagree about this one
+        (200, 150, 100, 255), // and another
+        (0, 0, 255, 255),     // P3's blue primary, which is sRGB's blue primary
     ] {
         px.extend_from_slice(&[r, g, b, a]);
     }
@@ -440,11 +403,7 @@ fn test_the_conversion_leaves_neutrals_alone_and_moves_mid_tones() {
     // Black, white and grey are the colours every RGB space agrees on.
     assert_eq!(&px[0..3], &[0, 0, 0], "black moved");
     assert_eq!(&px[4..7], &[255, 255, 255], "white moved");
-    assert_eq!(
-        &px[8..11],
-        &[128, 128, 128],
-        "grey is white scaled down, so it cannot move"
-    );
+    assert_eq!(&px[8..11], &[128, 128, 128], "grey is white scaled down, so it cannot move");
     // A mid-tone moves, and it moves *in a direction*: P3 is the wider gamut, so
     // the same numbers in P3 describe a more saturated colour, and converting to
     // sRGB has to pull the channels toward the neutral — red up, green and blue
@@ -458,11 +417,7 @@ fn test_the_conversion_leaves_neutrals_alone_and_moves_mid_tones() {
 
     // And the shared primary must come out byte-identical, which is the clearest
     // evidence the matrix is anchored in the right place.
-    assert_eq!(
-        &px[20..24],
-        &before[20..24],
-        "the shared blue primary must be untouched"
-    );
+    assert_eq!(&px[20..24], &before[20..24], "the shared blue primary must be untouched");
 }
 
 /// `set_wide_gamut_conversion` is a process-wide global and `cargo test` runs
@@ -485,27 +440,18 @@ fn test_the_conversion_is_off_by_default_and_only_touches_wide_gamut_files() {
     // The default matters more than the maths: this changes how photos look, and
     // nobody asked for that. If this ever asserts false, an existing user's
     // pictures changed without them doing anything.
-    assert!(
-        !image_viewer::wide_gamut_conversion(),
-        "wide-gamut conversion must ship off"
-    );
+    assert!(!image_viewer::wide_gamut_conversion(), "wide-gamut conversion must ship off");
 
     let dir = tempfile::tempdir().unwrap();
     let p3 = dir.path().join("p3.jpg");
-    std::fs::write(
-        &p3,
-        jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)),
-    )
-    .unwrap();
+    std::fs::write(&p3, jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)))
+        .unwrap();
     let plain = dir.path().join("plain.jpg");
     std::fs::write(&plain, jpeg_with_icc(32, 32, &[])).unwrap();
 
     let decode = |p: &std::path::Path, on: bool| {
         with_conversion(on, || {
-            image_viewer::load_page_preview_full(p, 512, 0)
-                .expect("decode")
-                .preview
-                .rgba
+            image_viewer::load_page_preview_full(p, 512, 0).expect("decode").preview.rgba
         })
     };
 
@@ -514,10 +460,7 @@ fn test_the_conversion_is_off_by_default_and_only_touches_wide_gamut_files() {
     // On, a wide-gamut file is converted.
     let unconverted = decode(&p3, false);
     let converted = decode(&p3, true);
-    assert_ne!(
-        unconverted, converted,
-        "a Display P3 file must convert when the setting is on"
-    );
+    assert_ne!(unconverted, converted, "a Display P3 file must convert when the setting is on");
     // And off again is off again, so the flag is not sticky in the other
     // direction either.
     assert_eq!(unconverted, decode(&p3, false));
@@ -539,11 +482,8 @@ fn test_the_decode_carries_its_own_colour_classification() {
     // would say, the decode's own answer already is.
     let dir = tempfile::tempdir().unwrap();
     let p3 = dir.path().join("p3.jpg");
-    std::fs::write(
-        &p3,
-        jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)),
-    )
-    .unwrap();
+    std::fs::write(&p3, jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)))
+        .unwrap();
     let plain = dir.path().join("plain.jpg");
     std::fs::write(&plain, jpeg_with_icc(32, 32, &[])).unwrap();
 
@@ -592,35 +532,20 @@ fn test_the_transfer_luts_are_within_one_code_of_the_exact_curves() {
     let mut worst = 0.0f64;
     for v in 0..=255u32 {
         let c = v as f64 / 255.0;
-        let lin = if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        };
+        let lin = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
         let (r, g, b) = (lin, lin, lin);
         let lr = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-        let exact = if lr <= 0.003_130_8 {
-            lr * 12.92
-        } else {
-            1.055 * lr.powf(1.0 / 2.4) - 0.055
-        };
+        let exact = if lr <= 0.003_130_8 { lr * 12.92 } else { 1.055 * lr.powf(1.0 / 2.4) - 0.055 };
         worst = worst.max((exact * 255.0 - v as f64).abs());
     }
-    assert!(
-        worst <= 1.0,
-        "the 12-bit LUT is {worst:.2} codes from the exact curve at worst"
-    );
+    assert!(worst <= 1.0, "the 12-bit LUT is {worst:.2} codes from the exact curve at worst");
 }
 
 #[test]
 fn test_color_info_on_disk_matches_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("p3.jpg");
-    std::fs::write(
-        &p,
-        jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0)),
-    )
-    .unwrap();
+    std::fs::write(&p, jpeg_with_icc(32, 32, &icc_profile(Some("Display P3"), P3_RED, 0))).unwrap();
     let from_disk = image_viewer::color_info(Path::new(&p));
     let from_bytes = jpeg(&std::fs::read(&p).unwrap());
     assert_eq!(from_disk.space, from_bytes.space);
@@ -662,11 +587,7 @@ fn test_a_heif_profile_is_classified_like_any_other() {
     // The real shape of the problem: no description, primaries only. This is 170
     // of the 200 wide-gamut files in a phone backup, so a path that needs `desc`
     // would be a path that does not work on real files.
-    let info = heif(&heif_fixtures::heif_with_icc(&icc_profile(
-        None,
-        P3_RED,
-        0,
-    )));
+    let info = heif(&heif_fixtures::heif_with_icc(&icc_profile(None, P3_RED, 0)));
     assert_eq!(info.space, ColorSpace::WideGamut);
     assert_eq!(info.description, "", "the fixture has no desc tag");
     assert_eq!(info.red_primaries, Some([P3_RED.0, P3_RED.1, P3_RED.2]));
@@ -678,11 +599,8 @@ fn test_a_heif_profile_is_classified_like_any_other() {
 
     // A named sRGB profile behaves as it does everywhere else, including being
     // worth a confirming line: "checked, needs nothing" beats silence.
-    let tagged = heif(&heif_fixtures::heif_with_icc(&icc_profile(
-        Some("sRGB IEC61966-2.1"),
-        SRGB_RED,
-        0,
-    )));
+    let tagged =
+        heif(&heif_fixtures::heif_with_icc(&icc_profile(Some("sRGB IEC61966-2.1"), SRGB_RED, 0)));
     assert_eq!(tagged.space, ColorSpace::Srgb);
     assert!(tagged.panel_line().is_some());
 }
@@ -725,17 +643,9 @@ fn test_a_corrupt_heif_claims_nothing_about_its_colour() {
 
     for (what, bytes) in cases {
         let info = heif(&bytes);
-        assert_eq!(
-            info.space,
-            ColorSpace::NotInspected,
-            "{what}: reported {:?}",
-            info.space
-        );
+        assert_eq!(info.space, ColorSpace::NotInspected, "{what}: reported {:?}", info.space);
         assert!(
-            matches!(
-                info.space,
-                ColorSpace::NotInspected | ColorSpace::Unknown
-            ),
+            matches!(info.space, ColorSpace::NotInspected | ColorSpace::Unknown),
             "{what}: a container we cannot parse is not evidence of any space"
         );
     }
@@ -752,14 +662,8 @@ fn test_scan_colour_audits_a_whole_folder() {
     // Natural order is the contract, and these names are chosen so a lexical
     // sort would produce a different answer (`IMG_10` before `IMG_2`).
     for (name, bytes) in [
-        (
-            "IMG_10.jpg",
-            jpeg_with_icc(16, 16, &icc_profile(None, P3_RED, 0)),
-        ),
-        (
-            "IMG_2.jpg",
-            jpeg_with_icc(16, 16, &icc_profile(Some("sRGB IEC61966-2.1"), SRGB_RED, 0)),
-        ),
+        ("IMG_10.jpg", jpeg_with_icc(16, 16, &icc_profile(None, P3_RED, 0))),
+        ("IMG_2.jpg", jpeg_with_icc(16, 16, &icc_profile(Some("sRGB IEC61966-2.1"), SRGB_RED, 0))),
         ("b.heic", heif_fixtures::heif_with_nclx_display_p3()),
     ] {
         std::fs::write(dir.join(name), bytes).unwrap();
@@ -769,10 +673,8 @@ fn test_scan_colour_audits_a_whole_folder() {
     std::fs::write(dir.join("raw.cbz"), b"PK\x03\x04").unwrap();
 
     let found = image_viewer::scan_colour(dir);
-    let names: Vec<String> = found
-        .iter()
-        .map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
+    let names: Vec<String> =
+        found.iter().map(|(p, _)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
     assert_eq!(
         names,
         vec!["b.heic", "IMG_2.jpg", "IMG_10.jpg"],
@@ -781,11 +683,7 @@ fn test_scan_colour_audits_a_whole_folder() {
     );
 
     let space_of = |name: &str| {
-        found
-            .iter()
-            .find(|(p, _)| p.file_name().unwrap() == name)
-            .map(|(_, i)| i.space)
-            .unwrap()
+        found.iter().find(|(p, _)| p.file_name().unwrap() == name).map(|(_, i)| i.space).unwrap()
     };
     assert_eq!(space_of("IMG_2.jpg"), ColorSpace::Srgb);
     assert_eq!(space_of("IMG_10.jpg"), ColorSpace::WideGamut);

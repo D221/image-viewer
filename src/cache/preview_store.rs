@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    encode_png, needs_refine, normalized, portable_dir, prune_cache, thumb_stamp, Animation, ColorInfo,
-    ColorSpace, ImageData, PreviewAndFull, ThumbStamp, FAST_FULL_MAX_PIXELS, PNG_IEND,
+    encode_png, needs_refine, normalized, portable_dir, prune_cache, thumb_stamp, Animation,
+    ColorInfo, ColorSpace, ImageData, PreviewAndFull, ThumbStamp, FAST_FULL_MAX_PIXELS, PNG_IEND,
     RESIZE_PX_FLOOR,
 };
 // ---------------------------------------------------------------------------
@@ -79,7 +79,8 @@ const PREVIEW_MAGIC: [u8; 4] = *b"IVPV";
 const PREVIEW_HEADER_VERSION: u8 = 1;
 
 /// The fixed part of the header, before the three variable-length strings.
-const PREVIEW_HEADER_FIXED: usize = 4 + 1 + 3 + 4 * 2 + 8 * 2 + 4 + 4 * 2 + 2 + 4 * 2 + 4 + 1 + 1 + 2 + 4 + 12 + 2 * 3;
+const PREVIEW_HEADER_FIXED: usize =
+    4 + 1 + 3 + 4 * 2 + 8 * 2 + 4 + 4 * 2 + 2 + 4 * 2 + 4 + 1 + 1 + 2 + 4 + 12 + 2 * 3;
 
 /// How much of an entry is read to decide whether it may be used.
 ///
@@ -102,14 +103,9 @@ pub fn preview_store_root() -> PathBuf {
         return dir.join("previews");
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        PathBuf::from(local)
-            .join("image-viewer")
-            .join("previews")
+        PathBuf::from(local).join("image-viewer").join("previews")
     } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home)
-            .join(".cache")
-            .join("image-viewer")
-            .join("previews")
+        PathBuf::from(home).join(".cache").join("image-viewer").join("previews")
     } else {
         PathBuf::from("image-viewer-previews")
     }
@@ -117,8 +113,7 @@ pub fn preview_store_root() -> PathBuf {
 
 /// On/off for the whole store, so a user who wants the viewer to write nothing
 /// outside its config folder can say so. Mirrors the cell cache's switch.
-static PREVIEW_STORE_ON: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static PREVIEW_STORE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 pub fn set_preview_store(on: bool) {
     PREVIEW_STORE_ON.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -176,7 +171,8 @@ fn encode_preview_header(h: &PreviewHeader) -> Vec<u8> {
     let space_len = u16::try_from(data_space.len()).unwrap_or(u16::MAX);
     let primaries = h.meta.colour.red_primaries.unwrap_or([0, 0, 0]);
     let has_primaries = u8::from(h.meta.colour.red_primaries.is_some());
-    let mut b = Vec::with_capacity(PREVIEW_HEADER_FIXED + path.len() + desc.len() + data_space.len());
+    let mut b =
+        Vec::with_capacity(PREVIEW_HEADER_FIXED + path.len() + desc.len() + data_space.len());
     b.extend_from_slice(&PREVIEW_MAGIC);
     b.push(PREVIEW_HEADER_VERSION);
     b.extend_from_slice(&[0u8; 3]);
@@ -283,11 +279,7 @@ fn decode_preview_header(bytes: &[u8]) -> Option<(PreviewHeader, &[u8])> {
                     description: desc,
                     profile_bytes: profile_bytes as usize,
                     data_space,
-                    red_primaries: if has_primaries == 1 {
-                        Some(primaries)
-                    } else {
-                        None
-                    },
+                    red_primaries: if has_primaries == 1 { Some(primaries) } else { None },
                 },
             },
             path,
@@ -367,13 +359,7 @@ pub fn read_cached_preview(
     // show, and a source smaller than the display is never re-decoded for it.
     let preview_long = header.width.max(header.height);
     let source_long = header.meta.orig.0.max(header.meta.orig.1);
-    if needs_refine(
-        preview_long,
-        source_long,
-        header.meta.decoded_for,
-        target,
-        RESIZE_PX_FLOOR,
-    ) {
+    if needs_refine(preview_long, source_long, header.meta.decoded_for, target, RESIZE_PX_FLOOR) {
         return None;
     }
     // Now the payload, and only now.
@@ -504,11 +490,9 @@ fn maybe_trim_preview_store(root: &Path) {
         return;
     }
     let root = root.to_path_buf();
-    let _ = std::thread::Builder::new()
-        .name("iv-preview-trim".into())
-        .spawn(move || {
-            prune_cache(&root, PREVIEW_STORE_MAX_BYTES);
-        });
+    let _ = std::thread::Builder::new().name("iv-preview-trim".into()).spawn(move || {
+        prune_cache(&root, PREVIEW_STORE_MAX_BYTES);
+    });
 }
 
 /// A preview waiting to be encoded and stored.
@@ -538,19 +522,17 @@ pub fn start_preview_store() {
     let _ = PREVIEW_STORE_TX.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::sync_channel::<PreviewJob>(PREVIEW_STORE_QUEUE);
         let root = preview_store_root();
-        let _ = std::thread::Builder::new()
-            .name("iv-preview-store".into())
-            .spawn(move || {
-                while let Ok(job) = rx.recv() {
-                    let data = ImageData {
-                        width: job.width,
-                        height: job.height,
-                        rgba: job.rgba,
-                        load_time: std::time::Duration::ZERO,
-                    };
-                    write_cached_preview(&root, &job.path, job.page, job.meta, &data);
-                }
-            });
+        let _ = std::thread::Builder::new().name("iv-preview-store".into()).spawn(move || {
+            while let Ok(job) = rx.recv() {
+                let data = ImageData {
+                    width: job.width,
+                    height: job.height,
+                    rgba: job.rgba,
+                    load_time: std::time::Duration::ZERO,
+                };
+                write_cached_preview(&root, &job.path, job.page, job.meta, &data);
+            }
+        });
         tx
     });
 }
@@ -577,11 +559,9 @@ pub(crate) fn store_preview(job: PreviewJob) {
 /// something to do on the thread that paints.
 pub fn clear_preview_store() {
     let root = preview_store_root();
-    let _ = std::thread::Builder::new()
-        .name("iv-preview-clear".into())
-        .spawn(move || {
-            let _ = std::fs::remove_dir_all(&root);
-        });
+    let _ = std::thread::Builder::new().name("iv-preview-clear".into()).spawn(move || {
+        let _ = std::fs::remove_dir_all(&root);
+    });
 }
 
 /// Whether this decode's preview is worth storing.
@@ -602,7 +582,8 @@ pub fn preview_is_storeable(
     orig: Option<(u32, u32)>,
     full: Option<&ImageData>,
     anim: Option<&Animation>,
-) -> bool {    if full.is_some() || anim.is_some() {
+) -> bool {
+    if full.is_some() || anim.is_some() {
         return false;
     }
     match orig {

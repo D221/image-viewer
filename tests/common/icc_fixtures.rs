@@ -48,14 +48,11 @@ pub fn icc_profile(desc: Option<&str>, red: (i32, i32, i32), pad_to: usize) -> V
         pad_data.resize(pad_to, b' ');
     }
 
-    let tags: Vec<(&[u8; 4], &Vec<u8>)> = [
-        (b"desc" as &[u8; 4], &desc_data),
-        (b"rXYZ", &xyz_data),
-        (b"text", &pad_data),
-    ]
-    .into_iter()
-    .filter(|(_, d)| !d.is_empty())
-    .collect();
+    let tags: Vec<(&[u8; 4], &Vec<u8>)> =
+        [(b"desc" as &[u8; 4], &desc_data), (b"rXYZ", &xyz_data), (b"text", &pad_data)]
+            .into_iter()
+            .filter(|(_, d)| !d.is_empty())
+            .collect();
 
     // 128-byte header, u32 tag count, then a 12-byte-per-tag table.
     let table_len = 132 + tags.len() * 12;
@@ -74,7 +71,7 @@ pub fn icc_profile(desc: Option<&str>, red: (i32, i32, i32), pad_to: usize) -> V
     out[16..20].copy_from_slice(b"RGB "); // data colour space
     out[20..24].copy_from_slice(b"XYZ "); // PCS
     out[36..40].copy_from_slice(b"acsp"); // profile file signature
-    // D50 illuminant, as ICC profiles store it.
+                                          // D50 illuminant, as ICC profiles store it.
     out[68..72].copy_from_slice(&0x0000_F6D6u32.to_be_bytes());
     out[72..76].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     out[76..80].copy_from_slice(&0x0000_D32Du32.to_be_bytes());
@@ -170,10 +167,7 @@ pub fn png_with_iccp(w: u32, h: u32, profile: &[u8], keyword: &str) -> Vec<u8> {
     chunk.extend_from_slice(&crc32(&crc_input).to_be_bytes());
 
     // Insert before the first IDAT.
-    let idat = png
-        .windows(4)
-        .position(|w| w == b"IDAT")
-        .expect("png has IDAT");
+    let idat = png.windows(4).position(|w| w == b"IDAT").expect("png has IDAT");
     let mut out = png[..idat].to_vec();
     out.extend_from_slice(&chunk);
     out.extend_from_slice(&png[idat..]);

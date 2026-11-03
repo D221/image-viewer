@@ -47,10 +47,9 @@ fn dispatch_region() -> String {
 /// that was not there.
 fn dispatch_region_in(src: &str) -> String {
     let anchor = "if !typing && self.capturing.is_none() {";
-    let start = src
-        .find(anchor)
-        .expect("the key-dispatch block is gone; update this test to match")
-        + anchor.len();
+    let start =
+        src.find(anchor).expect("the key-dispatch block is gone; update this test to match")
+            + anchor.len();
     let mut depth = 1i32;
     let mut end = src.len();
     for (i, b) in src.as_bytes()[start..].iter().enumerate() {
@@ -98,9 +97,7 @@ fn collect_src(dir: &std::path::Path, texts: &mut Vec<String>) {
 /// closing brace and runs on until the file's own braces happen to balance - and
 /// a scan like that passes with the thing it is looking for deleted.
 fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
         + sig.len();
     let mut depth = 0i32;
     let mut end = None;
@@ -173,9 +170,7 @@ fn code_only(src: &str) -> String {
 /// User overrides can move any of these (that is the feature), but the
 /// shipped default a fresh install gets is what this pins.
 fn bound_bare(letter: char) -> bool {
-    KEY_ACTIONS.iter().any(|(_, chord, _)| {
-        chord.len() == 1 && chord.chars().next() == Some(letter)
-    })
+    KEY_ACTIONS.iter().any(|(_, chord, _)| chord.len() == 1 && chord.chars().next() == Some(letter))
 }
 
 /// The bare letters this app allows, and what each one is allowed to do.
@@ -194,14 +189,8 @@ const BARE_LETTERS: &[(&str, &str)] = &[
          image itself, and the write is atomic. See the spec for why undo \
          deliberately does not cover it.",
     ),
-    (
-        "C",
-        "crop mode - a view transform, nothing written until Ctrl+S",
-    ),
-    (
-        "D",
-        "right-to-left page order - view only, a bool in config.json",
-    ),
+    ("C", "crop mode - a view transform, nothing written until Ctrl+S"),
+    ("D", "right-to-left page order - view only, a bool in config.json"),
     ("E", "reveal the containing folder in Explorer - read-only"),
     ("F", "toggle fit-view mode - view only"),
     ("G", "toggle the gallery grid - view only"),
@@ -217,10 +206,7 @@ const BARE_LETTERS: &[(&str, &str)] = &[
     ("P", "toggle the right (settings) pane - view only"),
     ("R", "rescan the folder - read-only"),
     ("T", "fit the window to the picture - view only"),
-    (
-        "W",
-        "set as desktop wallpaper - writes, but to the OS, never to your photos",
-    ),
+    ("W", "set as desktop wallpaper - writes, but to the OS, never to your photos"),
     (
         "X",
         "toggle one page between single and double - writes only to spreads.json \
@@ -239,10 +225,7 @@ fn no_unexpected_bare_letter_shortcuts() {
         region.contains("crop_key") || region.contains("step("),
         "the key-dispatch block no longer looks like the key-dispatch block:\n{region}"
     );
-    assert!(
-        source().contains("Key::Delete"),
-        "expected Delete to still be bound"
-    );
+    assert!(source().contains("Key::Delete"), "expected Delete to still be bound");
     // The manga controls have to be *dispatched* inside this block, which is what
     // makes them stand down while the filter box has focus. Their handlers are named
     // rather than their keys, because the keys are read in the `ctx.input` tuple above
@@ -331,10 +314,7 @@ fn no_unexpected_bare_letter_shortcuts() {
          reader 'fixing' it.\nBody was:\n{d}"
     );
     for (sig, what) in [
-        (
-            "fn nudge_lead_lone(&mut self, by: i32, ctx: &Context)",
-            "O / Shift+O",
-        ),
+        ("fn nudge_lead_lone(&mut self, by: i32, ctx: &Context)", "O / Shift+O"),
         ("fn toggle_cursor_shape(&mut self, ctx: &Context)", "X"),
     ] {
         let body = fn_body(&whole, sig);
@@ -351,10 +331,7 @@ fn no_unexpected_bare_letter_shortcuts() {
         );
     }
 
-    let allowed: Vec<char> = BARE_LETTERS
-        .iter()
-        .map(|(k, _)| k.chars().next().unwrap())
-        .collect();
+    let allowed: Vec<char> = BARE_LETTERS.iter().map(|(k, _)| k.chars().next().unwrap()).collect();
     for letter in 'A'..='Z' {
         if !bound_bare(letter) {
             continue;
@@ -433,14 +410,8 @@ fn move_and_copy_are_still_reachable_just_not_by_key() {
         !m_body.contains("transfer_current") && !m_body.contains("delete_current"),
         "`M` reaches a file-writing action."
     );
-    for action in [
-        "transfer_current(ctx, false)",
-        "transfer_current(ctx, true)",
-    ] {
-        assert!(
-            src.contains(action),
-            "{action} is gone - the button should still work"
-        );
+    for action in ["transfer_current(ctx, false)", "transfer_current(ctx, true)"] {
+        assert!(src.contains(action), "{action} is gone - the button should still work");
     }
     // And no key may reach a file-writing action through the dispatch at all.
     let region = dispatch_region();
@@ -481,11 +452,7 @@ fn only_delete_reaches_the_recycle_bin() {
     //    and matching is exact everywhere, so no modifier combo reaches it.
     //    (The old text counted `key_pressed(Key::Delete)` lines; reads now go
     //    through the resolver, so the default table is where this lives.)
-    assert_eq!(
-        default_binding("del"),
-        "Delete",
-        "del must default to a bare Delete"
-    );
+    assert_eq!(default_binding("del"), "Delete", "del must default to a bare Delete");
 
     // 2. In the dispatch, `Del` reaches `delete_current` and nothing between the
     //    two is another condition. Read as an exact shape rather than by looking
@@ -503,10 +470,7 @@ fn only_delete_reaches_the_recycle_bin() {
          longer reaches the Recycle Bin directly:\n{after}"
     );
     assert!(
-        after
-            .trim_start_matches('{')
-            .trim_start()
-            .starts_with("self.delete_current(ctx);"),
+        after.trim_start_matches('{').trim_start().starts_with("self.delete_current(ctx);"),
         "`if del` does not call `delete_current` next, so whatever it does call is the \
          thing one stray keypress reaches:\n{after}"
     );
@@ -529,10 +493,7 @@ fn only_delete_reaches_the_recycle_bin() {
         );
         from = at + 1;
     }
-    assert!(
-        seen >= 1,
-        "the Delete button is gone - it should still work"
-    );
+    assert!(seen >= 1, "the Delete button is gone - it should still work");
 
     // 4. And no bare letter names the call on the line that reads it.
     for (letter, why) in BARE_LETTERS {
@@ -563,8 +524,19 @@ fn the_buttons_do_not_advertise_keys_that_are_gone() {
         );
     }
     for hint in [
-        "(Ctrl+S)", "(Ctrl+C)", "(Ctrl+P)", "(Ctrl+Shift", "(Del)", "(Space)", "(Home)",
-        "(End)", "(Enter)", "(F11)", "(Num", "(Comma)", "(Period)",
+        "(Ctrl+S)",
+        "(Ctrl+C)",
+        "(Ctrl+P)",
+        "(Ctrl+Shift",
+        "(Del)",
+        "(Space)",
+        "(Home)",
+        "(End)",
+        "(Enter)",
+        "(F11)",
+        "(Num",
+        "(Comma)",
+        "(Period)",
     ] {
         for (n, line) in src.lines().enumerate() {
             let line = line.trim();
@@ -606,17 +578,11 @@ fn ctrl_c_is_read_from_the_copy_event_and_not_from_a_key() {
     // the handler below is written around.
     let ctx = egui::Context::default();
     let mut out = ctx.run_ui(
-        egui::RawInput {
-            events: vec![egui::Event::Copy],
-            ..Default::default()
-        },
+        egui::RawInput { events: vec![egui::Event::Copy], ..Default::default() },
         |ctx| {
             let copy_seen = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
             let key_seen = ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.command);
-            assert!(
-                copy_seen,
-                "egui no longer surfaces Event::Copy in InputState"
-            );
+            assert!(copy_seen, "egui no longer surfaces Event::Copy in InputState");
             assert!(
                 !key_seen,
                 "egui now DOES deliver a C key press for the copy chord, so the \

@@ -5,7 +5,6 @@
 //! so `image_viewer::name` keeps working as it did. See `AGENTS.md` and
 //! `tests/source_size.rs`.
 
-
 /// One navigation input, **named** rather than answered.
 ///
 /// The point of the type is that there is nowhere else to put the question. A caller
@@ -101,4 +100,3 @@ pub fn fill_scale(natural: (f32, f32), area: (f32, f32)) -> f32 {
     }
     (area.0 / w).max(area.1 / h).clamp(1e-4, 8.0)
 }
-

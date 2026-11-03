@@ -39,9 +39,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        Fixture {
-            dir: tempfile::tempdir().unwrap(),
-        }
+        Fixture { dir: tempfile::tempdir().unwrap() }
     }
     fn root(&self) -> PathBuf {
         self.dir.path().join("cache")
@@ -165,10 +163,7 @@ fn a_cell_of_a_non_jpeg_and_the_main_view_agree_on_the_pixels() {
             (view.preview.width, view.preview.height),
             "{w}x{h}: cell and view disagree on size"
         );
-        assert_eq!(
-            cell.rgba, view.preview.rgba,
-            "{w}x{h}: cell and view disagree on pixels"
-        );
+        assert_eq!(cell.rgba, view.preview.rgba, "{w}x{h}: cell and view disagree on pixels");
     }
 }
 
@@ -177,12 +172,7 @@ fn a_cell_of_a_non_jpeg_and_the_main_view_agree_on_the_pixels() {
 fn png(w: u32, h: u32) -> Vec<u8> {
     let mut img = image::RgbaImage::from_pixel(w, h, image::Rgba([90, 120, 200, 255]));
     for (x, y, px) in img.enumerate_pixels_mut() {
-        *px = image::Rgba([
-            (x % 251) as u8,
-            (y % 241) as u8,
-            (x.wrapping_mul(y) % 200) as u8,
-            255,
-        ]);
+        *px = image::Rgba([(x % 251) as u8, (y % 241) as u8, (x.wrapping_mul(y) % 200) as u8, 255]);
     }
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(img)
@@ -208,10 +198,7 @@ fn a_cell_of_a_non_jpeg_keeps_nothing_at_source_size() {
     assert!(cell.width.max(cell.height) <= CELL, "{}x{}", cell.width, cell.height);
 
     let view = load_image_preview_full(&p, CELL).unwrap();
-    assert!(
-        view.full.is_some(),
-        "the main view must still ride on the full decode"
-    );
+    assert!(view.full.is_some(), "the main view must still ride on the full decode");
 }
 
 #[test]
@@ -515,10 +502,7 @@ fn a_damaged_entry_is_a_miss_rather_than_a_panic() {
 
     for (what, bytes) in damaged {
         f.put_entry_bytes(&p, &bytes);
-        assert!(
-            read_cached_thumbnail(&f.root(), &p, CELL).is_none(),
-            "{what} must be a miss"
-        );
+        assert!(read_cached_thumbnail(&f.root(), &p, CELL).is_none(), "{what} must be a miss");
     }
 
     // And the good entry still works, so the damage above was not simply deleting
@@ -643,23 +627,16 @@ fn a_trim_removes_the_oldest_entries_and_stops_under_the_cap() {
     assert!(left <= total / 4, "left {left} of {total}, cap was {}", total / 4);
     assert!(left < total, "a trim under its cap must delete something");
     let survivors: u64 = made.iter().filter(|(p, _)| p.exists()).map(|(_, l)| *l).sum();
-    assert_eq!(
-        survivors, left,
-        "reported bytes must match the files actually left"
-    );
+    assert_eq!(survivors, left, "reported bytes must match the files actually left");
     assert!(
         made[19].0.exists() && !made[0].0.exists(),
         "the newest entry must survive and the oldest must not"
     );
     // Every survivor is newer than every victim.
-    let newest_victim = made
-        .iter()
-        .position(|(p, _)| !p.exists())
-        .expect("some entries were removed");
-    let oldest_survivor = made
-        .iter()
-        .rposition(|(p, _)| p.exists())
-        .expect("some entries survived");
+    let newest_victim =
+        made.iter().position(|(p, _)| !p.exists()).expect("some entries were removed");
+    let oldest_survivor =
+        made.iter().rposition(|(p, _)| p.exists()).expect("some entries survived");
     assert!(
         oldest_survivor > newest_victim,
         "survivors up to {oldest_survivor} must all be newer than the last victim {newest_victim}"
@@ -760,10 +737,7 @@ fn the_cache_dirs_announce_themselves_to_windows_search() {
         );
         // The mark adds, never replaces: the directory bit (whatever else the
         // file system set) must survive the SetFileAttributesW round-trip.
-        assert!(
-            attrs & 0x10 != 0,
-            "{d:?} must still be a directory after the mark"
-        );
+        assert!(attrs & 0x10 != 0, "{d:?} must still be a directory after the mark");
     }
 
     // A second write into the same directories (their entries are rewritten on
@@ -850,10 +824,7 @@ mod shell_cache {
         // The case that matters: the shell often draws into a 32-bit bitmap whose
         // fourth byte is left at zero, and honouring it paints the cell blank -
         // which reads as a decode that failed, not as this.
-        assert_eq!(
-            bgra_to_rgba(&[1, 2, 3, 0, 4, 5, 6, 0]),
-            [3, 2, 1, 255, 6, 5, 4, 255]
-        );
+        assert_eq!(bgra_to_rgba(&[1, 2, 3, 0, 4, 5, 6, 0]), [3, 2, 1, 255, 6, 5, 4, 255]);
     }
 
     #[test]
@@ -885,10 +856,7 @@ mod shell_cache {
         // the measured behaviour, not a guess: the shell returns what its cache
         // holds, so a 32px entry comes back 32x24 for a 256px ask.
         for smear in [(32, 24), (48, 36), (96, 72)] {
-            assert!(
-                !shell_cell_is_usable(smear, CELL),
-                "{smear:?} is a smear at {CELL}"
-            );
+            assert!(!shell_cell_is_usable(smear, CELL), "{smear:?} is a smear at {CELL}");
         }
         for fine in [(128, 96), (256, 192), (1024, 768)] {
             assert!(shell_cell_is_usable(fine, CELL), "{fine:?} is usable at {CELL}");
@@ -963,10 +931,7 @@ mod shell_cache {
         // property the whole feature rests on: the call in front of the decode
         // may never *cause* an extraction.
         for round in 0..3 {
-            assert!(
-                shell_thumbnail(&p, CELL).is_none(),
-                "round {round}: a miss must stay a miss"
-            );
+            assert!(shell_thumbnail(&p, CELL).is_none(), "round {round}: a miss must stay a miss");
         }
         // And the entry appears only when something extracts, which is what makes
         // the three misses above evidence about the flag rather than about the
@@ -1074,7 +1039,10 @@ mod shell_cache {
     /// own decode, so "a shell cell is never cached" is a byte-offset fact.
     #[test]
     fn a_grid_cell_asks_our_cache_then_the_shell_then_decodes() {
-        let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cache/shell_thumb.rs")).unwrap();
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cache/shell_thumb.rs"),
+        )
+        .unwrap();
         let body = fn_body(&src, "load_grid_thumbnail");
 
         let cache = body.find("read_cached_thumbnail").expect("our cache is asked");
@@ -1094,10 +1062,7 @@ mod shell_cache {
         // Every shell arm hands its cell back rather than caching it...
         for (i, _) in body.match_indices("shell_cell(") {
             let arm = &body[i..(i + 120).min(body.len())];
-            assert!(
-                arm.contains("Ok(data)"),
-                "the shell's cell is what the cell becomes: {arm:?}"
-            );
+            assert!(arm.contains("Ok(data)"), "the shell's cell is what the cell becomes: {arm:?}");
             assert!(
                 !arm.contains("write_cached_thumbnail"),
                 "a shell cell is never written into our own cache: {arm:?}"

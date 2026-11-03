@@ -29,8 +29,8 @@
 //! of the 109 tests is still here.
 
 use image_viewer::{
-    anchor_of, lone, next_anchor, next_turn, pairable, prev_anchor, prev_turn, shape_of,
-    turn_len, Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape, LEAD_LONE_DEFAULT,
+    anchor_of, lone, next_anchor, next_turn, pairable, prev_anchor, prev_turn, shape_of, turn_len,
+    Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape, LEAD_LONE_DEFAULT,
 };
 
 use proptest::prelude::*;
@@ -56,7 +56,8 @@ use spreads_fixtures::*;
 /// and `{5}` are only both true of the page being wide being 5.
 #[test]
 fn a_turn_runs_cover_pairs_a_wide_page_then_pairs_again() {
-    let g = TestGallery::one_doc(vec![Single, Single, Single, Single, Single, Double, Single, Single]);
+    let g =
+        TestGallery::one_doc(vec![Single, Single, Single, Single, Single, Double, Single, Single]);
     let lead = 1;
 
     assert_eq!(g.flat_of(&g.anchors(lead)), vec![0, 1, 3, 5, 6]);
@@ -95,17 +96,8 @@ fn a_turn_runs_cover_pairs_a_wide_page_then_pairs_again() {
 fn any_gallery() -> impl Strategy<Value = (TestGallery, u32)> {
     (1usize..=12, 0u32..=2, any::<bool>()).prop_flat_map(|(len, lead, looping)| {
         proptest::collection::vec(any::<bool>(), len).prop_map(move |wide| {
-            let shapes = wide
-                .into_iter()
-                .map(|d| if d { Double } else { Single })
-                .collect();
-            (
-                TestGallery {
-                    docs: vec![shapes],
-                    loop_back: looping,
-                },
-                lead,
-            )
+            let shapes = wide.into_iter().map(|d| if d { Double } else { Single }).collect();
+            (TestGallery { docs: vec![shapes], loop_back: looping }, lead)
         })
     })
 }
@@ -331,10 +323,7 @@ fn a_wide_page_never_shares_a_turn() {
 /// protecting.
 #[test]
 fn a_turn_straddles_a_page_boundary() {
-    let g = TestGallery::docs(vec![
-        vec![Single, Double],
-        vec![Single, Single, Single],
-    ]);
+    let g = TestGallery::docs(vec![vec![Single, Double], vec![Single, Single, Single]]);
     assert_eq!(g.flat_of(&g.anchors(0)), vec![0, 1, 2, 4]);
     assert_eq!(g.turns(0), vec![vec![0], vec![1], vec![2, 3], vec![4]]);
 
@@ -428,10 +417,8 @@ fn nothing_moves_past_either_end_when_looping_is_off() {
 fn a_gallery_steps_without_wrapping_whatever_loop_back_says() {
     use image_viewer::{Gallery, PagePos as P};
     let dir = tempfile::tempdir().unwrap();
-    let paths: Vec<std::path::PathBuf> = ["a.jpg", "b.jpg", "c.jpg"]
-        .iter()
-        .map(|n| dir.path().join(n))
-        .collect();
+    let paths: Vec<std::path::PathBuf> =
+        ["a.jpg", "b.jpg", "c.jpg"].iter().map(|n| dir.path().join(n)).collect();
     for p in &paths {
         std::fs::write(p, b"not really a jpeg").unwrap();
     }
@@ -484,10 +471,7 @@ fn a_gallery_steps_without_wrapping_whatever_loop_back_says() {
 /// one place instead of in the pairing.
 #[test]
 fn a_looping_gallery_truncates_its_last_turn_and_still_wraps() {
-    let g = TestGallery {
-        docs: vec![vec![Single, Single, Single, Single]],
-        loop_back: true,
-    };
+    let g = TestGallery { docs: vec![vec![Single, Single, Single, Single]], loop_back: true };
     assert_eq!(g.turns(0), vec![vec![0, 1], vec![2, 3]], "no turn straddles the seam");
     assert_eq!(g.flat_of(&g.anchors(0)), vec![0, 2]);
 
@@ -518,10 +502,7 @@ fn a_looping_gallery_truncates_its_last_turn_and_still_wraps() {
 fn a_one_page_gallery_is_a_turn_of_one_however_it_loops() {
     for looping in [false, true] {
         for shapes in [vec![Single], vec![Double]] {
-            let g = TestGallery {
-                docs: vec![shapes],
-                loop_back: looping,
-            };
+            let g = TestGallery { docs: vec![shapes], loop_back: looping };
             let only = g.page_at(0).unwrap();
             assert_eq!(turn_len(only, 0, &g), 1, "looping {looping} over {g:?}");
             assert_eq!(g.turns(0), vec![vec![0]], "looping {looping} over {g:?}");
@@ -579,9 +560,8 @@ impl PageCtx for WithOverrides<'_> {
 /// ends at the last turn, so neither guard is reached by a correct implementation
 /// Ã¢â‚¬â€ they are here so a wrong one fails.
 fn tiling(ctx: &dyn PageCtx, lead_lone: u32) -> Vec<Vec<usize>> {
-    let flat = |p: PagePos| {
-        PageCtx::flat(ctx, p).expect("every page count in these fixtures is set")
-    };
+    let flat =
+        |p: PagePos| PageCtx::flat(ctx, p).expect("every page count in these fixtures is set");
     let mut out: Vec<Vec<usize>> = Vec::new();
     let mut cur = PagePos { index: 0, page: 0 };
     for _ in 0..256 {
@@ -625,13 +605,7 @@ fn an_override_beats_the_detector() {
     let mut gal = gallery_of(&[page.clone()], &[4]);
     gal.set_loop_back(false);
     for p in 0..4u32 {
-        gal.note_shapes(
-            ImgKey {
-                path: page.clone(),
-                page: p,
-            },
-            (800, 1200),
-        );
+        gal.note_shapes(ImgKey { path: page.clone(), page: p }, (800, 1200));
     }
 
     let plain = GallerySpreads::default();

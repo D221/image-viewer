@@ -11,8 +11,8 @@
 //! already fell into once.
 
 use image_viewer::{
-    wallpaper_target, wide_gamut_conversion, ColorSpace, color_info, load_image,
-    convert_wide_gamut_rgba, set_wide_gamut_conversion,
+    color_info, convert_wide_gamut_rgba, load_image, set_wide_gamut_conversion, wallpaper_target,
+    wide_gamut_conversion, ColorSpace,
 };
 
 /// Restores `wide_gamut_conversion` to its previous value when dropped.
@@ -30,8 +30,8 @@ fn untagged_jpeg(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     std::fs::write(
         &p,
         &[
-            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
-            0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
         ],
     )
     .unwrap();
@@ -55,10 +55,7 @@ fn wallpaper_target_keeps_the_original_for_untagged_jpeg_when_conversion_is_on()
     let dir = tempfile::tempdir().unwrap();
     let p = untagged_jpeg(dir.path(), "photo.jpg");
     let target = wallpaper_target(&p, dir.path(), false);
-    assert_eq!(
-        target, p,
-        "an untagged JPEG is not WideGamut, so conversion does not apply"
-    );
+    assert_eq!(target, p, "an untagged JPEG is not WideGamut, so conversion does not apply");
 }
 
 #[test]

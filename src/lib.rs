@@ -1,7 +1,6 @@
 //! Core logic for the image viewer, kept separate from the GUI so it can be
 //! unit-tested, benchmarked, and fuzz-tested.
 
-
 /// The sidecar path for an image, or `None` inside an archive.
 ///
 /// Appends `.xmp` (`photo.png` becomes `photo.png.xmp`) so files sharing a
@@ -29,8 +28,7 @@ pub fn sidecar_path(image: &Path) -> Option<PathBuf> {
 /// the app, so it must be copied out first. Everything else can be handed to
 /// the shell as-is.
 pub fn wallpaper_target(image: &Path, folder: &Path, in_archive: bool) -> PathBuf {
-    let converted = wide_gamut_conversion()
-        && color_info(image).space == ColorSpace::WideGamut;
+    let converted = wide_gamut_conversion() && color_info(image).space == ColorSpace::WideGamut;
     if in_archive || converted {
         let ext = image
             .extension()
@@ -43,8 +41,8 @@ pub fn wallpaper_target(image: &Path, folder: &Path, in_archive: bool) -> PathBu
 }
 
 use nom_exif::{ExifTag, URational};
-use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -56,7 +54,6 @@ use image::{DynamicImage, GenericImageView, RgbaImage};
 pub fn load_image_preview(path: &Path, preview_max_dim: u32) -> Result<ImageData, LoadError> {
     load_image(path, preview_max_dim.min(512))
 }
-
 
 // ---------------------------------------------------------------------------
 // The modules
@@ -105,4 +102,3 @@ pub use watch::*;
 
 pub mod gallery;
 pub use gallery::*;
-

@@ -53,7 +53,9 @@ pub(crate) fn archive_member_name(raw: &str) -> Option<String> {
     let safe: String = name
         .chars()
         .map(|c| {
-            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20 {
+            if matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                || (c as u32) < 0x20
+            {
                 '_'
             } else {
                 c
@@ -128,12 +130,11 @@ impl DropCopyPlan {
     /// Trusting the flag would mean a plan made before a 500 MB copy cannot be
     /// wrong about it; re-checking cannot.
     pub fn materialise(&self, src: &Path) -> Result<DropCopy, String> {
-        let want = std::fs::metadata(src)
-            .map_err(|e| format!("{}: {e}", src.display()))?
-            .len();
+        let want = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?.len();
         let reused = copy_is_current(&self.file, want);
         if !reused {
-            std::fs::create_dir_all(&self.dir).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+            std::fs::create_dir_all(&self.dir)
+                .map_err(|e| format!("{}: {e}", self.dir.display()))?;
             // Re-owning must be idempotent, and `copy` writes through an existing
             // destination rather than refusing it. Removing first is what makes a
             // second drop of the same file a clean overwrite instead of leaving a
@@ -142,11 +143,7 @@ impl DropCopyPlan {
             let _ = std::fs::remove_file(&self.file);
             std::fs::copy(src, &self.file).map_err(|e| format!("{}: {e}", self.file.display()))?;
         }
-        Ok(DropCopy {
-            dir: self.dir.clone(),
-            file: self.file.clone(),
-            reused,
-        })
+        Ok(DropCopy { dir: self.dir.clone(), file: self.file.clone(), reused })
     }
 }
 
@@ -177,16 +174,10 @@ pub fn plan_drop_copy(src: &Path) -> Result<DropCopyPlan, String> {
     if !meta.is_file() {
         return Err(format!("{} is not a file", src.display()));
     }
-    let name = src
-        .file_name()
-        .ok_or_else(|| format!("{} has no file name", src.display()))?;
+    let name = src.file_name().ok_or_else(|| format!("{} has no file name", src.display()))?;
     let dir = drop_copy_dir(src, &meta);
     let file = dir.join(name);
-    Ok(DropCopyPlan {
-        reuse: copy_is_current(&file, meta.len()),
-        dir,
-        file,
-    })
+    Ok(DropCopyPlan { reuse: copy_is_current(&file, meta.len()), dir, file })
 }
 
 /// Take a copy of a file that the app cannot expect to still be there, and say
@@ -279,10 +270,7 @@ pub fn drop_copy_dir(src: &Path, meta: &std::fs::Metadata) -> PathBuf {
     src.hash(&mut h);
     meta.modified().ok().map(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).hash(&mut h);
     meta.len().hash(&mut h);
-    std::env::temp_dir()
-        .join("image-viewer")
-        .join("drop")
-        .join(format!("{:016x}", h.finish()))
+    std::env::temp_dir().join("image-viewer").join("drop").join(format!("{:016x}", h.finish()))
 }
 
 /// Drop the copies this app owns. **Every failure is swallowed on purpose**:
@@ -333,8 +321,8 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
 pub fn extract_7z(archive: &Path, dest: &Path) -> Result<(usize, usize), String> {
     use sevenz_rust2::ArchiveReader;
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let mut reader = ArchiveReader::open(archive, sevenz_rust2::Password::empty())
-        .map_err(|e| e.to_string())?;
+    let mut reader =
+        ArchiveReader::open(archive, sevenz_rust2::Password::empty()).map_err(|e| e.to_string())?;
     let mut extracted = 0;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut names: Vec<(String, bool)> = Vec::new();
@@ -478,11 +466,7 @@ pub(crate) fn verify_extracted_image(path: &Path) -> Result<bool, std::io::Error
 /// rar — so the caller can say how many and why rather than showing a short
 /// gallery with no explanation.
 pub fn extract_archive(archive: &Path, dest: &Path) -> Result<(usize, usize), String> {
-    let ext = archive
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = archive.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     match ext.as_str() {
         "zip" | "cbz" => extract_zip(archive, dest),
         "7z" => extract_7z(archive, dest),
@@ -517,11 +501,7 @@ pub fn extract_archive(archive: &Path, dest: &Path) -> Result<(usize, usize), St
 /// `None` for anything that cannot be read: the caller has a path, not a
 /// problem to solve, and the error belongs at open time.
 pub fn archive_image_count(archive: &Path) -> Option<usize> {
-    let ext = archive
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = archive.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     match ext.as_str() {
         "zip" | "cbz" => {
             let f = std::fs::File::open(archive).ok()?;
@@ -665,4 +645,3 @@ pub fn archive_image_count(archive: &Path) -> Option<usize> {
 // never which side; a wrong guess costs a pairing, not a broken picture. A
 // user override beats the detector outright, which is why `PageCtx` asks for one
 // separately instead of folding it into the dimensions.
-

@@ -14,8 +14,8 @@
 //! are only names.
 
 use image_viewer::{
-    last_anchor, prev_turn, shape_of, turn_len, turn_partner, Gallery, ImgKey, PageCtx,
-    PagePos, Shape, LEAD_LONE_DEFAULT,
+    last_anchor, prev_turn, shape_of, turn_len, turn_partner, Gallery, ImgKey, PageCtx, PagePos,
+    Shape, LEAD_LONE_DEFAULT,
 };
 
 use Shape::Double;
@@ -75,10 +75,7 @@ fn a_step_forward_advances_a_whole_turn() {
     );
     assert_eq!(
         turn_partner(cover.page_pos(), LEAD_LONE_DEFAULT, &cover),
-        Some(ImgKey {
-            path: cover.files[2].clone(),
-            page: 0
-        }),
+        Some(ImgKey { path: cover.files[2].clone(), page: 0 }),
         "and its other half is the third file: every file here is one page, so the \
          turn's second page is a page number of 0 in a different file"
     );
@@ -110,10 +107,7 @@ fn a_step_backward_returns_to_the_previous_turn_and_not_the_previous_page() {
         PagePos { index: 0, page: 0 },
         "back to the anchor of the previous turn"
     );
-    assert!(
-        !step_backward(&mut gal, lead),
-        "and no turn before the first one, with looping off"
-    );
+    assert!(!step_backward(&mut gal, lead), "and no turn before the first one, with looping off");
     assert_eq!(gal.page_pos(), PagePos { index: 0, page: 0 }, "which did not move the cursor");
 
     let mut cover = turns_gallery(&[1; 8]);
@@ -221,15 +215,23 @@ fn navigating_a_full_round_returns_to_the_start() {
     for (lead, anchors, last_anchor_pos) in [
         (
             0u32,
-            vec![PagePos { index: 0, page: 0 }, PagePos { index: 2, page: 0 },
-                 PagePos { index: 4, page: 0 }, PagePos { index: 6, page: 0 }],
+            vec![
+                PagePos { index: 0, page: 0 },
+                PagePos { index: 2, page: 0 },
+                PagePos { index: 4, page: 0 },
+                PagePos { index: 6, page: 0 },
+            ],
             PagePos { index: 6, page: 0 },
         ),
         (
             LEAD_LONE_DEFAULT,
-            vec![PagePos { index: 0, page: 0 }, PagePos { index: 1, page: 0 },
-                 PagePos { index: 3, page: 0 }, PagePos { index: 5, page: 0 },
-                 PagePos { index: 7, page: 0 }],
+            vec![
+                PagePos { index: 0, page: 0 },
+                PagePos { index: 1, page: 0 },
+                PagePos { index: 3, page: 0 },
+                PagePos { index: 5, page: 0 },
+                PagePos { index: 7, page: 0 },
+            ],
             PagePos { index: 7, page: 0 },
         ),
     ] {
@@ -387,10 +389,7 @@ fn a_multi_page_document_is_navigated_by_turn_too() {
     );
     assert_eq!(
         turn_partner(gal.page_pos(), lead, &gal),
-        Some(ImgKey {
-            path: gal.files[1].clone(),
-            page: 0
-        }),
+        Some(ImgKey { path: gal.files[1].clone(), page: 0 }),
         "and its other half is the next file's first page"
     );
     assert_eq!(
@@ -437,10 +436,7 @@ fn removing_the_cursor_page_leaves_its_partner_a_turn_of_one() {
     assert_eq!(turn_len(gal.page_pos(), lead, &gal), 2, "the cursor's turn has two pages");
     assert_eq!(
         turn_partner(gal.page_pos(), lead, &gal),
-        Some(ImgKey {
-            path: partner.clone(),
-            page: 0
-        }),
+        Some(ImgKey { path: partner.clone(), page: 0 }),
         "and the partner is the other file's first page"
     );
 
@@ -461,11 +457,7 @@ fn removing_the_cursor_page_leaves_its_partner_a_turn_of_one() {
         1,
         "so it takes a turn of its own: alone on screen, not stranded"
     );
-    assert_eq!(
-        turn_partner(gal.page_pos(), lead, &gal),
-        None,
-        "with nothing left to pair with"
-    );
+    assert_eq!(turn_partner(gal.page_pos(), lead, &gal), None, "with nothing left to pair with");
     assert!(
         !step_forward(&mut gal, lead),
         "and one page left is one turn, so with looping off there is no next turn either"

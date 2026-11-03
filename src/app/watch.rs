@@ -248,8 +248,7 @@ impl MyApp {
         if self.zip_archive.is_some() {
             return; // archives: the extracted temp dir is stable
         }
-        let mut fresh: HashMap<PathBuf, Stamp> =
-            HashMap::with_capacity(self.gallery.files.len());
+        let mut fresh: HashMap<PathBuf, Stamp> = HashMap::with_capacity(self.gallery.files.len());
         let mut changed: Vec<PathBuf> = Vec::new();
         for p in &self.gallery.files {
             let now = Stamp::of(p);
@@ -284,5 +283,4 @@ impl MyApp {
             || self.cur.as_ref().is_some_and(|c| c.path == p)
             || self.failed.iter().any(|(q, _)| q.path == p)
     }
-
 }

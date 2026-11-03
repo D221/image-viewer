@@ -82,7 +82,11 @@ fn a_lone_page_anchors_its_zoom_on_itself() {
             (slot[0] + slot[2] * 0.5, slot[1] + slot[3] * 0.5),
             "rtl={rtl}: the middle of the page's own slot, which is what the zoom measures from"
         );
-        assert_eq!(spread_centre(PANEL, &pages, scale, rtl, false).0, expected_x, "rtl={rtl}: pinned");
+        assert_eq!(
+            spread_centre(PANEL, &pages, scale, rtl, false).0,
+            expected_x,
+            "rtl={rtl}: pinned"
+        );
         assert_eq!(
             spread_centre(PANEL, &pages, scale, rtl, false).1,
             200.0,
@@ -195,11 +199,8 @@ fn the_zoom_measures_from_the_content_centre_at_both_scales() {
     // **Comments are stripped first**, and that is not tidiness: the block quotes the
     // expression it replaced ("`anchor - panel.center()` is right only when..."), so
     // scanning the raw text would pass on the comment alone and mean nothing.
-    let code = body
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let code =
+        body.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
 
     assert!(
         code.contains("centre_at(scale)") && code.contains("centre_at(target_scale)"),
@@ -241,7 +242,9 @@ fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
 
     let central = fn_body(&src, "fn central(");
     assert!(
-        central.contains("tile_pages") && central.contains("page_rects[i]") && central.contains("rects[i]"),
+        central.contains("tile_pages")
+            && central.contains("page_rects[i]")
+            && central.contains("rects[i]"),
         "the tile loop is not ranging over the pages of the turn any more. It has to cut\n\
          each page from that page's own buffer at that page's own rect, or a zoomed\n\
          spread is sharp on one half and soft on the other - with the expensive decode\n\

@@ -54,10 +54,7 @@ impl TestGallery {
 
     /// One entry per file.
     pub fn docs(docs: Vec<Vec<Shape>>) -> Self {
-        TestGallery {
-            docs,
-            loop_back: false,
-        }
+        TestGallery { docs, loop_back: false }
     }
 
     /// How many pages the whole gallery has.
@@ -77,10 +74,7 @@ impl TestGallery {
         let mut seen = 0usize;
         for (index, doc) in self.docs.iter().enumerate() {
             if n < seen + doc.len() {
-                return Some(PagePos {
-                    index,
-                    page: (n - seen) as u32,
-                });
+                return Some(PagePos { index, page: (n - seen) as u32 });
             }
             seen += doc.len();
         }
@@ -139,10 +133,7 @@ impl TestGallery {
 
     /// Every turn in the gallery, as flat ordinals, in reading order.
     pub fn turns(&self, lead_lone: u32) -> Vec<Vec<usize>> {
-        self.anchors(lead_lone)
-            .iter()
-            .map(|&a| self.flat_of(&self.turn_at(a, lead_lone)))
-            .collect()
+        self.anchors(lead_lone).iter().map(|&a| self.flat_of(&self.turn_at(a, lead_lone))).collect()
     }
 }
 impl PageCtx for TestGallery {
@@ -224,10 +215,7 @@ impl PageCtx for TestGallery {
 /// A key the way `turn_partner` must build it: the document's path and the
 /// position's **own page number**, which is the half `ImgKey::first` throws away.
 pub fn key_of(index: usize, page: u32) -> ImgKey {
-    ImgKey {
-        path: std::path::PathBuf::from(format!("/vol/doc{index}.tiff")),
-        page,
-    }
+    ImgKey { path: std::path::PathBuf::from(format!("/vol/doc{index}.tiff")), page }
 }
 
 /// A gallery of `len` pages in one document, for the tests that only care about
@@ -292,13 +280,7 @@ pub fn turns_gallery(counts: &[u32]) -> Gallery {
 /// long way from a real page's 0.71, so "wide" and "portrait" are not in the same
 /// class by a hair.
 pub fn mark_wide(gal: &mut Gallery, index: usize, page: u32) {
-    gal.note_shapes(
-        ImgKey {
-            path: gal.files[index].clone(),
-            page,
-        },
-        (2000, 1400),
-    );
+    gal.note_shapes(ImgKey { path: gal.files[index].clone(), page }, (2000, 1400));
 }
 
 /// One step forwards, as `MyApp::turn_forward` performs it.
@@ -392,10 +374,7 @@ pub fn walk_start_positions(gal: &Gallery) -> Vec<PagePos> {
         for (index, _) in gal.files.iter().enumerate() {
             let pages = gal.pages_in(index);
             if n < seen + pages as usize {
-                out.push(PagePos {
-                    index,
-                    page: (n - seen) as u32,
-                });
+                out.push(PagePos { index, page: (n - seen) as u32 });
                 break;
             }
             seen += pages as usize;
@@ -409,10 +388,7 @@ pub fn flat_position(gal: &Gallery, n: usize) -> PagePos {
     for (index, _) in gal.files.iter().enumerate() {
         let pages = gal.pages_in(index) as usize;
         if n < seen + pages {
-            return PagePos {
-                index,
-                page: (n - seen) as u32,
-            };
+            return PagePos { index, page: (n - seen) as u32 };
         }
         seen += pages;
     }
@@ -460,9 +436,7 @@ pub fn anchors_of(gal: &Gallery, lead_lone: u32) -> Vec<PagePos> {
 /// 60 KB later. **That was the second version of that test, and it passed with the
 /// call deleted.** Verified by mutation, not reasoned about.
 pub fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
         + sig.len();
     let mut depth = 0i32;
     let mut end = None;
@@ -479,7 +453,9 @@ pub fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
             _ => {}
         }
     }
-    let end = end.expect("could not find the end of the function: its braces do not \
-                         balance, or the signature changed shape. Update this test.");
+    let end = end.expect(
+        "could not find the end of the function: its braces do not \
+                         balance, or the signature changed shape. Update this test.",
+    );
     &src[start..end]
 }

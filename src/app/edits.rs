@@ -50,10 +50,13 @@ impl MyApp {
 
     /// Back to the file's own orientation, discarding the view transform.
     pub(crate) fn reset_transform(&mut self, ctx: &Context) {
-        self.apply_to_current(|r, p| {
-            r.reset(p);
-            Xform::Identity
-        }, ctx);
+        self.apply_to_current(
+            |r, p| {
+                r.reset(p);
+                Xform::Identity
+            },
+            ctx,
+        );
     }
 
     /// Shared tail for every view-transform button: re-fit and repaint.
@@ -250,9 +253,7 @@ impl MyApp {
 
     /// The transform of the image the user last asked for.
     pub(crate) fn current_xform(&self) -> Xform {
-        self.cur
-            .as_ref()
-            .map_or(Xform::Identity, |k| self.edits.xform(&k.path))
+        self.cur.as_ref().map_or(Xform::Identity, |k| self.edits.xform(&k.path))
     }
 
     /// The transform of the image actually *on screen*.
@@ -268,9 +269,7 @@ impl MyApp {
     /// `current_xform` is still what the *save* uses, because saving is about
     /// `cur` — the image the user last asked for — even if it is not up yet.
     pub(crate) fn shown_xform(&self) -> Xform {
-        self.shown
-            .as_ref()
-            .map_or(Xform::Identity, |k| self.edits.xform(&k.path))
+        self.shown.as_ref().map_or(Xform::Identity, |k| self.edits.xform(&k.path))
     }
 
     /// Per-frame housekeeping that must run before anything is drawn.
@@ -314,5 +313,4 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
             perf::counter(perf::C_DECODE_PANICS),
         );
     }
-
 }

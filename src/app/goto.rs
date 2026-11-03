@@ -38,7 +38,8 @@ impl MyApp {
         // Which file, if any, the user named. Taken before the `match` below
         // consumes `arg`, and excluding archives because those are extracted to a
         // temp folder and opened as a directory instead.
-        let named_file: Option<PathBuf> = arg.clone().filter(|a| a.is_file() && !is_archive_path(a));
+        let named_file: Option<PathBuf> =
+            arg.clone().filter(|a| a.is_file() && !is_archive_path(a));
         // An archive argument is extracted up front and opened as its temp dir.
         let mut zip_archive: Option<PathBuf> = None;
         let mut zip_temp: Option<PathBuf> = None;
@@ -50,11 +51,8 @@ impl MyApp {
                 // The default-folder arm below already skips it for that reason;
                 // this one did not, and on a cold cache a 1400-image folder paid
                 // ~300 ms for a list that was thrown away before the first frame.
-                let g = if config.load_all_on_startup {
-                    Gallery::empty()
-                } else {
-                    Gallery::new(&a)
-                };
+                let g =
+                    if config.load_all_on_startup { Gallery::empty() } else { Gallery::new(&a) };
                 (a, g)
             }
             Some(a) if a.is_file() && is_archive_path(&a) => {
@@ -114,27 +112,23 @@ impl MyApp {
             let files = match prefetched.take() {
                 Some((dir, rx)) if dir == folder => match rx.recv() {
                     Ok(files) => files,
-                    Err(_) => Self::sorted_scan(
-                        &folder,
-                        config.sort,
-                        config.sort_descending,
-                        recursive,
-                    ),
+                    Err(_) => {
+                        Self::sorted_scan(&folder, config.sort, config.sort_descending, recursive)
+                    }
                 },
                 _ => {
-                    let files = Self::sorted_scan(
-                        &folder,
-                        config.sort,
-                        config.sort_descending,
-                        recursive,
-                    );
+                    let files =
+                        Self::sorted_scan(&folder, config.sort, config.sort_descending, recursive);
                     files
                 }
             };
             gallery.index = image_viewer::startup_index(
                 &files,
                 named_file.as_deref(),
-                config.last_by_folder.get(&folder.to_string_lossy().to_string()).map(|s| s.as_str()),
+                config
+                    .last_by_folder
+                    .get(&folder.to_string_lossy().to_string())
+                    .map(|s| s.as_str()),
             );
             gallery.files = files;
         }
@@ -188,12 +182,8 @@ impl MyApp {
             shown_partner: None,
             full: None,
             full_due: None,
-            view: View {
-                fit: true,
-                scale: 1.0,
-                offset: Vec2::ZERO,
-            },
-                        error: None,
+            view: View { fit: true, scale: 1.0, offset: Vec2::ZERO },
+            error: None,
             notice: None,
             deleted_stack: Vec::new(),
             anim: None,
@@ -258,7 +248,7 @@ impl MyApp {
             zip_archive,
             zip_temp,
             archive_parent: None,
-            
+
             save_as: SaveAsState {
                 open: false,
                 dest: String::new(),
@@ -418,10 +408,7 @@ impl MyApp {
         self.cur = self
             .gallery
             .current()
-            .map(|p| ImgKey {
-                path: p.to_path_buf(),
-                page: self.gallery.current_page(),
-            });
+            .map(|p| ImgKey { path: p.to_path_buf(), page: self.gallery.current_page() });
         // Panning belongs to the picture it panned: a carried-over offset
         // shifts the new image by the old one's drag — black on one side,
         // clipped on the other — and no zoom readout looks wrong while it
@@ -469,12 +456,7 @@ impl MyApp {
         // Preloading hit rate: the new image already had a preview, so the
         // first pixel is free. If this counter stays low, the preload window
         // is aimed wrong.
-        if is_nav
-            && self
-                .cur
-                .as_ref()
-                .is_some_and(|c| self.previews.contains_key(c))
-        {
+        if is_nav && self.cur.as_ref().is_some_and(|c| self.previews.contains_key(c)) {
             perf::count(perf::C_PREVIEW_REUSED, 1);
         }
         self.error = None;
@@ -483,12 +465,7 @@ impl MyApp {
         // what the first attempt said rather than showing "Loading…" for a
         // job that will never run. The entry is cleared everywhere the
         // `failed` entry is, so this cannot outlive the failure it reports.
-        if let Some(msg) = self
-            .cur
-            .as_ref()
-            .and_then(|c| self.load_errors.get(c))
-            .cloned()
-        {
+        if let Some(msg) = self.cur.as_ref().and_then(|c| self.load_errors.get(c)).cloned() {
             self.error = Some(msg);
         }
         self.exif_info = None;
@@ -506,20 +483,17 @@ impl MyApp {
             && self
                 .cur
                 .as_ref()
-                .is_some_and(|c| {
-                    !is_archive_path(&c.path) && !self.previews.contains_key(c)
-                });
+                .is_some_and(|c| !is_archive_path(&c.path) && !self.previews.contains_key(c));
 
-        if let Some(name) = self
-            .cur
-            .as_ref()
-            .and_then(|p| p.path.file_name())
-            .and_then(|n| n.to_str())
+        if let Some(name) =
+            self.cur.as_ref().and_then(|p| p.path.file_name()).and_then(|n| n.to_str())
         {
             // "page 3 of 12" only when the file has more than one page, so a
             // normal photo's title is exactly what it always was.
             let title = match self.gallery.pages_in_current() {
-                n if n > 1 => format!("Image Viewer - {name}  ({}/{})", self.gallery.current_page() + 1, n),
+                n if n > 1 => {
+                    format!("Image Viewer - {name}  ({}/{})", self.gallery.current_page() + 1, n)
+                }
                 _ => format!("Image Viewer - {name}"),
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -744,5 +718,4 @@ impl MyApp {
         }
         moved
     }
-
 }

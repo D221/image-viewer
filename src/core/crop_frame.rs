@@ -147,4 +147,3 @@ pub fn constrain_to_aspect(
     cy = if corner.1 < anchor.1 { ay - dy } else { ay + dy };
     (ax.min(cx), ay.min(cy), ax.max(cx), ay.max(cy))
 }
-

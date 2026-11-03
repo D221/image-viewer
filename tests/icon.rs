@@ -23,11 +23,7 @@ fn the_badge_fills_the_bitmap() {
         icon::HALF
     );
     // The same check at the size that actually matters, a file list.
-    assert!(
-        icon::coverage(16) > 0.85,
-        "16px icon fills only {:.0}%",
-        icon::coverage(16)
-    );
+    assert!(icon::coverage(16) > 0.85, "16px icon fills only {:.0}%", icon::coverage(16));
 }
 
 #[test]
@@ -53,11 +49,7 @@ fn local_coordinates_really_span_minus_one_to_one() {
     // pixel is not yellow.
     let img = icon::render(256);
     let (cx, cy) = icon::canvas_of(0.45, -0.45);
-    let px = img.get_pixel(
-        (cx * 256.0).round() as u32,
-        (cy * 256.0).round() as u32,
-    )
-    .0;
+    let px = img.get_pixel((cx * 256.0).round() as u32, (cy * 256.0).round() as u32).0;
     assert_eq!(
         &px[..3],
         &[0xFF, 0xC5, 0x31],
@@ -84,10 +76,7 @@ fn both_ridges_reach_the_bottom_of_the_frame() {
     // the outermost rows and columns are transparent margin; sampling the very
     // last row finds nothing at all and looks like a missing ridge.
     let bottom = (256.0 * 0.95) as u32;
-    assert!(
-        img.get_pixel(128, bottom).0[3] > 8,
-        "test setup: row {bottom} is outside the badge"
-    );
+    assert!(img.get_pixel(128, bottom).0[3] > 8, "test setup: row {bottom} is outside the badge");
     let is = |x: u32, want: [u8; 3]| {
         let p = img.get_pixel(x, bottom).0;
         &p[..3] == &want
@@ -112,11 +101,7 @@ fn the_ico_holds_every_size_with_a_valid_directory() {
     let ico = icon::build_ico();
     assert_eq!(&ico[0..2], &[0, 0], "reserved");
     assert_eq!(&ico[2..4], &[1, 0], "type 1 = icon");
-    assert_eq!(
-        u16::from_le_bytes([ico[4], ico[5]]) as usize,
-        SIZES.len(),
-        "entry count"
-    );
+    assert_eq!(u16::from_le_bytes([ico[4], ico[5]]) as usize, SIZES.len(), "entry count");
     for (i, &size) in SIZES.iter().enumerate() {
         let e = 6 + i * 16;
         let dim = ico[e];
@@ -126,16 +111,9 @@ fn the_ico_holds_every_size_with_a_valid_directory() {
         let len = u32::from_le_bytes(ico[e + 8..e + 12].try_into().unwrap()) as usize;
         let off = u32::from_le_bytes(ico[e + 12..e + 16].try_into().unwrap()) as usize;
         assert!(len > 0, "entry {i} is empty");
-        assert!(
-            off + len <= ico.len(),
-            "entry {i} runs past the end of the file"
-        );
+        assert!(off + len <= ico.len(), "entry {i} runs past the end of the file");
         // PNG-compressed entries start with the PNG signature.
-        assert_eq!(
-            &ico[off..off + 4],
-            b"\x89PNG",
-            "entry {i} is not a PNG payload"
-        );
+        assert_eq!(&ico[off..off + 4], b"\x89PNG", "entry {i} is not a PNG payload");
     }
 }
 

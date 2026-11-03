@@ -65,9 +65,12 @@
 //! would be how the limit of the change got forgotten.
 
 use image::ImageEncoder as _;
-use std::io::Read;
-use image_viewer::{jpeg_comment, load_image_full, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader, Plan};
+use image_viewer::{
+    jpeg_comment, load_image_full, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader,
+    Plan,
+};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -134,8 +137,7 @@ fn fixture_dir_at(n: usize, w: u32, h: u32, quality: u8) -> PathBuf {
         }
         let mut out = std::io::Cursor::new(Vec::new());
         let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality);
-        enc.write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8)
-            .expect("write fixture");
+        enc.write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8).expect("write fixture");
         std::fs::write(&p, out.into_inner()).expect("write fixture");
     }
     dir
@@ -144,10 +146,8 @@ fn fixture_dir_at(n: usize, w: u32, h: u32, quality: u8) -> PathBuf {
 /// Mean file size of a fixture folder, in MB. Reported rather than assumed: the
 /// EXIF read is `fs::read`, so its cost is whatever this says it is.
 fn mean_mb(dir: &std::path::Path) -> f64 {
-    let v: Vec<u64> = files(dir)
-        .iter()
-        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-        .collect();
+    let v: Vec<u64> =
+        files(dir).iter().filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len())).collect();
     if v.is_empty() {
         return 0.0;
     }
@@ -256,10 +256,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
     let decode_ms = Arc::new(Mutex::new(Vec::<Delivery>::new()));
     let dm = decode_ms.clone();
     let loader = Loader::spawn(
-        std::thread::available_parallelism()
-            .map(|x| x.get())
-            .unwrap_or(2)
-            .clamp(2, 4),
+        std::thread::available_parallelism().map(|x| x.get()).unwrap_or(2).clamp(2, 4),
         tx,
         move |job: &Job| {
             let t0 = Instant::now();
@@ -285,41 +282,17 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
                         let _ = f.by_ref().take(262144).read_to_end(&mut head);
                         let _ = jpeg_comment(&head);
                     }
-                    Ok(Decoded {
-                        bytes: 0,
-                        below_target: false,
-                    })
+                    Ok(Decoded { bytes: 0, below_target: false })
                 }
                 _ => Err("benchmark only decodes previews and reads exif".to_string()),
             };
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let logged = out.clone();
-            dm.lock().unwrap().push((
-                job.path().to_path_buf(),
-                job.kind,
-                ms,
-                logged,
-            ));
-            (
-                Msg {
-                    path: job.path().to_path_buf(),
-                    kind: job.kind,
-                    ms,
-                    outcome: out,
-                },
-                true,
-            )
+            dm.lock().unwrap().push((job.path().to_path_buf(), job.kind, ms, logged));
+            (Msg { path: job.path().to_path_buf(), kind: job.kind, ms, outcome: out }, true)
         },
         |job: &Job, e: String| {
-            (
-                Msg {
-                    path: job.path().to_path_buf(),
-                    kind: job.kind,
-                    ms: 0.0,
-                    outcome: Err(e),
-                },
-                true,
-            )
+            (Msg { path: job.path().to_path_buf(), kind: job.kind, ms: 0.0, outcome: Err(e) }, true)
         },
         || {},
     );
@@ -358,13 +331,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
                         // Cancellation's entire reason to exist.
                         s.wasted_ms += ms;
                     }
-                    cache.insert(
-                        path.clone(),
-                        Cached {
-                            bytes: d.bytes,
-                            used: clock,
-                        },
-                    );
+                    cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                     if let Some(t) = pending_since.remove(&path) {
                         s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                     }
@@ -375,9 +342,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
                 }
             }
         }
-        s.peak_bytes = s
-            .peak_bytes
-            .max(cache.values().map(|c| c.bytes).sum::<usize>());
+        s.peak_bytes = s.peak_bytes.max(cache.values().map(|c| c.bytes).sum::<usize>());
         evict(&mut cache, &files, index, n, &mut clock);
 
         // 2. Look at the picture: cached, or a wait?
@@ -436,7 +401,16 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
             let chunk = slice.min(hold - waited);
             std::thread::sleep(chunk);
             waited += chunk;
-            take_delivery(&mut s, &rx, &decode_ms, &mut cache, &mut pending_since, &mut failed, &wanted, &mut clock);
+            take_delivery(
+                &mut s,
+                &rx,
+                &decode_ms,
+                &mut cache,
+                &mut pending_since,
+                &mut failed,
+                &wanted,
+                &mut clock,
+            );
         }
         index = (index + 1) % n;
         let _ = step;
@@ -467,13 +441,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
                 } else {
                     s.wasted_ms += ms;
                 }
-                cache.insert(
-                    path.clone(),
-                    Cached {
-                        bytes: d.bytes,
-                        used: clock,
-                    },
-                );
+                cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                 if let Some(t) = pending_since.remove(&path) {
                     s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -482,10 +450,7 @@ fn browse(dir: &std::path::Path, hold_ms: u64, exif: bool) -> Session {
         if left == 0 {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "the queue never drained: {left} outstanding"
-        );
+        assert!(Instant::now() < deadline, "the queue never drained: {left} outstanding");
         std::thread::sleep(Duration::from_millis(2));
     }
     s.wall_ms = t_start.elapsed().as_secs_f64() * 1000.0;
@@ -567,13 +532,7 @@ fn take_delivery(
                     // number cancellation exists to reduce.
                     s.wasted_ms += ms;
                 }
-                cache.insert(
-                    path.clone(),
-                    Cached {
-                        bytes: d.bytes,
-                        used: *clock,
-                    },
-                );
+                cache.insert(path.clone(), Cached { bytes: d.bytes, used: *clock });
                 if let Some(t) = pending_since.remove(&path) {
                     s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -654,14 +613,8 @@ fn real_photo_reads() {
 #[test]
 #[ignore = "benchmark; run with --ignored --nocapture"]
 fn browse_baseline() {
-    let n: usize = std::env::var("IV_BENCH_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
-    let runs: usize = std::env::var("IV_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
+    let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let runs: usize = std::env::var("IV_BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let dir = fixture_dir(n);
     let files = files(&dir);
     eprintln!(
@@ -670,7 +623,15 @@ fn browse_baseline() {
     );
     eprintln!(
         "  {:>6}  {:>8}  {:>9}  {:>9}  {:>8}  {:>8}  {:>10}  {:>9}  {:>9}",
-        "hold", "wall s", "ttfp p50", "ttfp p95", "wasted", "peak MB", "cache hit", "decode s", "below tgt"
+        "hold",
+        "wall s",
+        "ttfp p50",
+        "ttfp p95",
+        "wasted",
+        "peak MB",
+        "cache hit",
+        "decode s",
+        "below tgt"
     );
     eprintln!("  {}", "-".repeat(94));
 
@@ -683,10 +644,7 @@ fn browse_baseline() {
         for _ in 0..runs {
             s.push(browse(&dir, hold, false));
         }
-        let hits: Vec<f64> = s
-            .iter()
-            .map(|x| x.arrived_cached as f64 / n as f64 * 100.0)
-            .collect();
+        let hits: Vec<f64> = s.iter().map(|x| x.arrived_cached as f64 / n as f64 * 100.0).collect();
         let wasted: Vec<f64> = s
             .iter()
             .map(|x| {
@@ -738,7 +696,15 @@ fn idle_warmup(dir: &std::path::Path, hold_ms: u64, runs: usize) {
     );
     eprintln!(
         "  {:>5}  {:>5}  {:>9}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}",
-        "hold", "arm", "ttfp p50", "ttfp p95", "cache hit", "wasted %", "decode s", "peak MB", "wall s"
+        "hold",
+        "arm",
+        "ttfp p50",
+        "ttfp p95",
+        "cache hit",
+        "wasted %",
+        "decode s",
+        "peak MB",
+        "wall s"
     );
     eprintln!("  {}", "-".repeat(96));
 
@@ -760,18 +726,17 @@ fn idle_warmup(dir: &std::path::Path, hold_ms: u64, runs: usize) {
 
     let row = |arm: &str, s: &Vec<Session>| {
         let hits = med(s.iter().map(|x| x.arrived_cached as f64 / n as f64 * 100.0).collect());
-        let wasted = med(
-            s.iter()
-                .map(|x| {
-                    let total = x.useful_ms + x.wasted_ms;
-                    if total > 0.0 {
-                        x.wasted_ms / total * 100.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect(),
-        );
+        let wasted = med(s
+            .iter()
+            .map(|x| {
+                let total = x.useful_ms + x.wasted_ms;
+                if total > 0.0 {
+                    x.wasted_ms / total * 100.0
+                } else {
+                    0.0
+                }
+            })
+            .collect());
         eprintln!(
             "  {:>5}  {:>5}  {:>9.0}  {:>9.0}  {:>9.0}  {:>8.0}%  {:>6}  {:>9.2}  {:>9}",
             hold_ms,
@@ -805,10 +770,7 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
     let decode_ms = Arc::new(Mutex::new(Vec::<Delivery>::new()));
     let dm = decode_ms.clone();
     let loader = Loader::spawn(
-        std::thread::available_parallelism()
-            .map(|x| x.get())
-            .unwrap_or(2)
-            .clamp(2, 4),
+        std::thread::available_parallelism().map(|x| x.get()).unwrap_or(2).clamp(2, 4),
         tx,
         move |job: &Job| {
             let t0 = Instant::now();
@@ -827,41 +789,17 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
                         let _ = f.by_ref().take(262144).read_to_end(&mut head);
                         let _ = jpeg_comment(&head);
                     }
-                    Ok(Decoded {
-                        bytes: 0,
-                        below_target: false,
-                    })
+                    Ok(Decoded { bytes: 0, below_target: false })
                 }
                 _ => Err("benchmark only decodes previews and reads exif".to_string()),
             };
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let logged = out.clone();
-            dm.lock().unwrap().push((
-                job.path().to_path_buf(),
-                job.kind,
-                ms,
-                logged,
-            ));
-            (
-                Msg {
-                    path: job.path().to_path_buf(),
-                    kind: job.kind,
-                    ms,
-                    outcome: out,
-                },
-                true,
-            )
+            dm.lock().unwrap().push((job.path().to_path_buf(), job.kind, ms, logged));
+            (Msg { path: job.path().to_path_buf(), kind: job.kind, ms, outcome: out }, true)
         },
         |job: &Job, e: String| {
-            (
-                Msg {
-                    path: job.path().to_path_buf(),
-                    kind: job.kind,
-                    ms: 0.0,
-                    outcome: Err(e),
-                },
-                true,
-            )
+            (Msg { path: job.path().to_path_buf(), kind: job.kind, ms: 0.0, outcome: Err(e) }, true)
         },
         || {},
     );
@@ -920,13 +858,7 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
                         } else {
                             s.wasted_ms += ms;
                         }
-                        cache.insert(
-                            path.clone(),
-                            Cached {
-                                bytes: d.bytes,
-                                used: clock,
-                            },
-                        );
+                        cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                     }
                     Err(_e) => {
                         failed.insert((ImgKey::first(&path), Kind::Preview));
@@ -936,10 +868,7 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
             if left == 0 {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "idle warm-up never drained: {left} outstanding"
-            );
+            assert!(Instant::now() < deadline, "idle warm-up never drained: {left} outstanding");
             std::thread::sleep(Duration::from_millis(2));
         }
         clock = 0; // reset clock after idle phase for eviction fairness
@@ -965,13 +894,7 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
                     } else {
                         s.wasted_ms += ms;
                     }
-                    cache.insert(
-                        path.clone(),
-                        Cached {
-                            bytes: d.bytes,
-                            used: clock,
-                        },
-                    );
+                    cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                     if let Some(t) = pending_since.remove(&path) {
                         s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                     }
@@ -981,9 +904,7 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
                 }
             }
         }
-        s.peak_bytes = s
-            .peak_bytes
-            .max(cache.values().map(|c| c.bytes).sum::<usize>());
+        s.peak_bytes = s.peak_bytes.max(cache.values().map(|c| c.bytes).sum::<usize>());
         evict(&mut cache, &files, index, n, &mut clock);
 
         let cur = &files[index];
@@ -1023,7 +944,16 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
             let chunk = slice.min(hold - waited);
             std::thread::sleep(chunk);
             waited += chunk;
-            take_delivery(&mut s, &rx, &decode_ms, &mut cache, &mut pending_since, &mut failed, &wanted, &mut clock);
+            take_delivery(
+                &mut s,
+                &rx,
+                &decode_ms,
+                &mut cache,
+                &mut pending_since,
+                &mut failed,
+                &wanted,
+                &mut clock,
+            );
         }
         index = (index + 1) % n;
         let _ = step;
@@ -1047,13 +977,7 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
                 } else {
                     s.wasted_ms += ms;
                 }
-                cache.insert(
-                    path.clone(),
-                    Cached {
-                        bytes: d.bytes,
-                        used: clock,
-                    },
-                );
+                cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                 if let Some(t) = pending_since.remove(&path) {
                     s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -1074,14 +998,8 @@ fn browse_idle(dir: &std::path::Path, hold_ms: u64, idle: bool) -> Session {
 #[test]
 #[ignore = "benchmark; run with --ignored --nocapture"]
 fn idle_warmup_bench() {
-    let n: usize = std::env::var("IV_BENCH_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
-    let runs: usize = std::env::var("IV_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
+    let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let runs: usize = std::env::var("IV_BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let dir = fixture_dir(n);
 
     // Warm-up so first-touch page faults don't dominate.
@@ -1108,14 +1026,8 @@ fn idle_warmup_bench() {
 #[test]
 #[ignore = "benchmark; run with --ignored --nocapture"]
 fn exif_ab() {
-    let n: usize = std::env::var("IV_BENCH_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
-    let runs: usize = std::env::var("IV_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(9);
+    let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(24);
+    let runs: usize = std::env::var("IV_BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(9);
     let dir = fixture_dir_at(n, EXIF_W, EXIF_H, EXIF_QUALITY);
     let files = files(&dir);
     assert!(files.len() >= n, "fixture is short: {} of {n}", files.len());
@@ -1127,11 +1039,7 @@ fn exif_ab() {
     // Cost of one metadata read, and what it is worth next to a decode.
     let probe = browse(&dir, 400, true);
     let per_read = med(probe.exif_each.clone());
-    let per_decode = if probe.runs > 0 {
-        probe.decode_ms / probe.runs as f64
-    } else {
-        0.0
-    };
+    let per_decode = if probe.runs > 0 { probe.decode_ms / probe.runs as f64 } else { 0.0 };
     eprintln!(
         "\n  exif A/B: {} pictures at {EXIF_W}x{EXIF_H} q{EXIF_QUALITY} ({:.1} MB each), median of {runs} interleaved\n",
         files.len(),
@@ -1144,7 +1052,16 @@ fn exif_ab() {
     real_photo_reads();
     eprintln!(
         "  {:>5}  {:>4}  {:>9}  {:>9}  {:>9}  {:>8}  {:>6}  {:>9}  {:>7}  {:>7}",
-        "hold", "arm", "ttfp p50", "ttfp mean", "ttfp p95", "cache hit", "cached", "exif s", "wasted", "wall s"
+        "hold",
+        "arm",
+        "ttfp p50",
+        "ttfp mean",
+        "ttfp p95",
+        "cache hit",
+        "cached",
+        "exif s",
+        "wasted",
+        "wall s"
     );
     eprintln!("  {}", "-".repeat(96));
 
@@ -1170,18 +1087,17 @@ fn exif_ab() {
         }
         let row = |arm: &str, s: &Vec<Session>| {
             let hits = med(s.iter().map(|x| x.arrived_cached as f64 / n as f64 * 100.0).collect());
-            let wasted = med(
-                s.iter()
-                    .map(|x| {
-                        let total = x.useful_ms + x.wasted_ms;
-                        if total > 0.0 {
-                            x.wasted_ms / total * 100.0
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect(),
-            );
+            let wasted = med(s
+                .iter()
+                .map(|x| {
+                    let total = x.useful_ms + x.wasted_ms;
+                    if total > 0.0 {
+                        x.wasted_ms / total * 100.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect());
             eprintln!(
                 "  {:>5}  {:>4}  {:>9.0}  {:>9.0}  {:>9.0}  {:>8.0}%  {:>6}  {:>9.2}  {:>6.0}%  {:>7.2}",
                 hold,
@@ -1244,14 +1160,8 @@ fn exif_ab() {
 #[test]
 #[ignore = "benchmark; run with --ignored --nocapture"]
 fn thumb_cache_ab() {
-    let n: usize = std::env::var("IV_BENCH_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(24);
-    let runs: usize = std::env::var("IV_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
+    let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(24);
+    let runs: usize = std::env::var("IV_BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
     // 3000x2000 is the browse fixture's size and is deliberately *below* the size
     // that made this interesting: the point of the measurement is the ratio, and a
     // fixture big enough to take 700 ms per cell would make the benchmark take
@@ -1280,12 +1190,7 @@ fn thumb_cache_ab() {
         let t = Instant::now();
         for p in &list {
             let d = image_viewer::load_grid_thumbnail(p, 256).expect("cell must load");
-            assert!(
-                d.width.max(d.height) <= 256,
-                "a cell came back {}x{}",
-                d.width,
-                d.height
-            );
+            assert!(d.width.max(d.height) <= 256, "a cell came back {}x{}", d.width, d.height);
         }
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         let bytes = dir_bytes(&image_viewer::thumb_cache_root());
@@ -1399,10 +1304,7 @@ fn shell_cache_cells() {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.is_file()
-                && std::fs::metadata(p)
-                    .map(|m| m.len() > 8_000_000)
-                    .unwrap_or(false)
+            p.is_file() && std::fs::metadata(p).map(|m| m.len() > 8_000_000).unwrap_or(false)
         })
         .collect();
     big.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
@@ -1475,9 +1377,8 @@ fn drop_fixture(dir: &std::path::Path, mb: u64) -> PathBuf {
     // One 1 MiB block of varied bytes, written `mb` times: a run of zeroes would
     // let the filesystem's compression or sparse handling make the copy look
     // faster than a photograph's bytes would.
-    let block: Vec<u8> = (0..1024 * 1024u32)
-        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
-        .collect();
+    let block: Vec<u8> =
+        (0..1024 * 1024u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
     for _ in 0..mb {
         std::io::Write::write_all(&mut w, &block).expect("write the drop fixture");
     }
@@ -1515,10 +1416,7 @@ fn drop_fixture(dir: &std::path::Path, mb: u64) -> PathBuf {
 #[test]
 #[ignore = "benchmark; run with --ignored --nocapture"]
 fn drop_copy_ab() {
-    let runs: usize = std::env::var("IV_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(7);
+    let runs: usize = std::env::var("IV_BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(7);
     let dir = tempfile::tempdir().expect("temp dir");
     eprintln!(
         "\n  drop copy A/B: {} MB files, median of {runs} interleaved rounds, \
@@ -1568,11 +1466,7 @@ fn drop_copy_ab() {
         let _ = reuse(usize::MAX);
         let _ = reuse(usize::MAX);
 
-        let mut a = Arms {
-            cold: Vec::new(),
-            repeat: Vec::new(),
-            ctl: Vec::new(),
-        };
+        let mut a = Arms { cold: Vec::new(), repeat: Vec::new(), ctl: Vec::new() };
         for i in 0..runs {
             // Alternate which arm goes first, so neither systematically inherits
             // the other's warm-up — and put the control between them, so a drift
@@ -1595,10 +1489,7 @@ fn drop_copy_ab() {
             a.repeat.push(r.0);
             a.ctl.push(k.0);
         }
-        eprintln!(
-            "  {:>5} MB   {:>10}  {:>10}  {:>10}   (ms)",
-            "size", "cold", "repeat", "ctl"
-        );
+        eprintln!("  {:>5} MB   {:>10}  {:>10}  {:>10}   (ms)", "size", "cold", "repeat", "ctl");
         eprintln!("  {}", "-".repeat(46));
         for i in 0..runs {
             eprintln!(
@@ -1687,10 +1578,7 @@ fn browse_parametric(
     let decode_ms = Arc::new(Mutex::new(Vec::<Delivery>::new()));
     let dm = decode_ms.clone();
     let loader = Loader::spawn(
-        std::thread::available_parallelism()
-            .map(|x| x.get())
-            .unwrap_or(2)
-            .clamp(2, 4),
+        std::thread::available_parallelism().map(|x| x.get()).unwrap_or(2).clamp(2, 4),
         tx,
         move |job: &Job| {
             let t0 = Instant::now();
@@ -1703,10 +1591,7 @@ fn browse_parametric(
                     })
                     .map_err(|e| e.to_string()),
                 Kind::Full => load_image_full(job.path(), 0)
-                    .map(|r| Decoded {
-                        bytes: r.rgba.len(),
-                        below_target: false,
-                    })
+                    .map(|r| Decoded { bytes: r.rgba.len(), below_target: false })
                     .map_err(|e| e.to_string()),
                 Kind::Exif => {
                     let _ = nom_exif::read_exif(job.path());
@@ -1715,41 +1600,17 @@ fn browse_parametric(
                         let _ = f.by_ref().take(262144).read_to_end(&mut head);
                         let _ = jpeg_comment(&head);
                     }
-                    Ok(Decoded {
-                        bytes: 0,
-                        below_target: false,
-                    })
+                    Ok(Decoded { bytes: 0, below_target: false })
                 }
                 _ => Err("benchmark only decodes previews, full, and reads exif".to_string()),
             };
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             let logged = out.clone();
-            dm.lock().unwrap().push((
-                job.path().to_path_buf(),
-                job.kind,
-                ms,
-                logged,
-            ));
-            (
-                Msg {
-                    path: job.path().to_path_buf(),
-                    kind: job.kind,
-                    ms,
-                    outcome: out,
-                },
-                true,
-            )
+            dm.lock().unwrap().push((job.path().to_path_buf(), job.kind, ms, logged));
+            (Msg { path: job.path().to_path_buf(), kind: job.kind, ms, outcome: out }, true)
         },
         |job: &Job, e: String| {
-            (
-                Msg {
-                    path: job.path().to_path_buf(),
-                    kind: job.kind,
-                    ms: 0.0,
-                    outcome: Err(e),
-                },
-                true,
-            )
+            (Msg { path: job.path().to_path_buf(), kind: job.kind, ms: 0.0, outcome: Err(e) }, true)
         },
         || {},
     );
@@ -1784,13 +1645,7 @@ fn browse_parametric(
                     } else {
                         s.wasted_ms += ms;
                     }
-                    cache.insert(
-                        path.clone(),
-                        Cached {
-                            bytes: d.bytes,
-                            used: clock,
-                        },
-                    );
+                    cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                     if let Some(t) = pending_since.remove(&path) {
                         s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                     }
@@ -1800,9 +1655,7 @@ fn browse_parametric(
                 }
             }
         }
-        s.peak_bytes = s
-            .peak_bytes
-            .max(cache.values().map(|c| c.bytes).sum::<usize>());
+        s.peak_bytes = s.peak_bytes.max(cache.values().map(|c| c.bytes).sum::<usize>());
         evict_parametric(&mut cache, &files, index, n, &mut clock, cache_cap);
 
         let cur = &files[index];
@@ -1819,7 +1672,8 @@ fn browse_parametric(
 
         // Request full-res decode after full_dwell_ms has elapsed since first seen
         let want_full = if full_dwell_ms > 0 {
-            let since_pending = pending_full.get(cur).map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
+            let since_pending =
+                pending_full.get(cur).map(|t| t.elapsed()).unwrap_or(Duration::ZERO);
             since_pending >= Duration::from_millis(full_dwell_ms)
         } else {
             true
@@ -1891,13 +1745,7 @@ fn browse_parametric(
                 } else {
                     s.wasted_ms += ms;
                 }
-                cache.insert(
-                    path.clone(),
-                    Cached {
-                        bytes: d.bytes,
-                        used: clock,
-                    },
-                );
+                cache.insert(path.clone(), Cached { bytes: d.bytes, used: clock });
                 if let Some(t) = pending_since.remove(&path) {
                     s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -1926,10 +1774,8 @@ fn evict_parametric(
 ) {
     *clock += 1;
     while cache.len() > cap {
-        let protect: HashSet<&PathBuf> = (0..=6)
-            .map(|k| (index + n * 2 + k - 3) % n)
-            .filter_map(|i| files.get(i))
-            .collect();
+        let protect: HashSet<&PathBuf> =
+            (0..=6).map(|k| (index + n * 2 + k - 3) % n).filter_map(|i| files.get(i)).collect();
         let victim = cache
             .iter()
             .filter(|(p, _)| !protect.contains(*p))
@@ -1981,13 +1827,7 @@ fn take_delivery_parametric(
                 } else {
                     s.wasted_ms += ms;
                 }
-                cache.insert(
-                    path.clone(),
-                    Cached {
-                        bytes: d.bytes,
-                        used: *clock,
-                    },
-                );
+                cache.insert(path.clone(), Cached { bytes: d.bytes, used: *clock });
                 if let Some(t) = pending_since.remove(&path) {
                     s.ttfp_ms.push(t.elapsed().as_secs_f64() * 1000.0);
                 }
@@ -2013,29 +1853,30 @@ fn browse_parametric_row(
     let mut sessions = Vec::new();
     for _ in 0..runs {
         sessions.push(browse_parametric(
-            dir, hold_ms, radius, preload_budget_bytes, target_dim, cache_cap,
+            dir,
+            hold_ms,
+            radius,
+            preload_budget_bytes,
+            target_dim,
+            cache_cap,
             full_dwell_ms,
         ));
     }
-    let hits = med(
-        sessions
-            .iter()
-            .map(|x| x.arrived_cached as f64 / sessions[0].ttfp_ms.len().max(1) as f64 * 100.0)
-            .collect(),
-    );
-    let wasted = med(
-        sessions
-            .iter()
-            .map(|x| {
-                let total = x.useful_ms + x.wasted_ms;
-                if total > 0.0 {
-                    x.wasted_ms / total * 100.0
-                } else {
-                    0.0
-                }
-            })
-            .collect(),
-    );
+    let hits = med(sessions
+        .iter()
+        .map(|x| x.arrived_cached as f64 / sessions[0].ttfp_ms.len().max(1) as f64 * 100.0)
+        .collect());
+    let wasted = med(sessions
+        .iter()
+        .map(|x| {
+            let total = x.useful_ms + x.wasted_ms;
+            if total > 0.0 {
+                x.wasted_ms / total * 100.0
+            } else {
+                0.0
+            }
+        })
+        .collect());
     eprintln!(
         "  {:>6}  {:>5}  {:>12}  {:>9}  {:>9}  {:>9}  {:>9}  {:>8}  {:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
         hold_ms,
@@ -2080,20 +1921,15 @@ fn heuristic_header() {
 #[test]
 #[ignore = "benchmark; run with --ignored --nocapture"]
 fn heuristic_sweep() {
-    let n: usize = std::env::var("IV_BENCH_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
-    let runs: usize = std::env::var("IV_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
+    let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let runs: usize = std::env::var("IV_BENCH_RUNS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     let dir = fixture_dir(n);
     let files = files(&dir);
     assert!(files.len() >= n, "fixture is short: {} of {n}", files.len());
 
     // Warm-up so first-touch page faults don't dominate.
-    let _ = browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
+    let _ =
+        browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
 
     eprintln!(
         "\n  Heuristic sweep: {} pictures at {W}x{H}, {} images, median of {} runs",
@@ -2111,7 +1947,16 @@ fn heuristic_sweep() {
     eprintln!("  ## 1: Preload radius (how many neighbours to preload each side)");
     heuristic_header();
     for radius in [1usize, 2, 3, 5, 10] {
-        browse_parametric_row(&dir, 30, radius, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS, runs);
+        browse_parametric_row(
+            &dir,
+            30,
+            radius,
+            PRELOAD_BUDGET_BYTES,
+            PREVIEW_DIM,
+            CAP,
+            FULL_DWELL_MS,
+            runs,
+        );
     }
     eprintln!();
 
@@ -2119,7 +1964,16 @@ fn heuristic_sweep() {
     eprintln!("  ## 2: Preload budget (byte budget for neighbour preloads)");
     heuristic_header();
     for budget_mb in [64usize, 128, 256, 512, 1024] {
-        browse_parametric_row(&dir, 30, RADIUS, budget_mb as u64 * 1_048_576, PREVIEW_DIM, CAP, FULL_DWELL_MS, runs);
+        browse_parametric_row(
+            &dir,
+            30,
+            RADIUS,
+            budget_mb as u64 * 1_048_576,
+            PREVIEW_DIM,
+            CAP,
+            FULL_DWELL_MS,
+            runs,
+        );
     }
     eprintln!();
 
@@ -2127,7 +1981,16 @@ fn heuristic_sweep() {
     eprintln!("  ## 3: Preview target dimension (panel size in physical px)");
     heuristic_header();
     for target_dim in [1024u32, 2048, 4096, 8192] {
-        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, target_dim, CAP, FULL_DWELL_MS, runs);
+        browse_parametric_row(
+            &dir,
+            30,
+            RADIUS,
+            PRELOAD_BUDGET_BYTES,
+            target_dim,
+            CAP,
+            FULL_DWELL_MS,
+            runs,
+        );
     }
     eprintln!();
 
@@ -2135,7 +1998,16 @@ fn heuristic_sweep() {
     eprintln!("  ## 4: Preview cache cap (max entries in preview cache)");
     heuristic_header();
     for cap in [4usize, 8, 16, 32] {
-        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, cap, FULL_DWELL_MS, runs);
+        browse_parametric_row(
+            &dir,
+            30,
+            RADIUS,
+            PRELOAD_BUDGET_BYTES,
+            PREVIEW_DIM,
+            cap,
+            FULL_DWELL_MS,
+            runs,
+        );
     }
     eprintln!();
 
@@ -2143,7 +2015,16 @@ fn heuristic_sweep() {
     eprintln!("  ## 5: Hold time between steps (navigation speed)");
     heuristic_header();
     for hold_ms in [0u64, 15, 30, 60, 120, 250, 500] {
-        browse_parametric_row(&dir, hold_ms, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS, runs);
+        browse_parametric_row(
+            &dir,
+            hold_ms,
+            RADIUS,
+            PRELOAD_BUDGET_BYTES,
+            PREVIEW_DIM,
+            CAP,
+            FULL_DWELL_MS,
+            runs,
+        );
     }
     eprintln!();
 
@@ -2151,7 +2032,16 @@ fn heuristic_sweep() {
     eprintln!("  ## 6: Full dwell time (ms before starting full-res decode)");
     heuristic_header();
     for full_dwell_ms in [0u64, 60, 120, 250, 500, 1000] {
-        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, full_dwell_ms, runs);
+        browse_parametric_row(
+            &dir,
+            30,
+            RADIUS,
+            PRELOAD_BUDGET_BYTES,
+            PREVIEW_DIM,
+            CAP,
+            full_dwell_ms,
+            runs,
+        );
     }
     eprintln!();
 
@@ -2159,15 +2049,13 @@ fn heuristic_sweep() {
 }
 
 fn full_dwell_sweep(dir: &std::path::Path, runs: usize) {
-    let n: usize = std::env::var("IV_BENCH_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
+    let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
     let files = files(&dir);
     assert!(files.len() >= n, "fixture is short: {} of {n}", files.len());
 
     // Warm-up
-    let _ = browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
+    let _ =
+        browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
 
     eprintln!(
         "\n  Full dwell sweep: {} pictures at {W}x{H}, {} images, median of {} runs",
@@ -2192,7 +2080,16 @@ fn full_dwell_sweep(dir: &std::path::Path, runs: usize) {
     eprintln!("  {}", "-".repeat(120));
 
     for full_dwell_ms in [0u64, 60, 120, 250, 500, 1000] {
-        browse_parametric_row(&dir, 30, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, full_dwell_ms, runs);
+        browse_parametric_row(
+            &dir,
+            30,
+            RADIUS,
+            PRELOAD_BUDGET_BYTES,
+            PREVIEW_DIM,
+            CAP,
+            full_dwell_ms,
+            runs,
+        );
     }
     eprintln!();
 }

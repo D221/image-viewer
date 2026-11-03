@@ -1,5 +1,5 @@
-use image_viewer::{load_image, Gallery};
 use image::{DynamicImage, Rgb, RgbImage};
+use image_viewer::{load_image, Gallery};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -30,16 +30,12 @@ fn folder() -> &'static Path {
 
         // Big enough to take the DCT-scaled path, which is the branch this suite
         // existed to cover.
-        gradient(2400, 1600)
-            .save(dir.join("a.jpg"))
-            .expect("write a.jpg");
+        gradient(2400, 1600).save(dir.join("a.jpg")).expect("write a.jpg");
 
         // A PNG, and a PNG wearing a .jpg extension. Format detection is by
         // content and must stay that way: routing this one through a JPEG
         // decoder is the regression this file guards.
-        gradient(800, 600)
-            .save(dir.join("b.png"))
-            .expect("write b.png");
+        gradient(800, 600).save(dir.join("b.png")).expect("write b.png");
         std::fs::copy(dir.join("b.png"), dir.join("c.jpg")).expect("write c.jpg");
 
         tmp
@@ -55,12 +51,7 @@ fn folder() -> &'static Path {
 #[test]
 fn integration_every_file_in_a_folder_loads_with_a_consistent_buffer() {
     let gallery = Gallery::new(folder());
-    assert_eq!(
-        gallery.len(),
-        3,
-        "the scan missed a file: {:?}",
-        gallery.files
-    );
+    assert_eq!(gallery.len(), 3, "the scan missed a file: {:?}", gallery.files);
 
     for path in &gallery.files {
         let d = load_image(path, 1600).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -119,10 +110,7 @@ fn integration_an_empty_folder_is_a_gallery_not_a_panic() {
 
     // `next` on nothing used to be the way this suite found out it had no files.
     let mut gallery = gallery;
-    assert!(
-        !gallery.next(),
-        "next() on an empty gallery must report no move"
-    );
+    assert!(!gallery.next(), "next() on an empty gallery must report no move");
     assert!(!gallery.prev());
     assert!(load_image(&empty.path().join("nope.jpg"), 1600).is_err());
 }

@@ -17,10 +17,9 @@
 use image_viewer::{default_binding, nav_is_forward, NavInput};
 fn dispatch_region_in(src: &str) -> String {
     let anchor = "if !typing && self.capturing.is_none() {";
-    let start = src
-        .find(anchor)
-        .expect("the key-dispatch block is gone; update this test to match")
-        + anchor.len();
+    let start =
+        src.find(anchor).expect("the key-dispatch block is gone; update this test to match")
+            + anchor.len();
     let mut depth = 1i32;
     let mut end = src.len();
     for (i, b) in src.as_bytes()[start..].iter().enumerate() {
@@ -68,9 +67,7 @@ fn collect_src(dir: &std::path::Path, texts: &mut Vec<String>) {
 /// closing brace and runs on until the file's own braces happen to balance - and
 /// a scan like that passes with the thing it is looking for deleted.
 fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
+    let start = src.find(sig).unwrap_or_else(|| panic!("{sig} is gone; update this test to match"))
         + sig.len();
     let mut depth = 0i32;
     let mut end = None;
@@ -294,11 +291,7 @@ fn every_navigation_input_in_the_binary_asks_the_direction_rule() {
     // knows what the assertion is for.
     let src = code_only(&source());
 
-    for literal in [
-        "step(ctx, false)",
-        "step(&ctx, true)",
-        "step(&ctx, false)",
-    ] {
+    for literal in ["step(ctx, false)", "step(&ctx, true)", "step(&ctx, false)"] {
         assert!(
             !src.contains(literal),
             "`{literal}` decides a direction on its own. Every navigation input has to \
@@ -316,9 +309,8 @@ fn every_navigation_input_in_the_binary_asks_the_direction_rule() {
     // in the slideshow block rather than near any input. (`if self.slideshow`
     // alone is not a unique anchor â€” the status line and the settings button
     // read the same flag â€” so this anchors on the pacing call.)
-    let tick_at = src
-        .find("slideshow_due(")
-        .expect("the slideshow tick is gone; update this test to match");
+    let tick_at =
+        src.find("slideshow_due(").expect("the slideshow tick is gone; update this test to match");
     let tick = &src[tick_at..(tick_at + 500).min(src.len())];
     assert!(
         tick.contains("self.step(ctx, true)"),
@@ -326,12 +318,10 @@ fn every_navigation_input_in_the_binary_asks_the_direction_rule() {
     );
     let total = src.matches("step(ctx, true)").count();
     assert_eq!(
-        total, 1,
+        total,
+        1,
         "expected exactly one literal-direction step (the slideshow tick):\n{}",
-        src.lines()
-            .filter(|l| l.contains("step(ctx, true)"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        src.lines().filter(|l| l.contains("step(ctx, true)")).collect::<Vec<_>>().join("\n")
     );
 
     // `ui` must read the direction rather than decide it.
@@ -453,10 +443,9 @@ fn home_and_end_reach_a_turn_rather_than_a_file() {
 fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live() {
     let src = code_only(&source());
 
-    for (base, action, field) in [
-        ("Double page mode", "manga", "manga_mode"),
-        ("Right-to-left pages", "rtl", "manga_rtl"),
-    ] {
+    for (base, action, field) in
+        [("Double page mode", "manga", "manga_mode"), ("Right-to-left pages", "rtl", "manga_rtl")]
+    {
         assert!(
             src.contains(&format!("action_button_text(&self.config, \"{base}\", \"{action}\")")),
             "the settings panel no longer offers `{base}` with its live chord. The keys are how a reader \
@@ -473,10 +462,7 @@ fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live()
     // preference, restarts, and finds it gone has been told the wrong thing. Read out
     // of the panel's own text rather than counted across the file, because a
     // count-of-two would be satisfied by two saves in the renderer row.
-    let panel = src
-        .split("Panel::right(\"settings\")")
-        .nth(1)
-        .expect("the settings panel is gone");
+    let panel = src.split("Panel::right(\"settings\")").nth(1).expect("the settings panel is gone");
     assert_eq!(
         panel.matches("self.config.save(&self.config_path)").count() >= 2,
         true,
@@ -502,10 +488,7 @@ fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live()
     // ASCII only, because a missing glyph is a blank box rather than an error and
     // `tests/unit.rs::no_ui_text_uses_a_glyph_the_font_lacks` covers the files rather
     // than a list. Spelled out here so the check is next to the labels it is about.
-    for line in src
-        .lines()
-        .filter(|l| l.contains("Manga mode") || l.contains("Right-to-left"))
-    {
+    for line in src.lines().filter(|l| l.contains("Manga mode") || l.contains("Right-to-left")) {
         assert!(
             line.is_ascii(),
             "the manga settings labels must be ASCII: `line` has a non-ASCII character, and \
@@ -560,10 +543,7 @@ fn every_navigation_key_is_paired_with_the_input_it_is_supposed_to_mean() {
                 ("PageUp", "Previous"),
             ][..],
         ),
-        (
-            "NAV_BUTTONS",
-            &[("Extra2", "Next"), ("Extra1", "Previous")][..],
-        ),
+        ("NAV_BUTTONS", &[("Extra2", "Next"), ("Extra1", "Previous")][..]),
     ] {
         // Bounded by the closing `];` rather than by braces, because a `const` has
         // no braces of its own â€” `fn_body` would run to the end of the file and read
@@ -572,9 +552,8 @@ fn every_navigation_key_is_paired_with_the_input_it_is_supposed_to_mean() {
             .find(&format!("const {table}:"))
             .unwrap_or_else(|| panic!("{table} is gone; update this test to match"));
         let after = &src[at..];
-        let end = after
-            .find("];")
-            .unwrap_or_else(|| panic!("{table} is no longer a bracketed list"));
+        let end =
+            after.find("];").unwrap_or_else(|| panic!("{table} is no longer a bracketed list"));
         let body = &after[..end];
 
         // Only the entry lines. The declaration line itself also contains a comma
@@ -604,21 +583,15 @@ fn every_navigation_key_is_paired_with_the_input_it_is_supposed_to_mean() {
             expected.len()
         );
         for (key, input) in expected {
-            let (found_key, found_input) = found
-                .iter()
-                .find(|(k, _)| k == key)
-                .copied()
-                .unwrap_or_else(|| {
+            let (found_key, found_input) =
+                found.iter().find(|(k, _)| k == key).copied().unwrap_or_else(|| {
                     panic!(
                         "{table} has no entry for {key}. The table is the whole of which \
                          key means what, so a missing pair is a key that navigates to \
                          nothing rather than a test that cannot see it."
                     )
                 });
-            assert_eq!(
-                found_key, *key,
-                "{table}: found the wrong key where {key} was expected"
-            );
+            assert_eq!(found_key, *key, "{table}: found the wrong key where {key} was expected");
             assert_eq!(
                 found_input, *input,
                 "{table} binds {key} to the wrong meaning. This is the whole class of bug \
@@ -784,17 +757,9 @@ fn space_is_the_fit_toggle_and_not_a_navigation_key() {
     );
     // And the navigation table holds no Space pair â€” the fallback table is the
     // one place a copy of the old meaning could survive the rebind resolver.
-    let at = src
-        .find("const NAV_KEYS:")
-        .expect("NAV_KEYS is gone; update this test to match");
-    let body = &src[at..src[at..]
-        .find("];")
-        .expect("NAV_KEYS is no longer a bracketed list")
-        + at];
-    assert!(
-        !body.contains("Key::Space"),
-        "NAV_KEYS still binds Space to navigation: `{body}`"
-    );
+    let at = src.find("const NAV_KEYS:").expect("NAV_KEYS is gone; update this test to match");
+    let body = &src[at..src[at..].find("];").expect("NAV_KEYS is no longer a bracketed list") + at];
+    assert!(!body.contains("Key::Space"), "NAV_KEYS still binds Space to navigation: `{body}`");
 }
 
 /// Hold-to-browse resolves to the same direction as the press that started it.
