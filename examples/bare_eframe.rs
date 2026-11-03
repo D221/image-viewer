@@ -34,8 +34,8 @@
 
 fn main() -> eframe::Result<()> {
     use eframe::egui_wgpu::{
-        wgpu::{Backends, InstanceDescriptor},
         WgpuSetup, WgpuSetupCreateNew,
+        wgpu::{Backends, InstanceDescriptor},
     };
 
     // Pinned to exactly one backend, which is the whole reason the real app has

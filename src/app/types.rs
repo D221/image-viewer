@@ -310,11 +310,7 @@ pub(crate) fn human_bytes(n: u64) -> String {
         v /= 1024.0;
         u += 1;
     }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.0} {}", UNITS[u])
-    }
+    if u == 0 { format!("{n} B") } else { format!("{v:.0} {}", UNITS[u]) }
 }
 
 pub(crate) enum Msg {
@@ -620,11 +616,7 @@ pub(crate) fn extract_exif(path: &Path) -> Option<String> {
         info.push(format!("Maps: https://maps.google.com/?q={:.6},{:.6}", lat, lon));
     }
 
-    if info.is_empty() {
-        None
-    } else {
-        Some(info.join("\n"))
-    }
+    if info.is_empty() { None } else { Some(info.join("\n")) }
 }
 
 pub(crate) fn orientation_label(v: u16) -> &'static str {
@@ -662,11 +654,7 @@ pub(crate) fn color_space_label(v: u16) -> &'static str {
 }
 
 pub(crate) fn flash_label(v: u16) -> &'static str {
-    if v & 0x1 == 1 {
-        "Fired"
-    } else {
-        "No flash"
-    }
+    if v & 0x1 == 1 { "Fired" } else { "No flash" }
 }
 
 // ---------------------------------------------------------------------------

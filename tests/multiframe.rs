@@ -13,7 +13,7 @@
 //! animation and decoded twice) and that the file reaches the animation code at
 //! all. See `TODO.md`.
 
-use image_viewer::{animated_format, load_image_preview_full, AnimatedFormat};
+use image_viewer::{AnimatedFormat, animated_format, load_image_preview_full};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ fn a_one_frame_gif_is_not_reported_as_an_animation() {
 /// unlinked IFD is invisible to `more_images()`, so the file came out
 /// single-page no matter how many times the loop ran.
 fn multipage_tiff(pages: &[[u8; 3]], w: u32, h: u32) -> Vec<u8> {
-    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype};
     let mut out = Vec::new();
     {
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
@@ -467,7 +467,7 @@ fn multipage_tiff(pages: &[[u8; 3]], w: u32, h: u32) -> Vec<u8> {
 /// Pages that are not all the same size, which is legal in a TIFF and which the
 /// viewer has to notice.
 fn mixed_size_tiff(sizes: &[(u32, u32)]) -> Vec<u8> {
-    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype};
     let mut out = Vec::new();
     {
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
@@ -555,7 +555,7 @@ fn page_zero_of_a_tiff_decodes_identically_through_both_paths() {
 /// cyan is (0, 255, 255) and full black ink is (0, 0, 0). Anything else would mean
 /// we had started guessing at the colour transform ourselves.
 fn cmyk_second_page_tiff(w: u32, h: u32) -> Vec<u8> {
-    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype};
     let mut out = Vec::new();
     {
         let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
@@ -894,7 +894,7 @@ fn the_protected_set_does_not_grow_with_the_length_of_a_document() {
 
 #[test]
 fn the_protected_set_keeps_the_page_you_are_on_and_only_page_zero_of_neighbours() {
-    use image_viewer::{protected_preview_keys, ImgKey};
+    use image_viewer::{ImgKey, protected_preview_keys};
     let files: Vec<std::path::PathBuf> =
         (0..9).map(|i| std::path::PathBuf::from(format!("{i}.jpg"))).collect();
 
@@ -933,7 +933,7 @@ fn the_protected_set_includes_what_is_actually_on_screen() {
     // `shown` lags `cur` by design, so during a navigation it is a different
     // image from the one being protected as "current". Forgetting it means the
     // picture on screen can be the eviction victim.
-    use image_viewer::{protected_preview_keys, ImgKey};
+    use image_viewer::{ImgKey, protected_preview_keys};
     let files: Vec<std::path::PathBuf> =
         ["a.jpg", "b.jpg", "c.jpg"].iter().map(std::path::PathBuf::from).collect();
     let shown = ImgKey { path: files[2].clone(), page: 0 };

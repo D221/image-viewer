@@ -22,10 +22,10 @@
 
 #[path = "common/exif_fixtures.rs"]
 mod exif_fixtures;
-use exif_fixtures::{jpeg, jpeg_with_thumbnail, Endian};
+use exif_fixtures::{Endian, jpeg, jpeg_with_thumbnail};
 use image_viewer::{
-    load_image_preview_full, load_thumbnail, prune_cache, read_cached_thumbnail,
-    set_thumbnail_cache, thumb_cache_entry, thumb_stamp, write_cached_thumbnail, ImageData,
+    ImageData, load_image_preview_full, load_thumbnail, prune_cache, read_cached_thumbnail,
+    set_thumbnail_cache, thumb_cache_entry, thumb_stamp, write_cached_thumbnail,
 };
 use std::path::{Path, PathBuf};
 
@@ -788,8 +788,8 @@ fn the_cache_dirs_announce_themselves_to_windows_search() {
 mod shell_cache {
     use super::*;
     use image_viewer::{
-        bgra_to_rgba, shell_api_path, shell_cell_is_usable, shell_thumbnail,
-        shell_thumbnail_allowing_extraction, ShellAsk, SHELL_MISS_GIVEUP,
+        SHELL_MISS_GIVEUP, ShellAsk, bgra_to_rgba, shell_api_path, shell_cell_is_usable,
+        shell_thumbnail, shell_thumbnail_allowing_extraction,
     };
 
     /// Mean absolute difference per colour channel, at 64x64 so two decodes of

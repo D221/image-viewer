@@ -343,11 +343,7 @@ impl MyApp {
             (panel.width() / display_px.x).clamp(1e-4, 8.0)
         } else {
             let tw: f32 = spread_dims.iter().map(|&(w, _)| w).sum();
-            if tw > 0.0 {
-                (panel.width() / tw).clamp(1e-4, 8.0)
-            } else {
-                1.0
-            }
+            if tw > 0.0 { (panel.width() / tw).clamp(1e-4, 8.0) } else { 1.0 }
         };
         let max_scale = MAX_SCALE.max(fit_scale).max(fit_width_scale);
         // Fit window to image: reset (`T`, arrivals in the mode) sets

@@ -66,13 +66,13 @@
 
 use image::ImageEncoder as _;
 use image_viewer::{
-    jpeg_comment, load_image_full, load_image_preview_full, plan_jobs, ImgKey, Job, Kind, Loader,
-    Plan,
+    ImgKey, Job, Kind, Loader, Plan, jpeg_comment, load_image_full, load_image_preview_full,
+    plan_jobs,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -649,11 +649,7 @@ fn browse_baseline() {
             .iter()
             .map(|x| {
                 let total = x.useful_ms + x.wasted_ms;
-                if total > 0.0 {
-                    x.wasted_ms / total * 100.0
-                } else {
-                    0.0
-                }
+                if total > 0.0 { x.wasted_ms / total * 100.0 } else { 0.0 }
             })
             .collect();
         eprintln!(
@@ -730,11 +726,7 @@ fn idle_warmup(dir: &std::path::Path, hold_ms: u64, runs: usize) {
             .iter()
             .map(|x| {
                 let total = x.useful_ms + x.wasted_ms;
-                if total > 0.0 {
-                    x.wasted_ms / total * 100.0
-                } else {
-                    0.0
-                }
+                if total > 0.0 { x.wasted_ms / total * 100.0 } else { 0.0 }
             })
             .collect());
         eprintln!(
@@ -1091,11 +1083,7 @@ fn exif_ab() {
                 .iter()
                 .map(|x| {
                     let total = x.useful_ms + x.wasted_ms;
-                    if total > 0.0 {
-                        x.wasted_ms / total * 100.0
-                    } else {
-                        0.0
-                    }
+                    if total > 0.0 { x.wasted_ms / total * 100.0 } else { 0.0 }
                 })
                 .collect());
             eprintln!(
@@ -1870,11 +1858,7 @@ fn browse_parametric_row(
         .iter()
         .map(|x| {
             let total = x.useful_ms + x.wasted_ms;
-            if total > 0.0 {
-                x.wasted_ms / total * 100.0
-            } else {
-                0.0
-            }
+            if total > 0.0 { x.wasted_ms / total * 100.0 } else { 0.0 }
         })
         .collect());
     eprintln!(

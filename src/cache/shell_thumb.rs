@@ -255,7 +255,7 @@ pub(crate) struct ComApartment {
 impl ComApartment {
     fn init() -> Option<Self> {
         use windows_sys::Win32::Foundation::RPC_E_CHANGED_MODE;
-        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
         let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
         if hr >= 0 {
             Some(ComApartment { uninit: true })
@@ -350,8 +350,8 @@ pub(crate) unsafe fn shell_bitmap_to_image(
     start: std::time::Instant,
 ) -> Option<ImageData> {
     use windows_sys::Win32::Graphics::Gdi::{
-        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+        GetDIBits, GetObjectW, HGDIOBJ, ReleaseDC,
     };
 
     let mut bm: BITMAP = std::mem::zeroed();

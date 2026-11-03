@@ -17,8 +17,8 @@
 //!   lone page, which is the case that reads as a bug.
 
 use image_viewer::{
-    shape_of, spread_fit, spread_rects, turn_is_a_lone_spread, ImgKey, PageCtx, PagePos, Rect4,
-    Shape,
+    ImgKey, PageCtx, PagePos, Rect4, Shape, shape_of, spread_fit, spread_rects,
+    turn_is_a_lone_spread,
 };
 
 use Shape::{Double, Single};

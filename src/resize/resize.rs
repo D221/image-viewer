@@ -112,11 +112,7 @@ pub fn decode_panel_px(
     manga_mode: bool,
     lone_spread_fills_turn: bool,
 ) -> (u32, u32) {
-    if manga_mode && !lone_spread_fills_turn {
-        (panel_px.0 / 2, panel_px.1)
-    } else {
-        panel_px
-    }
+    if manga_mode && !lone_spread_fills_turn { (panel_px.0 / 2, panel_px.1) } else { panel_px }
 }
 
 /// Long side of the preview texture for a display area, in physical pixels.

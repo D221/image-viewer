@@ -10,9 +10,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    encode_png, needs_refine, normalized, portable_dir, prune_cache, thumb_stamp, Animation,
-    ColorInfo, ColorSpace, ImageData, PreviewAndFull, ThumbStamp, FAST_FULL_MAX_PIXELS, PNG_IEND,
-    RESIZE_PX_FLOOR,
+    Animation, ColorInfo, ColorSpace, FAST_FULL_MAX_PIXELS, ImageData, PNG_IEND, PreviewAndFull,
+    RESIZE_PX_FLOOR, ThumbStamp, encode_png, needs_refine, normalized, portable_dir, prune_cache,
+    thumb_stamp,
 };
 // ---------------------------------------------------------------------------
 // The preview store on disk

@@ -8,8 +8,8 @@
 //! the binary, which no integration test can reach.
 
 use image_viewer::{
-    exif_orientation, next_anchor, page_dims, pairable, shape_of, turn_len, Gallery, ImgKey,
-    PageCtx, PagePos, Shape, PROBE_PREFIX_BYTES,
+    Gallery, ImgKey, PROBE_PREFIX_BYTES, PageCtx, PagePos, Shape, exif_orientation, next_anchor,
+    page_dims, pairable, shape_of, turn_len,
 };
 
 use Shape::{Double, Single};
@@ -40,7 +40,7 @@ fn write_jpeg_with_orientation(path: &std::path::Path, w: u32, h: u32, tag: u16)
     tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // Orientation
     tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
     tiff.extend_from_slice(&1u32.to_be_bytes()); // one value
-                                                 // A SHORT's value lives in the first 2 bytes of its 4-byte field.
+    // A SHORT's value lives in the first 2 bytes of its 4-byte field.
     tiff.extend_from_slice(&tag.to_be_bytes());
     tiff.extend_from_slice(&[0, 0]);
     tiff.extend_from_slice(&0u32.to_be_bytes()); // no IFD1
@@ -244,7 +244,7 @@ fn a_rotated_phone_scan_is_judged_as_it_displays() {
 /// runs (`tests/multiframe.rs` records that the hard way).
 #[test]
 fn a_later_page_of_a_document_is_measured_as_its_own_page() {
-    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype};
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("doc.tiff");
 
@@ -322,7 +322,7 @@ fn a_later_page_of_a_document_is_measured_as_its_own_page() {
 /// against the more likely half-regression as well.
 #[test]
 fn a_page_of_a_document_is_judged_by_its_own_dimensions() {
-    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype};
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("volume.tiff");
 
@@ -392,7 +392,7 @@ fn a_page_of_a_document_is_judged_by_its_own_dimensions() {
 /// A **two-page** document whose *second* page is a landscape spread. Page 1 is the
 /// shape the cursor has not reached yet, and it has to be right anyway.
 fn two_page_tiff_with_a_spread_on_page_1(dir: &std::path::Path) -> std::path::PathBuf {
-    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::encoder::{TiffEncoder, colortype};
     let p = dir.join("volume.tiff");
     let mut bytes = Vec::new();
     {

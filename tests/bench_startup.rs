@@ -11,7 +11,7 @@
 //!   cargo test --release --test bench_startup -- --ignored --nocapture
 //!   IV_BENCH_FOLDER=<folder> cargo test --release --test bench_startup -- --ignored --nocapture
 
-use image_viewer::{scan_folder_sorted, Config, Gallery, SortMode};
+use image_viewer::{Config, Gallery, SortMode, scan_folder_sorted};
 use std::path::PathBuf;
 use std::time::Instant;
 

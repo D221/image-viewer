@@ -17,7 +17,7 @@
 //! `#[ignore]`d, like the other benches: it builds a large image and prints a
 //! report. Correctness lives in `rotate_save.rs`.
 
-use image_viewer::{save_transformed, Crop, Xform};
+use image_viewer::{Crop, Xform, save_transformed};
 use std::time::Instant;
 
 /// A photographic-ish image: smooth gradients plus some structure, because a

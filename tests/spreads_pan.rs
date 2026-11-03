@@ -11,7 +11,7 @@
 //! panel's centre by exactly what `spread_centre` reports, so the bound is the
 //! symmetric one **translated by minus that displacement**.
 
-use image_viewer::{spread_centre, spread_fit, spread_pan_bounds, spread_rects, Rect4};
+use image_viewer::{Rect4, spread_centre, spread_fit, spread_pan_bounds, spread_rects};
 
 #[path = "common/spreads_fixtures.rs"]
 mod spreads_fixtures;

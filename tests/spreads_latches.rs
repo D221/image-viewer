@@ -15,7 +15,7 @@
 //! **position** of a call relative to a brace, not merely its presence, because
 //! presence is exactly what was true of the bug.
 
-use image_viewer::{anchor_of, next_turn, Gallery, ImgKey, PageCtx, PagePos, LEAD_LONE_DEFAULT};
+use image_viewer::{Gallery, ImgKey, LEAD_LONE_DEFAULT, PageCtx, PagePos, anchor_of, next_turn};
 
 #[path = "common/spreads_fixtures.rs"]
 mod spreads_fixtures;

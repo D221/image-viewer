@@ -10,9 +10,9 @@
 //! this file may be able to stop the app starting.
 
 use image_viewer::{
+    GallerySpreads, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, SPREADS_MAX_BYTES, SPREADS_MAX_PAGES, Shape,
     load_spread_overrides, save_spread_overrides, spread_root_key, spreads_root, spreads_tmp,
-    thumb_cache_root, GallerySpreads, Shape, LEAD_LONE_DEFAULT, LEAD_LONE_MAX, SPREADS_MAX_BYTES,
-    SPREADS_MAX_PAGES,
+    thumb_cache_root,
 };
 
 use Shape::{Double, Single};

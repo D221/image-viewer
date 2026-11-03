@@ -149,11 +149,7 @@ pub(crate) fn kernel(f: DownscaleFilter) -> (Box<dyn Fn(f32) -> f32>, f32) {
             Box::new(|x: f32| {
                 // Hermite = cubic B-spline with B=0, C=0 (a.k.a. "smoothstep").
                 let x = x.abs();
-                if x < 1.0 {
-                    1.0 - 2.5 * x * x + 1.5 * x * x * x
-                } else {
-                    0.0
-                }
+                if x < 1.0 { 1.0 - 2.5 * x * x + 1.5 * x * x * x } else { 0.0 }
             }),
             1.0,
         ),
@@ -542,8 +538,15 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
     if *PHASE_TIMING.get_or_init(|| std::env::var("PERF_PHASE").is_ok()) {
         eprintln!(
             "  linear_resize {}x{}->{}x{}: prefilter={:?} to_linear={:?} weights={:?} hpass={:?} vpass={:?}",
-            data.width, data.height, new_w, new_h,
-            t1 - t0, t2 - t1, t3 - t2, t3.elapsed(), t3.elapsed()
+            data.width,
+            data.height,
+            new_w,
+            new_h,
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t3.elapsed(),
+            t3.elapsed()
         );
     }
     out

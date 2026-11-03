@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use image_viewer::{
-    next_anchor, next_turn, prev_turn, turn_len, Gallery, ImgKey, PageCtx, PagePos, Rect4, Shape,
+    Gallery, ImgKey, PageCtx, PagePos, Rect4, Shape, next_anchor, next_turn, prev_turn, turn_len,
 };
 
 use Shape::{Double, Single};

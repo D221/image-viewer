@@ -5,7 +5,7 @@
 //! decode: the preview *is* the decode.
 
 use image_viewer::{
-    decode_svg, is_browsable, is_svg_bytes, load_image_preview_full, SUPPORTED_EXTENSIONS,
+    SUPPORTED_EXTENSIONS, decode_svg, is_browsable, is_svg_bytes, load_image_preview_full,
 };
 
 /// A simple 100x100 red square SVG.

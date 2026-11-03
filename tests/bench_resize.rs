@@ -14,7 +14,7 @@
 //! `#[ignore]`d because it prints a report rather than asserting anything; the
 //! assertions that matter live in `flip_through.rs`.
 
-use image_viewer::{needs_refine, ResizeAction, ResizeTracker, RESIZE_PX_FLOOR};
+use image_viewer::{RESIZE_PX_FLOOR, ResizeAction, ResizeTracker, needs_refine};
 
 /// Preview state the drag acts on, so each refine is reflected immediately.
 #[derive(Clone, Copy)]

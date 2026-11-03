@@ -322,11 +322,7 @@ pub(crate) fn is_lead(pos: PagePos, n: u32, ctx: &dyn PageCtx) -> bool {
 /// which every caller can already express, and a struct over it would only add
 /// a conversion to get wrong.
 pub fn turn_len(anchor: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> usize {
-    if lone(anchor, lead_lone, ctx) {
-        1
-    } else {
-        2
-    }
+    if lone(anchor, lead_lone, ctx) { 1 } else { 2 }
 }
 
 /// The other page of the turn anchored at `anchor`, or `None` when the turn holds

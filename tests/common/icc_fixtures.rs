@@ -71,7 +71,7 @@ pub fn icc_profile(desc: Option<&str>, red: (i32, i32, i32), pad_to: usize) -> V
     out[16..20].copy_from_slice(b"RGB "); // data colour space
     out[20..24].copy_from_slice(b"XYZ "); // PCS
     out[36..40].copy_from_slice(b"acsp"); // profile file signature
-                                          // D50 illuminant, as ICC profiles store it.
+    // D50 illuminant, as ICC profiles store it.
     out[68..72].copy_from_slice(&0x0000_F6D6u32.to_be_bytes());
     out[72..76].copy_from_slice(&0x0001_0000u32.to_be_bytes());
     out[76..80].copy_from_slice(&0x0000_D32Du32.to_be_bytes());

@@ -67,7 +67,7 @@
 //!   docs on `fn_body` for why the scans check a byte offset and not a
 //!   `contains`.
 
-use image_viewer::{forget_drop_copy, own_dropped, plan_drop_copy, DropCopy};
+use image_viewer::{DropCopy, forget_drop_copy, own_dropped, plan_drop_copy};
 use std::path::{Path, PathBuf};
 
 /// A jpeg on disk, and the directory holding it, for a test to hand to

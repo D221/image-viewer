@@ -14,8 +14,8 @@
 //! are only names.
 
 use image_viewer::{
-    last_anchor, prev_turn, shape_of, turn_len, turn_partner, Gallery, ImgKey, PageCtx, PagePos,
-    Shape, LEAD_LONE_DEFAULT,
+    Gallery, ImgKey, LEAD_LONE_DEFAULT, PageCtx, PagePos, Shape, last_anchor, prev_turn, shape_of,
+    turn_len, turn_partner,
 };
 
 use Shape::Double;

@@ -692,11 +692,7 @@ impl MyApp {
         }
 
         let moved = if self.config.manga_mode {
-            if forward {
-                self.turn_forward()
-            } else {
-                self.turn_backward()
-            }
+            if forward { self.turn_forward() } else { self.turn_backward() }
         } else if forward {
             self.gallery.next()
         } else {

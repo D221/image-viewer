@@ -401,11 +401,7 @@ pub(crate) fn default_grid_cell() -> f32 {
 /// `portable_dir_from` takes the directory so tests can point it at a
 /// `tempfile` instead of the real executable's.
 pub fn portable_dir_from(exe_dir: &Path) -> Option<PathBuf> {
-    if exe_dir.join("portable.txt").is_file() {
-        Some(exe_dir.to_path_buf())
-    } else {
-        None
-    }
+    if exe_dir.join("portable.txt").is_file() { Some(exe_dir.to_path_buf()) } else { None }
 }
 
 pub fn portable_dir() -> Option<PathBuf> {

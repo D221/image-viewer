@@ -149,11 +149,7 @@ pub fn invert3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
         let cols: Vec<usize> = (0..3).filter(|c| *c != col).collect();
         let minor =
             m[rows[0]][cols[0]] * m[rows[1]][cols[1]] - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
-        if (row + col) % 2 == 0 {
-            minor
-        } else {
-            -minor
-        }
+        if (row + col) % 2 == 0 { minor } else { -minor }
     };
     // Expand along the first row: det = sum_j m[0][j] * C[0][j].
     let det = m[0][0] * cof(0, 0) + m[0][1] * cof(0, 1) + m[0][2] * cof(0, 2);
@@ -191,20 +187,12 @@ pub(crate) const TF_STEPS: usize = 4096;
 
 /// sRGB electro-optical transfer function, exact.
 pub(crate) fn srgb_to_linear_exact(v: f64) -> f64 {
-    if v <= 0.04045 {
-        v / 12.92
-    } else {
-        ((v + 0.055) / 1.055).powf(2.4)
-    }
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
 }
 
 /// sRGB opto-electronic transfer function, exact.
 pub(crate) fn linear_to_srgb_exact(v: f64) -> f64 {
-    if v <= 0.003_130_8 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    }
+    if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
 }
 
 pub(crate) fn srgb_to_linear_lut() -> &'static [f32; TF_STEPS] {
@@ -432,9 +420,5 @@ pub(crate) fn clean_comment_text(bytes: &[u8]) -> Option<String> {
         Err(_) => bytes.iter().map(|&b| b as char).collect(),
     };
     let s = s.trim_matches(['\0', ' ', '\t', '\r', '\n']).to_owned();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }

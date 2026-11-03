@@ -424,9 +424,5 @@ pub fn spread_pan_bounds(
 /// which is why this is asked of the transform rather than derived from a turn
 /// count. All eight keep the result axis-aligned, so 1:1 stays pixel-sharp.
 pub fn xformed_footprint(w: f32, h: f32, xform: Xform) -> (f32, f32) {
-    if xform.swaps_axes() {
-        (h, w)
-    } else {
-        (w, h)
-    }
+    if xform.swaps_axes() { (h, w) } else { (w, h) }
 }

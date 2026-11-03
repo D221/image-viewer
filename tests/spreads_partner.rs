@@ -11,8 +11,8 @@
 //! difference. So the key is asserted whole, and never through `path()`.
 
 use image_viewer::{
-    next_anchor, pairable, prev_anchor, shape_of, turn_len, turn_partner, ImgKey, PageCtx, PagePos,
-    Shape,
+    ImgKey, PageCtx, PagePos, Shape, next_anchor, pairable, prev_anchor, shape_of, turn_len,
+    turn_partner,
 };
 
 use Shape::{Double, Single};

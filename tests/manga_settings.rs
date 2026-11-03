@@ -8,10 +8,10 @@
 //! `load_spread_overrides` and `LEAD_LONE_DEFAULT` are all imported from the
 //! crate, and `CONFIG_WITH_EVERY_FLAG_FLIPPED` is defined here.
 
-use image_viewer::{
-    load_spread_overrides, save_spread_overrides, GallerySpreads, Shape, LEAD_LONE_DEFAULT,
-};
 use Shape::{Double, Single};
+use image_viewer::{
+    GallerySpreads, LEAD_LONE_DEFAULT, Shape, load_spread_overrides, save_spread_overrides,
+};
 
 /// A config written before either manga key existed still loads, and gets the
 /// values a reader of a manga library wants rather than the ones an absent field

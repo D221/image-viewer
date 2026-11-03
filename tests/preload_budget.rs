@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use image_viewer::{plan_jobs, ImgKey, Job, Kind, Plan};
+use image_viewer::{ImgKey, Job, Kind, Plan, plan_jobs};
 
 /// Seven synthetic paths sized to a small wrap-around folder.
 fn files() -> Vec<PathBuf> {

@@ -1,4 +1,4 @@
-use image_viewer::{load_image, Gallery, ZoomPan};
+use image_viewer::{Gallery, ZoomPan, load_image};
 
 /// `set_linear_resample` / `set_downscale_filter` are process-wide globals, and
 /// `cargo test` runs the tests in a file concurrently. Anything that asserts
@@ -818,7 +818,7 @@ fn test_fit_to_window() {
     assert!(zoom_pan.pan_y == 0.0);
 }
 
-use image_viewer::{grid_cols, grid_row_h, GRID_CELL, GRID_LABEL_H};
+use image_viewer::{GRID_CELL, GRID_LABEL_H, grid_cols, grid_row_h};
 
 /// The grid geometry follows the cell size instead of the constant: 150pt is
 /// six columns across 1000pt, 300pt is three, and the row pitch is always
@@ -1099,7 +1099,7 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
 
 #[test]
 fn test_wgpu_backend_set_enables_exactly_one_backend() {
-    use image_viewer::{wgpu_backend_set, WgpuBackend};
+    use image_viewer::{WgpuBackend, wgpu_backend_set};
 
     // The contract changed, and deliberately. This used to return
     // `(vulkan, dx12)` and kept DX12 enabled *alongside* Vulkan as a fallback.
@@ -1486,7 +1486,7 @@ fn no_ui_text_uses_a_glyph_the_font_lacks() {
 
 #[test]
 fn test_xformed_footprint_only_swaps_when_the_transform_does() {
-    use image_viewer::{xformed_footprint, Xform};
+    use image_viewer::{Xform, xformed_footprint};
     let (w, h) = (4000.0_f32, 3000.0_f32);
     // The four turns and two of the four mirrors leave the shape alone; the two
     // diagonal mirrors swap it, because a diagonal reflection *is* a quarter turn
@@ -2220,7 +2220,7 @@ fn a_crop_gesture_records_once_on_press() {
 /// looped forever. The backward edge existed; the forward one did not.
 #[test]
 fn both_ends_of_an_archive_step_out_of_it() {
-    use image_viewer::{leave_archive_at, Gallery};
+    use image_viewer::{Gallery, leave_archive_at};
     let dir = tempfile::tempdir().unwrap();
     for n in ["a.jpg", "b.jpg", "c.jpg"] {
         std::fs::write(dir.path().join(n), b"x").unwrap();

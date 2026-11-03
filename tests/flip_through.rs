@@ -7,10 +7,10 @@
 //! never load" report. Neither half was reachable from a test, because both
 //! lived in a binary.
 
-use image_viewer::{plan_jobs, ImgKey, Job, Kind, Loader, Plan};
+use image_viewer::{ImgKey, Job, Kind, Loader, Plan, plan_jobs};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -178,11 +178,7 @@ fn delivered_always(_p: &PathBuf, _k: &Kind) -> Done {
 fn abandons_first_attempt_only() -> impl Fn(&PathBuf, &Kind) -> Done + Send + Sync + 'static {
     let seen: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     move |p: &PathBuf, _k: &Kind| {
-        if seen.lock().unwrap().insert(p.clone()) {
-            Done::Abandoned
-        } else {
-            Done::Delivered
-        }
+        if seen.lock().unwrap().insert(p.clone()) { Done::Abandoned } else { Done::Delivered }
     }
 }
 
@@ -422,11 +418,7 @@ fn flipping_through_pictures_leaves_nothing_stranded() {
         1,
         move |p, _k| {
             let mut seen = a2.lock().unwrap();
-            if seen.insert(p.clone()) {
-                Done::Abandoned
-            } else {
-                Done::Delivered
-            }
+            if seen.insert(p.clone()) { Done::Abandoned } else { Done::Delivered }
         },
         4,
     );

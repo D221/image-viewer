@@ -332,11 +332,7 @@ fn edge_grad(d: &image_viewer::ImageData, crop: (u32, u32, u32, u32)) -> f32 {
             n += 1.0;
         }
     }
-    if n == 0.0 {
-        0.0
-    } else {
-        (sum / n) as f32
-    }
+    if n == 0.0 { 0.0 } else { (sum / n) as f32 }
 }
 
 /// Which output pixels sit on **flat tone** and which on a **strong edge**.
@@ -413,11 +409,7 @@ fn masked_grad(d: &image_viewer::ImageData, mask: &[bool]) -> f32 {
             n += 1.0;
         }
     }
-    if n == 0.0 {
-        0.0
-    } else {
-        (sum / n) as f32
-    }
+    if n == 0.0 { 0.0 } else { (sum / n) as f32 }
 }
 
 /// The strength a **first run** gets. Read from `Config::load` on an absent file
@@ -725,11 +717,7 @@ fn step_rise(out: &image_viewer::ImageData) -> f32 {
             n += 1.0;
         }
     }
-    if n == 0.0 {
-        0.0
-    } else {
-        (total / n) as f32
-    }
+    if n == 0.0 { 0.0 } else { (total / n) as f32 }
 }
 
 /// Write the **same crop** of a real page at each strength, scaled 2x nearest,
@@ -1448,7 +1436,7 @@ fn a_config_written_before_pixel_art_still_loads_and_stays_off() {
 /// nothing, because egui picks the sampler per axis at draw time.
 #[test]
 fn pixel_art_sampling_is_nearest_on_magnify_linear_on_minify() {
-    use image_viewer::{pixel_art_sampling, Sampling};
+    use image_viewer::{Sampling, pixel_art_sampling};
 
     assert_eq!(pixel_art_sampling(false), Sampling::Linear);
     assert_eq!(pixel_art_sampling(true), Sampling::NearestMagnify);

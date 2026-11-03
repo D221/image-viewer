@@ -20,7 +20,9 @@ fn main() {
             res.compile().expect("embedding the application icon");
         } else {
             // Not fatal: the build still works, files just get the generic icon.
-            println!("cargo:warning=assets/app.ico is missing - run `cargo run --release --example make_icon`");
+            println!(
+                "cargo:warning=assets/app.ico is missing - run `cargo run --release --example make_icon`"
+            );
         }
     }
 

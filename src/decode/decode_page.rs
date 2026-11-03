@@ -403,11 +403,7 @@ pub fn is_jxl_bytes(bytes: &[u8]) -> bool {
 
 /// The 4CC brand of an ISOBMFF file (HEIC/HEIF/AVIF family), if any.
 pub(crate) fn isobmff_brand(bytes: &[u8]) -> Option<&[u8]> {
-    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
-        Some(&bytes[8..12])
-    } else {
-        None
-    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" { Some(&bytes[8..12]) } else { None }
 }
 
 /// True if the bytes look like a HEIF-family file (HEIC/HEIF/AVIF).

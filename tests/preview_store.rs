@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use image_viewer::{
-    read_cached_preview, write_cached_preview, ColorInfo, ColorSpace, ImageData, PreviewMeta,
+    ColorInfo, ColorSpace, ImageData, PreviewMeta, read_cached_preview, write_cached_preview,
 };
 
 /// Grid-cell size is 256; a preview is the size of the panel.

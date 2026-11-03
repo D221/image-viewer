@@ -26,24 +26,24 @@ mod app;
 pub(crate) use egui::{
     Color32, ColorImage, Context, Pos2, Rect, TextureHandle, TextureOptions, Vec2,
 };
-pub(crate) use nom_exif::{read_exif, ExifTag};
+pub(crate) use nom_exif::{ExifTag, read_exif};
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::io::Read as _;
 pub(crate) use std::path::{Path, PathBuf};
-pub(crate) use std::sync::mpsc::{self, Receiver, Sender};
 pub(crate) use std::sync::Arc;
+pub(crate) use std::sync::mpsc::{self, Receiver, Sender};
 pub(crate) use std::time::{Duration, Instant};
 
 pub(crate) use image_viewer::perf;
 pub(crate) use image_viewer::{
+    Animation, Config, DownscaleFilter, GRID_LABEL_H, Gallery, GallerySpreads, ImageData, ImgKey,
+    MAX_FULL_PIXELS, NavInput, PageCtx, PagePos, SavedView, Shape, SortMode, Xform,
     archive_image_count, buffer_has_alpha, extract_archive, fill_scale, fit_scale_no_upscale,
     forget_thumbnail, grid_cols, grid_row_h, is_archive_path, last_anchor, load_grid_thumbnail,
     load_image_full, load_page_preview_full, load_spread_overrides, nav_is_forward,
     protected_preview_keys, save_spread_overrides, scan_folder_sorted_dir, set_downscale_filter,
     set_downscale_smoothing, set_linear_resample, set_thumbnail_cache, spread_root_key,
-    spreads_root, thumb_cache_root, xformed_footprint, Animation, Config, DownscaleFilter, Gallery,
-    GallerySpreads, ImageData, ImgKey, NavInput, PageCtx, PagePos, SavedView, Shape, SortMode,
-    Xform, GRID_LABEL_H, MAX_FULL_PIXELS,
+    spreads_root, thumb_cache_root, xformed_footprint,
 };
 pub(crate) use image_viewer::{Job, Kind, Loader, PRIO_CURRENT_EXIF, PRIO_THUMB_BASE};
 
@@ -89,15 +89,21 @@ fn main() -> eframe::Result<()> {
         Some("--register") => {
             return match fileassoc::register() {
                 Ok(id) => {
-                    println!("Registered as '{id}'. Use Explorer's 'Open with > Choose another app' to set it as default.");
+                    println!(
+                        "Registered as '{id}'. Use Explorer's 'Open with > Choose another app' to set it as default."
+                    );
                     // Explorer caches icons per user and does not notice a
                     // changed registration on its own, so without this the
                     // obvious conclusion is that the fix did not work.
                     match fileassoc::default_icon() {
                         Some(icon) => println!("Icon: {icon}"),
-                        None => println!("Warning: no DefaultIcon was registered; files will show a generic icon."),
+                        None => println!(
+                            "Warning: no DefaultIcon was registered; files will show a generic icon."
+                        ),
                     }
-                    println!("If icons have not changed, run: ie4uinit.exe -show  (then restart Explorer).");
+                    println!(
+                        "If icons have not changed, run: ie4uinit.exe -show  (then restart Explorer)."
+                    );
                     Ok(())
                 }
                 Err(e) => {

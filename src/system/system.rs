@@ -9,9 +9,9 @@
 // (`Local\`, which any user can always create — `Global\` needs a privilege
 // a normal login does not have) and stable across runs so a second launch
 // finds the first one.
-extern "system" {
+unsafe extern "system" {
     fn CreateMutexW(attr: *const std::ffi::c_void, initially_owned: i32, name: *const u16)
-        -> usize;
+    -> usize;
     fn GetLastError() -> u32;
     fn ShellExecuteW(
         hwnd: usize,
@@ -28,7 +28,7 @@ extern "system" {
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
     fn GetCurrentProcessId() -> u32;
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32)
-        -> i32;
+    -> i32;
 }
 
 /// Callback for [`set_topmost`]: stash the first top-level window owned by

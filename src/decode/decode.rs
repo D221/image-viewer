@@ -579,19 +579,15 @@ pub(crate) fn decode_tiff_page(
         kind: tiff::ColorType,
         result: tiff::decoder::DecodingResult,
     ) -> Result<image::RgbaImage, LoadError> {
-        use tiff::decoder::DecodingResult as D;
         use tiff::ColorType as T;
+        use tiff::decoder::DecodingResult as D;
         let bad = |what: &str| {
             LoadError::Other(format!(
                 "TIFF page is {kind:?}, which is not supported past the first page ({what})"
             ))
         };
         let need = |got: usize, want: usize| -> Result<(), LoadError> {
-            if got == want {
-                Ok(())
-            } else {
-                Err(bad(&format!("{got} samples for {want} pixels")))
-            }
+            if got == want { Ok(()) } else { Err(bad(&format!("{got} samples for {want} pixels"))) }
         };
         let img: image::DynamicImage = match (kind, result) {
             (T::Gray(8), D::U8(b)) => {

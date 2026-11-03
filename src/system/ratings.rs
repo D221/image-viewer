@@ -55,11 +55,7 @@ impl Rating {
 /// this branch a click on the lit star computes `i - stars == 0`, a no-op that
 /// reads as a dead button.
 pub fn star_click_delta(current: u8, clicked: u8) -> i32 {
-    if clicked == current {
-        -(current as i32)
-    } else {
-        clicked as i32 - current as i32
-    }
+    if clicked == current { -(current as i32) } else { clicked as i32 - current as i32 }
 }
 
 /// Everything the sidecar holds for one image.
@@ -195,11 +191,7 @@ fn insert_into_tag(text: &str, tag_end: usize, addition: &str) -> String {
 }
 
 fn xmlns_uri(name: &str) -> &'static str {
-    if name == "xmlns:iviewer" {
-        IVIEWER_NS
-    } else {
-        XMP_NS
-    }
+    if name == "xmlns:iviewer" { IVIEWER_NS } else { XMP_NS }
 }
 
 /// Replace the value of `name` in place, or insert ` name="value"` into the

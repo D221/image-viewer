@@ -8,8 +8,8 @@
 
 #[path = "common/exif_fixtures.rs"]
 mod exif_fixtures;
-use exif_fixtures::{jpeg_with_thumbnail, Endian};
-use image_viewer::{load_image_preview_full, ImageData};
+use exif_fixtures::{Endian, jpeg_with_thumbnail};
+use image_viewer::{ImageData, load_image_preview_full};
 use std::path::Path;
 
 /// Write bytes to a temp file and load a preview from it at `target`.

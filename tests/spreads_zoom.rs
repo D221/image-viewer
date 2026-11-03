@@ -19,7 +19,7 @@
 //! So the anchor has to be the content's centre, **derived from `spread_rects`
 //! itself** - a second statement of the seam rule is a second rule.
 
-use image_viewer::{spread_centre, spread_rects, Rect4};
+use image_viewer::{Rect4, spread_centre, spread_rects};
 
 #[path = "common/spreads_fixtures.rs"]
 mod spreads_fixtures;

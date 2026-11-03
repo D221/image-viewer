@@ -11,8 +11,8 @@
 //! already fell into once.
 
 use image_viewer::{
-    color_info, convert_wide_gamut_rgba, load_image, set_wide_gamut_conversion, wallpaper_target,
-    wide_gamut_conversion, ColorSpace,
+    ColorSpace, color_info, convert_wide_gamut_rgba, load_image, set_wide_gamut_conversion,
+    wallpaper_target, wide_gamut_conversion,
 };
 
 /// Restores `wide_gamut_conversion` to its previous value when dropped.

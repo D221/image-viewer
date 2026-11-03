@@ -207,11 +207,7 @@ pub struct QueueState {
 /// clamped to 2..=4. Anything else is the user's explicit choice, clamped to
 /// 1..=8 so a typo cannot spawn 64 threads or zero the pool.
 pub fn resolve_worker_count(available: usize, preferred: usize) -> usize {
-    if preferred == 0 {
-        available.clamp(2, 4)
-    } else {
-        preferred.clamp(1, 8)
-    }
+    if preferred == 0 { available.clamp(2, 4) } else { preferred.clamp(1, 8) }
 }
 
 pub struct Loader {

@@ -14,7 +14,7 @@
 //! The trap note moves with them â€” `code_only` strips `//` comments because
 //! a scan of the whole file reads the explanations as well as the code, and
 //! this file's subject matter is code that must not appear.
-use image_viewer::{default_binding, nav_is_forward, NavInput};
+use image_viewer::{NavInput, default_binding, nav_is_forward};
 fn dispatch_region_in(src: &str) -> String {
     let anchor = "if !typing && self.capturing.is_none() {";
     let start =

@@ -1,5 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use image_viewer::{load_image, Gallery};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use image_viewer::{Gallery, load_image};
 use std::path::Path;
 
 #[path = "common/bench_fixtures.rs"]

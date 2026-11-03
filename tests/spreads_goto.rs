@@ -10,8 +10,8 @@
 //! Left from a second half jumped to the last spread of the volume.
 
 use image_viewer::{
-    anchor_of, lone, prev_anchor, turn_len, turn_partner, Gallery, ImgKey, PageCtx, PagePos, Shape,
-    LEAD_LONE_DEFAULT,
+    Gallery, ImgKey, LEAD_LONE_DEFAULT, PageCtx, PagePos, Shape, anchor_of, lone, prev_anchor,
+    turn_len, turn_partner,
 };
 
 #[path = "common/spreads_fixtures.rs"]

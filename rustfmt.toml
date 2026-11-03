@@ -7,6 +7,6 @@
 # in `tests/source_size.rs` inside its ceiling after a reformat: at the default
 # heuristic the wrap-everything style pushed `tests/multiframe.rs` over the
 # 1,000-line target and grew eight other files past the ceilings recorded here.
-edition = "2021"
+edition = "2024"
 max_width = 100
 use_small_heuristics = "Max"

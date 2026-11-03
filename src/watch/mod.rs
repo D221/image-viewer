@@ -212,9 +212,10 @@ impl DirWatcher {
         use std::os::windows::ffi::OsStrExt as _;
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
             FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            ReadDirectoryChangesW,
         };
 
         let meta = std::fs::metadata(&dir)?;
@@ -574,9 +575,9 @@ pub(crate) fn encode_png(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, image::ImageError> {
-    use image::codecs::png::{FilterType, PngEncoder};
     use image::ExtendedColorType;
     use image::ImageEncoder;
+    use image::codecs::png::{FilterType, PngEncoder};
     let mut out = Vec::new();
     {
         let enc =

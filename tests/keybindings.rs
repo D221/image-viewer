@@ -24,7 +24,7 @@
 //! silently does nothing over RDP, so such a test would be green forever without
 //! ever having pressed anything. See `AGENTS.md`.
 
-use image_viewer::{default_binding, KEY_ACTIONS};
+use image_viewer::{KEY_ACTIONS, default_binding};
 
 /// The region that reads keys and dispatches on them: the body of the
 /// `if !typing && self.capturing.is_none() {` block, found by matching braces.

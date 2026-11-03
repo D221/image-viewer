@@ -29,8 +29,8 @@
 //! of the 109 tests is still here.
 
 use image_viewer::{
-    anchor_of, lone, next_anchor, next_turn, pairable, prev_anchor, prev_turn, shape_of, turn_len,
-    Gallery, GallerySpreads, ImgKey, PageCtx, PagePos, Shape, LEAD_LONE_DEFAULT,
+    Gallery, GallerySpreads, ImgKey, LEAD_LONE_DEFAULT, PageCtx, PagePos, Shape, anchor_of, lone,
+    next_anchor, next_turn, pairable, prev_anchor, prev_turn, shape_of, turn_len,
 };
 
 use proptest::prelude::*;

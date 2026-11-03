@@ -5,7 +5,7 @@
 //! the probing is reduced to a list of `(backend, survived)` pairs and the
 //! interesting function is which one gets picked from it.
 
-use image_viewer::{path_arg, pick_probed, RendererPref, WgpuBackend, PROBE_ORDER};
+use image_viewer::{PROBE_ORDER, RendererPref, WgpuBackend, path_arg, pick_probed};
 use std::path::PathBuf;
 
 fn pref(choice: WgpuBackend, probed: Option<WgpuBackend>) -> RendererPref {

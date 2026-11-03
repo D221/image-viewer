@@ -1,5 +1,5 @@
 use image::{DynamicImage, Rgb, RgbImage};
-use image_viewer::{load_image, Gallery};
+use image_viewer::{Gallery, load_image};
 use std::path::Path;
 use std::sync::OnceLock;
 

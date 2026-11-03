@@ -56,11 +56,7 @@ impl Xform {
 
     /// Dimensions of the result, given the input.
     pub fn out_dims(self, w: u32, h: u32) -> (u32, u32) {
-        if self.swaps_axes() {
-            (h, w)
-        } else {
-            (w, h)
-        }
+        if self.swaps_axes() { (h, w) } else { (w, h) }
     }
 
     /// Which input pixel ends up at output pixel `(ox, oy)`.
@@ -171,8 +167,8 @@ impl Xform {
         let (iw, ih) = (7u32, 5u32);
         let (mw, mh) = self.out_dims(iw, ih); // `self`'s output = `next`'s input
         let (ow, oh) = next.out_dims(mw, mh); // the composition's output
-                                              // `map` takes the *input* dimensions, which is the easy thing to get
-                                              // wrong here and produces underflow rather than a wrong answer.
+        // `map` takes the *input* dimensions, which is the easy thing to get
+        // wrong here and produces underflow rather than a wrong answer.
         let probe = |ox: u32, oy: u32| {
             let (bx, by) = next.map(ox, oy, mw, mh);
             self.map(bx, by, iw, ih)

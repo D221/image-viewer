@@ -44,11 +44,7 @@ impl Edit {
         if self.xform != Xform::Identity {
             parts.push(self.xform.label().to_owned());
         }
-        if parts.is_empty() {
-            "no transform".to_owned()
-        } else {
-            parts.join(", ")
-        }
+        if parts.is_empty() { "no transform".to_owned() } else { parts.join(", ") }
     }
 }
 

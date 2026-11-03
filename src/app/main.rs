@@ -45,8 +45,8 @@ pub(crate) fn wgpu_options(
     backend: image_viewer::WgpuBackend,
 ) -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{
-        wgpu::{Backends, InstanceDescriptor},
         WgpuSetup, WgpuSetupCreateNew,
+        wgpu::{Backends, InstanceDescriptor},
     };
 
     // The bit values live in `lib.rs` so the policy is testable without pulling

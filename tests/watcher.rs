@@ -24,9 +24,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use image_viewer::{
-    classify_change, coalesce_changes, parse_notify_buffer, ChangeKind, DirWatcher, FsChange,
-    CHANGE_OVERFLOW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_REMOVED,
-    FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
+    CHANGE_OVERFLOW, ChangeKind, DirWatcher, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
+    FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME, FsChange,
+    classify_change, coalesce_changes, parse_notify_buffer,
 };
 
 // ---------------------------------------------------------------------------

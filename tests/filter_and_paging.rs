@@ -4,7 +4,7 @@
 //! shows the wrong image, or an out-of-range one — so it is tested through the
 //! real `Gallery::set_filtered` rather than a reimplementation.
 
-use image_viewer::{file_name_of, Gallery};
+use image_viewer::{Gallery, file_name_of};
 use std::path::{Path, PathBuf};
 
 fn p(s: &str) -> PathBuf {

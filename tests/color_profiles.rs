@@ -13,9 +13,9 @@ mod heif_fixtures;
 mod icc_fixtures;
 
 use icc_fixtures::{
-    icc_profile, jpeg_with_icc, png_with_iccp, png_with_srgb_chunk, P3_RED, SRGB_RED,
+    P3_RED, SRGB_RED, icc_profile, jpeg_with_icc, png_with_iccp, png_with_srgb_chunk,
 };
-use image_viewer::{color_info_from_bytes, ColorSpace};
+use image_viewer::{ColorSpace, color_info_from_bytes};
 use std::path::Path;
 
 /// Route bytes through the same entry point the app uses.

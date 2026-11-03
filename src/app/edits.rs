@@ -38,11 +38,7 @@ impl MyApp {
     pub(crate) fn mirror(&mut self, horizontal: bool, ctx: &Context) {
         self.apply_to_current(
             |r, p| {
-                if horizontal {
-                    r.mirror_horizontal(p)
-                } else {
-                    r.mirror_vertical(p)
-                }
+                if horizontal { r.mirror_horizontal(p) } else { r.mirror_vertical(p) }
             },
             ctx,
         );

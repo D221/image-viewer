@@ -76,7 +76,7 @@ fn icon_value(exe: &std::path::Path) -> (String, &'static str) {
 fn exe_has_icon(exe: &std::path::Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "shell32")]
-    extern "system" {
+    unsafe extern "system" {
         fn ExtractIconExW(
             file: *const u16,
             index: i32,
@@ -273,7 +273,7 @@ pub fn declare_taskbar_identity() -> R<()> {
 
     // The process half, and it only sticks if it happens before the first window.
     #[link(name = "shell32")]
-    extern "system" {
+    unsafe extern "system" {
         fn SetCurrentProcessExplicitAppUserModelID(id: *const u16) -> i32;
     }
     let mut wide: Vec<u16> = APP_USER_MODEL_ID.encode_utf16().collect();

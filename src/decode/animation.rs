@@ -58,11 +58,7 @@ pub fn step_frame(n: usize, idx: usize, forward: bool) -> usize {
     if n == 0 {
         return 0;
     }
-    if forward {
-        (idx + 1) % n
-    } else {
-        (idx + n.saturating_sub(1)) % n
-    }
+    if forward { (idx + 1) % n } else { (idx + n.saturating_sub(1)) % n }
 }
 
 /// When frame `idx` starts, from loop origin: the floored delays before it.

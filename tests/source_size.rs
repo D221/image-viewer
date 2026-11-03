@@ -46,12 +46,12 @@ const TARGET: usize = 1000;
 const OVER_TARGET: &[(&str, usize)] = &[
     ("tests/unit.rs", 4_752),
     ("src/gallery/gallery.rs", 1_099),
-    ("tests/resample.rs", 2_549),
-    ("src/app/central.rs", 1_393),
+    ("tests/resample.rs", 2_537),
+    ("src/app/central.rs", 1_389),
     ("src/app/ui.rs", 2_272),
-    ("tests/rotate_save.rs", 1_845),
-    ("tests/flip_through.rs", 1_580),
-    ("tests/bench_browse.rs", 2_143),
+    ("tests/rotate_save.rs", 1_847),
+    ("tests/flip_through.rs", 1_572),
+    ("tests/bench_browse.rs", 2_127),
     ("tests/thumb_cache.rs", 1_086),
 ];
 

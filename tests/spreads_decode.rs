@@ -8,8 +8,8 @@
 //! picture was soft in proportion to how much of the panel it used.
 
 use image_viewer::{
-    decode_panel_px, lone_spread_fills_turn, preview_target, shape_of, spread_fit, turn_len,
-    PageCtx, Shape, LEAD_LONE_DEFAULT,
+    LEAD_LONE_DEFAULT, PageCtx, Shape, decode_panel_px, lone_spread_fills_turn, preview_target,
+    shape_of, spread_fit, turn_len,
 };
 
 use Shape::{Double, Single};

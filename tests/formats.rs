@@ -6,8 +6,8 @@
 //! named files is a sniffer that will one day pick the wrong decoder.
 
 use image_viewer::{
-    image_dims_bytes, is_bmp_bytes, is_ico_bytes, is_qoi_bytes, is_tiff_bytes, load_image,
-    load_image_preview_full, scan_folder, SUPPORTED_EXTENSIONS,
+    SUPPORTED_EXTENSIONS, image_dims_bytes, is_bmp_bytes, is_ico_bytes, is_qoi_bytes,
+    is_tiff_bytes, load_image, load_image_preview_full, scan_folder,
 };
 use std::path::Path;
 

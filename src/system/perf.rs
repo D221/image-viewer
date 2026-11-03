@@ -16,8 +16,8 @@
 //! Use [`set_enabled`] (or `--perf` / `PERF=1`) to turn latency sampling on, and
 //! [`report`] at shutdown to print a table.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
 
 /// Process start, stamped as early as possible in `main`.
 static BOOT: OnceLock<std::time::Instant> = OnceLock::new();
@@ -305,11 +305,7 @@ fn percentile(sorted: &[u32], p: f32) -> u64 {
 }
 
 fn ms(micros: u64) -> String {
-    if micros >= 1000 {
-        format!("{:.1}ms", micros as f32 / 1000.0)
-    } else {
-        format!("{micros}us")
-    }
+    if micros >= 1000 { format!("{:.1}ms", micros as f32 / 1000.0) } else { format!("{micros}us") }
 }
 
 /// Render a human-readable report of everything recorded so far.

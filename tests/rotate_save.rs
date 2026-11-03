@@ -13,8 +13,8 @@
 //! with the `image` crate. If the two ever disagree, the save is wrong.
 
 use image_viewer::{
-    apply_exif_orientation, display_xform, exif_orientation, load_image,
-    neutralize_exif_orientation, save_transformed, unique_dest, ImageEdits, Xform,
+    ImageEdits, Xform, apply_exif_orientation, display_xform, exif_orientation, load_image,
+    neutralize_exif_orientation, save_transformed, unique_dest,
 };
 use std::path::Path;
 use std::path::PathBuf;
@@ -54,7 +54,7 @@ fn write_jpeg(
         tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // orientation
         tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
         tiff.extend_from_slice(&1u32.to_be_bytes()); // one value
-                                                     // A SHORT's value lives in the first 2 bytes of the 4-byte field.
+        // A SHORT's value lives in the first 2 bytes of the 4-byte field.
         tiff.extend_from_slice(&exif_tag.to_be_bytes());
         tiff.extend_from_slice(&[0, 0]);
         tiff.extend_from_slice(&0u32.to_be_bytes()); // no IFD1
@@ -1206,11 +1206,13 @@ fn an_edit_says_what_it_did() {
     };
     assert_eq!(both.label(), "cropped to 32×48, mirrored left-right");
     // Crop alone, and a rotation-only edit, are both non-identity.
-    assert!(!image_viewer::Edit {
-        xform: Xform::Identity,
-        crop: Some(image_viewer::Crop::new(0, 0, 8, 8).unwrap()),
-    }
-    .is_identity());
+    assert!(
+        !image_viewer::Edit {
+            xform: Xform::Identity,
+            crop: Some(image_viewer::Crop::new(0, 0, 8, 8).unwrap()),
+        }
+        .is_identity()
+    );
 }
 
 #[test]
@@ -1678,7 +1680,7 @@ fn screen_size_save_refuses_a_format_it_cannot_write() {
 /// assertions are the same kind of evidence.
 #[test]
 fn save_as_writes_the_named_path_at_the_named_quality() {
-    use image_viewer::{save_transformed_to, Xform};
+    use image_viewer::{Xform, save_transformed_to};
     let tmp = tempfile::tempdir().unwrap();
     let src = write_jpeg(tmp.path(), "photo.jpg", &quadrants(256, 192), 0);
 
@@ -1719,7 +1721,7 @@ fn save_as_writes_the_named_path_at_the_named_quality() {
 /// `.jpg` must be a JPEG, or the file's extension lies about its contents.
 #[test]
 fn save_as_encodes_the_chosen_format_not_the_source_format() {
-    use image_viewer::{save_transformed_to, Xform};
+    use image_viewer::{Xform, save_transformed_to};
     let tmp = tempfile::tempdir().unwrap();
     let mut buf = Vec::new();
     quadrants(64, 48)
@@ -1750,7 +1752,7 @@ fn save_as_encodes_the_chosen_format_not_the_source_format() {
 /// transform that was applied.
 #[test]
 fn a_save_as_file_is_the_transform_that_was_on_screen() {
-    use image_viewer::{save_transformed_to, Xform};
+    use image_viewer::{Xform, save_transformed_to};
     let tmp = tempfile::tempdir().unwrap();
     let src = write_jpeg(tmp.path(), "photo.jpg", &quadrants(128, 96), 0);
 
@@ -1795,7 +1797,7 @@ fn a_save_as_file_is_the_transform_that_was_on_screen() {
 /// worse than failing.
 #[test]
 fn save_as_refuses_a_destination_it_cannot_write() {
-    use image_viewer::{save_transformed_to, Xform};
+    use image_viewer::{Xform, save_transformed_to};
     let tmp = tempfile::tempdir().unwrap();
     let src = write_jpeg(tmp.path(), "photo.jpg", &quadrants(32, 24), 0);
     // A parent that does not exist.
@@ -1814,7 +1816,7 @@ fn save_as_refuses_a_destination_it_cannot_write() {
 /// with the other one reading the wrong value.
 #[test]
 fn an_unedited_save_is_a_copy_and_a_turned_one_is_a_rotated_one() {
-    use image_viewer::{save_infix, Crop, Xform};
+    use image_viewer::{Crop, Xform, save_infix};
 
     // The reported case, exactly: nothing turned, nothing cropped.
     assert_eq!(
