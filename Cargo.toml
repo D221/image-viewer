@@ -79,3 +79,10 @@ miniz_oxide = "0.8"
 
 [build-dependencies]
 winresource = "0.1.31"
+
+[profile.release]
+strip = true        # Automatically strip symbols from the release binary.
+opt-level = "z"     # Optimize for size instead of speed.
+lto = true          # Link Time Optimization — removes dead code across crates.
+codegen-units = 1   # Better cross-codegen-unit optimization; slower builds.
+
