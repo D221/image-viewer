@@ -41,6 +41,7 @@ pub(crate) type RestartSlot = std::sync::Arc<std::sync::Mutex<Option<image_viewe
 /// set), and a key being present does not mean wgpu can use the driver behind it.
 ///
 /// The chosen backend is printed so a crash is never a mystery.
+#[allow(dead_code)]
 pub(crate) fn wgpu_options(
     backend: image_viewer::WgpuBackend,
 ) -> eframe::egui_wgpu::WgpuConfiguration {
@@ -202,6 +203,7 @@ pub(crate) fn probe_backends() -> Vec<(image_viewer::WgpuBackend, bool)> {
 /// Resolve the backend to use at launch, probing only if the preference needs
 /// it. Returns the backend and, if a probe ran and found something, the answer
 /// to cache in the config.
+#[allow(dead_code)]
 pub(crate) fn resolve_renderer(
     pref: &image_viewer::RendererPref,
 ) -> (image_viewer::WgpuBackend, Option<image_viewer::WgpuBackend>) {

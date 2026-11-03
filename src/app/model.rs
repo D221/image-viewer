@@ -594,6 +594,7 @@ pub(crate) struct MyApp {
     /// Favourite folders: bookmarked locations the reader can jump to from
     /// Settings. Stored as absolute paths; a favourite whose folder no longer
     /// exists is silently skipped when opened.
+    #[allow(dead_code)]
     pub(crate) favourite_folders: Vec<PathBuf>,
 
     /// Every file in the folder, **unfiltered**. `gallery.files` is this list

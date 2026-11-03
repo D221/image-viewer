@@ -327,14 +327,18 @@ pub(crate) unsafe fn get_image(
     flags: i32,
     out: *mut HBITMAP,
 ) -> i32 {
-    let vtbl = *(factory as *mut *const ImageFactoryVtbl);
-    ((*vtbl).get_image)(factory, size, flags, out)
+    unsafe {
+        let vtbl = *(factory as *mut *const ImageFactoryVtbl);
+        ((*vtbl).get_image)(factory, size, flags, out)
+    }
 }
 
 #[cfg(windows)]
 pub(crate) unsafe fn release(factory: *mut std::ffi::c_void) {
-    let vtbl = *(factory as *mut *const ImageFactoryVtbl);
-    ((*vtbl).release)(factory);
+    unsafe {
+        let vtbl = *(factory as *mut *const ImageFactoryVtbl);
+        ((*vtbl).release)(factory);
+    }
 }
 
 /// Turn the shell's `HBITMAP` into pixels, and destroy it.
@@ -349,63 +353,69 @@ pub(crate) unsafe fn shell_bitmap_to_image(
     target: u32,
     start: std::time::Instant,
 ) -> Option<ImageData> {
-    use windows_sys::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
-        GetDIBits, GetObjectW, HGDIOBJ, ReleaseDC,
-    };
+    unsafe {
+        use windows_sys::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDC,
+            GetDIBits, GetObjectW, HGDIOBJ, ReleaseDC,
+        };
 
-    let mut bm: BITMAP = std::mem::zeroed();
-    let got = GetObjectW(
-        hbm as HGDIOBJ,
-        std::mem::size_of::<BITMAP>() as i32,
-        &mut bm as *mut BITMAP as *mut std::ffi::c_void,
-    );
-    // The size cap is hygiene, not paranoia: `SIIGBF_BIGGERSIZEOK` lets the
-    // shell return any cached size, and a corrupt or hostile cache entry must
-    // not become a multi-gigabyte allocation on a worker.
-    if got == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+        let mut bm: BITMAP = std::mem::zeroed();
+        let got = GetObjectW(
+            hbm as HGDIOBJ,
+            std::mem::size_of::<BITMAP>() as i32,
+            &mut bm as *mut BITMAP as *mut std::ffi::c_void,
+        );
+        // The size cap is hygiene, not paranoia: `SIIGBF_BIGGERSIZEOK` lets the
+        // shell return any cached size, and a corrupt or hostile cache entry must
+        // not become a multi-gigabyte allocation on a worker.
+        if got == 0 || bm.bmWidth <= 0 || bm.bmHeight <= 0 {
+            DeleteObject(hbm as HGDIOBJ);
+            return None;
+        }
+        let (w, h) = (bm.bmWidth as u32, bm.bmHeight as u32);
+        if u64::from(w) * u64::from(h) > 16 * 1024 * 1024 {
+            DeleteObject(hbm as HGDIOBJ);
+            return None;
+        }
+
+        let mut bi: BITMAPINFO = std::mem::zeroed();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = w as i32;
+        bi.bmiHeader.biHeight = -(h as i32);
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        let mut bgra = vec![0u8; w as usize * h as usize * 4];
+        let dc = GetDC(std::ptr::null_mut());
+        let lines = GetDIBits(
+            dc,
+            hbm,
+            0,
+            h,
+            bgra.as_mut_ptr() as *mut std::ffi::c_void,
+            &mut bi,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(std::ptr::null_mut(), dc);
         DeleteObject(hbm as HGDIOBJ);
-        return None;
-    }
-    let (w, h) = (bm.bmWidth as u32, bm.bmHeight as u32);
-    if u64::from(w) * u64::from(h) > 16 * 1024 * 1024 {
-        DeleteObject(hbm as HGDIOBJ);
-        return None;
-    }
+        if lines == 0 {
+            return None;
+        }
 
-    let mut bi: BITMAPINFO = std::mem::zeroed();
-    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-    bi.bmiHeader.biWidth = w as i32;
-    bi.bmiHeader.biHeight = -(h as i32);
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    let mut bgra = vec![0u8; w as usize * h as usize * 4];
-    let dc = GetDC(std::ptr::null_mut());
-    let lines = GetDIBits(
-        dc,
-        hbm,
-        0,
-        h,
-        bgra.as_mut_ptr() as *mut std::ffi::c_void,
-        &mut bi,
-        DIB_RGB_COLORS,
-    );
-    ReleaseDC(std::ptr::null_mut(), dc);
-    DeleteObject(hbm as HGDIOBJ);
-    if lines == 0 {
-        return None;
+        let mut data = ImageData {
+            width: w,
+            height: h,
+            rgba: bgra_to_rgba(&bgra),
+            load_time: start.elapsed(),
+        };
+        // The same rule the decode path follows: whatever the decoder produced, the
+        // cell is never larger than its target. A cached 1024px thumbnail would
+        // otherwise cost 4 MB of texture per cell against the 512-entry cap.
+        if data.width.max(data.height) > target {
+            data = downscale_image(&data, target);
+        }
+        Some(data)
     }
-
-    let mut data =
-        ImageData { width: w, height: h, rgba: bgra_to_rgba(&bgra), load_time: start.elapsed() };
-    // The same rule the decode path follows: whatever the decoder produced, the
-    // cell is never larger than its target. A cached 1024px thumbnail would
-    // otherwise cost 4 MB of texture per cell against the 512-entry cap.
-    if data.width.max(data.height) > target {
-        data = downscale_image(&data, target);
-    }
-    Some(data)
 }
 
 /// How many consecutive misses on one folder before Explorer is left alone.

@@ -167,7 +167,7 @@ fn main() -> eframe::Result<()> {
     let restart: RestartSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
 
     let config_path = image_viewer::Config::default_path();
-    let mut config = image_viewer::Config::load(&config_path);
+    let config = image_viewer::Config::load(&config_path);
     // Single-instance gate: a second launch exits rather than fighting
     // with the first over the shared archive temp dir (and making the
     // watcher's already-wrong "file vanished" notifications fatal).

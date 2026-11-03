@@ -37,13 +37,14 @@ unsafe extern "system" {
 /// predicate would skip the very window this exists to find.
 unsafe extern "system" fn find_own_window(hwnd: isize, out: isize) -> i32 {
     let mut pid: u32 = 0;
-    GetWindowThreadProcessId(hwnd, &mut pid);
-    if pid == GetCurrentProcessId() {
-        *(out as *mut isize) = hwnd;
-        0
-    } else {
-        1
+    unsafe {
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == GetCurrentProcessId() {
+            *(out as *mut isize) = hwnd;
+            return 0;
+        }
     }
+    1
 }
 
 /// Keep our window above all others, live (egui 0.36 has a builder for this
