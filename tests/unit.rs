@@ -2277,7 +2277,7 @@ fn recursive_browsing_is_wired() {
 
 /// The body of the function whose signature is `sig`, by brace counting.
 ///
-/// The same helper as `tests/spreads.rs`, kept local rather than shared because
+/// The same helper as `tests/common/spreads_fixtures.rs`, kept local rather than shared because
 /// each test binary compiles separately, and these scans sit beside the
 /// behaviour they belong to.
 fn fn_body<'a>(src: &'a str, sig: &str) -> Option<&'a str> {

@@ -260,7 +260,7 @@ impl GallerySpreads {
     /// override and the caller's judgement have parted company — an override set
     /// against a page whose file has since been re-exported. The same call would
     /// then answer two different questions, and only one of them was asked.
-    /// `tests/spreads.rs::toggling_a_page_reports_the_shape_it_landed_on` pins it.
+    /// `tests/spreads_overrides.rs::toggling_a_page_reports_the_shape_it_landed_on` pins it.
     pub fn toggle(&mut self, path: &Path, page: u32, detected: Shape) -> Shape {
         let next = match detected {
             Shape::Single => Shape::Double,

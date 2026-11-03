@@ -47,7 +47,6 @@ const OVER_TARGET: &[(&str, usize)] = &[
     ("tests/unit.rs", 5_095),
     ("src/gallery/gallery.rs", 1_155),
     ("tests/resample.rs", 2_723),
-    ("tests/spreads.rs", 6_687),
     ("src/app/central.rs", 1_398),
     ("src/app/ui.rs", 2_302),
     ("tests/rotate_save.rs", 1_921),
@@ -68,9 +67,9 @@ fn source_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
     for dir in SOURCE_DIRS {
         let dir = root.join(dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        if std::fs::read_dir(&dir).is_err() {
             continue;
-        };
+        }
         collect_rs(&dir, &mut files);
     }
     files.sort();

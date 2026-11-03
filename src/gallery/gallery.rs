@@ -393,7 +393,7 @@ impl Gallery {
     /// **Which of those bounds is load-bearing, measured rather than assumed:** the
     /// same-document one. Dropping the page-count bound is a **no-op mutation** — a
     /// one-page file's next page is necessarily in a *different* file, so the
-    /// same-document bound catches it too, and all 28 tests in `spreads.rs` stay green
+    /// same-document bound catches it too, and all 28 tests in the spreads suite stay green
     /// with the page-count check deleted (run twice, including after the bounds test
     /// was reordered). The page-count bound is kept because it states the read-ahead's
     /// scope where it is decided and skips one in-memory hop, **not** because anything

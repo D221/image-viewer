@@ -7,8 +7,8 @@
 //! against `src/main.rs` as text. The same pattern as
 //! `tests/renderer.rs`, `tests/keybindings.rs` and the other scans here.
 //!
-//! The helpers below are twins of `tests/spreads.rs`'s: one test target cannot
-//! import from another, so `main_src`, `collect_src`, `fn_body` and
+//! The helpers below are twins of `tests/common/spreads_fixtures.rs`' ones: one test
+//! target cannot import from another, so `main_src`, `collect_src`, `fn_body` and
 //! `block_after` exist once per file. `call_args` is defined here because it is
 //! only used by this file's scans.
 

@@ -295,9 +295,10 @@ and the deferred anchor list. This section's investigation stays intact so it
 does not have to be repeated if the feature is picked up again.
 
 Shipped. The pairing rules and the layout geometry are pure functions in
-`lib.rs` and are pinned behaviourally in `tests/spreads.rs`; the traps are in
-`AGENTS.md` under **Spreads and reading direction**; the user-facing description
-and the three limits a user cannot work around are in `README.md`.
+`lib.rs` and are pinned behaviourally in the `tests/spreads*.rs` targets; the
+traps are in `AGENTS.md` under **Spreads and reading direction**; the
+user-facing description and the three limits a user cannot work around are in
+`README.md`.
 
 **What is unverified is the part a test cannot reach.** `main.rs` is unreachable
 from every integration test, so the paint and navigation wiring is covered by
@@ -368,7 +369,7 @@ which is exactly what a visual check passes.
 
 `anchor_of` and `prev_anchor` both walk forward from `(0, 0)`, because backward cannot
 be answered locally. **The corrected cost, measured as a count rather than a time**
-(`tests/spreads.rs::a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor`):
+(`tests/spreads_goto.rs::a_navigation_walk_costs_one_turn_len_per_turn_behind_the_cursor`):
 
 | | turns | `dims` reads | per turn |
 |---|---|---|---|
@@ -537,13 +538,13 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 | file | lines | what is in it |
 |---|---|---|
 | `tests/unit.rs` | 5,095 | the unit suite, one file for everything that does not deserve its own target |
-| `tests/spreads.rs` | 6,687 | the manga-mode suite, same shape |
-| `src/app/ui.rs` | 2,060 | pane layout against the egui UI |
 | `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
+| `src/app/ui.rs` | 2,302 | pane layout against the egui UI |
+| `tests/bench_browse.rs` | 2,246 | the cell-cache benchmarks |
 | `tests/rotate_save.rs` | 1,921 | |
 | `tests/flip_through.rs` | 1,647 | |
-| `src/app/central.rs` | 1,402 | |
-| `tests/bench_browse.rs` | 1,309 | |
+| `src/app/central.rs` | 1,398 | |
+| `src/gallery/gallery.rs` | 1,155 | |
 | `tests/thumb_cache.rs` | 1,121 | |
 
 The split shape is proven on this tree several times over — the preview store,
@@ -551,13 +552,20 @@ then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
 folders, then `unit.rs`'s prefilter suite out to `tests/resample.rs`,
 `spreads.rs`'s settings section out to `tests/manga_settings.rs`,
 `keybindings.rs` into `keybindings.rs` (648 lines) plus
-`tests/keys_direction.rs` (889 lines) — 17 tests split 7/10 — and
+`tests/keys_direction.rs` (889 lines) — 17 tests split 7/10 —
 `spreads.rs`'s central/schedule wiring scans out to `tests/spread_wiring.rs`
-(328 lines) with the navigation-walk test staying in place — 113 → 109 tests
-in spreads.rs, none lost, none duplicated, no new warnings. Files that come
-down under the target leave the list; that is what just happened to
-`keybindings.rs`, `manga_settings.rs` and `spread_wiring.rs`. What remains is
-the same move: split a test file by subject, or move a section of
+(328 lines), and finally **`spreads.rs` itself** (6,687 lines, 109 tests) split
+by subject into eleven targets — `spreads_partner.rs` (410), `spreads_dims.rs`
+(903), `spreads_overrides.rs` (828), `spreads_layout.rs` (599),
+`spreads_zoom.rs` (258), `spreads_pan.rs` (693), `spreads_nav.rs` (472),
+`spreads_goto.rs` (744), `spreads_latches.rs` (538), `spreads_decode.rs` (202)
+and what stayed behind in `spreads.rs` (658) — with the shared fixtures in
+`tests/common/spreads_fixtures.rs` (470). 109 tests in, 109 out, none lost,
+none duplicated, no new warnings; every one of those files is under the target
+and `spreads.rs` has left the list. Files that come down under the target leave
+the list; that is what just happened to `keybindings.rs`,
+`manga_settings.rs`, `spread_wiring.rs` and `spreads.rs`. What remains is the
+same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
 numbers above.
 

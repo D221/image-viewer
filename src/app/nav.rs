@@ -116,7 +116,7 @@ impl MyApp {
     /// [`image_viewer::next_turn`] - which snaps to the current turn's anchor first,
     /// wraps when `loop_back` is on, and refuses past the end with it off - and the
     /// move is [`Self::goto_turn`]. Both are library rules tested in
-    /// `tests/spreads.rs`, which is what lets this method be two lines without being
+    /// `tests/spreads_nav.rs`, which is what lets this method be two lines without being
     /// untested logic.
     pub(crate) fn turn_forward(&mut self) -> bool {
         let to = image_viewer::next_turn(self.gallery.page_pos(), self.spreads.lead_lone, &self.page_ctx());
@@ -178,7 +178,7 @@ impl MyApp {
     ///   either way, and `prev_anchor` answers `None` at the front or on a second
     ///   half. The controller's original "walk `prev_anchor` back from the final
     ///   page" was found unimplementable for the same reason; `last_anchor` is the
-    ///   rule that works, and it is the one tested in `tests/spreads.rs`.
+    ///   rule that works, and it is the one tested in `tests/spreads_nav.rs`.
     ///
     /// An empty gallery does nothing at all, which is the old `!is_empty()` guard
     /// moved in here so the two modes cannot disagree about it.

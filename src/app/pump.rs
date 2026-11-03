@@ -457,7 +457,7 @@ impl MyApp {
             }
         }
         // **Outside the gate on purpose, and this is the assertion that keeps it
-        // outside** (`tests/spreads.rs`,
+        // outside** (`tests/spreads_latches.rs`,
         // `the_turns_second_half_is_derived_not_latched`). One frame, unconditionally:
         // the mode toggle, the leading-lone nudge, `X`, a learned shape that collapses
         // the turn, a learned page count that moves its far edge, a re-export that

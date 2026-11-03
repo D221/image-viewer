@@ -92,7 +92,7 @@ fn collect_src(dir: &std::path::Path, texts: &mut Vec<String>) {
 
 /// The body of `fn <sig>` in `src/main.rs`, found by **brace matching**.
 ///
-/// Same helper as `tests/spreads.rs::fn_body` and the same reason it starts its
+/// Same helper as `tests/common/spreads_fixtures.rs::fn_body` and the same reason it starts its
 /// depth at 0: the scan begins *before* the function's `{` (the signature has
 /// none), so the first brace it meets is the function's. Starting at 1 misses the
 /// closing brace and runs on until the file's own braces happen to balance - and

@@ -600,7 +600,7 @@ pub fn anchor_of(pos: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> PagePos {
 ///
 /// **It does not see the wrap, and that is what makes a looping gallery's tiling
 /// the tiling it would have with looping off** - the property the round-trip test
-/// in `tests/spreads.rs` asserts. It walks with [`PageCtx::step_no_wrap`] for the
+/// in `tests/spreads_nav.rs` asserts. It walks with [`PageCtx::step_no_wrap`] for the
 /// same reason [`prev_anchor`] does: a turn must not name a page twice, and across
 /// the seam it would. It is also what makes the walk **end by itself**: a wrapping
 /// step on a looping gallery never answers `None`, so the loop would run to
