@@ -553,7 +553,9 @@ and what stayed behind in `spreads.rs` (658) — with the shared fixtures in
 none duplicated, no new warnings; every one of those files is under the target
 and `spreads.rs` has left the list. Files that come down under the target leave
 the list; that is what just happened to `keybindings.rs`,
-`manga_settings.rs`, `spread_wiring.rs` and `spreads.rs`. What remains is the
+`manga_settings.rs`, `spread_wiring.rs`, `spreads.rs` and `multiframe.rs`
+(split into `tests/multiframe.rs` for animation and
+`tests/multipage_tiff.rs` for multi-page TIFF pages). What remains is the
 same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
 numbers above.
