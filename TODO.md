@@ -534,7 +534,6 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 | `tests/flip_through.rs` | 1,572 | |
 | `src/app/central.rs` | 1,389 | |
 | `src/gallery/gallery.rs` | 1,099 | |
-| `tests/thumb_cache.rs` | 1,086 | |
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
@@ -553,9 +552,10 @@ and what stayed behind in `spreads.rs` (658) — with the shared fixtures in
 none duplicated, no new warnings; every one of those files is under the target
 and `spreads.rs` has left the list. Files that come down under the target leave
 the list; that is what just happened to `keybindings.rs`,
-`manga_settings.rs`, `spread_wiring.rs`, `spreads.rs` and `multiframe.rs`
-(split into `tests/multiframe.rs` for animation and
-`tests/multipage_tiff.rs` for multi-page TIFF pages). What remains is the
+`manga_settings.rs`, `spread_wiring.rs`, `spreads.rs`, `multiframe.rs`
+(truncated from 1,036 to 437 lines by removing the TIFF
+and gallery-navigation sections) and `thumb_cache.rs` (its shell-cache
+tests moved to `tests/thumb_shell_cache.rs`). What remains is the
 same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
 numbers above.

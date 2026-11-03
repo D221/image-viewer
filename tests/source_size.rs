@@ -52,7 +52,6 @@ const OVER_TARGET: &[(&str, usize)] = &[
     ("tests/rotate_save.rs", 1_847),
     ("tests/flip_through.rs", 1_572),
     ("tests/bench_browse.rs", 2_127),
-    ("tests/thumb_cache.rs", 1_086),
 ];
 
 /// The directories a source file can live in.
