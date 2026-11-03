@@ -604,6 +604,96 @@ fn a_cmyk_past_the_first_page_is_converted_not_refused() {
     assert_eq!(px(3), [255, 255, 255]);
 }
 
+/// A two-page TIFF whose **second** page is CMYKA, which used to be refused.
+///
+/// CMYKA is CMYK plus an alpha sample per pixel. `image` cannot decode a CMYKA
+/// TIFF at all, so the conversion is done here instead of through `cmyk_via_image`
+/// — the same `(255 - c) * (1 - k/255)` formula `image` uses for CMYK, then the
+/// alpha sample is passed straight through.
+fn cmyka_second_page_tiff(w: u32, h: u32) -> Vec<u8> {
+    use tiff::encoder::{TiffEncoder, colortype};
+    let mut out = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [10u8, 20, 30, 255]).collect();
+        enc.write_image::<colortype::RGBA8>(w, h, &rgba).unwrap();
+
+        let n = (w * h) as usize;
+        let mut cmyka = vec![0u8; n * 5]; // no ink, fully opaque
+        // Pixel 0: full cyan, alpha 128
+        cmyka[0..5].copy_from_slice(&[255, 0, 0, 0, 128]);
+        // Pixel 1: full black ink, alpha 255
+        cmyka[5..10].copy_from_slice(&[0, 0, 0, 255, 255]);
+        // Pixel 2: no ink (white), alpha 64
+        cmyka[10..15].copy_from_slice(&[0, 0, 0, 0, 64]);
+        enc.write_image::<colortype::CMYKA8>(w, h, &cmyka).unwrap();
+    }
+    out
+}
+
+#[test]
+fn a_cmyka_past_the_first_page_is_converted_not_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "print_cmyka.tiff", &cmyka_second_page_tiff(4, 2));
+    assert_eq!(image_viewer::tiff_page_count(&p), 2);
+
+    let first = image_viewer::load_page_preview_full(&p, 512, 0).unwrap();
+    assert_eq!((first.preview.width, first.preview.height), (4, 2));
+
+    let cmyka = image_viewer::load_page_preview_full(&p, 512, 1).unwrap();
+    assert_eq!(
+        (cmyka.preview.width, cmyka.preview.height),
+        (4, 2),
+        "the conversion must not change the page's dimensions"
+    );
+    assert_eq!(cmyka.preview.rgba.len(), 4 * 2 * 4, "and the buffer must still be exactly w*h*4");
+
+    // The actual conversion, checked against `image`'s own CMYK formula,
+    // with alpha passed straight through.
+    let px = |i: usize| {
+        [
+            cmyka.preview.rgba[i * 4],
+            cmyka.preview.rgba[i * 4 + 1],
+            cmyka.preview.rgba[i * 4 + 2],
+            cmyka.preview.rgba[i * 4 + 3],
+        ]
+    };
+    assert_eq!(px(0), [0, 255, 255, 128], "full cyan ink, alpha 128");
+    assert_eq!(px(1), [0, 0, 0, 255], "full black ink, alpha 255");
+    assert_eq!(px(2), [255, 255, 255, 64], "no ink is white, alpha 64");
+}
+
+/// YCbCr pages past the first stay refused. `image` rejects the YCbCr colour
+/// type outright, so there is no conversion path — a YCbCr page must surface an
+/// error rather than silently show the wrong colours.
+#[test]
+fn a_ycbcr_past_the_first_page_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(dir.path(), "ycbcr.tiff", &ycbcr_second_page_tiff(4, 2));
+
+    let r = image_viewer::load_page_preview_full(&p, 512, 1);
+    assert!(r.is_err(), "page 1 YCbCr of a TIFF must not decode");
+    // Page 0 of the same file is fine, so the failure is about the colour type.
+    assert!(image_viewer::load_page_preview_full(&p, 512, 0).is_ok());
+}
+
+fn ycbcr_second_page_tiff(w: u32, h: u32) -> Vec<u8> {
+    use tiff::encoder::{TiffEncoder, colortype};
+    let mut out = Vec::new();
+    {
+        let mut enc = TiffEncoder::new(std::io::Cursor::new(&mut out)).unwrap();
+        let rgba: Vec<u8> = (0..w * h).flat_map(|_| [10u8, 20, 30, 255]).collect();
+        enc.write_image::<colortype::RGBA8>(w, h, &rgba).unwrap();
+
+        let n = (w * h) as usize;
+        let mut ycbcr = vec![0u8; n * 3];
+        // Pixel 0: Y=0, Cb=0, Cr=0
+        ycbcr[0..3].copy_from_slice(&[0, 0, 0]);
+        enc.write_image::<colortype::YCbCr8>(w, h, &ycbcr).unwrap();
+    }
+    out
+}
+
 #[test]
 fn asking_for_a_page_that_is_not_there_is_an_error_not_a_wrong_picture() {
     // The failure that matters most here. Falling back to page 1 would be

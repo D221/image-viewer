@@ -110,20 +110,9 @@ Pages work, and **CMYK now works too** — `cmyk_via_image` re-wraps a page's
 samples in a one-page TIFF and lets `image` do the conversion, because `image`
 owns the maths and cannot be pointed at page 2. Verified for CMYK8 and CMYK16.
 
-Still refused past page 0, each an error rather than an approximation: **YCbCr,
-Lab, palette, CMYK+alpha, multiband.** The blocker is not the decoder — `image`
-can convert YCbCr and Lab — it is that the re-wrap trick needs a `tiff`-crate
-*encoder* type for the source colour type, and there isn't a usable one:
+Still refused past page 0, each an error rather than an approximation: **palette, Lab, multiband.** YCbCr stays refused too: `image` rejects the YCbCr colour type outright when decoding a TIFF, so re-wrapping a YCbCr page as a one-page TIFF and handing it to `image` fails — it cannot be reached this way.
 
-- `tiff::encoder::colortype::YCbCr8` has `Inner = u8` with `BITS_PER_SAMPLE =
-  [8, 8, 8]`, which cannot carry three samples per pixel. Writing a YCbCr page
-  through it is not possible as written.
-- palette needs the `colormap` tag applied, and Lab is not a photometric
-  interpretation the encoder offers at all.
-
-So this item is now "find or write a way to express those types in a one-page
-TIFF", not "make `image` do the conversion". Worth doing only if real scans need
-it; a 24-bit CMYK scan is the common print case and it is already covered.
+**Done since this section was written:** CMYK (8 and 16 bit) and CMYKA (8 bit) now decode past page 0 through the `cmyk_via_image` re-wrap trick. Verified for CMYK8, CMYK16, and CMYKA8. Worth doing only if real scans need it; CMYK (the common print case) was already covered.
 
 ---
 
@@ -537,15 +526,15 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 
 | file | lines | what is in it |
 |---|---|---|
-| `tests/unit.rs` | 5,095 | the unit suite, one file for everything that does not deserve its own target |
-| `tests/resample.rs` | 2,723 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
-| `src/app/ui.rs` | 2,302 | pane layout against the egui UI |
-| `tests/bench_browse.rs` | 2,246 | the cell-cache benchmarks |
-| `tests/rotate_save.rs` | 1,921 | |
-| `tests/flip_through.rs` | 1,647 | |
-| `src/app/central.rs` | 1,398 | |
-| `src/gallery/gallery.rs` | 1,155 | |
-| `tests/thumb_cache.rs` | 1,121 | |
+| `tests/unit.rs` | 4,752 | the unit suite, one file for everything that does not deserve its own target |
+| `tests/resample.rs` | 2,537 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
+| `src/app/ui.rs` | 2,272 | pane layout against the egui UI |
+| `tests/bench_browse.rs` | 2,127 | the cell-cache benchmarks |
+| `tests/rotate_save.rs` | 1,847 | |
+| `tests/flip_through.rs` | 1,572 | |
+| `src/app/central.rs` | 1,389 | |
+| `src/gallery/gallery.rs` | 1,099 | |
+| `tests/thumb_cache.rs` | 1,086 | |
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic

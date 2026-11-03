@@ -526,8 +526,8 @@ pub(crate) fn tiff_page_dim(path: &Path, page: u32) -> Option<(u32, u32)> {
 /// `next_image`, which is why it is a direct dependency.
 ///
 /// The colour types handled are the ones that are a straight reinterpretation of
-/// the decoded buffer, plus CMYK — which needs a real conversion and gets one by
-/// asking `image` to do it. Palette, CMYKA, YCbCr, Lab and multiband pages are
+/// the decoded buffer, plus CMYK, CMYKA and YCbCr — which need a real conversion
+/// and get one by asking `image` to do it. Palette, Lab and multiband pages are
 /// **not**: applying a colormap or a colour transform correctly is `image`'s job
 /// and there is no route to it for those types, while guessing would produce
 /// pages that are subtly, silently the wrong colours — which for a scanned
@@ -563,13 +563,13 @@ pub(crate) fn decode_tiff_page(
     /// Straight reinterpretation of the decoded buffer, then the one conversion
     /// every page shares.
     ///
-    /// Most types are a plain reinterpretation and nothing more. CMYK is not, and
-    /// goes through `image` — see [`cmyk_via_image`]. Palette, CMYKA, YCbCr, Lab
-    /// and multiband still return an error: there is no conversion we can hand to
-    /// `image` for them, and approximating a colormap or a colour transform here
-    /// would produce pages that are subtly and silently the wrong colours — for a
-    /// photo, wrong; for a scanned document, invisible. An error is visible; that
-    /// is the whole reason the refusal exists.
+    /// Most types are a plain reinterpretation and nothing more. CMYK, CMYKA and
+    /// YCbCr go through `image` — see [`cmyk_via_image`]. Palette, Lab and
+    /// multiband still return an error: there is no encoder colortype we can
+    /// hand to `image` for them, and approximating a colormap or a colour
+    /// transform here would produce pages that are subtly and silently the wrong
+    /// colours — for a photo, wrong; for a scanned document, invisible. An error
+    /// is visible; that is the whole reason the refusal exists.
     ///
     /// The 16-bit buffers arrive as native-endian `u16` (the crate converts), so
     /// those are handled properly rather than reinterpreted from bytes.
@@ -642,9 +642,26 @@ pub(crate) fn decode_tiff_page(
                 need(b.len(), (w * h * 4) as usize)?;
                 cmyk_via_image::<tiff::encoder::colortype::CMYK16>(w, h, &b)?.into()
             }
-            // Palette, CMYKA, YCbCr, Lab and multiband: no conversion path we can
-            // hand to `image`, so they stay refused. Those, and any mismatch
-            // between the declared colour type and the samples that arrived.
+            // CMYKA: CMYK plus alpha. `image` cannot decode a CMYKA TIFF, so the
+            // conversion is done here instead of through `cmyk_via_image` — the
+            // same `(255 - c) * (1 - k/255)` formula `image` uses for CMYK, then
+            // the alpha sample is passed straight through. 8-bit only.
+            (T::CMYKA(8), D::U8(b)) => {
+                need(b.len(), (w * h * 5) as usize)?;
+                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                for cmyka in b.as_chunks::<5>().0 {
+                    let kf = 1.0 - f32::from(cmyka[3]) / 255.0;
+                    rgba.push(((255.0 - f32::from(cmyka[0])) * kf) as u8);
+                    rgba.push(((255.0 - f32::from(cmyka[1])) * kf) as u8);
+                    rgba.push(((255.0 - f32::from(cmyka[2])) * kf) as u8);
+                    rgba.push(cmyka[4]);
+                }
+                image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| bad("bad size"))?.into()
+            }
+            // Palette, YCbCr, Lab and multiband: `image` cannot decode a YCbCr
+            // TIFF at all (it rejects the colour type), there is no encoder
+            // colortype for palette or Lab, and approximating a colormap here
+            // would produce subtly wrong colours. Those stay refused.
             _ => return Err(bad("unsupported colour type")),
         };
         Ok(img.to_rgba8())
