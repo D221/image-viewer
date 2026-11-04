@@ -234,6 +234,7 @@ impl MyApp {
             lat: Latency::default(),
             t_boot: perf::boot(),
             t_prev_frame: None,
+            first_frame: true,
             pending_advance: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),

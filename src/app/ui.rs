@@ -78,6 +78,14 @@ impl eframe::App for MyApp {
         let ctx = &ctx;
         self.frame_prelude(ctx);
 
+        // The window is created hidden (`with_visible(false)` in `main.rs`) so
+        // the compositor never composites a blank frame before the first
+        // texture uploads. Show it once the first frame is painted.
+        if self.first_frame {
+            self.first_frame = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+
         // ---- one direction rule, read once --------------------------------
         //
         // **Every input that can move the view is named in [`NAV_KEYS`] /

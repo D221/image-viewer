@@ -490,6 +490,9 @@ pub(crate) struct MyApp {
     pub(crate) t_boot: Option<Instant>,
     /// Start of the previous frame, for the frame-interval metric.
     pub(crate) t_prev_frame: Option<Instant>,
+    /// The window is created hidden; shown on the first frame so the user never
+    /// sees a blank compositor frame before the first texture uploads.
+    pub(crate) first_frame: bool,
     pub(crate) pending_advance: Option<bool>, // queued step, consumed after one painted frame
     pub(crate) zip_archive: Option<PathBuf>,  // archive currently open (cbz/zip/7z/rar)
     pub(crate) zip_temp: Option<PathBuf>,     // its extracted temp dir

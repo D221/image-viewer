@@ -190,7 +190,9 @@ fn main() -> eframe::Result<()> {
     // Window chrome from config at creation; the checkboxes apply the
     // same flags live, so this only matters for what a fresh launch
     // looks like.
-    let mut viewport = egui::ViewportBuilder::default();
+    // Created hidden so the compositor never composites a blank frame before
+    // the first texture uploads; shown on the first frame (see `MyApp::ui`).
+    let mut viewport = egui::ViewportBuilder::default().with_visible(false);
     // Remembered size: fall back to the shipped 1280x800 on first launch.
     if let Some((w, h)) = config.window_size {
         viewport = viewport.with_inner_size([w as f32, h as f32]);
