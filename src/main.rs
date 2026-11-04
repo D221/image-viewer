@@ -132,18 +132,13 @@ fn main() -> eframe::Result<()> {
         _ => {}
     }
 
-    // `--probe-renderer <name>` is the child half of the backend probe: it does
-    // adapter enumeration for one backend and exits, so that a driver which
-    // access-violates takes this process down and nothing else. Never reached
-    // unless the parent asked for it.
-    if let Some(i) = args.iter().position(|a| a == "--probe-renderer") {
-        let name = args.get(i + 1).and_then(|s| image_viewer::WgpuBackend::parse(s));
-        let Some(backend) = name else {
-            eprintln!("--probe-renderer needs a backend name (dx12, gl, vulkan)");
-            std::process::exit(2);
-        };
-        std::process::exit(probe_one(backend));
-    }
+    // Glow renderer — OpenGL is universally available on Windows, so there is no
+    // backend to choose, nothing to probe, and no access violation to survive.
+    // wgpu is not built at all: `Cargo.toml` turns eframe's default features off
+    // and asks for `glow` and nothing platform-specific. That is why the
+    // per-process backend probe, the restart slot and the `--probe-renderer`
+    // child mode are gone rather than dormant — there is no second renderer for
+    // them to choose between.
 
     // The window icon takes ~18 ms to render (1024 px supersampled then downscaled).
     // Start it on a worker thread now so it overlaps the registry and config work
@@ -160,12 +155,6 @@ fn main() -> eframe::Result<()> {
         eprintln!("note: could not declare a taskbar identity: {e}");
     }
 
-    // The renderer can change while the app is running, which means re-entering
-    // the eframe event loop. The app cannot hand that back through its return
-    // value, so it leaves a request in this slot on its way out and the loop
-    // below picks it up.
-    let restart: RestartSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
-
     let config_path = image_viewer::Config::default_path();
     let config = image_viewer::Config::load(&config_path);
     // Single-instance gate: a second launch exits rather than fighting
@@ -175,21 +164,16 @@ fn main() -> eframe::Result<()> {
         eprintln!("Another image-viewer instance is already running — exiting.");
         std::process::exit(0);
     }
-    // Glow renderer — OpenGL is universally available on Windows, no probe
-    // needed, no risk of wgpu driver access violations. The wgpu probe code
-    // (renderer.rs) stays in the tree for reference but is not called here.
-    let _config = &config;
     // Joined here: the render started before the registry/config work, so it is
-    // usually done by now and the join returns at once. Stored as an Arc so the
-    // renderer-restart loop can reuse the same icon data without re-rendering.
+    // usually done by now and the join returns at once.
     let icon = std::sync::Arc::new(egui::IconData {
         rgba: icon_handle.join().expect("icon render thread panicked").into_raw(),
         width: WINDOW_ICON_PX,
         height: WINDOW_ICON_PX,
     });
     // The launch listing starts here, not in the app creator: the creator only
-    // runs once the window, adapter, device and surface exist (~150 ms on this
-    // machine), and the walk needs none of them. See `core/startup_scan.rs`.
+    // runs once the window and GL context exist (~150 ms on this machine), and
+    // the walk needs neither. See `core/startup_scan.rs`.
     let launch_folder = launch_scan_folder(&config);
     let prefetched = launch_folder.as_deref().map(|folder| {
         (
@@ -202,110 +186,80 @@ fn main() -> eframe::Result<()> {
             ),
         )
     });
-    let prefetched = std::sync::Arc::new(std::sync::Mutex::new(prefetched));
 
-    // One iteration per renderer the user runs. The app is rebuilt from the
-    // config each time, so a restart keeps the folder, sort mode and settings
-    // but loses the in-memory preview cache and has to decode again.
-    //
-    // This loop has no `break`: it exits only via `return` (normal exit on
-    // `Ok`, startup failure on `Err`). That is intentional — the app requests
-    // a renderer restart by writing to the shared `restart` slot and closing
-    // the viewport, which returns control here to rebuild with the new
-    // backend. Clippy's `never_loop` denies loops without `break`/`continue`,
-    // but termination here is through `return`, so the lint is allowed with a
-    // documented reason rather than restructured (which would obscure the
-    // restart-slot hand-off between the app and the launch loop).
-    #[allow(clippy::never_loop)]
-    loop {
-        // Window chrome from config at creation; the checkboxes apply the
-        // same flags live, so this only matters for what a fresh launch
-        // looks like.
-        let mut viewport = egui::ViewportBuilder::default();
-        // Remembered size: fall back to the shipped 1280x800 on first launch.
-        if let Some((w, h)) = config.window_size {
-            viewport = viewport.with_inner_size([w as f32, h as f32]);
-        } else {
-            viewport = viewport.with_inner_size([1280.0, 800.0]);
-        }
-        // Remembered position, maximized state first so the window opens where
-        // the user left it. Position is applied even when maximized is set —
-        // winit ignores the position of a maximized window, so nothing breaks.
-        if let Some((x, y)) = config.window_pos {
-            viewport = viewport.with_position([x as f32, y as f32]);
-        }
-        if config.window_maximized {
-            viewport = viewport.with_maximized(true);
-        }
-        if config.always_on_top {
-            viewport = viewport.with_always_on_top();
-        }
-        if config.hide_title_bar {
-            viewport = viewport.with_decorations(false);
-        }
-        let options = eframe::NativeOptions {
-            renderer: eframe::Renderer::Glow,
-            viewport: viewport
-                // The window icon, set at creation rather than afterwards.
-                //
-                // This is the whole fix, and it took four attempts to find the
-                // obvious API. Everything before it was the icon reaching the
-                // window *late*: `WM_SETICON` only works if the window procedure
-                // forwards it to `DefWindowProc` (winit's does not, and it serves
-                // icons from its own state instead), and DWM caches the title
-                // bar's icon when the non-client area is built — which is before
-                // any of our code runs. Setting it here is the only point where
-                // the window does not exist yet, so nothing has to be corrected
-                // afterwards.
-                //
-                // `icon::render` is the same generator that produces
-                // `assets/app.ico` for the embedded resource, so the window icon
-                // and the icon in the exe are the same artwork by construction
-                // rather than by two files agreeing.
-                .with_icon(icon.clone()),
-            glow_options: eframe::egui_glow::GlowConfiguration::default(),
-            // eframe's own window-state store is one more file to read on the
-            // start-up path, and its job is already done here: size, position
-            // and maximized are persisted in `config.json` and applied through
-            // the viewport above, which also means the two cannot disagree
-            // about the window geometry.
-            persist_window: false,
-            ..Default::default()
-        };
-        let slot = restart.clone();
-        let prefetch = prefetched.clone();
-        let result = eframe::run_native(
-            "Image Viewer",
-            options,
-            Box::new(move |cc| {
-                let listing = prefetch.lock().ok().and_then(|mut p| p.take());
-                let app = MyApp::new_with_renderer(cc, slot, listing);
-                Ok(Box::new(app) as Box<dyn eframe::App>)
-            }),
-        );
-
-        // Whatever happened, get the request out before deciding. The perf
-        // report is written by `on_exit`, not here: that is the clean-exit path,
-        // and writing it from both places would produce it twice.
-        let _requested = restart.lock().ok().and_then(|mut s| s.take());
-
-        // Glow build: no backend switching — glow is the only renderer.
-        match result {
-            Ok(_) => return Ok(()),
-            Err(e) => {
-                eprintln!("Failed to start the viewer: {e}");
-                return Err(e);
-            }
+    // Window chrome from config at creation; the checkboxes apply the
+    // same flags live, so this only matters for what a fresh launch
+    // looks like.
+    let mut viewport = egui::ViewportBuilder::default();
+    // Remembered size: fall back to the shipped 1280x800 on first launch.
+    if let Some((w, h)) = config.window_size {
+        viewport = viewport.with_inner_size([w as f32, h as f32]);
+    } else {
+        viewport = viewport.with_inner_size([1280.0, 800.0]);
+    }
+    // Remembered position, maximized state first so the window opens where
+    // the user left it. Position is applied even when maximized is set —
+    // winit ignores the position of a maximized window, so nothing breaks.
+    if let Some((x, y)) = config.window_pos {
+        viewport = viewport.with_position([x as f32, y as f32]);
+    }
+    if config.window_maximized {
+        viewport = viewport.with_maximized(true);
+    }
+    if config.always_on_top {
+        viewport = viewport.with_always_on_top();
+    }
+    if config.hide_title_bar {
+        viewport = viewport.with_decorations(false);
+    }
+    let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Glow,
+        viewport: viewport
+            // The window icon, set at creation rather than afterwards.
+            //
+            // This is the whole fix, and it took four attempts to find the
+            // obvious API. Everything before it was the icon reaching the
+            // window *late*: `WM_SETICON` only works if the window procedure
+            // forwards it to `DefWindowProc` (winit's does not, and it serves
+            // icons from its own state instead), and DWM caches the title
+            // bar's icon when the non-client area is built — which is before
+            // any of our code runs. Setting it here is the only point where
+            // the window does not exist yet, so nothing has to be corrected
+            // afterwards.
+            //
+            // `icon::render` is the same generator that produces
+            // `assets/app.ico` for the embedded resource, so the window icon
+            // and the icon in the exe are the same artwork by construction
+            // rather than by two files agreeing.
+            .with_icon(icon),
+        glow_options: eframe::egui_glow::GlowConfiguration::default(),
+        // eframe's own window-state store is one more file to read on the
+        // start-up path, and its job is already done here: size, position
+        // and maximized are persisted in `config.json` and applied through
+        // the viewport above, which also means the two cannot disagree
+        // about the window geometry.
+        persist_window: false,
+        ..Default::default()
+    };
+    let result = eframe::run_native(
+        "Image Viewer",
+        options,
+        Box::new(move |cc| {
+            let app = MyApp::new(cc, prefetched);
+            Ok(Box::new(app) as Box<dyn eframe::App>)
+        }),
+    );
+    // The perf report is written by `on_exit`, not here: that is the clean-exit
+    // path, and writing it from both places would produce it twice.
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            eprintln!("Failed to start the viewer: {e}");
+            Err(e)
         }
     }
 }
 
-/// Where a running app leaves "restart me with this backend" on its way out.
-///
-/// A `run_native` loop cannot see inside the `App` it is handed, and a hard
-/// crash is not something to recover from in-process, so the only two channels
-/// available are a process exit code (too coarse) and shared state. This is the
-/// shared state.
 // ---------------------------------------------------------------------------
 // The modules
 // ---------------------------------------------------------------------------

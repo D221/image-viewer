@@ -1098,38 +1098,6 @@ fn test_gallery_grid_cells_fit_row_and_register_clicks() {
 }
 
 #[test]
-fn test_wgpu_backend_set_enables_exactly_one_backend() {
-    use image_viewer::{WgpuBackend, wgpu_backend_set};
-
-    // The contract changed, and deliberately. This used to return
-    // `(vulkan, dx12)` and kept DX12 enabled *alongside* Vulkan as a fallback.
-    // That is not a fallback: wgpu enumerates every backend in the set during
-    // adapter discovery and access-violates on this machine when Vulkan is in
-    // it, so a two-backend set is a way to crash rather than a way to recover.
-    //
-    // One bit, always. Which one is the launch loop's decision, made by probing
-    // each in a child process; see `tests/renderer.rs` for the policy.
-    for b in [WgpuBackend::Auto, WgpuBackend::Dx12, WgpuBackend::Gl, WgpuBackend::Vulkan] {
-        assert_eq!(wgpu_backend_set(b).count_ones(), 1, "{b:?} enabled more than one backend");
-    }
-    // `Auto` is resolved before it reaches here, but must not produce an empty
-    // set — that fails with a much more confusing error than a wrong backend.
-    assert_eq!(wgpu_backend_set(WgpuBackend::Auto), wgpu_backend_set(WgpuBackend::Dx12));
-
-    // Parsing: an unrecognised value must not silently select something, and
-    // callers treat `None` as the default. "opengl" used to be rejected and is
-    // now a real backend.
-    assert_eq!(WgpuBackend::parse("auto"), Some(WgpuBackend::Auto));
-    assert_eq!(WgpuBackend::parse("  DX12 "), Some(WgpuBackend::Dx12));
-    assert_eq!(WgpuBackend::parse("vulkan"), Some(WgpuBackend::Vulkan));
-    assert_eq!(WgpuBackend::parse("vk"), Some(WgpuBackend::Vulkan));
-    assert_eq!(WgpuBackend::parse("d3d12"), Some(WgpuBackend::Dx12));
-    assert_eq!(WgpuBackend::parse("opengl"), Some(WgpuBackend::Gl));
-    assert_eq!(WgpuBackend::parse("gl"), Some(WgpuBackend::Gl));
-    assert_eq!(WgpuBackend::parse("nonsense"), None);
-}
-
-#[test]
 fn test_path_arg_skips_flags() {
     use image_viewer::path_arg;
 
@@ -1167,6 +1135,13 @@ fn test_path_arg_skips_flags() {
         path_arg(["--perf", "C:\\my-photos\\a-b.jpg"]).as_deref(),
         Some(std::path::Path::new("C:\\my-photos\\a-b.jpg"))
     );
+
+    // An argument that *starts* with a dash is a flag whatever it means, which
+    // is why a relative path can be escaped as `.\-name.jpg`. And an empty
+    // argument is not a path either - it would open the process's own directory.
+    assert_eq!(path_arg(["-name.jpg"]), None);
+    assert_eq!(path_arg([r".\-name.jpg"]).as_deref(), Some(std::path::Path::new(r".\-name.jpg")));
+    assert_eq!(path_arg(["", "C:\\photos"]).as_deref(), Some(std::path::Path::new("C:\\photos")));
 }
 
 #[test]
@@ -4520,6 +4495,73 @@ fn an_old_config_without_the_remember_setting_lands_on_the_default() {
     assert!(c2.remember_view, "an explicit true must be honoured");
 }
 
+/// The renderer setting is **gone from the file, and a file that still has it
+/// must still load.**
+///
+/// wgpu stopped being built when the app moved to glow, so `renderer` is now an
+/// unknown key. Unknown keys are ignored rather than rejected (there is no
+/// `deny_unknown_fields`), and that is the whole reason every `config.json`
+/// written by an older build keeps working. A test that only checked a *missing*
+/// key would not notice the day someone made unknown keys fatal; this one feeds
+/// back a key this version has no field for.
+#[test]
+fn a_config_written_by_the_wgpu_build_still_loads() {
+    let old = r#"{
+        "load_all_on_startup": true,
+        "renderer": { "choice": "dx12", "probed": "gl" },
+        "folder": "C:\\photos"
+    }"#;
+    let c: image_viewer::Config = serde_json::from_str(old).expect("an old config must load");
+    assert!(c.load_all_on_startup);
+    assert_eq!(c.folder.as_deref(), Some(r"C:\photos"));
+}
+
+/// **wgpu is not in the build, and that is a decision about a file the compiler
+/// does not check.**
+///
+/// eframe's default features bring `egui-wgpu`, and with it `wgpu`, `wgpu-core`,
+/// `wgpu-hal` and `naga` plus their D3D12 and Vulkan backends. Measured on this
+/// machine that is 154 MB more idle memory (321 MB against 84 MB for a bare
+/// window) and 269 ms more to create a device, for the **same** frame rate - and
+/// its Vulkan backend access-violates during adapter enumeration even though
+/// `vulkaninfo` reports a healthy device. The app renders on glow, so none of it
+/// is used.
+///
+/// Removing `default-features = false` restores all of it silently. Nothing else
+/// in the tree notices, the build only gets slower, and no test would catch it;
+/// this is that test. `AGENTS.md` carries the measurements.
+#[test]
+fn eframe_is_built_without_wgpu() {
+    // The manifest explains in comments *why* wgpu is absent, so a prose line
+    // mentioning it must not be what this reads.
+    let manifest: String = include_str!("../Cargo.toml")
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Just the eframe entry: `zip` also sets `default-features = false`, and a
+    // whole-file search for that key would pass while eframe's defaults came
+    // back.
+    let start = manifest.find("eframe =").expect("an eframe dependency");
+    let entry = &manifest[start..];
+    let entry = &entry[..entry.find("] }").map(|i| i + 3).unwrap_or(entry.len())];
+    assert!(
+        entry.contains("default-features = false"),
+        "eframe must be built with its default features off: turning them on \
+         brings back wgpu, along with the Wayland/X11 and web features a \
+         Windows-only glow app never uses. eframe entry: {entry}"
+    );
+    assert!(
+        !entry.contains("\"wgpu\""),
+        "wgpu is not used by this app - the renderer is glow. eframe entry: {entry}"
+    );
+    assert!(
+        entry.contains("\"glow\""),
+        "glow is the renderer; without it eframe has no backend at all. \
+         eframe entry: {entry}"
+    );
+}
+
 /// The wiring: **the save must happen while the outgoing key is still in
 /// hand, and the restore after the key changes** — both inside the
 /// cursor-change block, both gated on the setting. `main.rs` is unreachable
@@ -4718,7 +4760,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
 
     // Startup honours the saved value — the same capture pattern the
     // constructor uses for `loop_back`.
-    let ctor = fn_body(&src, "fn new_with_renderer(").expect("constructor");
+    let ctor = fn_body(&src, "fn new(").expect("constructor");
     let capture = ctor
         .find("let show_panels = config.show_panels;")
         .expect("the constructor must read the saved master");

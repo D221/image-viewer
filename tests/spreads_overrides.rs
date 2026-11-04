@@ -790,7 +790,7 @@ fn the_overrides_live_beside_the_thumbnail_cache_not_beside_the_config() {
 /// * `"double"` Ã¢â‚¬â€ the spelling `#[serde(rename_all = "lowercase")]` exists to
 ///   produce. Without it serde writes `"Double"` and refuses to read `"double"`,
 ///   so a hand-edited file using the documented spelling loads as *nothing*, and
-///   `AGENTS.md` records that exact trap for `WgpuBackend`.
+///   `AGENTS.md` records that exact trap.
 /// * a root with no `lead_lone` Ã¢â‚¬â€ an older build, or a hand that added one page.
 ///   It gets [`LEAD_LONE_DEFAULT`], not `0`: see `assert_empty`.
 /// * a root with no `pages` Ã¢â‚¬â€ likewise, and it gets none.

@@ -211,52 +211,26 @@ substring of the tag list). Anything else stays a file-name substring match.
 
 ### Graphics backend
 
-Settings → **Graphics** picks the wgpu backend: **Automatic**, **DirectX 12**,
-**OpenGL** or **Vulkan**. Changing it restarts the renderer immediately — the
-window closes and reopens on the new backend, which keeps your folder, sort mode
-and settings but starts with an empty preview cache. **There is no Direct3D 11
-option**, because wgpu removed its DX11 backend upstream; DX12 and OpenGL are
-what it offers on Windows.
+The renderer is **glow** on OpenGL. There is no setting to pick a backend and
+nothing to probe, because glow has no backends to choose between.
 
-Automatic probes each backend and keeps the first that works, **in a separate
-process for each**. That is not ceremony: wgpu enumerates every backend in the
-enabled set during adapter discovery, and on some drivers that fails by
-**access-violating** — `0xC0000005`, before any window exists, with nothing on
-stderr. A process that has crashed cannot catch its own way out, so "try DX12
-and fall back to Vulkan" is not writable inside one process. Probing **stops at
-the first backend that works** — the others exist only to be tried when it
-fails — and the answer is cached, so it normally costs one child launch, and
-only on the first run after you change the setting. **Probe backends now**
-re-runs it on demand.
+An earlier version used wgpu and offered DirectX 12, OpenGL or Vulkan. It was
+removed after being measured, not on principle:
 
-The probe drives the driver as far as an adapter and a **device**, not just
-adapter enumeration — enumeration only walks the loader's list, and a probe that
-stopped there reported Vulkan as working on a machine where the app crashes on
-it. It does not create a window, so a backend that fails only at surface
-creation would still pass.
+- **154 MB more memory at idle** — 321 MB against 84 MB for an empty eframe
+  window — and **269 ms more** to create a device, for the **same** 76.8 fps
+  (interleaved A/B, active console session).
+- Its Vulkan backend **access-violates** during adapter enumeration on this
+  machine (`0xC0000005`) even though `vulkaninfo` reports a healthy device, so
+  the choice had to be made in a child process that was allowed to crash.
+- eframe's default features also compiled the X11 and Wayland platform layers
+  and the web screen reader, none of which a Windows-only app runs.
 
-The order is **OpenGL, then DirectX 12, then Vulkan** — measured on the
-development machine (Intel UHD 620, driver 30.0.100.9865), not assumed. Adapter
-and device creation costs 186 ms on GL against 455 ms on DX12, and an empty
-eframe window (no viewer code at all) holds 84 MB on GL against 321 MB on DX12,
-so GL is the same speed for 154 MB less. DX12 is second because it goes through
-a different driver stack, and so is the one most likely to work where GL does
-not. Automatic probing stops at the first success, so on a machine where GL
-works you see one line:
-
-```
-Probing for a working graphics backend...
-       gl: works
-```
-
-and where it does not, the rest of the order is tried and reported in turn:
-
-```
-Probing for a working graphics backend...
-       gl: unavailable
-     dx12: works
-   vulkan: unavailable
-```
+So `Cargo.toml` turns eframe's default features off and asks only for `glow`,
+and `main.rs` passes `eframe::Renderer::Glow`. The one way this can fail is a
+machine with no OpenGL 2.0 context — a **disconnected RDP session** is the usual
+cause, because Windows then hands out the 1.1 software renderer; the app prints
+`egui_glow requires opengl 2.0+` and exits rather than showing a window.
 
 ### Saving as (`Ctrl+Shift+A`)
 
@@ -744,8 +718,8 @@ change, run `ie4uinit.exe -show` (or restart Explorer).
 | `PERF=1` | Turn on the latency report without passing `--perf` a folder |
 | `PERF_PHASE=1` | Per-phase timing inside the linear-light resampler (development) |
 
-The renderer is **wgpu**, and which backend it uses is a setting (below). The
-backend is printed at startup.
+The renderer is **glow** on OpenGL, with no backend setting (see
+[Graphics backend](#graphics-backend)).
 
 ---
 

@@ -9,7 +9,7 @@
 //! of the sum.
 //!
 //! Measured on the development machine (release, 1405-image folder, warm cache):
-//! window + wgpu = ~150 ms, the sorted walk = ~30-70 ms, ~600 ms on a cold
+//! window + GL context = ~150 ms, the sorted walk = ~30-70 ms, ~600 ms on a cold
 //! cache. So the overlap is the whole walk, and a cold launch is where it shows
 //! most.
 //!

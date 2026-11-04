@@ -765,8 +765,9 @@ fn a_crop_shape_survives_a_config_round_trip() {
         let back: image_viewer::CropAspect = serde_json::from_str(&json).unwrap();
         assert_eq!(back, a, "{a:?} did not survive {json}");
     }
-    // Lowercase in the file, whatever the variant is called in Rust: the same
-    // trap that made `WgpuBackend` write "Dx12" and then fail to read it back.
+    // Lowercase in the file, whatever the variant is called in Rust: an enum
+    // that writes its variant name cannot be read back by anyone who edited the
+    // file to the documented spelling.
     let json = serde_json::to_string(&image_viewer::CropAspect::TallPhoto).unwrap();
     assert_eq!(json, "\"tallphoto\"");
 }

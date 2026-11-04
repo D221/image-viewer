@@ -229,13 +229,6 @@ pub(crate) struct MyApp {
     pub(crate) config: Config,
     pub(crate) config_path: PathBuf,
 
-    /// The backend actually in use, and where to leave a "restart with this one"
-    /// request for the launch loop. The app cannot return a value to
-    /// `run_native`, so changing the renderer means closing the window and
-    /// letting the loop build a new one.
-    pub(crate) renderer: image_viewer::WgpuBackend,
-    pub(crate) restart: RestartSlot,
-
     pub(crate) loader: Loader,
     pub(crate) rx: Receiver<Msg>,
 

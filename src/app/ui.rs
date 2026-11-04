@@ -41,7 +41,7 @@ impl MyApp {
 impl eframe::App for MyApp {
     /// Persist the last-viewed image per folder on app close, then clean up
     /// any extracted archive temp dir.
-    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Key by the archive path when one is open (the temp folder name is
         // meaningless to the user).
         let key: String = match &self.zip_archive {
@@ -1225,41 +1225,6 @@ impl eframe::App for MyApp {
                         egui::CollapsingHeader::new("Graphics & window")
                     .default_open(true)
                     .show(ui, |ui| {
-                    // ---- renderer ------------------------------------------------
-                    // Deliberately the first group: it is the only setting that can
-                    // make the app fail to start at all, so it should not be
-                    // something you have to go looking for.
-                    ui.horizontal(|ui| {
-                        ui.label("Graphics:")
-                            .on_hover_text(
-                                "Automatic probes each backend in its own process and keeps the \
-                                 first that starts, because a driver that fails does so by \
-                                 crashing rather than by returning an error.",
-                            );
-                        let mut choice = self.config.renderer.choice;
-                        let mut changed = false;
-                        egui::ComboBox::from_id_salt("renderer")
-                            .selected_text(choice.label())
-                            .show_ui(ui, |ui| {
-                                for b in [
-                                    image_viewer::WgpuBackend::Auto,
-                                    image_viewer::WgpuBackend::Dx12,
-                                    image_viewer::WgpuBackend::Gl,
-                                    image_viewer::WgpuBackend::Vulkan,
-                                ] {
-                                    changed |= ui
-                                        .selectable_value(&mut choice, b, b.label())
-                                        .clicked();
-                                }
-                            });
-                        if changed {
-                            self.request_renderer_restart(ui.ctx(), choice);
-                        }
-                    });
-                    ui.small(format!("In use: {}", self.renderer.label()));
-                    if ui.button("Probe backends now").clicked() {
-                        self.probe_renderer_now(ui.ctx());
-                    }
                     if ui
                         .checkbox(&mut self.config.esc_closes_app, "Esc closes the app")
                         .on_hover_text("Off: Esc still leaves crop mode, the grid and fullscreen, but never quits.")

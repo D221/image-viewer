@@ -12,7 +12,7 @@ use crate::*;
 /// A curated list rather than an arbitrary ratio, because this is a dropdown in
 /// the settings panel and the ratios people actually want are the ones a camera
 /// or a phone shoots at. `#[serde(rename_all = "lowercase")]` so the config
-/// spelling matches the labels — the same trap `WgpuBackend` fell into.
+/// spelling matches the labels — the trap an enum with a mismatch falls into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CropAspect {

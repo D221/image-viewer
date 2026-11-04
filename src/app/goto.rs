@@ -10,17 +10,13 @@
 use crate::*;
 
 impl MyApp {
-    pub(crate) fn new_with_renderer(
+    pub(crate) fn new(
         cc: &eframe::CreationContext<'_>,
-        restart: RestartSlot,
         mut prefetched: Option<(PathBuf, std::sync::mpsc::Receiver<Vec<PathBuf>>)>,
     ) -> Self {
         let ctx = &cc.egui_ctx;
         let config_path = Config::default_path();
         let config = Config::load(&config_path);
-        // The launch loop already resolved this (probing if it needed to), and
-        // the answer is in the config, so reading it back keeps the two in step.
-        let renderer = config.renderer.resolve(None);
 
         // **Before the gallery is built below**, unlike the other settings the
         // library reads, which are applied further down. `Gallery::new` scans
@@ -224,8 +220,6 @@ impl MyApp {
             checker: Some(make_checker_texture(ctx)),
             display_dim: None,
             resize: image_viewer::ResizeTracker::new(),
-            renderer,
-            restart,
             suppress_resize_redecode: false,
             waiting_load: false,
             grid_sel: 0,

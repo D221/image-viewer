@@ -463,7 +463,6 @@ impl Config {
             recursive_folders: false,
             show_archives: true,
             esc_closes_app: true,
-            renderer: RendererPref::default(),
             convert_wide_gamut: false,
             crop_aspect: CropAspect::default(),
             thumbnail_cache: true,

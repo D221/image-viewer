@@ -52,8 +52,8 @@ pub const LEAD_LONE_MAX: u32 = 4;
 /// format is chosen so that a shape can be typed by hand. `rename_all =
 /// "lowercase"` is what makes the documented spelling (`"double"`) the one that
 /// *loads*; without it serde writes `"Double"` and refuses `"double"`, so a
-/// hand-edited file silently becomes no overrides at all — the same trap
-/// `WgpuBackend` fell into, which `AGENTS.md` records.
+/// hand-edited file silently becomes no overrides at all — the same trap an
+/// enum with a `rename_all` mismatch falls into, which `AGENTS.md` records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Shape {

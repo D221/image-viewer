@@ -143,10 +143,6 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub esc_closes_app: bool,
 
-    /// Which wgpu backend to render with, and the last probe result.
-    #[serde(default)]
-    pub renderer: RendererPref,
-
     /// Convert Display P3 pixels to sRGB as they are decoded.
     ///
     /// **Off by default, and that is a decision rather than a shrug.** The
@@ -313,9 +309,9 @@ pub struct Config {
     /// was last hidden. The strip exists only while the window is decorated,
     /// so a hide is the one moment it can be measured — and showing it back
     /// needs it, to put the outer frame where the client area the user was
-    /// looking at stays put ([`outer_top_for_decoration_toggle`]). Persisted
-    /// like `RendererPref.probed`'s measured number is: it is machine
-    /// geometry, not a preference.
+    /// looking at stays put ([`outer_top_for_decoration_toggle`]). A measured
+    /// number rather than a preference: it is machine geometry, like the window
+    /// position, and it is carried across launches so the two do not disagree.
     #[serde(default)]
     pub title_strip: f32,
 

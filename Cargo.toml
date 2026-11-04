@@ -4,8 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-eframe = { version = "0.36", features = ["glow"] }
-glow = "0.17"
+# **`default-features = false`, deliberately.** eframe's defaults pull in
+# `wgpu` (via `egui-wgpu`), the Wayland and X11 platform features, and the web
+# screen reader - none of which a Windows-only glow app compiles or runs. wgpu
+# alone is `wgpu`, `wgpu-core`, `wgpu-hal`, `naga` and their D3D12/Vulkan
+# backends: a large part of the build time for a renderer this app never
+# creates a device on. `glow` is the renderer (`eframe::Renderer::Glow` in
+# `main.rs`), `default_fonts` is the font egui draws with, and `accesskit` is
+# the Windows screen-reader bridge. Dropping any of those three breaks the app
+# in a way a build cannot catch; dropping `wgpu` is what this list is for.
+eframe = { version = "0.36", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "accesskit",
+] }
 egui = "0.36"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "ico", "tiff", "qoi", "rayon"] }
 # PNG stores its iCCP profile zlib-compressed. Already in the tree via `png`,
@@ -39,7 +51,6 @@ winreg = "0.52"
 # own subtree. A member using one fails extraction with a clear error instead
 # of dragging 30 crates along.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-pollster = "1.0.1"
 sevenz-rust2 = "0.23"
 rar = "0.4"
 

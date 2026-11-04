@@ -151,50 +151,6 @@ impl MyApp {
     /// reversible and saving twice accumulates rather than compounding. The
     /// view-only transform stays a view transform — this is the one path that
     /// touches the disk, and it does so only when asked.
-    /// Ask the launch loop to rebuild the window with a different backend.
-    ///
-    /// Saves first, so the choice survives even if the new backend turns out to
-    /// crash — the config is the way back. `None` clears the probe cache, so
-    /// switching back to Automatic re-probes rather than trusting an answer
-    /// obtained before the user had an opinion.
-    pub(crate) fn request_renderer_restart(
-        &mut self,
-        ctx: &Context,
-        backend: image_viewer::WgpuBackend,
-    ) {
-        if backend == self.renderer
-            && self.config.renderer.choice != image_viewer::WgpuBackend::Auto
-        {
-            return;
-        }
-        self.config.renderer.choice = backend;
-        self.config.renderer.probed = None;
-        let _ = self.config.save(&self.config_path);
-        if let Ok(mut slot) = self.restart.lock() {
-            *slot = Some(backend);
-        }
-        self.notice = Some(format!("Switching to {}…", backend.label()));
-        // Closing the viewport is what returns control to the launch loop;
-        // there is no other way for the app to ask for a new event loop.
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-    }
-
-    /// Run the backend probe and report what it found, without changing
-    /// anything. Useful when Automatic picked something surprising.
-    pub(crate) fn probe_renderer_now(&mut self, ctx: &Context) {
-        self.notice = Some("Probing graphics backends…".into());
-        ctx.request_repaint();
-        let results = probe_backends();
-        let mut lines = Vec::new();
-        for (b, ok) in &results {
-            lines.push(format!("{}: {}", b.name(), if *ok { "works" } else { "unavailable" }));
-        }
-        // Reuse the launch-time decision so there is one implementation of
-        // "which one do we pick".
-        let picked = image_viewer::pick_probed(&results);
-        self.notice = Some(format!("{} — would use {}", lines.join(", "), picked.name()));
-    }
-
     pub(crate) fn save_transformed_copy(&mut self) {
         let Some(cur) = self.cur.clone() else {
             return;

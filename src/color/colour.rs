@@ -12,9 +12,9 @@ use crate::*;
 // ---------------------------------------------------------------------------
 //
 // This stage only *reports*. Nothing here touches a decode path, so it cannot
-// change a pixel: the renderer already uploads textures as
-// `Rgba8UnormSrgb` (egui-wgpu), so the bytes are expected to be sRGB-encoded
-// and a future transform's only job is to make that true at decode time.
+// change a pixel: the renderer uploads textures as sRGB and the shader converts
+// to linear on sample, so the bytes are expected to be sRGB-encoded and a
+// future transform's only job is to make that true at decode time.
 
 /// What can be said about a file's declared colour space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

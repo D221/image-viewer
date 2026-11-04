@@ -3,6 +3,9 @@
 pub mod image_data;
 pub use image_data::*;
 
+pub mod cli;
+pub use cli::*;
+
 pub mod crop_frame;
 pub use crop_frame::*;
 
