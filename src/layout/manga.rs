@@ -491,10 +491,7 @@ pub fn prev_anchor(a: PagePos, lead_lone: u32, ctx: &dyn PageCtx) -> Option<Page
         // than cycling: there is no previous turn before the first one, and
         // whether the *app* wraps to the last turn on a looping gallery is the
         // navigation layer's decision, not this function's.
-        let next = match ctx.step_no_wrap(anchor, turn_len(anchor, lead_lone, ctx) as isize) {
-            Some(n) => n,
-            None => return None,
-        };
+        let next = ctx.step_no_wrap(anchor, turn_len(anchor, lead_lone, ctx) as isize)?;
         // Compared against the SUCCESSOR, and that is the whole contract: the
         // answer to "the anchor before `a`" is the anchor whose turn *ends* by
         // handing over to `a`.

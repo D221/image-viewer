@@ -75,6 +75,9 @@ pub(crate) type SpreadStore = std::collections::BTreeMap<String, GallerySpreads>
 /// the decisions in memory for the session — the only cost is that they are
 /// forgotten at exit, which is a far smaller failure than an app that will not
 /// start.
+// `if let / else if let` is more readable here than a `map`/`or_else` chain
+// because each arm has a different fallback path.
+#[allow(clippy::manual_map)]
 pub fn spreads_root() -> Option<PathBuf> {
     if let Some(dir) = portable_dir() {
         return Some(dir.join("spreads.json"));
@@ -457,17 +460,17 @@ pub fn spreads_tmp(store: &Path, pid: u32) -> PathBuf {
 /// drifted over, which loses the very decisions the cap exists to protect. The
 /// threshold is deliberately not an invariant on writes; see [`SPREADS_MAX_BYTES`].
 pub fn save_spread_overrides(store: &Path, root: &Path, g: &GallerySpreads) -> std::io::Result<()> {
-    if let Ok(meta) = std::fs::metadata(store) {
-        if meta.len() > SPREADS_MAX_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "the overrides file is {} bytes, over the {SPREADS_MAX_BYTES}-byte \
+    if let Ok(meta) = std::fs::metadata(store)
+        && meta.len() > SPREADS_MAX_BYTES
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "the overrides file is {} bytes, over the {SPREADS_MAX_BYTES}-byte \
                      cap, so it was not read and not written",
-                    meta.len()
-                ),
-            ));
-        }
+                meta.len()
+            ),
+        ));
     }
     let mut all: SpreadStore = std::fs::read_to_string(store)
         .ok()

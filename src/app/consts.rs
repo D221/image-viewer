@@ -3,7 +3,7 @@
 //!
 //! main.rs is the binary's crate root: the imports, the type definitions,
 //! n main and the module list.
-//! See AGENTS.md and 	ests/source_size.rs.
+//! See AGENTS.md and tests/source_size.rs.
 
 use crate::*;
 
@@ -377,10 +377,10 @@ pub(crate) fn resolve_action(
         image_viewer::resolve_binding(bindings, action),
         image_viewer::default_binding(action).to_owned(),
     ] {
-        if let Some((ctrl, shift, alt, name)) = image_viewer::split_chord(&candidate) {
-            if let Some(key) = parse_key_full(&name) {
-                return Some(ResolvedBinding { key, ctrl, shift, alt });
-            }
+        if let Some((ctrl, shift, alt, name)) = image_viewer::split_chord(&candidate)
+            && let Some(key) = parse_key_full(&name)
+        {
+            return Some(ResolvedBinding { key, ctrl, shift, alt });
         }
     }
     None

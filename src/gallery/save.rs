@@ -414,6 +414,10 @@ pub fn save_transformed_to(
     if fmt == image::ImageFormat::Jpeg {
         // JPEG has no alpha: drop it the same way every 32→24-bit save path
         // here does, rather than asking the encoder to guess.
+        // `chunks_exact` + `flat_map` is the correct pattern here: `as_chunks`
+        // yields `&[u8; 4]` items which do not work with the `flat_map`
+        // indexing used below to drop the alpha channel.
+        #[allow(clippy::chunks_exact_to_as_chunks)]
         let rgb: Vec<u8> =
             scaled.rgba.chunks_exact(4).flat_map(|px| [px[0], px[1], px[2]]).collect();
         let mut cursor = std::io::Cursor::new(&mut buf);
@@ -646,23 +650,20 @@ pub fn neutralize_exif_orientation(jpeg: &mut [u8]) -> bool {
         if e + 12 > end {
             break;
         }
-        match rd16(jpeg, e, end, le) {
-            Some(EXIF_TAG_ORIENTATION) => {
-                orientation_at = Some(e + 8);
-                break;
-            }
-            _ => {}
+        if let Some(EXIF_TAG_ORIENTATION) = rd16(jpeg, e, end, le) {
+            orientation_at = Some(e + 8);
+            break;
         }
     }
     // The next-IFD pointer sits after the entry table.
     let next_at = ifd0 + 2 + count * 12;
 
     let mut changed = false;
-    if let Some(at) = orientation_at {
-        if at + 2 <= end {
-            wr16(jpeg, at, 1, le);
-            changed = true;
-        }
+    if let Some(at) = orientation_at
+        && at + 2 <= end
+    {
+        wr16(jpeg, at, 1, le);
+        changed = true;
     }
     if next_at + 4 <= end {
         // Only bother if it actually pointed somewhere.

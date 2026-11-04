@@ -8,8 +8,20 @@
 //! `tests/source_size.rs`.
 use crate::*;
 impl MyApp {
-    pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
+    /// Panel geometry for the current frame: the available rect, pixels per
+    /// point, and the display area in physical pixels. Also settles any
+    /// pending window position (fit-window centering) and returns the
+    /// computed `(panel, ppp, panel_px)`.
+    ///
+    /// `pending_pos` is a `(width, height, tries)` triple left by the
+    /// fit-window code. Each frame it checks whether the viewport has reached
+    /// the requested size; once settled (or out of tries) it centres the
+    /// window on the monitor and clears the triple.
+    fn panel_geometry(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+    ) -> (egui::Rect, f32, (u32, u32)) {
         let panel = ui.available_rect_before_wrap();
         let ppp = ctx.pixels_per_point();
         // Track the display area in physical pixels; previews are decoded to
@@ -39,6 +51,294 @@ impl MyApp {
                 self.pending_pos = Some((want, tries - 1));
             }
         }
+        (panel, ppp, panel_px)
+    }
+
+    /// First measurement and resize action for the frame.
+    ///
+    /// The first measurement (when `display_dim` is `None`) is not a resize:
+    /// it is the frame the plan has been waiting for, so `schedule()` is called
+    /// once to decode the current page at the panel's real size. Later changes
+    /// go through `ResizeTracker`, which coalesces window-drag frames into a
+    /// single `Refine` decision once the size stops moving.
+    fn handle_resize(&mut self, panel_px: (u32, u32), target: u32, ctx: &egui::Context) {
+        if self.display_dim != Some(panel_px) {
+            // **The first measurement is not a resize, and it is the frame the plan
+            // has been waiting for.** `schedule` answers no target at all until the
+            // display area exists (see its doc), so the plan built in
+            // `frame_prelude` was empty and *nothing* is queued. Re-planning here is
+            // what makes the current page decode at the panel's real size instead of
+            // `PREVIEW_TEXTURE_DIM`.
+            //
+            // **Inside this block, and that is the property rather than its
+            // presence.** `display_dim` is what `schedule` reads, so a call one line
+            // above the assignment would queue the plan a second time against the
+            // same empty `display_dim` and change nothing at all — which is the
+            // defect shape this feature has already produced once
+            // (`the_turns_second_half_is_derived_not_latched`). The scan
+            // `the_plan_is_empty_until_the_display_area_is_measured` brace-matches
+            // this block and checks the call is inside it.
+            //
+            // Deliberately *only* the first measurement. Every later change of the
+            // display area is a resize, and re-planning on each of those would issue
+            // a decode per frame of a window drag — the exact storm `ResizeTracker`
+            // exists to coalesce, and the reason `Wait` is not `Refine` below.
+            let first_measurement = self.display_dim.is_none();
+            self.display_dim = Some(panel_px);
+            // Hiding/showing panels resizes the display area but must not
+            // reload the image: consume exactly one transition silently.
+            if self.suppress_resize_redecode {
+                self.suppress_resize_redecode = false;
+                self.resize.suppress();
+            }
+            if first_measurement {
+                self.schedule();
+            }
+        }
+        match self.resize.frame(target, self.current_needs_refine(target)) {
+            image_viewer::ResizeAction::Refine => {
+                perf::count(perf::C_RESIZE_REDECODES, 1);
+                self.schedule();
+            }
+            image_viewer::ResizeAction::Wait => {
+                // Still moving. Ask for one more frame so the decision gets made
+                // once it stops; without this the final size of a drag would
+                // never be examined, because nothing else asks for a repaint.
+                ctx.request_repaint_after(RESIZE_SETTLE_REPAINT);
+            }
+            image_viewer::ResizeAction::Idle => {}
+        }
+    }
+
+    /// Fit-window calculations and convergence: reset (`T`, arrivals in the
+    /// mode) sets 100%-if-fits and sizes the window; wrap keeps the zoom and
+    /// only re-hugs. Converges on the symptom itself — while the drawn picture
+    /// and the panel disagree, re-measure and re-send. `wrap` doubles as the
+    /// settle flag: cleared only on convergence, so the loop actually repeats
+    /// instead of running once and stranding `fit_iters`.
+    ///
+    /// `shown_is_cur` is `true` when the shown page is the current page, which
+    /// gates arrival fits so they wait for adoption rather than fitting a
+    /// picture the reader has already left.
+    ///
+    /// Ten parameters is more than clippy likes, but they are all naturally
+    /// part of the fit-window computation: UI/context access, panel geometry,
+    /// density, content size, fit scale, and convergence state. Grouping them
+    /// into a struct would add an unnecessary abstraction just to satisfy a
+    /// lint count.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_fit_window(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        panel: egui::Rect,
+        ppp: f32,
+        display_px: egui::Vec2,
+        spread_dims: &[(f32, f32)],
+        fit_scale: f32,
+        shown: &ImgKey,
+        cur: Option<ImgKey>,
+    ) {
+        if !(self.fit_window_pending || self.fit_arrive_pending || self.fit_wrap_pending)
+            || self.fit_iters == 0
+            || (self.fit_arrive_pending && !self.fit_window_pending && cur.as_ref() != Some(shown))
+        {
+            return;
+        }
+        self.fit_iters -= 1;
+        // Arrival carries the reset too (it just waits longer to run):
+        // both arms mean "this picture starts at 100%", only the timing
+        // differs. Forgetting the arrival half is how zoomed-out views
+        // survived navigation.
+        let reset = self.fit_window_pending || self.fit_arrive_pending;
+        self.fit_arrive_pending = false;
+        if ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+            return;
+        }
+        // Twin of `clamp_px` below: the content's source footprint,
+        // so the two cannot disagree about how big the picture is.
+        let natural = if spread_dims.is_empty() {
+            display_px
+        } else {
+            let mut w = 0.0;
+            let mut h: f32 = 0.0;
+            for &(pw, ph) in spread_dims {
+                w += pw;
+                h = h.max(ph);
+            }
+            Vec2::new(w, h)
+        } / ppp;
+        let Some(inner) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size())) else {
+            return;
+        };
+        // No monitor info: fall back to the window itself, which
+        // only affects the clamp — the zoom above never shrinks.
+        let work = ui
+            .input(|i| i.viewport().monitor_size)
+            .map(|m| (m.x, m.y))
+            .unwrap_or((inner.x, inner.y));
+        let mut ratio = if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
+        if reset {
+            self.fit_window_pending = false;
+            // T mode: fit the window to the image at 1:1, but if the
+            // image is larger than the monitor, scale it down to fit
+            // (maintaining aspect ratio). This matches JPEGView
+            // behaviour — 1:1 only when it fits, otherwise shrink to
+            // fit the monitor.
+            self.view.fit = false;
+            self.view.offset = Vec2::ZERO;
+            // Available space for the image on the monitor (monitor
+            // minus window chrome). Chrome = inner - panel (panels,
+            // title bar, etc.).
+            let chrome_x = (inner.x - panel.width()).max(0.0);
+            let chrome_y = (inner.y - panel.height()).max(0.0);
+            let available_x = work.0 - chrome_x;
+            let available_y = work.1 - chrome_y;
+            // Max scale that fits the image in the available space,
+            // capped at 1.0 (never upscale).
+            let max_scale =
+                (available_x / natural.x).min(available_y / natural.y).min(1.0).max(0.01);
+            self.view.scale = max_scale / ppp;
+            self.view.offset = Vec2::ZERO;
+            ratio = max_scale;
+        }
+        // `wrap` clears only here, on convergence: it doubles as the
+        // settle flag, so clearing it up front would run the loop
+        // exactly once no matter what `fit_iters` allows.
+        let drawn = (natural.x * ratio, natural.y * ratio);
+        let (nw, nh) = image_viewer::fit_window_size(
+            drawn,
+            (inner.x, inner.y),
+            (panel.width(), panel.height()),
+            Some(work),
+        );
+        self.fit_debug =
+            Some((ratio, drawn.0, drawn.1, panel.width(), panel.height(), inner.x, inner.y));
+        // Converge on the symptom (drawn vs panel), not the proxy
+        // (window vs target): a window can match its target while
+        // the picture still disagrees with the panel, and that
+        // disagreement is the bars.
+        if (drawn.0 - panel.width()).abs() > 2.0 || (drawn.1 - panel.height()).abs() > 2.0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
+            // Position still goes through `pending_pos` (below):
+            // it must land after this resize settles.
+            self.pending_pos = Some(((nw, nh), 10));
+            self.fit_wrap_pending = true;
+        } else {
+            self.fit_wrap_pending = false;
+            self.fit_iters = 0;
+        }
+    }
+
+    /// Preview lookup and animation frame advance for the cursor page.
+    ///
+    /// Returns `((orig_w, orig_h), tex_id, tex_w, has_alpha)` or `None` when the
+    /// wanted image has no texture yet (this frame shows nothing). On `None`,
+    /// the caller counts a display-gap frame and returns.
+    ///
+    /// When an animation is playing on the shown path, its texture is advanced
+    /// to the current frame and a repaint is scheduled at the frame boundary.
+    /// When paused, the held frame is held.
+    fn preview_and_animation(
+        &mut self,
+        ctx: &egui::Context,
+        shown: &ImgKey,
+    ) -> Option<((u32, u32), egui::TextureId, f32, bool)> {
+        let Some(pv) = self.previews.get_mut(shown) else {
+            return None;
+        };
+        // Stamped here, and this is where the **cursor** page's `used` clock
+        // moves — the partner's is stamped where it is painted below, for the
+        // same reason. `evict_previews` is an LRU on `used`, so a page on
+        // screen whose clock never advances is a page the cache is free to
+        // drop, and a spread whose second half evaporates and comes back
+        // re-decoded is the symptom.
+        pv.used = self.clock;
+        let mut tex_id = pv.tex.id();
+        let mut tex_w = pv.tex.size()[0] as f32;
+        let pv_has_alpha = pv.has_alpha;
+        let orig = pv.orig;
+        if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown.path) {
+            // Paused: hold the chosen frame and schedule nothing. Playing:
+            // advance to the current frame and repaint at its boundary.
+            if let Some(held) = av.paused
+                && held != av.last_index
+                && let Some(f) = av.anim.frames.get(held)
+            {
+                av.tex.set(
+                    ColorImage::from_rgba_unmultiplied(
+                        [f.width as usize, f.height as usize],
+                        &f.rgba,
+                    ),
+                    content_texture_options(self.config.pixel_art),
+                );
+                av.last_index = held;
+            } else {
+                let (idx, next_in) = image_viewer::anim_frame_state(
+                    &av.anim,
+                    av.start.elapsed(),
+                    self.config.anim_speed,
+                );
+                if idx != av.last_index {
+                    let f = &av.anim.frames[idx];
+                    av.tex.set(
+                        ColorImage::from_rgba_unmultiplied(
+                            [f.width as usize, f.height as usize],
+                            &f.rgba,
+                        ),
+                        TextureOptions::LINEAR,
+                    );
+                    av.last_index = idx;
+                }
+                ctx.request_repaint_after(next_in);
+            }
+            tex_id = av.tex.id();
+            tex_w = av.anim.frames[0].width as f32;
+        }
+        Some((orig, tex_id, tex_w, pv_has_alpha))
+    }
+
+    /// Image transform and display dimensions: applies EXIF orientation and
+    /// computes the transformed footprint, which is what the image occupies
+    /// on screen (four of the eight transforms swap the axes).
+    fn compute_transform_and_display(&self, orig: (u32, u32)) -> (Vec2, Xform, Vec2) {
+        let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
+        let xform = self.shown_xform();
+        let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
+        let display_px = Vec2::new(dw, dh);
+        (img_px, xform, display_px)
+    }
+
+    /// Spread layout: manga turn pages and their transformed footprints.
+    ///
+    /// `spread_dims` uses transformed footprints, not stored dimensions — a
+    /// slot laid out from stored dims is the wrong shape for a turned page;
+    // transformed footprints make the rotation fit inside the slot.
+    ///
+    /// The return type is a pair of vectors; factoring it into a struct would
+    /// add an unnecessary abstraction just to satisfy a lint count.
+    #[allow(clippy::type_complexity)]
+    fn compute_spread_layout(
+        &self,
+        shown: &ImgKey,
+        orig: (u32, u32),
+    ) -> (Vec<(ImgKey, (u32, u32), Xform)>, Vec<(f32, f32)>) {
+        // The turn's pages, in manga mode: the cursor page and, when the turn
+        // holds two, the other one. Empty with the mode off, so every branch
+        // below falls through to the single-image path unchanged.
+        let pages: Vec<(ImgKey, (u32, u32), Xform)> =
+            if self.config.manga_mode { self.turn_pages(shown, orig) } else { Vec::new() };
+        let spread_dims: Vec<(f32, f32)> = pages
+            .iter()
+            .map(|(_, (w, h), xf)| xformed_footprint(*w as f32, *h as f32, *xf))
+            .collect();
+        (pages, spread_dims)
+    }
+
+    pub(crate) fn central(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let (panel, ppp, panel_px) = self.panel_geometry(ui, &ctx);
+
         // **The half panel in manga mode**, and both halves of the change hang off the
         // same number. `preview_target` takes the *long* side, so halving the width is
         // what makes `display_dim`, `schedule`'s `target_dim` and the resize refine ask
@@ -97,65 +397,14 @@ impl MyApp {
         );
         let panel_px =
             image_viewer::decode_panel_px(panel_px, self.config.manga_mode, lone_spread_fills_turn);
-        // Resize. The texture is re-fitted to the new area by the drawing code
-        // below, which happens on this very frame and costs nothing — so the
-        // picture is never blanked and never soft *as a choice*. The only thing
-        // a resize needs to decide is whether to decode something sharper
-        // behind the existing texture.
-        //
-        // A window drag delivers a stream of sizes, and one decode costs the
-        // same whatever the size, so the refine is issued only once the size
-        // stops moving: "unchanged since the previous frame", not a wall-clock
-        // settle. A large preview takes ~800ms to decode, which means frames
-        // are ~800ms apart, and any timer shorter than that expires between
-        // every pair of them and never fires.
         let target = image_viewer::preview_target(panel_px);
-        if self.display_dim != Some(panel_px) {
-            // **The first measurement is not a resize, and it is the frame the plan
-            // has been waiting for.** `schedule` answers no target at all until the
-            // display area exists (see its doc), so the plan built in
-            // `frame_prelude` was empty and *nothing* is queued. Re-planning here is
-            // what makes the current page decode at the panel's real size instead of
-            // `PREVIEW_TEXTURE_DIM`.
-            //
-            // **Inside this block, and that is the property rather than its
-            // presence.** `display_dim` is what `schedule` reads, so a call one line
-            // above the assignment would queue the plan a second time against the
-            // same empty `display_dim` and change nothing at all — which is the
-            // defect shape this feature has already produced once
-            // (`the_turns_second_half_is_derived_not_latched`). The scan
-            // `the_plan_is_empty_until_the_display_area_is_measured` brace-matches
-            // this block and checks the call is inside it.
-            //
-            // Deliberately *only* the first measurement. Every later change of the
-            // display area is a resize, and re-planning on each of those would issue
-            // a decode per frame of a window drag — the exact storm `ResizeTracker`
-            // exists to coalesce, and the reason `Wait` is not `Refine` below.
-            let first_measurement = self.display_dim.is_none();
-            self.display_dim = Some(panel_px);
-            // Hiding/showing panels resizes the display area but must not
-            // reload the image: consume exactly one transition silently.
-            if self.suppress_resize_redecode {
-                self.suppress_resize_redecode = false;
-                self.resize.suppress();
-            }
-            if first_measurement {
-                self.schedule();
-            }
-        }
-        match self.resize.frame(target, self.current_needs_refine(target)) {
-            image_viewer::ResizeAction::Refine => {
-                perf::count(perf::C_RESIZE_REDECODES, 1);
-                self.schedule();
-            }
-            image_viewer::ResizeAction::Wait => {
-                // Still moving. Ask for one more frame so the decision gets made
-                // once it stops; without this the final size of a drag would
-                // never be examined, because nothing else asks for a repaint.
-                ctx.request_repaint_after(RESIZE_SETTLE_REPAINT);
-            }
-            image_viewer::ResizeAction::Idle => {}
-        }
+        // First measurement and resize action. The first measurement (when
+        // `display_dim` is `None`) is not a resize: it is the frame the plan has
+        // been waiting for, so `schedule()` is called once to decode the current
+        // page at the panel's real size. Later changes go through `ResizeTracker`,
+        // which coalesces window-drag frames into a single `Refine` decision once
+        // the size stops moving.
+        self.handle_resize(panel_px, target, &ctx);
         // The save-as panel, drawn as a window over whatever is behind it and
         // **before the early returns below**, so it also appears over the grid
         // and over the archive placeholder. Placed after those returns it would
@@ -220,96 +469,16 @@ impl MyApp {
             );
             return;
         };
-        let (orig, tex_id, tex_w, pv_has_alpha) = {
-            let Some(pv) = self.previews.get_mut(&shown) else {
-                // The wanted image has no texture yet: this frame shows nothing.
-                // Counted as a regression guard - it should stay at 0 except
-                // for the very first frames of a cold open.
-                perf::count(perf::C_DISPLAY_GAP_FRAMES, 1);
-                return;
-            };
-            // Stamped here, and this is where the **cursor** page's `used` clock
-            // moves — the partner's is stamped where it is painted below, for the
-            // same reason. `evict_previews` is an LRU on `used`, so a page on
-            // screen whose clock never advances is a page the cache is free to
-            // drop, and a spread whose second half evaporates and comes back
-            // re-decoded is the symptom.
-            pv.used = self.clock;
-            (pv.orig, pv.tex.id(), pv.tex.size()[0] as f32, pv.has_alpha)
+        let Some((orig, tex_id, tex_w, pv_has_alpha)) = self.preview_and_animation(&ctx, &shown)
+        else {
+            // The wanted image has no texture yet: this frame shows nothing.
+            // Counted as a regression guard - it should stay at 0 except
+            // for the very first frames of a cold open.
+            perf::count(perf::C_DISPLAY_GAP_FRAMES, 1);
+            return;
         };
-        let (tex_id, tex_w) = if let Some(av) = self.anim.as_mut().filter(|a| a.path == shown.path)
-        {
-            // Paused: hold the chosen frame and schedule nothing. Playing:
-            // advance to the current frame and repaint at its boundary.
-            if let Some(held) = av.paused {
-                if held != av.last_index {
-                    if let Some(f) = av.anim.frames.get(held) {
-                        av.tex.set(
-                            ColorImage::from_rgba_unmultiplied(
-                                [f.width as usize, f.height as usize],
-                                &f.rgba,
-                            ),
-                            content_texture_options(self.config.pixel_art),
-                        );
-                        av.last_index = held;
-                    }
-                }
-            } else {
-                let (idx, next_in) = image_viewer::anim_frame_state(
-                    &av.anim,
-                    av.start.elapsed(),
-                    self.config.anim_speed,
-                );
-                if idx != av.last_index {
-                    let f = &av.anim.frames[idx];
-                    av.tex.set(
-                        ColorImage::from_rgba_unmultiplied(
-                            [f.width as usize, f.height as usize],
-                            &f.rgba,
-                        ),
-                        TextureOptions::LINEAR,
-                    );
-                    av.last_index = idx;
-                }
-                ctx.request_repaint_after(next_in);
-            }
-            (av.tex.id(), av.anim.frames[0].width as f32)
-        } else {
-            (tex_id, tex_w)
-        };
-        let img_px = Vec2::new(orig.0 as f32, orig.1 as f32);
-        // Quarter turns and mirrors, clockwise. Only the eight lattice symmetries,
-        // so the image stays axis-aligned and 1:1 stays pixel-sharp.
-        let xform = self.shown_xform();
-        // What the image *occupies* on screen: four of the eight swap the axes.
-        let (dw, dh) = xformed_footprint(img_px.x, img_px.y, xform);
-        let display_px = Vec2::new(dw, dh);
-        // The turn's pages, in manga mode: the cursor page and, when the turn
-        // holds two, the other one. **Empty with the mode off**, so every branch
-        // below falls through to the single-image path unchanged — that is the
-        // shape of the gate, not a coincidence.
-        let pages: Vec<(ImgKey, (u32, u32), Xform)> =
-            if self.config.manga_mode { self.turn_pages(&shown, orig) } else { Vec::new() };
-        // **Transformed footprints, not stored dimensions** — and this is the one
-        // line the whole turned-page behaviour turns on. `spread_rects` sizes a
-        // page's slot by the dims it is handed and `paint_tex` rotates about
-        // `rect.center()`, so a slot laid out from *stored* dims is the wrong
-        // *shape* for a turned page and the rotated picture lands on the swapped
-        // rectangle centred on the same point, spilling `|w - h| * scale / 2` past
-        // the seam. Handing over each page's `xformed_footprint` instead makes the
-        // slot the right shape, and then the rotation fits inside it — which is
-        // exactly how the single-image path already works, where `rect` is in
-        // unrotated image space and `footprint` is the on-screen rect after
-        // rotation. Four of the eight `Xform`s swap the axes, so this is what a
-        // turned page in a turn looks like rather than an edge case.
-        //
-        // Page 0's entry is `display_px` exactly — `turn_pages` was handed `orig`
-        // for that page and looked up its own `shown_xform` — so the cursor page's
-        // slot and the `footprint` the view already had are the same rectangle.
-        let spread_dims: Vec<(f32, f32)> = pages
-            .iter()
-            .map(|(_, (w, h), xf)| xformed_footprint(*w as f32, *h as f32, *xf))
-            .collect();
+        let (img_px, xform, display_px) = self.compute_transform_and_display(orig);
+        let (pages, spread_dims) = self.compute_spread_layout(&shown, orig);
         // **A turn of one page that is a spread fills the turn, and the page _is_ the
         // whole spread** — so it is fitted against the panel's whole width and centred
         // on the seam, rather than confined to a half with an empty one beside it.
@@ -346,121 +515,17 @@ impl MyApp {
             if tw > 0.0 { (panel.width() / tw).clamp(1e-4, 8.0) } else { 1.0 }
         };
         let max_scale = MAX_SCALE.max(fit_scale).max(fit_width_scale);
-        // Fit window to image: reset (`T`, arrivals in the mode) sets
-        // 100%-if-fits and sizes the window; wrap (user zooms in the mode)
-        // keeps the zoom and only re-hugs. Every resize centers on the
-        // monitor, always — old-window centering was asked for and dropped:
-        // polite in theory, drifting in practice. Converges on the symptom
-        // itself: while the drawn picture and the panel disagree, re-measure
-        // and re-send (panels move after the measure — notices, wraps, late
-        // widths — so one shot lands wherever they leave it). `wrap` doubles
-        // as the settle flag: cleared only on convergence, so the loop
-        // actually repeats instead of running once and stranding `fit_iters`.
-        // Bounded by `fit_iters`, and each pass only sends when off target.
-        // Placed before `scale` is read so a reset draws what the window was
-        // sized for on the same frame. Arrival fits wait for adoption
-        // (`shown` still displays the previous image until its preview lands
-        // — fitting then sizes the window for the picture just left); an
-        // explicit `T` fits whatever is on screen by definition. Waiting
-        // burns no iterations.
-        if (self.fit_window_pending || self.fit_arrive_pending || self.fit_wrap_pending)
-            && self.fit_iters > 0
-            && (!self.fit_arrive_pending || self.fit_window_pending || self.shown == self.cur)
-        {
-            self.fit_iters -= 1;
-            // Arrival carries the reset too (it just waits longer to run):
-            // both arms mean "this picture starts at 100%", only the timing
-            // differs. Forgetting the arrival half is how zoomed-out views
-            // survived navigation.
-            let reset = self.fit_window_pending || self.fit_arrive_pending;
-            self.fit_arrive_pending = false;
-            if !ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
-                // Twin of `clamp_px` below: the content's source footprint,
-                // so the two cannot disagree about how big the picture is.
-                let natural = if pages.is_empty() {
-                    display_px
-                } else {
-                    let mut w = 0.0;
-                    let mut h: f32 = 0.0;
-                    for &(pw, ph) in &spread_dims {
-                        w += pw;
-                        h = h.max(ph);
-                    }
-                    Vec2::new(w, h)
-                } / ppp;
-                if let Some(inner) = ui.input(|i| i.viewport().inner_rect.map(|r| r.size())) {
-                    // No monitor info: fall back to the window itself, which
-                    // only affects the clamp — the zoom above never shrinks.
-                    let work = ui
-                        .input(|i| i.viewport().monitor_size)
-                        .map(|m| (m.x, m.y))
-                        .unwrap_or((inner.x, inner.y));
-                    let mut ratio =
-                        if self.view.fit { fit_scale * ppp } else { self.view.scale * ppp };
-                    if reset {
-                        self.fit_window_pending = false;
-                        // T mode: fit the window to the image at 1:1, but if the
-                        // image is larger than the monitor, scale it down to fit
-                        // (maintaining aspect ratio). This matches JPEGView
-                        // behaviour — 1:1 only when it fits, otherwise shrink to
-                        // fit the monitor.
-                        self.view.fit = false;
-                        self.view.offset = Vec2::ZERO;
-                        // Available space for the image on the monitor (monitor
-                        // minus window chrome). Chrome = inner - panel (panels,
-                        // title bar, etc.).
-                        let chrome_x = (inner.x - panel.width()).max(0.0);
-                        let chrome_y = (inner.y - panel.height()).max(0.0);
-                        let available_x = work.0 - chrome_x;
-                        let available_y = work.1 - chrome_y;
-                        // Max scale that fits the image in the available space,
-                        // capped at 1.0 (never upscale).
-                        let max_scale = (available_x / natural.x)
-                            .min(available_y / natural.y)
-                            .min(1.0)
-                            .max(0.01);
-                        self.view.scale = max_scale / ppp;
-                        self.view.offset = Vec2::ZERO;
-                        ratio = max_scale;
-                    }
-                    // `wrap` clears only here, on convergence: it doubles as the
-                    // settle flag, so clearing it up front would run the loop
-                    // exactly once no matter what `fit_iters` allows.
-                    let drawn = (natural.x * ratio, natural.y * ratio);
-                    let (nw, nh) = image_viewer::fit_window_size(
-                        drawn,
-                        (inner.x, inner.y),
-                        (panel.width(), panel.height()),
-                        Some(work),
-                    );
-                    self.fit_debug = Some((
-                        ratio,
-                        drawn.0,
-                        drawn.1,
-                        panel.width(),
-                        panel.height(),
-                        inner.x,
-                        inner.y,
-                    ));
-                    // Converge on the symptom (drawn vs panel), not the proxy
-                    // (window vs target): a window can match its target while
-                    // the picture still disagrees with the panel, and that
-                    // disagreement is the bars.
-                    if (drawn.0 - panel.width()).abs() > 2.0
-                        || (drawn.1 - panel.height()).abs() > 2.0
-                    {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(nw, nh)));
-                        // Position still goes through `pending_pos` (below):
-                        // it must land after this resize settles.
-                        self.pending_pos = Some(((nw, nh), 10));
-                        self.fit_wrap_pending = true;
-                    } else {
-                        self.fit_wrap_pending = false;
-                        self.fit_iters = 0;
-                    }
-                }
-            }
-        }
+        self.handle_fit_window(
+            ui,
+            &ctx,
+            panel,
+            ppp,
+            display_px,
+            &spread_dims,
+            fit_scale,
+            &shown,
+            self.cur.clone(),
+        );
         let mut scale = if self.config.fit_width_mode {
             fit_width_scale
         } else if self.view.fit {
@@ -571,37 +636,35 @@ impl MyApp {
         // cursor, copied to the clipboard. Reads from the full-res buffer;
         // reports when it isn't available (zoom to 1:1 first).
         if self.color_picker_active && resp.clicked() {
-            if let Some(hover) = resp.hover_pos() {
-                if let Some(key) = self.cur.as_ref() {
-                    if let Some(pv) = self.previews.get(key) {
-                        if let Some(full) = &pv.full {
-                            let center = panel.center();
-                            let sx = ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0)
-                                .round() as i32;
-                            let sy = ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0)
-                                .round() as i32;
-                            if (0..full.width as i32).contains(&sx)
-                                && (0..full.height as i32).contains(&sy)
-                            {
-                                let c = &full.rgba
-                                    [((sy as usize * full.width as usize + sx as usize) * 4)..];
-                                self.notice = Some(format!(
-                                    "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
-                                    c[0], c[1], c[2], c[0], c[1], c[2], sx, sy
-                                ));
-                                if let Ok(mut cb) = arboard::Clipboard::new() {
-                                    let _ = cb.set_text(&format!(
-                                        "#{:02X}{:02X}{:02X}",
-                                        c[0], c[1], c[2]
-                                    ));
-                                }
-                            } else {
-                                self.notice = Some("Click outside the picture".into());
-                            }
-                        } else {
-                            self.notice = Some("Full-res buffer not available — view at 1:1 for pixel-accurate sampling".into());
+            if let Some(hover) = resp.hover_pos()
+                && let Some(key) = self.cur.as_ref()
+                && let Some(pv) = self.previews.get(key)
+            {
+                if let Some(full) = &pv.full {
+                    let center = panel.center();
+                    let sx =
+                        ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0).round() as i32;
+                    let sy =
+                        ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0).round() as i32;
+                    if (0..full.width as i32).contains(&sx) && (0..full.height as i32).contains(&sy)
+                    {
+                        let c =
+                            &full.rgba[((sy as usize * full.width as usize + sx as usize) * 4)..];
+                        self.notice = Some(format!(
+                            "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
+                            c[0], c[1], c[2], c[0], c[1], c[2], sx, sy
+                        ));
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            let _ = cb.set_text(&format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
                         }
+                    } else {
+                        self.notice = Some("Click outside the picture".into());
                     }
+                } else {
+                    self.notice = Some(
+                        "Full-res buffer not available — view at 1:1 for pixel-accurate sampling"
+                            .into(),
+                    );
                 }
             }
         }
@@ -928,33 +991,29 @@ impl MyApp {
                     (pv.tex.id(), pv.has_alpha)
                 });
             if let Some((partner_tex, partner_alpha)) = painted {
-                if partner_alpha {
-                    if let Some(checker) = &self.checker {
-                        // From **this** page's rect, so the backdrop is under its
-                        // own page. A checkerboard sized for one page and drawn
-                        // under the other is a visible misalignment, not a subtle
-                        // one: the squares are a fixed size in page space.
-                        let ps = partner_rect.size();
-                        paint_tex(
-                            &painter,
-                            checker.id(),
-                            *partner_rect,
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(ps.x / 32.0, ps.y / 32.0)),
-                            partner_xform,
-                        );
-                    }
+                if partner_alpha && let Some(checker) = &self.checker {
+                    // From **this** page's rect, so the backdrop is under its
+                    // own page. A checkerboard sized for one page and drawn
+                    // under the other is a visible misalignment, not a subtle
+                    // one: the squares are a fixed size in page space.
+                    let ps = partner_rect.size();
+                    paint_tex(
+                        &painter,
+                        checker.id(),
+                        *partner_rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(ps.x / 32.0, ps.y / 32.0)),
+                        partner_xform,
+                    );
                 }
                 paint_tex(&painter, partner_tex, *partner_rect, uv, partner_xform);
             }
         }
         // Always paint the preview first; tiles refine it where available.
         // Transparent images get a checkerboard backdrop underneath.
-        if pv_has_alpha {
-            if let Some(checker) = &self.checker {
-                let uv =
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(src_size.x / 32.0, src_size.y / 32.0));
-                paint_tex(&painter, checker.id(), rect, uv, xform);
-            }
+        if pv_has_alpha && let Some(checker) = &self.checker {
+            let uv =
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(src_size.x / 32.0, src_size.y / 32.0));
+            paint_tex(&painter, checker.id(), rect, uv, xform);
         }
         paint_tex(&painter, tex_id, rect, uv, xform);
         // The wanted image is now on screen. The *latency* is committed next
@@ -1303,67 +1362,67 @@ impl MyApp {
         // Draw the frame from the *stored* crop mapped back out, so what is on
         // screen is the rectangle the save will cut — block-aligned, and correct
         // through any EXIF tag or turn or mirror.
-        if let Some(pv) = pvx {
-            if let Some(cr) = self.crop_screen_rect(footprint, display_px, pv) {
-                let cr = cr.intersect(footprint);
-                if cr.width() > 1.0 && cr.height() > 1.0 {
-                    // Dim what is being cut away, as four bands rather than a
-                    // full-panel wash with a hole: no blending, so the picture
-                    // outside the frame is unchanged and only the frame is new ink.
-                    // The geometry — which includes not dimming the middle of the
-                    // top and bottom edges, which is what the first version did —
-                    // is `dim_bands`, and it is tested there.
-                    let band = Color32::from_black_alpha(140);
-                    let outer = [
-                        footprint.min.x,
-                        footprint.min.y,
-                        footprint.right_bottom().x,
-                        footprint.right_bottom().y,
-                    ];
-                    let inner = [cr.min.x, cr.min.y, cr.max.x, cr.max.y];
-                    for [x0, y0, x1, y1] in image_viewer::dim_bands(outer, inner) {
-                        if x1 > x0 && y1 > y0 {
-                            painter.rect_filled(
-                                egui::Rect::from_min_max(
-                                    egui::Pos2::new(x0, y0),
-                                    egui::Pos2::new(x1, y1),
-                                ),
-                                0u8,
-                                band,
-                            );
-                        }
+        if let Some(pv) = pvx
+            && let Some(cr) = self.crop_screen_rect(footprint, display_px, pv)
+        {
+            let cr = cr.intersect(footprint);
+            if cr.width() > 1.0 && cr.height() > 1.0 {
+                // Dim what is being cut away, as four bands rather than a
+                // full-panel wash with a hole: no blending, so the picture
+                // outside the frame is unchanged and only the frame is new ink.
+                // The geometry — which includes not dimming the middle of the
+                // top and bottom edges, which is what the first version did —
+                // is `dim_bands`, and it is tested there.
+                let band = Color32::from_black_alpha(140);
+                let outer = [
+                    footprint.min.x,
+                    footprint.min.y,
+                    footprint.right_bottom().x,
+                    footprint.right_bottom().y,
+                ];
+                let inner = [cr.min.x, cr.min.y, cr.max.x, cr.max.y];
+                for [x0, y0, x1, y1] in image_viewer::dim_bands(outer, inner) {
+                    if x1 > x0 && y1 > y0 {
+                        painter.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::Pos2::new(x0, y0),
+                                egui::Pos2::new(x1, y1),
+                            ),
+                            0u8,
+                            band,
+                        );
                     }
-                    painter.rect_stroke(
-                        cr,
-                        0u8,
-                        egui::Stroke::new(1.0, Color32::WHITE),
-                        egui::StrokeKind::Outside,
+                }
+                painter.rect_stroke(
+                    cr,
+                    0u8,
+                    egui::Stroke::new(1.0, Color32::WHITE),
+                    egui::StrokeKind::Outside,
+                );
+                // Rule of thirds. Two lines each way, faint: enough to line a
+                // portrait up on thirds without competing with the picture.
+                let thin = egui::Stroke::new(1.0, Color32::from_white_alpha(70));
+                for i in 1..3 {
+                    let t = i as f32 / 3.0;
+                    let x = cr.min.x + cr.width() * t;
+                    let y = cr.min.y + cr.height() * t;
+                    painter.line_segment(
+                        [egui::Pos2::new(x, cr.min.y), egui::Pos2::new(x, cr.max.y)],
+                        thin,
                     );
-                    // Rule of thirds. Two lines each way, faint: enough to line a
-                    // portrait up on thirds without competing with the picture.
-                    let thin = egui::Stroke::new(1.0, Color32::from_white_alpha(70));
-                    for i in 1..3 {
-                        let t = i as f32 / 3.0;
-                        let x = cr.min.x + cr.width() * t;
-                        let y = cr.min.y + cr.height() * t;
-                        painter.line_segment(
-                            [egui::Pos2::new(x, cr.min.y), egui::Pos2::new(x, cr.max.y)],
-                            thin,
-                        );
-                        painter.line_segment(
-                            [egui::Pos2::new(cr.min.x, y), egui::Pos2::new(cr.max.x, y)],
-                            thin,
-                        );
-                    }
-                    if let Some(crop) = self.edits.crop(&shown.path) {
-                        painter.text(
-                            cr.left_top() + Vec2::new(4.0, -6.0),
-                            egui::Align2::LEFT_BOTTOM,
-                            crop.label(),
-                            egui::FontId::proportional(13.0),
-                            Color32::WHITE,
-                        );
-                    }
+                    painter.line_segment(
+                        [egui::Pos2::new(cr.min.x, y), egui::Pos2::new(cr.max.x, y)],
+                        thin,
+                    );
+                }
+                if let Some(crop) = self.edits.crop(&shown.path) {
+                    painter.text(
+                        cr.left_top() + Vec2::new(4.0, -6.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        crop.label(),
+                        egui::FontId::proportional(13.0),
+                        Color32::WHITE,
+                    );
                 }
             }
         }

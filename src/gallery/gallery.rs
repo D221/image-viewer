@@ -65,7 +65,7 @@ pub struct Gallery {
 /// `date_taken` is EXIF `DateTimeOriginal` as "YYYY:MM:DD HH:MM:SS", empty when
 /// absent or unreadable. `orientation` is the EXIF tag (1-8), 0 when absent.
 /// `mtime`/`len` are the invalidate key: a file whose either changed is re-measured.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FileShape {
     pub w: u32,
@@ -74,12 +74,6 @@ pub struct FileShape {
     pub date_taken: String,
     pub mtime: u64,
     pub len: u64,
-}
-
-impl Default for FileShape {
-    fn default() -> Self {
-        Self { w: 0, h: 0, orientation: 0, date_taken: String::new(), mtime: 0, len: 0 }
-    }
 }
 
 /// A filter needle interpreted as a rating query rather than a name substring.
@@ -117,10 +111,10 @@ pub(crate) fn parse_rating_term(needle: &str) -> Option<RatingTerm> {
     if needle == "unflagged" {
         return Some(RatingTerm::Unflagged);
     }
-    if let Some(name) = needle.strip_prefix("tag:") {
-        if !name.is_empty() {
-            return Some(RatingTerm::Tag(name.to_string()));
-        }
+    if let Some(name) = needle.strip_prefix("tag:")
+        && !name.is_empty()
+    {
+        return Some(RatingTerm::Tag(name.to_string()));
     }
     None
 }
@@ -452,20 +446,21 @@ impl Gallery {
             self.shape_cache = load_shape_cache();
             self.shape_cache_loaded = true;
         }
-        if pos.page == 0 {
-            if let Ok(metadata) = std::fs::metadata(&path) {
-                let mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                if let Some(cached) = self.shape_cache.get(&path_str(&path)) {
-                    if cached.mtime == mtime && cached.len == metadata.len() {
-                        self.insert_shapes(key, (cached.w, cached.h));
-                        return;
-                    }
-                }
+        if pos.page == 0
+            && let Ok(metadata) = std::fs::metadata(&path)
+        {
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if let Some(cached) = self.shape_cache.get(&path_str(&path))
+                && cached.mtime == mtime
+                && cached.len == metadata.len()
+            {
+                self.insert_shapes(key, (cached.w, cached.h));
+                return;
             }
         }
         let Some(((w, h), jpeg)) = page_dims_and_jpeg(&path, pos.page) else {
@@ -478,22 +473,22 @@ impl Gallery {
         // Update the persisted cache for page 0: dims, orientation, capture
         // date, mtime and length. Multi-page pages are not cached here — their
         // dims vary per page and the in-memory `shapes` map already covers them.
-        if pos.page == 0 {
-            if let Ok(metadata) = std::fs::metadata(&path) {
-                let mtime = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let date_taken = if jpeg { exif_date_taken(&path) } else { String::new() };
-                self.shape_cache.insert(
-                    path_str(&path),
-                    FileShape { w, h, orientation: tag, date_taken, mtime, len: metadata.len() },
-                );
-                self.shape_cache_dirty = true;
-                self.save_shape_cache();
-            }
+        if pos.page == 0
+            && let Ok(metadata) = std::fs::metadata(&path)
+        {
+            let mtime = metadata
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let date_taken = if jpeg { exif_date_taken(&path) } else { String::new() };
+            self.shape_cache.insert(
+                path_str(&path),
+                FileShape { w, h, orientation: tag, date_taken, mtime, len: metadata.len() },
+            );
+            self.shape_cache_dirty = true;
+            self.save_shape_cache();
         }
     }
 
@@ -700,6 +695,13 @@ impl Gallery {
     /// Returns whether the view actually moved - `false` at the end with
     /// `loop_back` off, so the caller can skip the work that a real change would
     /// justify.
+    ///
+    /// Named `next` because it advances the gallery cursor to the next page/image,
+    /// mirroring `Iterator::next` semantics deliberately — this is a gallery
+    /// cursor, not an iterator, so the name is appropriate. `Gallery` is not an
+    /// iterator (it borrows mutably and has state beyond a position), so
+    /// implementing `Iterator` would be wrong.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         let Some(to) = self.pos_next(self.index, self.page) else {
             return false;
@@ -1020,10 +1022,11 @@ impl PageCtx for Gallery {
 }
 
 /// Where the shape sidecar lives: `%LOCALAPPDATA%\image-viewer\shapes.json`.
-///
-/// Same rules as `spreads_root`: local, not roaming; beside the cache, not the
-/// config. `None` means "do not persist".
+/// Same rules as `spreads_root`: local, not roaming; beside the cache, not
+/// the config. `None` means "do not persist".
+#[allow(clippy::manual_map)]
 pub(crate) fn shape_cache_root() -> Option<PathBuf> {
+    // `if let / else if let` is more readable than `map`/`or_else` here: each arm has a different fallback path.
     if let Some(dir) = portable_dir() {
         return Some(dir.join("shapes.json"));
     }
@@ -1054,10 +1057,7 @@ pub(crate) fn load_shape_cache() -> std::collections::HashMap<String, FileShape>
     let Ok(data) = std::fs::read(&root) else {
         return Default::default();
     };
-    match serde_json::from_slice(&data) {
-        Ok(map) => map,
-        Err(_) => Default::default(),
-    }
+    serde_json::from_slice(&data).unwrap_or_default()
 }
 
 /// Save the shape cache atomically (tmp + rename). A store that cannot be

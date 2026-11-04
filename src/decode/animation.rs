@@ -125,6 +125,11 @@ pub fn tile_axis_range(
 /// copy of the whole image over the image's own top-left. At 1.0 this is
 /// exactly the old arithmetic, so full-res sources paint bit-identical
 /// rects.
+///
+/// Eight related parameters (paint origin, page position, tile size, scale,
+/// keypoint offset); no natural grouping into a struct without introducing
+/// an unnecessary abstraction.
+#[allow(clippy::too_many_arguments)]
 pub fn tile_draw_rect(
     paint_min: (f32, f32),
     px: u32,
@@ -307,7 +312,7 @@ pub fn is_animated(bytes: &[u8], format: AnimatedFormat) -> bool {
 
 /// True when the first two frames both decode. Two `next` calls and no loop, so it
 /// terminates on any input including a file whose frame data runs out.
-pub(crate) fn two_ok_frames<'a, I: Iterator<Item = image::ImageResult<image::Frame>>>(
+pub(crate) fn two_ok_frames<I: Iterator<Item = image::ImageResult<image::Frame>>>(
     mut it: I,
 ) -> bool {
     matches!(it.next(), Some(Ok(_))) && matches!(it.next(), Some(Ok(_)))
@@ -382,9 +387,7 @@ pub(crate) fn decode_embedded_thumbnail(
     if target == 0 || target > EMBEDDED_THUMB_MAX_TARGET {
         return None;
     }
-    let Some(t) = find_embedded_thumbnail(bytes) else {
-        return None;
-    };
+    let t = find_embedded_thumbnail(bytes)?;
     let (w, h) = t.dims?;
     let (mw, mh) = main?;
     // An upscale means the embedded copy is too small to be worth anything, and

@@ -43,6 +43,9 @@ use crate::*;
 /// — it makes no difference to an opaque photograph, which is what a grid cell
 /// is, and un-premultiplying on a guess would darken or blow out the transparent
 /// edge of the few cells that are not.
+// `chunks_exact` is used here because `as_chunks` does not resolve as an
+// iterator on this slice type.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
     let mut any_alpha = false;
     for px in bgra.chunks_exact(4) {

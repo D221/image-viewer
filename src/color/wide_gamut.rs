@@ -91,9 +91,9 @@ pub fn rgb_to_xyz(primaries: [(f64, f64); 3], white: (f64, f64)) -> [[f64; 3]; 3
     }
     // Solve M * s = white, then scale each column by its own s.
     let s = mul_vec(&invert3(&m), xy_to_xyz(white));
-    for r in 0..3 {
-        for c in 0..3 {
-            m[r][c] *= s[c];
+    for row in m.iter_mut() {
+        for (cell, s_val) in row.iter_mut().zip(s) {
+            *cell *= s_val;
         }
     }
     m
@@ -149,17 +149,17 @@ pub fn invert3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
         let cols: Vec<usize> = (0..3).filter(|c| *c != col).collect();
         let minor =
             m[rows[0]][cols[0]] * m[rows[1]][cols[1]] - m[rows[0]][cols[1]] * m[rows[1]][cols[0]];
-        if (row + col) % 2 == 0 { minor } else { -minor }
+        if (row + col).is_multiple_of(2) { minor } else { -minor }
     };
     // Expand along the first row: det = sum_j m[0][j] * C[0][j].
     let det = m[0][0] * cof(0, 0) + m[0][1] * cof(0, 1) + m[0][2] * cof(0, 2);
     let inv = 1.0 / det;
     let mut out = [[0.0; 3]; 3];
-    for r in 0..3 {
-        for c in 0..3 {
+    for (row, out_row) in out.iter_mut().enumerate() {
+        for (col, cell) in out_row.iter_mut().enumerate() {
             // adj[r][c] == C[c][r]: the adjugate is the transpose of the
             // cofactor matrix. Getting this backwards is the whole bug.
-            out[r][c] = cof(c, r) * inv;
+            *cell = cof(col, row) * inv;
         }
     }
     out
@@ -363,10 +363,10 @@ pub fn jpeg_comment(bytes: &[u8]) -> Option<String> {
                 if len < 2 || i + len > bytes.len() {
                     return None;
                 }
-                if marker == 0xFE {
-                    if let Some(text) = clean_comment_text(&bytes[i + 2..i + len]) {
-                        return Some(text);
-                    }
+                if marker == 0xFE
+                    && let Some(text) = clean_comment_text(&bytes[i + 2..i + len])
+                {
+                    return Some(text);
                 }
                 i += len;
             }
@@ -385,6 +385,9 @@ pub fn decode_user_comment(payload: &[u8]) -> Option<String> {
     }
     let (code, text) = payload.split_at(8);
     if code == b"UNICODE\0" {
+        // `chunks_exact` is correct here: `as_chunks` does not resolve as an
+        // iterator on this slice type in this context.
+        #[allow(clippy::chunks_exact_to_as_chunks)]
         let units: Vec<u16> =
             text.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let s: String = char::decode_utf16(units.iter().copied())

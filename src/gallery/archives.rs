@@ -513,10 +513,10 @@ pub fn archive_image_count(archive: &Path) -> Option<usize> {
                     if entry.is_dir() {
                         continue;
                     }
-                    if let Some(safe) = archive_member_name(entry.name()) {
-                        if claim_member_name(&mut seen, &safe) {
-                            n += 1;
-                        }
+                    if let Some(safe) = archive_member_name(entry.name())
+                        && claim_member_name(&mut seen, &safe)
+                    {
+                        n += 1;
                     }
                 }
             }
@@ -529,12 +529,11 @@ pub fn archive_image_count(archive: &Path) -> Option<usize> {
             let mut n = 0usize;
             reader
                 .for_each_entries(|entry, _| {
-                    if !entry.is_directory() {
-                        if let Some(safe) = archive_member_name(entry.name()) {
-                            if claim_member_name(&mut seen, &safe) {
-                                n += 1;
-                            }
-                        }
+                    if !entry.is_directory()
+                        && let Some(safe) = archive_member_name(entry.name())
+                        && claim_member_name(&mut seen, &safe)
+                    {
+                        n += 1;
                     }
                     Ok(true)
                 })

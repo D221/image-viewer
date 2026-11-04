@@ -160,20 +160,20 @@ pub(crate) fn decode_page(
     // treats unknown dims as "probably fits", which would collapse a manga turn
     // when a wide SVG's shape is learned late. `decode_svg` returns the
     // viewport it actually rendered, so the caller knows the truth.
-    if is_svg_bytes(&bytes) {
-        if let Ok(data) = decode_svg(&bytes, max_dim, start) {
-            let dims = (data.width, data.height);
-            return Ok(PreviewAndFull {
-                preview: data,
-                full: None,
-                anim: None,
-                orig: Some(dims),
-                below_target: true,
-                exif_tag: tag,
-                crop_grid,
-                colour,
-            });
-        }
+    if is_svg_bytes(&bytes)
+        && let Ok(data) = decode_svg(&bytes, max_dim, start)
+    {
+        let dims = (data.width, data.height);
+        return Ok(PreviewAndFull {
+            preview: data,
+            full: None,
+            anim: None,
+            orig: Some(dims),
+            below_target: true,
+            exif_tag: tag,
+            crop_grid,
+            colour,
+        });
     }
 
     // An animation: decode the whole loop once; no second full decode, no tiles.
@@ -208,22 +208,21 @@ pub(crate) fn decode_page(
                     colour,
                 });
             }
-        } else if is_animated(&bytes, fmt) {
-            if let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start, fmt) {
-                if anim.frames.len() > 1 {
-                    let dims = (anim.frames[0].width, anim.frames[0].height);
-                    return Ok(PreviewAndFull {
-                        preview: anim.frames[0].clone(),
-                        full: None,
-                        anim: Some(anim),
-                        orig: Some(dims),
-                        below_target: false,
-                        exif_tag: tag,
-                        crop_grid,
-                        colour,
-                    });
-                }
-            }
+        } else if is_animated(&bytes, fmt)
+            && let Ok(anim) = load_animation(&bytes, PREVIEW_TEXTURE_DIM, start, fmt)
+            && anim.frames.len() > 1
+        {
+            let dims = (anim.frames[0].width, anim.frames[0].height);
+            return Ok(PreviewAndFull {
+                preview: anim.frames[0].clone(),
+                full: None,
+                anim: Some(anim),
+                orig: Some(dims),
+                below_target: false,
+                exif_tag: tag,
+                crop_grid,
+                colour,
+            });
         }
         // A still image of an animated format, or one that would not decode:
         // fall through to the normal path, which handles it once.
@@ -234,24 +233,24 @@ pub(crate) fn decode_page(
     // saves RAM but not much time, whereas this reads a few KB that were already
     // encoded. No full decode happens, so `full` stays `None` and the caller
     // re-decodes if the user actually opens the image.
-    if jpeg {
-        if let Some(preview) = decode_embedded_thumbnail(&bytes, max_dim, stored, tag, start) {
-            return Ok(PreviewAndFull {
-                preview,
-                full: None,
-                anim: None,
-                orig,
-                below_target: true,
-                exif_tag: tag,
-                crop_grid,
-                colour,
-            });
-        }
+    if jpeg && let Some(preview) = decode_embedded_thumbnail(&bytes, max_dim, stored, tag, start) {
+        return Ok(PreviewAndFull {
+            preview,
+            full: None,
+            anim: None,
+            orig,
+            below_target: true,
+            exif_tag: tag,
+            crop_grid,
+            colour,
+        });
     }
 
-    let full_is_cheap = orig.map_or(true, |(w, h)| w as u64 * h as u64 <= FAST_FULL_MAX_PIXELS);
+    let full_is_cheap =
+        orig.map(|(w, h)| w as u64 * h as u64 <= FAST_FULL_MAX_PIXELS).unwrap_or(true);
 
     if jpeg && !full_is_cheap {
+        #[allow(clippy::collapsible_if)]
         if let Ok((w, h, rgba)) = decode_jpeg_scaled(&bytes, max_dim) {
             let mut preview =
                 normalized(ImageData { width: w, height: h, rgba, load_time: start.elapsed() });
@@ -371,7 +370,7 @@ pub fn decode_svg(
         .map_err(|e| LoadError::Other(format!("svg: {e}")))?;
     let size = tree.size();
     let (render_w, render_h) = if size.width() > 0.0 && size.height() > 0.0 {
-        let scale = (max_dim as f32 / size.width().max(size.height()) as f32).min(1.0);
+        let scale = (max_dim as f32 / size.width().max(size.height())).min(1.0);
         let w = (size.width() * scale).round().max(1.0) as u32;
         let h = (size.height() * scale).round().max(1.0) as u32;
         (w, h)

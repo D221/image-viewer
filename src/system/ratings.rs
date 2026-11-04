@@ -28,16 +28,10 @@ const XMP_NS: &str = "http://ns.adobe.com/xap/1.0/";
 /// `stars` is clamped to `0..=5` wherever it is *used* (the fields are public,
 /// so no constructor can enforce it); the flag is stored as `xmp:Label`
 /// `Pick`, which is what makes the file readable in Lightroom.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rating {
     pub stars: u8,
     pub flag: bool,
-}
-
-impl Default for Rating {
-    fn default() -> Self {
-        Rating { stars: 0, flag: false }
-    }
 }
 
 impl Rating {

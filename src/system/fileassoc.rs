@@ -62,7 +62,7 @@ fn icon_value(exe: &std::path::Path) -> (String, &'static str) {
         (format!("\"{}\",0", exe.to_string_lossy()), "the icon in the exe")
     } else {
         (
-            format!(r"%SystemRoot%\System32\imageres.dll,-102"),
+            r"%SystemRoot%\System32\imageres.dll,-102".to_string(),
             "a system picture icon (this build has no embedded icon)",
         )
     }

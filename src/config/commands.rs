@@ -292,10 +292,10 @@ pub fn split_chord(raw: &str) -> Option<(bool, bool, bool, String)> {
 /// Unknown placeholders are left alone rather than deleted, so a literal
 /// `{x}` in a program path survives instead of silently vanishing.
 pub fn expand_template(template: &str, file: &std::path::Path) -> String {
-    let s = template.replace("{file}", &file.to_string_lossy().into_owned());
-    let dir = file.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let s = template.replace("{file}", &file.to_string_lossy());
+    let dir = file.parent().map(|p| p.to_string_lossy()).unwrap_or_default();
     let s = s.replace("{dir}", &dir);
-    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
     s.replace("{name}", &name)
 }
 
@@ -509,11 +509,11 @@ impl Config {
 
     /// Save configuration to a JSON file.
     pub fn save(&self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                eprintln!("Failed to create config directory {}: {}", parent.display(), err);
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("Failed to create config directory {}: {}", parent.display(), err);
+            return;
         }
 
         let Ok(data) = serde_json::to_string_pretty(self) else {

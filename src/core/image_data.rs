@@ -55,6 +55,9 @@ impl Histogram {
 pub fn histogram_rgba(rgba: &[u8], width: u32, height: u32) -> Histogram {
     let mut h = Histogram::default();
     let want = width as usize * height as usize;
+    // `chunks_exact` is used here because `as_chunks` does not resolve as an
+    // iterator on this slice type.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     for px in rgba.chunks_exact(4).take(want) {
         h.bins[0][px[0] as usize] += 1;
         h.bins[1][px[1] as usize] += 1;

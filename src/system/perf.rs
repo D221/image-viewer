@@ -264,10 +264,10 @@ pub fn enabled() -> bool {
 
 /// Record a latency sample in microseconds. No-op when sampling is disabled.
 pub fn record(idx: usize, micros: u64) {
-    if ENABLED.load(Relaxed) != 0 {
-        if let Some(m) = METRIC.get(idx) {
-            m.push(micros);
-        }
+    if ENABLED.load(Relaxed) != 0
+        && let Some(m) = METRIC.get(idx)
+    {
+        m.push(micros);
     }
 }
 

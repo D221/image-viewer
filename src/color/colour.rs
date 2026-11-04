@@ -181,19 +181,19 @@ pub(crate) fn png_colour_chunks(bytes: &[u8]) -> (bool, Option<Vec<u8>>) {
                 // The compression is the easy thing to forget: handing the raw
                 // chunk to the ICC parser just yields "unknown", because there
                 // is no 'acsp' signature at offset 36 in a deflate stream.
-                if let Some(z) = bytes[data..end].iter().position(|b| *b == 0) {
-                    if let Some(z2) = bytes[data + z + 1..end].iter().position(|b| *b == 0) {
-                        let packed = &bytes[data + z + 1 + z2 + 1..end];
-                        use std::io::Read;
-                        let mut out = Vec::new();
-                        let inflated = flate2::read::ZlibDecoder::new(packed)
-                            // A profile is a few KB; refuse to inflate a bomb.
-                            .take(1 << 20)
-                            .read_to_end(&mut out)
-                            .is_ok();
-                        if inflated && out.len() > 132 {
-                            iccp = Some(out);
-                        }
+                if let Some(z) = bytes[data..end].iter().position(|b| *b == 0)
+                    && let Some(z2) = bytes[data + z + 1..end].iter().position(|b| *b == 0)
+                {
+                    let packed = &bytes[data + z + 1 + z2 + 1..end];
+                    use std::io::Read;
+                    let mut out = Vec::new();
+                    let inflated = flate2::read::ZlibDecoder::new(packed)
+                        // A profile is a few KB; refuse to inflate a bomb.
+                        .take(1 << 20)
+                        .read_to_end(&mut out)
+                        .is_ok();
+                    if inflated && out.len() > 132 {
+                        iccp = Some(out);
                     }
                 }
             }
@@ -261,6 +261,9 @@ pub(crate) fn icc_description_opt(icc: &[u8]) -> Option<String> {
                 if start >= icc.len() || start % 2 != 0 {
                     return None;
                 }
+                // `chunks_exact` is correct here: `as_chunks` does not resolve
+                // as an iterator on this slice type in this context.
+                #[allow(clippy::chunks_exact_to_as_chunks)]
                 let units: Vec<u16> = icc[start..end]
                     .chunks_exact(2)
                     .map(|c| u16::from_be_bytes([c[0], c[1]]))
@@ -357,7 +360,7 @@ pub(crate) fn classify_icc(icc: &[u8]) -> ColorInfo {
     let d = info.description.to_ascii_lowercase();
     let tokens: Vec<&str> =
         d.split(|c: char| !c.is_ascii_alphanumeric()).filter(|s| !s.is_empty()).collect();
-    let has = |w: &str| tokens.iter().any(|t| *t == w);
+    let has = |w: &str| tokens.contains(&w);
     info.space = if has("prophoto") {
         ColorSpace::WideGamut
     } else if has("p3") || has("adobergb") || has("2020") {

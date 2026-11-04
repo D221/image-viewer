@@ -187,6 +187,9 @@ pub(crate) fn kernel(f: DownscaleFilter) -> (Box<dyn Fn(f32) -> f32>, f32) {
 /// sRGB <-> 12-bit-linear LUTs (JPEGView-style): resizing in linear light
 /// avoids darkened edges and moiré on lineart/screentones.
 pub(crate) fn lin_tables() -> (&'static [u16; 256], &'static [u8; 4096]) {
+    // `OnceLock<(Box<[u16; 256]>, Box<[u8; 4096]>)>` is a complex type, but it
+    // is used only here and a type alias would not improve readability.
+    #[allow(clippy::type_complexity)]
     static TABLES: std::sync::OnceLock<(Box<[u16; 256]>, Box<[u8; 4096]>)> =
         std::sync::OnceLock::new();
     let tables = TABLES.get_or_init(|| {
@@ -376,10 +379,10 @@ pub(crate) fn kernel_reduce_linear(
                 a += (p[3] as f32) * 16.0 * w;
             }
             let o = x * 4;
-            out_row[o] = to_srgb[r.max(0.0).min(4095.0) as usize];
-            out_row[o + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
-            out_row[o + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
-            out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+            out_row[o] = to_srgb[r.clamp(0.0, 4095.0) as usize];
+            out_row[o + 1] = to_srgb[g.clamp(0.0, 4095.0) as usize];
+            out_row[o + 2] = to_srgb[b.clamp(0.0, 4095.0) as usize];
+            out_row[o + 3] = ((a.clamp(0.0, 4080.0) / 16.0).round()) as u8;
         }
     });
     if ph == sh {
@@ -401,10 +404,10 @@ pub(crate) fn kernel_reduce_linear(
                 b += to_lin[p[2] as usize] as f32 * w;
                 a += (p[3] as f32) * 16.0 * w;
             }
-            out_row[i] = to_srgb[r.max(0.0).min(4095.0) as usize];
-            out_row[i + 1] = to_srgb[g.max(0.0).min(4095.0) as usize];
-            out_row[i + 2] = to_srgb[b.max(0.0).min(4095.0) as usize];
-            out_row[i + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+            out_row[i] = to_srgb[r.clamp(0.0, 4095.0) as usize];
+            out_row[i + 1] = to_srgb[g.clamp(0.0, 4095.0) as usize];
+            out_row[i + 2] = to_srgb[b.clamp(0.0, 4095.0) as usize];
+            out_row[i + 3] = ((a.clamp(0.0, 4080.0) / 16.0).round()) as u8;
         }
     });
     out
@@ -472,6 +475,9 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
     let mut lin = vec![0u16; (lw as usize) * (lh as usize) * 4];
     small.par_chunks_exact(lw as usize * 4).zip(lin.par_chunks_mut(lw as usize * 4)).for_each(
         |(srow, lrow)| {
+            // `chunks_exact` + indexing is correct here; `as_chunks` does not
+            // resolve as an iterator on this slice type.
+            #[allow(clippy::chunks_exact_to_as_chunks)]
             for (c, chunk) in srow.chunks_exact(4).enumerate() {
                 lrow[c * 4] = to_lin[chunk[0] as usize];
                 lrow[c * 4 + 1] = to_lin[chunk[1] as usize];
@@ -528,10 +534,10 @@ pub(crate) fn linear_resize(data: &ImageData, new_w: u32, new_h: u32) -> Vec<u8>
                 }
                 // Clamp to the 12-bit linear range (filters overshoot on edges).
                 let o = x * 4;
-                out_row[o] = to_srgb[(r.max(0.0).min(4095.0)) as usize];
-                out_row[o + 1] = to_srgb[(g.max(0.0).min(4095.0)) as usize];
-                out_row[o + 2] = to_srgb[(b.max(0.0).min(4095.0)) as usize];
-                out_row[o + 3] = ((a.max(0.0).min(4080.0) / 16.0).round()) as u8;
+                out_row[o] = to_srgb[(r.clamp(0.0, 4095.0)) as usize];
+                out_row[o + 1] = to_srgb[(g.clamp(0.0, 4095.0)) as usize];
+                out_row[o + 2] = to_srgb[(b.clamp(0.0, 4095.0)) as usize];
+                out_row[o + 3] = ((a.clamp(0.0, 4080.0) / 16.0).round()) as u8;
             }
         }
     });
@@ -582,7 +588,7 @@ pub(crate) fn contributions(
         let center = (dst as f32 + 0.5) / scale - 0.5;
         let lo = ((center - radius).floor() as i32).max(0) as usize;
         let hi = ((center + radius).ceil() as i32).min(src_len as i32 - 1) as usize;
-        let mut con: Vec<(usize, f32)> = Vec::with_capacity((hi - lo + 1) as usize);
+        let mut con: Vec<(usize, f32)> = Vec::with_capacity(hi - lo + 1);
         let mut sum = 0f32;
         for si in lo..=hi {
             let w = kern((si as f32 - center) / filter_scale);
@@ -612,11 +618,17 @@ pub fn normalized(mut data: ImageData) -> ImageData {
     let got = data.rgba.len();
     // If the buffer is self-consistent at some other height (or width), trust
     // it: that's what a decoder that mis-reported its size looks like.
-    if data.width > 0 && got % (data.width as usize * 4) == 0 && got >= data.width as usize * 4 {
+    if data.width > 0
+        && got.is_multiple_of(data.width as usize * 4)
+        && got >= data.width as usize * 4
+    {
         data.height = (got / (data.width as usize * 4)) as u32;
         return data;
     }
-    if data.height > 0 && got % (data.height as usize * 4) == 0 && got >= data.height as usize * 4 {
+    if data.height > 0
+        && got.is_multiple_of(data.height as usize * 4)
+        && got >= data.height as usize * 4
+    {
         data.width = (got / (data.height as usize * 4)) as u32;
         return data;
     }
@@ -630,6 +642,10 @@ pub fn normalized(mut data: ImageData) -> ImageData {
 
 /// True if any pixel has a non-opaque alpha channel (used to decide whether
 /// to draw the transparency checkerboard).
+///
+/// `chunks_exact` is used here because `as_chunks` does not resolve as an
+/// iterator on this slice type.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub fn buffer_has_alpha(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|p| p[3] != 255)
 }

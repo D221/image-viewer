@@ -486,7 +486,7 @@ pub fn write_cached_preview(
 /// store slightly over its cap and perfectly valid.
 fn maybe_trim_preview_store(root: &Path) {
     let n = PREVIEW_PUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    if n % PREVIEW_TRIM_EVERY != 0 {
+    if !n.is_multiple_of(PREVIEW_TRIM_EVERY) {
         return;
     }
     let root = root.to_path_buf();

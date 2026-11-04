@@ -152,8 +152,12 @@ pub fn parse_notify_buffer(buf: &[u8]) -> Vec<FsChange> {
         let Some(name_bytes) = buf.get(off + 12..off + 12 + name_len) else {
             break;
         };
-        let units: Vec<u16> =
-            name_bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = {
+            // `chunks_exact` is used here because `as_chunks` does not resolve as an
+            // iterator on this slice type.
+            #[allow(clippy::chunks_exact_to_as_chunks)]
+            name_bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        };
         out.push(FsChange { action, name: String::from_utf16_lossy(&units) });
         // `NextEntryOffset == 0` marks the last record; anything that cannot
         // advance the cursor ends the walk rather than looping forever.
@@ -570,6 +574,9 @@ pub fn write_cached_thumbnail(root: &Path, path: &Path, target: u32, data: &Imag
 /// What a cell costs on disk, measured: **13-80 KB, call it 1.5 bytes per pixel**.
 /// Deflate is simply not good at photographic content, which is what a thumbnail
 /// of a photo is, and [`THUMB_CACHE_MAX_BYTES`] is chosen with that in mind.
+// `chunks_exact` is used here because `as_chunks` does not resolve as an
+// iterator on this slice type.
+#[allow(clippy::chunks_exact_to_as_chunks)]
 pub(crate) fn encode_png(
     rgba: &[u8],
     width: u32,
@@ -625,7 +632,7 @@ pub(crate) static THUMB_PUTS: std::sync::atomic::AtomicU64 = std::sync::atomic::
 /// leaves the cache slightly over its cap and perfectly valid.
 pub(crate) fn maybe_trim_thumb_cache(root: &Path) {
     let n = THUMB_PUTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-    if n % THUMB_TRIM_EVERY != 0 {
+    if !n.is_multiple_of(THUMB_TRIM_EVERY) {
         return;
     }
     let root = root.to_path_buf();

@@ -10,6 +10,34 @@
 use crate::app::gallery_ops::UndoDeleteResult;
 use crate::*;
 
+// Per-frame input reads, extracted from `ui()` so each dispatch site reads
+// from a single resolved snapshot rather than re-querying egui.
+
+/// Every input resolved once per frame, before any dispatch acts on it.
+struct FrameInputs {
+    typing: bool,
+    kb: std::collections::HashMap<String, ResolvedBinding>,
+    f11: bool,
+    esc: bool,
+}
+
+impl MyApp {
+    /// Read every input up front, before anything acts on it.
+    ///
+    /// `typing` gates all global single-key handling; `kb` maps action names
+    /// to resolved chords; `f11`/`Esc` are the two global keys that override
+    /// everything. Navigation (`nav_direction`) is deliberately *not* here:
+    /// it must stay in `ui()` so the source scan can verify the one direction
+    /// rule.
+    fn read_inputs(&self, ctx: &Context) -> FrameInputs {
+        let typing = ctx.egui_wants_keyboard_input();
+        let kb = build_bindings(&self.config);
+        let f11 = action_pressed(ctx, &kb, "fullscreen");
+        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        FrameInputs { typing, kb, f11, esc }
+    }
+}
+
 impl eframe::App for MyApp {
     /// Persist the last-viewed image per folder on app close, then clean up
     /// any extracted archive temp dir.
@@ -50,21 +78,6 @@ impl eframe::App for MyApp {
         let ctx = &ctx;
         self.frame_prelude(ctx);
 
-        // Read every key up front, before anything acts on them: Esc needs to
-        // know whether the search box has focus, and the panels are drawn last.
-        //
-        // `typing` is true when a text field owns the keyboard. All the global
-        // single-key handling below has to stand down then, or typing "g" into
-        // the filter would toggle the grid and "r" would reload the folder.
-        let typing = ctx.egui_wants_keyboard_input();
-        // Every binding resolved once per frame from the keybindings map
-        // (user overrides over shipped defaults). Each read below asks this
-        // table by action name instead of naming a key, so there is exactly
-        // one place where a physical key becomes a meaning.
-        let kb = build_bindings(&self.config);
-        let f11 = action_pressed(ctx, &kb, "fullscreen");
-        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-
         // ---- one direction rule, read once --------------------------------
         //
         // **Every input that can move the view is named in [`NAV_KEYS`] /
@@ -95,21 +108,21 @@ impl eframe::App for MyApp {
             )
         });
         // Read once, and the *only* navigation read in the frame that is a press
-        // rather than a hold.
-        //
-        // `Option<bool>` because `MyApp::step` already takes a `bool` for its
-        // direction: forwards is `true`. So `nav` is passed straight through and
-        // there is no arithmetic on it anywhere in the dispatch — a
-        // `let (fwd, back) = nav` with `if fwd && !back` beside it would be a
-        // second place where a direction is decided.
+        // rather than a hold. `Option<bool>` because `step` takes a `bool`
+        // (forwards is `true`); `nav` is passed straight through with no
+        // arithmetic on it anywhere in the dispatch.
         let step_dir = nav;
 
-        // The **grid's** arrows, which are a different question and deliberately
-        // do not go through the rule: a highlight moving across a grid drawn left
-        // to right has a side, and the grid has one cell per file with no reading
-        // order at all. `Space` is in here because it has always moved the
-        // highlight, and a key that stops working because a manga setting is on
-        // would be the kind of regression nothing in the tree can see.
+        let inputs = self.read_inputs(ctx);
+        let typing = inputs.typing;
+        let f11 = inputs.f11;
+        let esc = inputs.esc;
+        let kb = inputs.kb;
+
+        // The grid's arrows do not go through the direction rule: a grid has one
+        // cell per file with no reading order. `Space` is in here because it has
+        // always moved the highlight, and a key that stops working because manga
+        // mode is on would be a regression nothing in the tree can see.
         let (grid_right, grid_left) = ctx.input(|i| {
             (
                 binding_down(i, &kb, "grid_right") || binding_down(i, &kb, "grid_right_alt"),
@@ -153,13 +166,9 @@ impl eframe::App for MyApp {
             self.suppress_resize_redecode = true;
             // **Entered fullscreen hides the panels; leaving restores what the
             // user had — not hard `true`.** The master is a persisted
-            // preference (`Config::show_panels`), and the fullscreen dance is
-            // a transient overlay: entering stashes the pre-fullscreen value,
-            // leaving hands it back, so minimal-state users keep their
-            // minimal state across a fullscreen detour instead of reacquiring
-            // chrome they switched off. The stash also protects `on_exit`'s
-            // whole-config save: with a hardcoded restore, one fullscreen
-            // detour would rewrite the saved "off" at close.
+            // preference; entering stashes it, leaving hands it back. The stash
+            // also protects `on_exit`'s whole-config save: a hardcoded restore
+            // would rewrite the saved "off" after one fullscreen detour.
             if fs {
                 self.show_panels = self.panels_before_fullscreen.take().unwrap_or(true);
             } else {
@@ -170,9 +179,9 @@ impl eframe::App for MyApp {
         if esc {
             // **The save-as panel is above everything, `typing` included.**
             //
-            // Its path box holds focus the moment it opens, so `typing` is true
-            // while the user is naming a file — and Esc landed in the search
-            // box's arm, which cleared the *filter* and left the panel standing.
+            // Its path box holds focus when it opens, so `typing` is true while
+            // the user is naming a file — and Esc landed in the search box's
+            // arm, which cleared the *filter* and left the panel standing.
             // One Esc later it fell through to the quit branch and closed the
             // app with the panel still up.
             //
@@ -180,8 +189,7 @@ impl eframe::App for MyApp {
             // is the same one the archive arm states below: Esc is "go back one
             // level", and a modal panel is a level above the viewer. It is also
             // the only modal here that *writes* — Esc on a panel holding a
-            // half-typed destination must not be a quit, for the same reason Esc
-            // in crop mode drops the frame instead.
+            // half-typed destination must not be a quit.
             if self.save_as.open {
                 self.save_as.open = false;
             } else if typing {
@@ -211,11 +219,11 @@ impl eframe::App for MyApp {
                 // through to the quit branch, so a reader three pages into a
                 // volume who pressed Esc to get out closed the app instead.
                 //
-                // A behaviour change to `esc_closes_app`, and the right one: the
-                // setting decides whether Esc quits *the viewer*, and inside an
-                // archive Esc is answering "leave the archive" — the same
-                // relationship crop mode and the grid already have above it.
-                // One level down and Esc quits exactly as before.
+                // A behaviour change to `esc_closes_app`: the setting decides
+                // whether Esc quits *the viewer*, and inside an archive Esc is
+                // answering "leave the archive" — the same relationship crop
+                // mode and the grid already have above it. One level down and
+                // Esc quits exactly as before.
                 if !self.leave_archive(ctx, false) {
                     self.notice = Some("No folder to go back to (archive opened directly)".into());
                 }
@@ -224,7 +232,7 @@ impl eframe::App for MyApp {
                 if in_fullscreen {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
                     // What the master stood at *before this fullscreen*, not
-                    // hard `true` — same reason the `F11` exit restores the
+                    // hard `true` — same reason the `f11` exit restores the
                     // stash: the value is the user's persisted choice, and a
                     // hardcoded restore rewrites it (and then `on_exit`
                     // saves the rewrite).
@@ -248,38 +256,19 @@ impl eframe::App for MyApp {
                 binding_down(i, &kb, "grid_open"),
             )
         });
-        // `M` (move) and `C` (copy) used to be bare single-key shortcuts. They are
-        // not any more, and the reason is worth keeping: both **write to the
-        // filesystem** on a keystroke with nothing standing between the key and
-        // the file. `C` in particular is the wrong letter to have bound to a
-        // mutation, because it is also the first thing anyone reaches for when
-        // they think they are in a text box somewhere else. `C` is now Crop,
-        // which touches nothing on disk until `Ctrl+S`.
+        // `M` (move) and `C` (copy) used to be bare single-key shortcuts. They
+        // are not any more: both **write to the filesystem** on a keystroke
+        // with nothing standing between the key and the file. `C` is the wrong
+        // letter for a mutation because it is also the first thing anyone
+        // reaches for in a text box. `C` is now Crop, which touches nothing on
+        // disk until `Ctrl+S`.
         //
-        // So the single-key budget goes to actions that cannot lose data. Triage
-        // is still one keystroke for Delete, which is the one people use while
-        // culling; Move and Copy are buttons. If they turn out to be wanted back
-        // on the keyboard, a modifier is the shape to add rather than a bare
-        // letter.
-        // `Ctrl+C` is **not** a key event, and reading it as one is why it did
-        // nothing. `egui-winit` intercepts the clipboard chords and converts
-        // them, dropping the key:
+        // The single-key budget goes to actions that cannot lose data. Triage
+        // is still one keystroke for Delete; Move and Copy are buttons.
         //
-        //     } else if is_copy_command(self.modifiers, active_key) {
-        //         self.egui_input.events.push(egui::Event::Copy);
-        //         return;                      // <- no `Key { key: C, .. }` ever
-        //     }
-        //
-        // and `is_copy_command` is `modifiers.command && key == C`, which on
-        // Windows is `ctrl` — the same thing. So `key_pressed(Key::C) &&
-        // modifiers.ctrl` is *unreachable*: the log of that frame shows
-        // `Copy` followed by `Key { key: C, pressed: false }`, and nothing
-        // between them. `Ctrl+S` survives because it is not on the list.
-        //
-        // So the chord is read from the converted event, which is also the
-        // honest way round: this is what the platform means by copy, so it
-        // now also answers to the Edit menu's Copy, `Ctrl+Insert`, and the
-        // dedicated Copy key, none of which would ever match a `C` test.
+        // `Ctrl+C` is **not** a key event: `egui-winit` intercepts clipboard
+        // chords and converts them, dropping the key. So `Ctrl+C` is read from
+        // the converted `Event::Copy`, not from a `Key { key: C }` press.
         //
         // It sits inside the `!typing` block below, so `Ctrl+C` in the filter
         // box still copies the selected text rather than the picture — the

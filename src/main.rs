@@ -207,6 +207,16 @@ fn main() -> eframe::Result<()> {
     // One iteration per renderer the user runs. The app is rebuilt from the
     // config each time, so a restart keeps the folder, sort mode and settings
     // but loses the in-memory preview cache and has to decode again.
+    //
+    // This loop has no `break`: it exits only via `return` (normal exit on
+    // `Ok`, startup failure on `Err`). That is intentional — the app requests
+    // a renderer restart by writing to the shared `restart` slot and closing
+    // the viewport, which returns control here to rebuild with the new
+    // backend. Clippy's `never_loop` denies loops without `break`/`continue`,
+    // but termination here is through `return`, so the lint is allowed with a
+    // documented reason rather than restructured (which would obscure the
+    // restart-slot hand-off between the app and the launch loop).
+    #[allow(clippy::never_loop)]
     loop {
         // Window chrome from config at creation; the checkboxes apply the
         // same flags live, so this only matters for what a fresh launch
@@ -284,7 +294,7 @@ fn main() -> eframe::Result<()> {
             Ok(_) => return Ok(()),
             Err(e) => {
                 eprintln!("Failed to start the viewer: {e}");
-                return Err(e.into());
+                return Err(e);
             }
         }
     }

@@ -636,11 +636,11 @@ pub(crate) fn decode_tiff_page(
             // `cmyk_via_image` for why that means re-wrapping the page.
             (T::CMYK(8), D::U8(b)) => {
                 need(b.len(), (w * h * 4) as usize)?;
-                cmyk_via_image::<tiff::encoder::colortype::CMYK8>(w, h, &b)?.into()
+                cmyk_via_image::<tiff::encoder::colortype::CMYK8>(w, h, &b)?
             }
             (T::CMYK(16), D::U16(b)) => {
                 need(b.len(), (w * h * 4) as usize)?;
-                cmyk_via_image::<tiff::encoder::colortype::CMYK16>(w, h, &b)?.into()
+                cmyk_via_image::<tiff::encoder::colortype::CMYK16>(w, h, &b)?
             }
             // CMYKA: CMYK plus alpha. `image` cannot decode a CMYKA TIFF, so the
             // conversion is done here instead of through `cmyk_via_image` — the
