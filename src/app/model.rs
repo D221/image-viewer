@@ -214,6 +214,15 @@ pub(crate) fn replace_extension(dest: &str, ext: &str) -> String {
     }
 }
 
+/// The crop drag in progress, and the file it belongs to.
+///
+/// A wrapper rather than a field on the gesture itself: `CropDrag` is pure
+/// screen geometry in `lib.rs` (where it can be tested), and a path is not.
+pub(crate) struct CropDragState {
+    pub(crate) path: PathBuf,
+    pub(crate) drag: image_viewer::CropDrag,
+}
+
 pub(crate) struct MyApp {
     pub(crate) folder: PathBuf,
     pub(crate) gallery: Gallery,
@@ -465,6 +474,14 @@ pub(crate) struct MyApp {
     /// unreachable while this is on, which is the one real cost; leaving crop mode
     /// is one click and the button says which mode you are in.
     pub(crate) crop_mode: bool,
+    /// The crop drag in progress, latched on the press and dropped on release.
+    ///
+    /// **Latched rather than re-decided**, because the press is a one-frame
+    /// event: see [`image_viewer::CropDrag`] for the bug that re-deciding each
+    /// frame produced. The path is part of the latch because the frame on screen
+    /// belongs to one *file* — if the picture changes mid-drag, the gesture has
+    /// to die with it rather than write a crop to whatever arrived.
+    pub(crate) crop_drag: Option<CropDragState>,
     /// Selection index the grid's scroll offset was last set for. The offset is
     /// written only when this differs, so manual scrolling is never fought.
     pub(crate) grid_sel_scrolled: usize,

@@ -160,33 +160,64 @@ impl MyApp {
         display_px: Vec2,
         pv: &Preview,
     ) -> Option<(image_viewer::Crop, (u32, u32, u32, u32))> {
-        let edit = self.edits.get(&self.cur.as_ref()?.path);
-        let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
-        let stored = stored_dims(pv);
-
-        let sx = footprint.width() / display_px.x.max(1.0);
-        let sy = footprint.height() / display_px.y.max(1.0);
-        if sx <= 0.0 || sy <= 0.0 {
-            return None;
-        }
-        let to_px = |p: egui::Pos2| -> (f32, f32) {
-            ((p.x - footprint.min.x) / sx, (p.y - footprint.min.y) / sy)
-        };
         // The shape is held in the image's own pixels rather than in screen
         // points, because that is the space the rectangle is finally expressed
         // in — and because a square in image pixels is a square on screen, the
         // footprint scaling the same on both axes.
-        let (ax, ay) = to_px(anchor);
-        let (cx, cy) = to_px(ptr);
+        let (ax, ay) = screen_to_px(anchor, footprint, display_px)?;
+        let (cx, cy) = screen_to_px(ptr, footprint, display_px)?;
         let (x0, y0, x1, y1) = image_viewer::constrain_to_aspect((ax, ay), (cx, cy), aspect);
-        // Outwards, so the frame never loses a row to rounding.
+        // Outwards, so a one-pixel slip while dragging never shaves the frame.
         let rect = (
             x0.floor().max(0.0) as u32,
             y0.floor().max(0.0) as u32,
             (x1.ceil() - x0.floor()).max(0.0) as u32,
             (y1.ceil() - y0.floor()).max(0.0) as u32,
         );
+        self.crop_from_display_rect(rect, pv)
+    }
 
+    /// The crop for a finished rectangle in **screen** points — the arm a moved
+    /// frame takes.
+    ///
+    /// A move has no anchor to grow from: its shape is whatever the frame
+    /// already was, so nothing is constrained here. Same conversion as a drag
+    /// otherwise, which is what keeps the drawn frame and the saved crop one
+    /// rectangle instead of two that nearly agree.
+    pub(crate) fn crop_from_screen_rect(
+        &self,
+        frame: egui::Rect,
+        footprint: egui::Rect,
+        display_px: Vec2,
+        pv: &Preview,
+    ) -> Option<(image_viewer::Crop, (u32, u32, u32, u32))> {
+        let (x0, y0) = screen_to_px(frame.min, footprint, display_px)?;
+        let (x1, y1) = screen_to_px(frame.max, footprint, display_px)?;
+        // **Nearest, not outwards.** The frame being carried is already the
+        // drawn, MCU-snapped rectangle, so its edges are whole pixels apart and
+        // only the screen <-> display round trip can nudge them. Rounding out
+        // would grow the crop by a pixel every time it is picked up, and a few
+        // drags later the frame no longer matches what was framed.
+        let (x0, y0, x1, y1) = (x0.round(), y0.round(), x1.round(), y1.round());
+        let rect = (
+            x0.max(0.0) as u32,
+            y0.max(0.0) as u32,
+            (x1 - x0).max(0.0) as u32,
+            (y1 - y0).max(0.0) as u32,
+        );
+        self.crop_from_display_rect(rect, pv)
+    }
+
+    /// The shared tail of both drag arms: a rectangle in the **displayed**
+    /// picture's pixels to the stored crop, snapped, and back out for drawing.
+    fn crop_from_display_rect(
+        &self,
+        rect: (u32, u32, u32, u32),
+        pv: &Preview,
+    ) -> Option<(image_viewer::Crop, (u32, u32, u32, u32))> {
+        let edit = self.edits.get(&self.cur.as_ref()?.path);
+        let display = image_viewer::display_xform(pv.exif_tag, edit.xform);
+        let stored = stored_dims(pv);
         let asked = image_viewer::Crop::from_display_rect(pv.exif_tag, edit.xform, rect, stored)?;
         // The same snap `save_transformed` will do, done here so the drawn frame
         // is the saved one. Idempotent: doing it again changes nothing.
@@ -238,6 +269,10 @@ impl MyApp {
     /// up saving a crop you framed for a different picture and forgot about.
     pub(crate) fn toggle_crop_mode(&mut self, ctx: &Context) {
         self.crop_mode = !self.crop_mode;
+        // A drag belongs to the mode it started in. Leaving and re-entering
+        // crop mode with the button still held would otherwise carry a frame
+        // from before the mode change into the new one.
+        self.crop_drag = None;
         if !self.crop_mode {
             if let Some(p) = self.cur.clone() {
                 self.history.record(&p.path, self.edits.get(&p.path));
@@ -309,4 +344,18 @@ cached={} poisoned={} previews={} thumbs={} panics={}",
             perf::counter(perf::C_DECODE_PANICS),
         );
     }
+}
+
+/// A screen point to the displayed picture's own pixels, or `None` when the
+/// picture has no size on screen to frame against.
+///
+/// The two endpoints of a rectangle go through this separately and are only
+/// combined by the caller, so a move and a drag share one scaling rule.
+fn screen_to_px(p: egui::Pos2, footprint: egui::Rect, display_px: Vec2) -> Option<(f32, f32)> {
+    let sx = footprint.width() / display_px.x.max(1.0);
+    let sy = footprint.height() / display_px.y.max(1.0);
+    if sx <= 0.0 || sy <= 0.0 {
+        return None;
+    }
+    Some(((p.x - footprint.min.x) / sx, (p.y - footprint.min.y) / sy))
 }

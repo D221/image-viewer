@@ -233,6 +233,7 @@ impl MyApp {
             edits: image_viewer::ImageEdits::default(),
             history: image_viewer::EditHistory::default(),
             crop_mode: false,
+            crop_drag: None,
             grid_sel_scrolled: usize::MAX,
             grid_scroll: 0.0,
             grid_view_h: 0.0,

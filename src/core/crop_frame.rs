@@ -147,3 +147,87 @@ pub fn constrain_to_aspect(
     cy = if corner.1 < anchor.1 { ay - dy } else { ay + dy };
     (ax.min(cx), ay.min(cy), ax.max(cx), ay.max(cy))
 }
+
+/// A crop-mode drag, decided **once, on the press**, and then answered from on
+/// every frame the button is held.
+///
+/// **The decision cannot be made per frame.** `InputState::pointer.primary_pressed`
+/// is true for exactly one frame, so a per-frame "was the press inside the
+/// frame?" test either starts a move and loses it one frame later, or — the bug
+/// this replaced — fails the test on every held frame and falls through to the
+/// draw arm, which paints a brand-new frame from the press point instead of
+/// carrying the old one. So the answer is latched, and this type is what gets
+/// latched.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CropDrag {
+    /// Nothing was under the press: drag a new frame out of the press point.
+    Draw { anchor: (f32, f32) },
+    /// The press landed inside an existing frame: carry it. `base` is where the
+    /// frame sat when the button went down and `grab` is where the press landed,
+    /// both in screen points.
+    Move { grab: (f32, f32), base: [f32; 4] },
+}
+
+/// What a crop drag means this frame: a new frame to draw from the press point,
+/// or where the existing frame has been carried to.
+///
+/// Rectangles are `[x0, y0, x1, y1]`, the same shape [`crate::dim_bands`] and
+/// [`translate_clamped`] take, so the app can convert to and from `egui::Rect`
+/// at one edge instead of everywhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CropFrame {
+    Draw { anchor: (f32, f32), corner: (f32, f32) },
+    Move([f32; 4]),
+}
+
+impl CropDrag {
+    /// Latch the gesture on the press.
+    ///
+    /// `inside` is the existing frame's screen rectangle when the press landed
+    /// inside it, or `None` when it did not. `press` is where the button went
+    /// down, which is the anchor for a draw and the grab point for a move.
+    pub fn at_press(inside: Option<[f32; 4]>, press: (f32, f32)) -> Self {
+        match inside {
+            Some(base) => CropDrag::Move { grab: press, base },
+            None => CropDrag::Draw { anchor: press },
+        }
+    }
+
+    /// The frame this drag describes with the pointer at `pointer`. `outer` is
+    /// the picture's screen rectangle, which a moved frame is held inside.
+    pub fn frame(&self, pointer: (f32, f32), outer: [f32; 4]) -> CropFrame {
+        match *self {
+            CropDrag::Draw { anchor } => CropFrame::Draw { anchor, corner: pointer },
+            CropDrag::Move { grab, base } => {
+                // From the **latched** base, never from the frame as it stands
+                // this frame: `pointer - grab` is the whole drag so far, so
+                // adding it to a frame that already moved would apply it again
+                // every frame and the frame would run away from the pointer.
+                let delta = (pointer.0 - grab.0, pointer.1 - grab.1);
+                CropFrame::Move(translate_clamped(base, delta, outer))
+            }
+        }
+    }
+}
+
+/// Move `frame` by `delta`, stopping at the edges of `outer` **without changing
+/// its size**.
+///
+/// Clamping by intersecting instead — which the first version of crop-moving
+/// did — shrinks the frame the moment it is dragged past the picture edge, so a
+/// single overshoot loses part of the crop and the loss is invisible until the
+/// save. Sliding is what every editor does, and what keeps the frame the shape
+/// the user framed.
+///
+/// A frame already bigger than `outer` cannot be made to fit by moving it, so
+/// that axis is left where it is rather than collapsed to an edge.
+pub fn translate_clamped(frame: [f32; 4], delta: (f32, f32), outer: [f32; 4]) -> [f32; 4] {
+    let (fx0, fy0, fx1, fy1) = (frame[0], frame[1], frame[2], frame[3]);
+    let (ox0, oy0, ox1, oy1) = (outer[0], outer[1], outer[2], outer[3]);
+    // `f32::clamp` panics on an inverted range, which is exactly what an
+    // oversized frame produces, so the slide is written out.
+    let slide = |d: f32, lo: f32, hi: f32| if lo <= hi { d.clamp(lo, hi) } else { 0.0 };
+    let dx = slide(delta.0, ox0 - fx0, ox1 - fx1);
+    let dy = slide(delta.1, oy0 - fy0, oy1 - fy1);
+    [fx0 + dx, fy0 + dy, fx1 + dx, fy1 + dy]
+}
