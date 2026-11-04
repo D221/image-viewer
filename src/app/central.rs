@@ -526,14 +526,18 @@ impl MyApp {
             &shown,
             self.cur.clone(),
         );
-        let mut scale = if self.config.fit_width_mode && self.view.fit {
+        let mut scale = if self.config.fit_width_mode {
             fit_width_scale
-        } else if self.view.fit {
+        } else if self.config.fit_mode {
             fit_scale
         } else {
             self.view.scale
         };
-        let mut offset = if self.view.fit { Vec2::ZERO } else { self.view.offset };
+        let mut offset = if self.config.fit_width_mode || self.config.fit_mode {
+            Vec2::ZERO
+        } else {
+            self.view.offset
+        };
         // Free zoom-out: the floor is effectively zero rather than the fit
         // scale, so the picture can shrink below the window. Centering below
         // fit comes from the pan bounds, not from snapping back.
