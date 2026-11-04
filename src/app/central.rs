@@ -1333,6 +1333,9 @@ impl MyApp {
             if let (true, Some(start), Some(p), Some(pv), Some(cur)) =
                 (down, origin, ptr, pvx, self.cur.clone())
             {
+                // Existing crop frame on screen, if any. Used to decide whether a
+                // press is moving the frame or drawing a new one.
+                let existing_crop_screen = self.crop_screen_rect(footprint, display_px, pv);
                 // **Once per gesture, on the press** — not at the `set_crop` below,
                 // which runs every frame the pointer moves. Recording per frame
                 // would push hundreds of entries for one drag, and undo would then
@@ -1348,7 +1351,31 @@ impl MyApp {
                 // doing now, and letting go of Shift mid-drag is how you get out
                 // of a shape you did not want.
                 let aspect = self.crop_aspect(&ctx, display_px);
-                if let Some((crop, _)) =
+                // If clicking inside an existing crop frame, drag it by the
+                // pointer delta instead of drawing a new frame.
+                let clicking_inside_crop =
+                    pressed && existing_crop_screen.map(|r| r.contains(p)).unwrap_or(false);
+                if clicking_inside_crop {
+                    if let Some(mut crop_screen) = existing_crop_screen {
+                        let delta = p - start;
+                        crop_screen.min += delta;
+                        crop_screen.max += delta;
+                        // Clamp to the image footprint so the frame can't be
+                        // dragged off the picture.
+                        crop_screen = crop_screen.intersect(footprint);
+                        if let Some((new_crop, _)) = self.crop_from_screen(
+                            crop_screen.min,
+                            crop_screen.max,
+                            aspect,
+                            footprint,
+                            display_px,
+                            pv,
+                        ) {
+                            self.history.record(&cur.path, self.edits.get(&cur.path));
+                            self.edits.set_crop(&cur.path, Some(new_crop));
+                        }
+                    }
+                } else if let Some((crop, _)) =
                     self.crop_from_screen(start, p, aspect, footprint, display_px, pv)
                 {
                     // Edits are per *file*, not per page: a turn or a crop frame
