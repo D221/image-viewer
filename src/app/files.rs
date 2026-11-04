@@ -244,13 +244,15 @@ impl MyApp {
         }
         self.folder = file.parent().unwrap_or(&file).to_path_buf();
         let mut g = Gallery::from_file(file);
-        if self.config.load_all_on_startup {
-            Self::load_folder_into(
-                &self.folder,
-                self.config.recursive_folders && self.zip_archive.is_none(),
-                &mut g,
-            );
-        }
+        // Opening a specific photo makes its folder the gallery: same-folder
+        // neighbours load so left/right arrow navigation works. `load_all_on_startup`
+        // still gates the no-args startup scan (fast first frame on a fresh
+        // install) and opening a folder directly, so that goal is untouched.
+        Self::load_folder_into(
+            &self.folder,
+            self.config.recursive_folders && self.zip_archive.is_none(),
+            &mut g,
+        );
         self.adopt_gallery(g, ctx);
     }
 

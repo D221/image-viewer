@@ -449,9 +449,10 @@ impl Config {
     /// Load configuration from a JSON file.
     pub fn load(path: &Path) -> Self {
         let default = Self {
-            // New installs do not decode the whole folder before the first
-            // picture is shown; the checkbox in Settings still opts in.
-            load_all_on_startup: false,
+            // Decode the whole folder on start-up so same-folder neighbours
+            // are ready when the user opens or drags in a photo. The checkbox
+            // in Settings still opts out.
+            load_all_on_startup: true,
             folder: None,
             sort: SortMode::Name,
             sort_descending: false,
