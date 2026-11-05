@@ -142,6 +142,9 @@ impl eframe::App for MyApp {
                 binding_down(i, &kb, "grid_left"),
             )
         });
+        // Backspace goes up one level in the grid: parent folder, or out of an
+        // archive. Mirroring the up-arrow cell in the grid.
+        let backspace = ctx.input(|i| i.key_pressed(egui::Key::Backspace));
 
         // Keyboard navigation + file triage
         let fs_default = image_viewer::resolve_binding(&self.config.keybindings, "focus_search")
@@ -432,6 +435,14 @@ impl eframe::App for MyApp {
                     *sel = last_idx;
                 } else if enter {
                     self.pick_grid_selection(ctx);
+                } else if backspace {
+                    // Backspace goes up one level: parent folder, or out of an
+                    // archive. Mirrors the up-arrow cell in the grid.
+                    if self.zip_archive.is_some() {
+                        self.leave_archive(ctx, false);
+                    } else if let Some(parent) = self.folder_stack.pop() {
+                        self.open_folder(ctx, parent);
+                    }
                 }
             } else if let Some(dir) = step_dir.filter(|_| !unpause) {
                 self.step(ctx, dir);
