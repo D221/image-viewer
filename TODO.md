@@ -535,7 +535,6 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 
 | file | lines | what is in it |
 |---|---|---|
-| `tests/unit.rs` | 4,794 | the unit suite, one file for everything that does not deserve its own target |
 | `src/app/ui.rs` | 2,234 | pane layout against the egui UI; functions extracted into helpers (done 2026-11-03) |
 | `src/app/central.rs` | 1,489 | central render pass; functions extracted into helpers (done 2026-11-03) |
 
@@ -562,6 +561,14 @@ five targets: the arms share one process, one fixture set and one command, so
 `cargo test --release --test bench_browse -- --ignored --nocapture` is still
 the whole benchmark. 6 `#[test]` arms in, 6 out (they gain a module prefix in
 the test list).
+`tests/unit.rs` (4,794) split by subject into twelve targets:
+`unit_decode.rs` (578), `unit_gallery.rs` (497), `unit_scans.rs` (162),
+`unit_transform.rs` (201), `unit_config.rs` (534), `unit_archives.rs` (285),
+`unit_slideshow.rs` (193), `unit_failures.rs` (263), `unit_fitwindow.rs` (584),
+`unit_uichrome.rs` (361), `unit_settings.rs` (243), `unit_edits.rs` (389),
+`unit_memory.rs` (402), with the shared helpers in
+`tests/common/unit_fixtures.rs` (408). 141 tests in, 141 out, none lost,
+none duplicated, no new warnings.
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
@@ -582,9 +589,9 @@ and `spreads.rs` has left the list. Files that come down under the target leave
 the list; that is what just happened to `keybindings.rs`,
 `manga_settings.rs`, `spread_wiring.rs`, `spreads.rs`, `multiframe.rs`
 (truncated from 1,036 to 437 lines by removing the TIFF and gallery-navigation
-sections), `gallery.rs`, `rotate_save.rs`, `resample.rs`, `bench_browse.rs` and
-`thumb_cache.rs` (its shell-cache tests moved to `tests/thumb_shell_cache.rs`).
-What remains is the
+sections), `gallery.rs`, `rotate_save.rs`, `resample.rs`, `unit.rs`,
+`bench_browse.rs` and `thumb_cache.rs` (its shell-cache tests moved to
+`tests/thumb_shell_cache.rs`). What remains is the
 same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
 numbers above.
