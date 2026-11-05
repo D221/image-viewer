@@ -22,6 +22,10 @@ is untouched, mid-tones move in the direction a wider gamut implies, out-of-gamu
 colours clip. A matrix transposed in the wrong place passes most of those and
 still looks wrong to an eye.
 
+Human with a P3 display has looked at it (2026-11-05): renders the same as
+JPEGView_L on a P3 display, considered fine-ish — closing the "correct looks
+right" question pragmatically rather than with a recorded reference.
+
 **To close it properly:** compare against something that converts. `test-images`
 has two P3 JPEGs and JPEGView_L (also in `test-images`) converts; the open
 question is whether the viewer and JPEGView_L agree *by eye* on the same file, and
@@ -675,6 +679,8 @@ Same rules as §9: twelve checkouts in `test-images\projects`, read but not buil
 
 - **Clipboard paste (Ctrl+V).** qView `paste()`, JPEGView `IDM_PASTE` (`KeyMap.txt.default:74`), PicView "Single Image". Ours is write-only (`app/paint.rs:249` `set_clipboard_rgba`). Tried and reverted: `Ctrl+V` did nothing for an image on the Windows clipboard, and it's not a useful function here — a viewer opens *files*, not clipboard pixels. *Effort S.* **Not taken.**
 
+- **Display folders in grid view (file-picker lite).** Grid currently shows only image files; standing on a folder opens it rather than showing its contents. Add folder cells (folder icon) so clicking descends into that folder, plus an "up arrow" (↑) to go to the parent folder — a lite file-browser inside the gallery so you don't need Explorer just to navigate folders. *Effort M.*
+
 
 
 
@@ -684,9 +690,9 @@ Same rules as §9: twelve checkouts in `test-images\projects`, read but not buil
 **Larger — do not mistake for afternoons:**
 - **Multi-select + batch triage.** `grid_sel: usize` is single (`app/model.rs:408`); qimgv's 1–9 destination slots, gthumb's numbered selections and gwenview's batch save show the shape. *Effort L.*
 
-- **Per-file adjustment DB** (gamma/contrast/brightness/saturation stored per image, pixels untouched) — JPEGView's parameter DB (`KeyMap.txt.default:66` `IDM_SAVE_PARAM_DB`). Nothing tonal exists anywhere here. *Effort L, structural.*
-- **RAW via WIC + embedded JPEG first.** FlyPhotos/ImageGlass/PicView/qimgv all decode RAW; our only on-ramp is §9.7's WIC experiment. *Effort L.*
-- **Tabs.** PicView opens many images in tabs; one image at a time here. *Effort L.*
+- **Per-file adjustment DB** (gamma/contrast/brightness/saturation stored per image, pixels untouched) — JPEGView's parameter DB (`KeyMap.txt.default:66` `IDM_SAVE_PARAM_DB`). Nothing tonal exists anywhere here. *Effort L.* **Not taken** — unnecessary for an image viewer.
+- **RAW via WIC + embedded JPEG first.** FlyPhotos/ImageGlass/PicView/qimgv all decode RAW; our only on-ramp is §9.7's WIC experiment. *Effort L.* **Not taken** — unnecessary for an image viewer.
+- **Tabs.** PicView opens many images in tabs; one image at a time here. *Effort L.* **Not taken** — unnecessary.
 
 ### 11.3 Checked, not worth doing (recorded so nobody re-derives)
 
