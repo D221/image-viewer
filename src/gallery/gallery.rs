@@ -470,11 +470,25 @@ impl Gallery {
         if page + 1 < self.pages_in(index) {
             return Some(PagePos { index, page: page + 1 });
         }
-        // Last page (or an ordinary file): on to the next one, at its first page.
-        match index.checked_add(1) {
-            Some(i) if i < self.files.len() => Some(PagePos { index: i, page: 0 }),
-            _ if self.loop_back => Some(PagePos { index: 0, page: 0 }),
-            _ => None,
+        // Search forward from index+1, wrapping to 0 if loop_back.
+        // Skip directories — arrowing in the single-image view must never land on
+        // a folder (folders are grid-only navigation targets; the grid drives
+        // `grid_sel` directly and does not use `pos_next`).
+        let mut i = index + 1;
+        let mut wrapped = false;
+        loop {
+            if i >= self.files.len() {
+                if self.loop_back && !wrapped {
+                    i = 0;
+                    wrapped = true;
+                    continue;
+                }
+                return None;
+            }
+            if !self.files[i].is_dir() {
+                return Some(PagePos { index: i, page: 0 });
+            }
+            i += 1;
         }
     }
 
@@ -503,16 +517,44 @@ impl Gallery {
         if page > 0 {
             return Some(PagePos { index, page: page - 1 });
         }
-        // The new file's page count is only known if it was visited, which it was,
-        // since the user is stepping back through where they came. `pages_in`
-        // falls back to 1 for anything unknown, so this is always in range.
-        match index.checked_sub(1) {
-            Some(i) => Some(PagePos { index: i, page: self.pages_in(i).saturating_sub(1) }),
-            None if self.loop_back => {
-                let last = self.files.len() - 1;
-                Some(PagePos { index: last, page: self.pages_in(last).saturating_sub(1) })
+        // Search backward from index-1, wrapping to the end if loop_back.
+        // Skip directories — arrowing in the single-image view must never land on
+        // a folder (folders are grid-only navigation targets).
+        let mut i = match index.checked_sub(1) {
+            Some(i) => i,
+            None => return if self.loop_back { self.prev_from_end() } else { None },
+        };
+        let mut wrapped = false;
+        loop {
+            if !self.files[i].is_dir() {
+                let last_page = self.pages_in(i).saturating_sub(1);
+                return Some(PagePos { index: i, page: last_page });
             }
-            None => None,
+            if i == 0 {
+                if self.loop_back && !wrapped {
+                    wrapped = true;
+                    i = self.files.len();
+                    continue;
+                }
+                return None;
+            }
+            i -= 1;
+        }
+    }
+
+    /// Search backward from the last file, used when stepping back from index 0
+    /// with loop_back on.
+    fn prev_from_end(&self) -> Option<PagePos> {
+        let mut i = self.files.len();
+        loop {
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+            if !self.files[i].is_dir() {
+                let last_page = self.pages_in(i).saturating_sub(1);
+                return Some(PagePos { index: i, page: last_page });
+            }
         }
     }
 
