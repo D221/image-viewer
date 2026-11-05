@@ -536,7 +536,6 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 | file | lines | what is in it |
 |---|---|---|
 | `tests/unit.rs` | 4,794 | the unit suite, one file for everything that does not deserve its own target |
-| `tests/resample.rs` | 2,537 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
 | `src/app/ui.rs` | 2,234 | pane layout against the egui UI; functions extracted into helpers (done 2026-11-03) |
 | `tests/bench_browse.rs` | 2,127 | the cell-cache benchmarks |
 | `src/app/central.rs` | 1,489 | central render pass; functions extracted into helpers (done 2026-11-03) |
@@ -550,6 +549,13 @@ module rather than a sibling, because it reaches the private `shapes` /
 27 tests), `crop_save.rs` (713, 24 tests — the clipboard and crop bands) and
 `image_edits.rs` (244, 12 tests — the per-image edit record), with the shared
 fixtures in `tests/common/rotate_fixtures.rs` (182). 63 tests in, 63 out.
+`tests/resample.rs` (2,537) split by subject into `resample.rs` (902, the
+prefilter pins and the strength pins), `resample_settings.rs` (240, the
+config-forward-compat and wiring scans), `resample_screentone.rs` (345, the
+alias band and the promoted pitch) and `resample_floor.rs` (648, the
+`MIN_FILTER_SCALE` floor), with the probes and the globals guard in
+`tests/common/resample_fixtures.rs` (503). 39 tests in, 39 out — 9 of them
+`#[ignore]`d printouts, which stayed printouts.
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
@@ -570,8 +576,8 @@ and `spreads.rs` has left the list. Files that come down under the target leave
 the list; that is what just happened to `keybindings.rs`,
 `manga_settings.rs`, `spread_wiring.rs`, `spreads.rs`, `multiframe.rs`
 (truncated from 1,036 to 437 lines by removing the TIFF and gallery-navigation
-sections), `gallery.rs`, `rotate_save.rs` and `thumb_cache.rs` (its shell-cache
-tests moved to `tests/thumb_shell_cache.rs`). What remains is the
+sections), `gallery.rs`, `rotate_save.rs`, `resample.rs` and `thumb_cache.rs`
+(its shell-cache tests moved to `tests/thumb_shell_cache.rs`). What remains is the
 same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
 numbers above.
