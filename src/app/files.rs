@@ -297,20 +297,25 @@ impl MyApp {
         }
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
         if image_viewer::SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
-            // **`true`**: Explorer's extraction of a zip member is a temp file it
-            // deletes after the drop returns, and a drag out of *any* container
-            // (7-Zip, WinRAR, a shell extension) has the same shape. Opening the
-            // path in place means the 2 s poll finds a changed file - it is a
-            // different stamp, because the file is gone - and blanks the picture
-            // it is showing, which is the reported symptom.
+            // **Only a temp-dir drop is transient.** Explorer's extraction of a
+            // zip member is a temp file it deletes after the drop returns, and a
+            // drag out of *any* container (7-Zip, WinRAR, a shell extension) has
+            // the same shape: opening the path in place means the 2 s poll finds
+            // a changed file - it is a different stamp, because the file is gone -
+            // and blanks the picture it is showing, which is the reported symptom.
+            // So those are copied first (`open_file`'s transient branch).
+            //
+            // A file dragged out of an ordinary folder is not one of those: it is
+            // opened in place, which is what lets its folder become the gallery
+            // so its neighbours are arrow-navigable. Copying it put the `%TEMP%`
+            // drop directory in the gallery instead, with one file in it.
             //
             // **`true` now means "copy it first", and the copy is requested
             // rather than performed**: `open_file` hands the work to a thread and
-            // returns, so nothing is on screen until that thread reports. The
-            // branch below is the only place the file reaches the app, which is
-            // why it does not have a "the copy failed, open it anyway" path of
-            // its own - `pump` owns that fallback.
-            self.open_file(ctx, path, true);
+            // returns, so nothing is on screen until that thread reports. `pump`
+            // owns the "the copy failed, open it anyway" fallback.
+            let transient = image_viewer::is_transient_drop(&path);
+            self.open_file(ctx, path, transient);
         }
     }
 

@@ -164,6 +164,37 @@ pub(crate) fn copy_is_current(dst: &Path, want: u64) -> bool {
     std::fs::metadata(dst).is_ok_and(|m| m.is_file() && m.len() == want)
 }
 
+/// Does a dropped path need a copy before it is opened?
+///
+/// **Not every drop is the hand-off [`own_dropped`] exists for.** A drag out of
+/// a container — Explorer extracting a zip member, 7-Zip, WinRAR, a shell
+/// extension — arrives as a file under the OS temp directory that its producer
+/// deletes as soon as the drop returns; that one is transient by construction. A
+/// file dragged out of an ordinary folder is the user's own file, and it stays
+/// where it is.
+///
+/// The difference decides what the app does with it. Opening the transient one in
+/// place is the flicker-then-blank bug described on [`own_dropped`], so it is
+/// copied first. Opening the durable one *in place* is what lets its folder
+/// become the gallery, so the neighbours left and right are arrow-navigable;
+/// copying it to `%TEMP%\image-viewer\drop\<hash>` made the **temp directory** the
+/// gallery, and that has no neighbours in it.
+///
+/// **The temp-dir prefix is the test.** A file-handle query cannot tell a
+/// container extraction from a real file, and neither can the extension; the one
+/// property the two classes differ in is where the producer put the file.
+///
+/// Both sides are canonicalised when they exist, so a short path, a junction or a
+/// drive-case difference cannot slip a temp file past the check. A path that is
+/// already gone falls back to the raw form, which is still a prefix test.
+pub fn is_transient_drop(path: &Path) -> bool {
+    let temp = std::env::temp_dir();
+    match (temp.canonicalize(), path.canonicalize()) {
+        (Ok(temp), Ok(canon)) => canon.starts_with(temp),
+        _ => path.starts_with(&temp),
+    }
+}
+
 /// Decide what owning `src` would do, without moving any bytes.
 ///
 /// Pure apart from the two `stat` calls it needs to answer the question, so the
@@ -186,9 +217,10 @@ pub fn plan_drop_copy(src: &Path) -> Result<DropCopyPlan, String> {
 /// **A drag-and-drop is a hand-off, not a reference.** Explorer does not pass a
 /// path into a zip's member and leave it there: it extracts the member to a
 /// transient temp file, hands *that* path to the drop target, and deletes it a
-/// moment later. So the source of a drop is transient **by construction**, and an
-/// app that opens one in place is holding a path to a file with an expiry date on
-/// it. What that cost, measured (`tests/drops.rs` and the trace in
+/// moment later. So the source of *that* drop is transient **by construction**,
+/// and an app that opens one in place is holding a path to a file with an expiry
+/// date on it. [`is_transient_drop`] is the test for which drops those are. What
+/// that cost, measured (`tests/drops.rs` and the trace in
 /// `.superpowers/sdd/2026-10-02-manga-spread-mode/dropped-temp-file-vanishes.md`):
 /// on the app's own 2 s poll the vanished file was a *changed* file, so
 /// `invalidate_path` dropped the texture, `rescan` removed it from the gallery and

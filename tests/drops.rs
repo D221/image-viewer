@@ -28,6 +28,13 @@
 //! shape the archive path already uses - a copy in a directory the app owns -
 //! and it is asserted by behaviour below, not by a scan of the wiring.
 //!
+//! **Only a drop whose source is transient takes that copy.** A temp file is the
+//! signature of a container extraction ([`is_transient_drop`]); a photo dragged
+//! out of an ordinary folder is the user's own file and is opened in place, which
+//! is what makes its folder the gallery and its neighbours arrow-navigable.
+//! Copying that one too put the `%TEMP%` drop directory on screen, with a single
+//! file in it.
+//!
 //! **Why the copy is made on a thread.** It is a read and a write of a file whose
 //! size the app has no way to know, and the rule this crate is built around is
 //! that the thread which paints never does work of that size. Measured here
@@ -60,14 +67,14 @@
 //!   `contains`, and [`a_repeated_drop_of_an_unchanged_file_writes_nothing`] for
 //!   the behavioural half (the reuse check, proved by a destination too
 //!   read-only for a copy to land on).
-//! * The **wiring** — that `load_dropped` asks for a copy, that
-//!   `open_file(…, transient)` is the only site that can, and that the copy is
-//!   started *after* the previous one is released - is also a **source scan**,
-//!   because `main.rs` is a binary and unreachable from a test. See the module
-//!   docs on `fn_body` for why the scans check a byte offset and not a
-//!   `contains`.
+//! * The **wiring** — that `load_dropped` lets the dropped *path* decide whether
+//!   a copy is needed ([`is_transient_drop`]), that `open_file(…, transient)` is
+//!   the only site that can act on it, and that the copy is started *after* the
+//!   previous one is released - is also a **source scan**, because `main.rs` is a
+//!   binary and unreachable from a test. See the module docs on `fn_body` for why
+//!   the scans check a byte offset and not a `contains`.
 
-use image_viewer::{DropCopy, forget_drop_copy, own_dropped, plan_drop_copy};
+use image_viewer::{DropCopy, forget_drop_copy, is_transient_drop, own_dropped, plan_drop_copy};
 use std::path::{Path, PathBuf};
 
 /// A jpeg on disk, and the directory holding it, for a test to hand to
@@ -268,20 +275,35 @@ fn fn_body<'a>(src: &'a str, sig: &str) -> &'a str {
     panic!("{sig} has no closing brace");
 }
 
-/// **`load_dropped` must ask for a copy.** The one caller that can, and the one
-/// that has to: `open_file`'s `transient` parameter exists for this and nothing
-/// else.
+/// **A drop asks for a copy only when its source is transient.** The one caller
+/// that can ask, and the one that decides whether it must: `open_file`'s
+/// `transient` parameter exists for this and nothing else.
 ///
-/// A `contains("true")` scan would pass against a comment, so this reads the
-/// call's arguments.
+/// The decision has to be made from the dropped path (`is_transient_drop`), not
+/// hard-coded either way. `true` for every drop is the flicker-then-blank fix,
+/// but it also makes the `%TEMP%` copy directory the gallery, so a photo dropped
+/// from a folder has no neighbours to navigate to. `false` for every drop
+/// restores navigation and brings the blanking back for a member extracted out of
+/// a container. Both halves are asserted, and **by position**: the test reads the
+/// call's arguments rather than a `contains("true")`, which would pass against a
+/// comment.
 #[test]
-fn a_drop_takes_a_copy_and_no_other_open_does() {
+fn a_drop_takes_a_copy_only_when_its_source_is_transient() {
     let src = main_src();
     let drop_body = fn_body(&src, "fn load_dropped");
+    let decide = drop_body.find("is_transient_drop(&path)").unwrap_or_else(|| {
+        panic!(
+            "the drop must decide transience from the path it was handed, or the \
+             copy and the neighbour load are both unconditional:\n{drop_body}"
+        )
+    });
+    let open = drop_body.find("self.open_file(ctx, path, transient)").unwrap_or_else(|| {
+        panic!("the drop must pass that decision to open_file, not a constant:\n{drop_body}")
+    });
     assert!(
-        drop_body.contains("self.open_file(ctx, path, true)"),
-        "the drop must open transiently, or the picture blanks a second later.\n\
-         the body was:\n{drop_body}"
+        decide < open,
+        "the decision must be made before it is used.\ndecision at {decide}, \
+         open at {open}\n{drop_body}"
     );
     // Every *other* open of a single file is a durable path: the command line,
     // the file dialog, the copy a drop's worker hands back, and the source a
@@ -647,7 +669,7 @@ fn only_a_dropped_file_is_copied() {
     let body = fn_body(&src, "fn load_dropped");
     let dir_branch = body.find("self.open_folder(ctx, path)").expect("a folder branch");
     let archive_branch = body.find("self.open_archive(ctx, &path)").expect("an archive branch");
-    let file_branch = body.find("self.open_file(ctx, path, true)").expect("a file branch");
+    let file_branch = body.find("self.open_file(ctx, path, transient)").expect("a file branch");
     // Each branch returns before the next, so the copy is reached only from the
     // file branch. The three being distinct statements is what this rests on.
     assert!(
@@ -687,4 +709,33 @@ fn a_drop_copys_directory_contains_its_file() {
         copy.dir.display()
     );
     forget_drop_copy(&copy);
+}
+
+/// **A drop's path decides whether it is a hand-off.** This is the difference
+/// between "the picture blanks a second later" and "the folder you dropped from is
+/// arrow-navigable", so both halves are asserted against real directories rather
+/// than strings.
+///
+/// The outside path is the test binary's own directory — a real path that is
+/// certainly not under `%TEMP%` on any machine this suite runs on, unlike a
+/// hand-made string that merely looks like one.
+#[test]
+fn a_drop_from_temp_is_transient_and_one_from_a_folder_is_not() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let inside = dir.path().join("inside.jpg");
+    assert!(
+        is_transient_drop(&inside),
+        "a file inside the OS temp directory is a container's extraction, and must \
+         be copied before it is opened: {}",
+        inside.display()
+    );
+
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let outside = exe.parent().expect("the test binary's directory").join("outside.jpg");
+    assert!(
+        !is_transient_drop(&outside),
+        "a file dragged out of an ordinary folder is the user's own, and opening it \
+         in place is what loads its neighbours: {}",
+        outside.display()
+    );
 }
