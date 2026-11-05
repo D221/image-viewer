@@ -113,13 +113,17 @@ pub fn is_browsable(p: &Path) -> bool {
     SUPPORTED_EXTENSIONS.contains(&ext.as_str())
 }
 
-/// Scan a directory for images and image archives, sorted alphabetically.
+/// Scan a directory for images, image archives, and subfolders, sorted
+/// alphabetically. Subfolders are listed so the grid can descend into them;
+/// they carry no pixels, so they are never handed to the decoder.
 pub fn scan_folder(folder: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(folder) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_file() && is_browsable(&p) {
+            if p.is_dir() {
+                files.push(p);
+            } else if p.is_file() && is_browsable(&p) {
                 files.push(p);
             }
         }

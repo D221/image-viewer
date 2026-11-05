@@ -244,17 +244,34 @@ impl MyApp {
         if self.zip_archive.is_some() && self.grid_sel == 0 {
             // "Go back" cell pressed
             self.leave_archive(ctx, false);
+        } else if !self.zip_archive.is_some() && !self.folder_stack.is_empty() && self.grid_sel == 0
+        {
+            // "Up" cell pressed: go back to the parent folder.
+            if let Some(parent) = self.folder_stack.pop() {
+                self.open_folder(ctx, parent);
+            }
         } else {
-            let file_idx =
-                self.grid_sel.saturating_sub(if self.zip_archive.is_some() { 1 } else { 0 });
-            self.gallery.goto_index(file_idx.min(self.gallery.len().saturating_sub(1)));
-            self.gallery_view = false;
-            self.goto(ctx);
-            // A click or Enter on an archive's cell is the request to open it — the
-            // grid has no other meaning for that cell, since there is nothing to
-            // display. Same rule as the arrow, for the same reason: opening is asked
-            // for here, not in the funnel every arrival passes through.
-            self.enter_archive_if_present(ctx);
+            let extra =
+                if self.zip_archive.is_some() || !self.folder_stack.is_empty() { 1 } else { 0 };
+            let file_idx = self.grid_sel.saturating_sub(extra);
+            let Some(path) = self.gallery.files.get(file_idx) else {
+                return;
+            };
+            if path.is_dir() {
+                // Folder cell: descend into it. Remember where we came from
+                // so the up arrow can take us back.
+                self.folder_stack.push(self.folder.clone());
+                self.open_folder(ctx, path.clone());
+            } else {
+                self.gallery.goto_index(file_idx.min(self.gallery.len().saturating_sub(1)));
+                self.gallery_view = false;
+                self.goto(ctx);
+                // A click or Enter on an archive's cell is the request to open it — the
+                // grid has no other meaning for that cell, since there is nothing to
+                // display. Same rule as the arrow, for the same reason: opening is asked
+                // for here, not in the funnel every arrival passes through.
+                self.enter_archive_if_present(ctx);
+            }
         }
     }
 }

@@ -245,8 +245,6 @@ fn the_zoom_measures_from_the_content_centre_at_both_scales() {
 #[test]
 fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
     let src = main_src();
-
-    let central = fn_body(&src, "fn central(");
     // The tile loop moved into `central_tiles` (its own module: central.rs passed the
     // 1000-line target). It must still range over the turn's pages.
     let tiles = fn_body(&src, "fn central_tiles(");

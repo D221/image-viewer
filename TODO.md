@@ -708,7 +708,7 @@ Same rules as §9: twelve checkouts in `test-images\projects`, read but not buil
 
 - **Clipboard paste (Ctrl+V).** qView `paste()`, JPEGView `IDM_PASTE` (`KeyMap.txt.default:74`), PicView "Single Image". Ours is write-only (`app/paint.rs:249` `set_clipboard_rgba`). Tried and reverted: `Ctrl+V` did nothing for an image on the Windows clipboard, and it's not a useful function here — a viewer opens *files*, not clipboard pixels. *Effort S.* **Not taken.**
 
-- **Display folders in grid view (file-picker lite).** Grid currently shows only image files; standing on a folder opens it rather than showing its contents. Add folder cells (folder icon) so clicking descends into that folder, plus an "up arrow" (↑) to go to the parent folder — a lite file-browser inside the gallery so you don't need Explorer just to navigate folders. *Effort M.*
+- **Display folders in grid view (file-picker lite).** Grid currently shows only image files; standing on a folder opens it rather than showing its contents. Add folder cells (folder icon) so clicking descends into that folder, plus an "up arrow" (↑) to go to the parent folder — a lite file-browser inside the gallery so you don't need Explorer just to navigate folders. *Effort M.* **Done** — `scan_folder` now lists subdirectories alongside images; `gallery_grid` renders folder cells (folder icon "D", no thumbnail decode) and an up-arrow cell when a parent exists; clicking descends/ascends with a folder-stack history. `src/app/grid.rs`, `src/app/paint.rs` (`grid_folder_cell`), `src/app/save_as.rs` (Enter on folder cell), `src/app/files.rs` (clear stack on fresh open), `src/app/model.rs` (`folder_stack`), `src/app/goto.rs` (init), `src/scan/mod.rs` (directories in `scan_folder`).
 
 
 
@@ -717,7 +717,7 @@ Same rules as §9: twelve checkouts in `test-images\projects`, read but not buil
 
 
 **Larger — do not mistake for afternoons:**
-- **Multi-select + batch triage.** `grid_sel: usize` is single (`app/model.rs:408`); qimgv's 1–9 destination slots, gthumb's numbered selections and gwenview's batch save show the shape. *Effort L.*
+- **Multi-select + batch triage.** `grid_sel: usize` is single (`app/model.rs:408`); qimgv's 1–9 destination slots, gthumb's numbered selections and gwenview's batch save show the shape. *Effort L.* **Not taken** — this is an image viewer, not an image manipulator; bulk select/triage is too complex and out of scope for now.
 
 - **Per-file adjustment DB** (gamma/contrast/brightness/saturation stored per image, pixels untouched) — JPEGView's parameter DB (`KeyMap.txt.default:66` `IDM_SAVE_PARAM_DB`). Nothing tonal exists anywhere here. *Effort L.* **Not taken** — unnecessary for an image viewer.
 - **RAW via WIC + embedded JPEG first.** FlyPhotos/ImageGlass/PicView/qimgv all decode RAW; our only on-ramp is §9.7's WIC experiment. *Effort L.* **Not taken** — unnecessary for an image viewer.

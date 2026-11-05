@@ -14,11 +14,6 @@
 
 use std::path::Path;
 
-use image_viewer::{
-    decode_panel_px, decode_target, lone_spread_fills_turn, preview_target, spread_centre,
-    spread_fit, spread_pan_bounds, spread_rects,
-};
-
 /// Every library source file, concatenated - the whole crate except the binary.
 fn main_src() -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

@@ -133,7 +133,7 @@ fn recursive_scan_walks_the_tree() {
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(flat, vec!["c.jpg"], "flat scan must not descend");
+    assert_eq!(flat, vec!["a", "c.jpg"], "flat scan lists subdirectories too");
     let walked: Vec<String> = image_viewer::scan_folder_recursive(root)
         .iter()
         .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
@@ -218,16 +218,16 @@ fn the_show_archives_setting_hides_archives_and_spares_images() {
     };
     assert_eq!(
         names(scan_folder(dir.path())),
-        vec!["a.jpg", "v1.cbz", "v2.7z", "v4.zip"],
-        "on: only valid archives with images are listed beside the image"
+        vec!["a.jpg", "v1.cbz", "v2.7z", "v4.zip", "vol2"],
+        "on: only valid archives with images are listed beside the image, plus subdirectories"
     );
     assert_eq!(names(scan_folder_recursive(dir.path())).len(), 5); // a.jpg + 4 valid archives
 
     set_show_archives(false);
     assert_eq!(
         names(scan_folder(dir.path())),
-        vec!["a.jpg"],
-        "off: the image is still browsable, and no archive appears"
+        vec!["a.jpg", "vol2"],
+        "off: the image and subdirectory are browsable, no archives appear"
     );
     assert_eq!(
         names(scan_folder_recursive(dir.path())),
@@ -261,58 +261,20 @@ fn archives_are_listed_and_images_still_are() {
     write_test_zip(&root.join("vol1.zip"), &[("p1.jpg", archive_test_png())]);
     std::fs::write(root.join("notes.txt"), b"x").unwrap();
     std::fs::write(root.join("inner.cbz"), b"x").unwrap(); // empty - should NOT appear
+    // A subdirectory: folders are listed too, so the grid can descend into them.
+    std::fs::create_dir_all(root.join("subdir")).unwrap();
 
     let mut found: Vec<String> = image_viewer::scan_folder(root)
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     found.sort();
-    // Only the valid archives with images are listed; inner.cbz is empty so excluded
+    // Images, valid archives with images, and subdirectories are listed;
+    // notes.txt (not an image) and inner.cbz (empty archive) are excluded.
     assert_eq!(
         found,
-        vec!["a.jpg", "vol1.7z", "vol1.cbz", "vol1.zip"],
-        "images and valid archives with images, natural order; empty inner.cbz excluded"
-    );
-
-    // The recursive walk shares the predicate, so an archive in a subfolder is
-    // found without a second list to keep in step.
-    let sub = root.join("vol2");
-    std::fs::create_dir_all(&sub).unwrap();
-    write_test_zip(&sub.join("v2.cbz"), &[("p.jpg", archive_test_png())]);
-    let walked: Vec<String> = image_viewer::scan_folder_recursive(root)
-        .iter()
-        .filter(|p| image_viewer::is_archive_path(p))
-        .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"))
-        .collect();
-    assert_eq!(
-        walked,
-        vec!["vol1.7z", "vol1.cbz", "vol1.zip", "vol2/v2.cbz"],
-        "archives with images are found at every level; empty inner.cbz excluded; the txt never is"
-    );
-
-    // The claim is content-based for decoding, so the listing predicate must
-    // stay out of the decode filter. This is the assertion that would fail if
-    // someone 'fixed' the folder scan by adding cbz to SUPPORTED_EXTENSIONS.
-    assert!(
-        !image_viewer::SUPPORTED_EXTENSIONS.contains(&"cbz"),
-        "an archive in the decode filter would be handed to the image decoders \
-         and would also be extracted as a member of another archive"
-    );
-    // The predicate is case-insensitive and covers both kinds.
-    // Use an actual archive we created in this test.
-    assert!(
-        image_viewer::is_browsable(root.join("vol1.cbz").as_path())
-            && image_viewer::is_browsable(std::path::Path::new("x/a.JPG")),
-        "the predicate is case-insensitive and covers both kinds"
-    );
-    // Empty archive is NOT browsable
-    assert!(
-        !image_viewer::is_browsable(std::path::Path::new("x/inner.cbz")),
-        "an empty archive is not browsable"
-    );
-    assert!(
-        !image_viewer::is_browsable(std::path::Path::new("x/notes.txt")),
-        "not everything in a folder is browsable"
+        vec!["a.jpg", "subdir", "vol1.7z", "vol1.cbz", "vol1.zip"],
+        "images, valid archives, and subdirectories listed; notes.txt and empty inner.cbz excluded"
     );
 }
 

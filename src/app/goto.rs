@@ -231,6 +231,7 @@ impl MyApp {
             grid_sel_scrolled: usize::MAX,
             grid_scroll: 0.0,
             grid_view_h: 0.0,
+            folder_stack: Vec::new(),
             lat: Latency::default(),
             t_boot: perf::boot(),
             t_prev_frame: None,

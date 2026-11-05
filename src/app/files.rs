@@ -260,6 +260,10 @@ impl MyApp {
         if let Some(folder) = rfd::FileDialog::new().set_title("Select image folder").pick_folder()
         {
             self.close_transients();
+            // A folder picked from the dialog is a fresh start: clear the
+            // navigation stack so the up arrow doesn't lead to a folder from a
+            // previous browsing session.
+            self.folder_stack.clear();
             self.config.folder = Some(folder.to_string_lossy().to_string());
             self.config.save(&self.config_path);
             self.open_folder(ctx, folder);
@@ -288,6 +292,8 @@ impl MyApp {
     pub(crate) fn load_dropped(&mut self, ctx: &Context, path: PathBuf) {
         if path.is_dir() {
             self.close_transients();
+            // A dropped folder is a fresh start: clear the navigation stack.
+            self.folder_stack.clear();
             self.open_folder(ctx, path);
             return;
         }

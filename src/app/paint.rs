@@ -189,6 +189,64 @@ pub(crate) fn grid_cell(
     resp
 }
 
+/// One gallery-grid cell for a subfolder: a folder icon and name, no thumbnail.
+/// Clicking descends into the folder. Folders carry no pixels, so no decode
+/// is ever requested for them.
+///
+/// Free function (not a method) so `gallery_grid` can hand out split borrows
+/// and avoid cloning the whole file list every frame.
+pub(crate) fn grid_folder_cell(
+    ui: &mut egui::Ui,
+    path: &Path,
+    cell: f32,
+    selected: bool,
+) -> egui::Response {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+
+    let fill = if selected {
+        egui::Color32::from_rgb(28, 58, 118)
+    } else {
+        egui::Color32::from_rgb(38, 38, 38)
+    };
+    let stroke = if selected {
+        egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 255))
+    } else {
+        egui::Stroke::NONE
+    };
+
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(cell, cell + GRID_LABEL_H), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        ui.painter().rect(rect, 0.0, fill, stroke, egui::StrokeKind::Inside);
+    }
+
+    let inner = rect.shrink(4.0);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Center)),
+    );
+
+    // Folder icon: "D" for directory, centred like a thumbnail would be.
+    let img_area = egui::Rect::from_min_size(
+        egui::Pos2::new(inner.min.x, inner.min.y),
+        egui::vec2(inner.width(), cell),
+    );
+    child.allocate_exact_size(img_area.size(), egui::Sense::hover());
+    child.painter().text(
+        img_area.center(),
+        egui::Align2::CENTER_CENTER,
+        "D",
+        egui::FontId::proportional(24.0),
+        ui.visuals().text_color(),
+    );
+
+    child.add(
+        egui::Label::new(egui::RichText::new(&name).small().color(egui::Color32::from_gray(200)))
+            .truncate(),
+    );
+
+    resp
+}
+
 /// A small 2x2-square checker texture used as the transparency backdrop.
 /// Painted with repeat-wrapped UVs so it tiles at any image size.
 /// The file's **stored** pixel dimensions, recovered from a preview's

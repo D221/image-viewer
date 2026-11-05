@@ -494,8 +494,12 @@ pub(crate) struct MyApp {
     /// sees a blank compositor frame before the first texture uploads.
     pub(crate) first_frame: bool,
     pub(crate) pending_advance: Option<bool>, // queued step, consumed after one painted frame
-    pub(crate) zip_archive: Option<PathBuf>,  // archive currently open (cbz/zip/7z/rar)
-    pub(crate) zip_temp: Option<PathBuf>,     // its extracted temp dir
+    /// Folder navigation stack: parent folders we descended from, so the grid
+    /// can offer an "up arrow" to go back one level. Each entry is a folder we
+    /// left to enter a subfolder. Pop to go up.
+    pub(crate) folder_stack: Vec<PathBuf>,
+    pub(crate) zip_archive: Option<PathBuf>, // archive currently open (cbz/zip/7z/rar)
+    pub(crate) zip_temp: Option<PathBuf>,    // its extracted temp dir
     /// The folder the current archive was entered **from**, and the index the
     /// archive sat at in it. Left by `enter_archive`, spent by `leave_archive`.
     ///

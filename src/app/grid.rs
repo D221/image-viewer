@@ -30,15 +30,24 @@ impl MyApp {
         // row_h, so the pitch is not row_h.
         let pitch = row_h as f32 + ui.spacing().item_spacing.y;
         self.grid_page_rows = ((panel.height() / pitch).floor() as usize).max(1);
-        let extra = if self.zip_archive.is_some() { 1 } else { 0 };
+        // One extra cell when inside an archive (the "go back" cell at index 0),
+        // or when we have a parent folder to go "up" to (the up-arrow cell).
+        // Both are mutually exclusive: an archive has no subfolders to navigate.
+        let in_archive = self.zip_archive.is_some();
+        let in_folder_nav = !in_archive && !self.folder_stack.is_empty();
+        let extra = if in_archive || in_folder_nav { 1 } else { 0 };
         let total = self.gallery.files.len() + extra;
         let total_rows = (total + cols - 1) / cols;
         let clock = self.clock;
         let sel = self.grid_sel;
-        let mut clicked: Option<usize> = None;
+        // (index, path) — path is None for the back/up cells, Some for file/folder cells.
+        let mut clicked: Option<(usize, PathBuf)> = None;
 
         // Split the borrows so cells can be drawn without cloning the file
         // list (a big folder is thousands of PathBufs per frame otherwise).
+        // `folder_stack` is NOT destructured here — it is accessed via `self`
+        // inside the closure and in the click handler below, which need
+        // mutable access to `self` after the closure returns.
         let Self {
             gallery,
             thumbs,
@@ -51,8 +60,6 @@ impl MyApp {
             drop_wake,
             ..
         } = self;
-        // When inside an archive, index 0 is the "go back" cell.
-        let in_archive = zip_archive.is_some();
         // auto_shrink([false, true]) is what makes the scrollbar appear: with
         // [false, false] the ScrollArea demands the full width and there is no
         // room left for the bar, so a long folder had no visible way to show
@@ -87,7 +94,8 @@ impl MyApp {
                     for col in 0..cols {
                         let idx = row * cols + col;
                         let is_back_cell = in_archive && idx == 0;
-                        let resp = if is_back_cell {
+                        let is_up_cell = in_folder_nav && idx == 0;
+                        if is_back_cell {
                             // "Go back" cell: draw an arrow up and the folder name
                             let folder_name = self
                                 .folder
@@ -144,21 +152,88 @@ impl MyApp {
                                 )
                                 .truncate(),
                             );
+                            if resp.clicked() && clicked.is_none() {
+                                clicked = Some((idx, PathBuf::new()));
+                            }
+                            resp
+                        } else if is_up_cell {
+                            // "Up" cell: go back to the parent folder.
+                            let parent = self.folder_stack.last().unwrap_or(&self.folder);
+                            let parent_name = parent
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| parent.to_string_lossy().into_owned());
+                            let name = format!("^ {}", parent_name);
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(cell, cell + GRID_LABEL_H),
+                                egui::Sense::click(),
+                            );
+                            let fill = if idx == sel {
+                                egui::Color32::from_rgb(28, 58, 118)
+                            } else {
+                                egui::Color32::from_rgb(38, 38, 38)
+                            };
+                            let stroke = if idx == sel {
+                                egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 170, 255))
+                            } else {
+                                egui::Stroke::NONE
+                            };
+                            if ui.is_rect_visible(rect) {
+                                ui.painter().rect(
+                                    rect,
+                                    0.0,
+                                    fill,
+                                    stroke,
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let inner = rect.shrink(4.0);
+                            let mut child = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(inner)
+                                    .layout(egui::Layout::top_down(egui::Align::Center)),
+                            );
+                            let img_area = egui::Rect::from_min_size(
+                                egui::Pos2::new(inner.min.x, inner.min.y),
+                                egui::vec2(inner.width(), cell),
+                            );
+                            child.allocate_exact_size(img_area.size(), egui::Sense::hover());
+                            child.painter().text(
+                                img_area.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "^",
+                                egui::FontId::proportional(24.0),
+                                ui.visuals().text_color(),
+                            );
+                            child.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&name)
+                                        .small()
+                                        .color(egui::Color32::from_gray(200)),
+                                )
+                                .truncate(),
+                            );
+                            if resp.clicked() && clicked.is_none() {
+                                clicked = Some((idx, PathBuf::new()));
+                            }
                             resp
                         } else {
-                            // Adjust index for the "go back" cell offset
-                            let file_idx = idx - if in_archive { 1 } else { 0 };
+                            // Adjust index for the extra cell offset (go back or up arrow).
+                            let file_idx = idx - if extra > 0 { 1 } else { 0 };
                             let Some(path) = gallery.files.get(file_idx) else {
                                 continue;
                             };
+                            let is_folder = path.is_dir();
                             // Fill the ratings map in the same pass that
                             // queues thumbnails: one worker read per newly
                             // visible cell, never a sidecar stat per cell
                             // per frame. The pending mark is what makes it
                             // once per cell — without it a cell whose
                             // answer has not landed yet would spawn a
-                            // thread every frame. Archives get no ratings.
-                            if !is_archive_path(path)
+                            // thread every frame. Archives get no ratings,
+                            // and folders have no ratings either.
+                            if !is_folder
+                                && !is_archive_path(path)
                                 && !grid_ratings.contains_key(path)
                                 && !grid_rating_pending.contains(path)
                             {
@@ -172,22 +247,28 @@ impl MyApp {
                                     wake.request_repaint();
                                 });
                             }
-                            let resp = grid_cell(
-                                ui,
-                                path,
-                                cell,
-                                idx == sel,
-                                clock,
-                                thumbs,
-                                thumb_tries,
-                                loader,
-                                grid_ratings,
-                            );
+                            let resp = if is_folder {
+                                // Folder cell: no thumbnail, just a folder icon
+                                // and name. Clicking descends into the folder.
+                                grid_folder_cell(ui, path, cell, idx == sel)
+                            } else {
+                                grid_cell(
+                                    ui,
+                                    path,
+                                    cell,
+                                    idx == sel,
+                                    clock,
+                                    thumbs,
+                                    thumb_tries,
+                                    loader,
+                                    grid_ratings,
+                                )
+                            };
+                            if resp.clicked() && clicked.is_none() {
+                                clicked = Some((idx, path.clone()));
+                            }
                             resp
                         };
-                        if resp.clicked() && clicked.is_none() {
-                            clicked = Some(idx);
-                        }
                     }
                 });
             }
@@ -197,13 +278,22 @@ impl MyApp {
         self.grid_scroll = grid_out.state.offset.y;
         self.grid_view_h = grid_out.inner_rect.height();
 
-        if let Some(i) = clicked {
+        if let Some((i, path)) = clicked {
             if zip_archive.is_some() && i == 0 {
                 // Clicked the "go back" cell
                 self.leave_archive(ctx, false);
+            } else if in_folder_nav && i == 0 {
+                // Clicked the "up" cell: go back to the parent folder.
+                if let Some(parent) = self.folder_stack.pop() {
+                    self.open_folder(ctx, parent);
+                }
+            } else if path.is_dir() {
+                // Folder cell: descend into it. Remember where we came
+                // from so the up arrow can take us back.
+                self.folder_stack.push(self.folder.clone());
+                self.open_folder(ctx, path);
             } else {
-                // Adjust index for the "go back" cell offset
-                let file_idx = i.saturating_sub(if zip_archive.is_some() { 1 } else { 0 });
+                let file_idx = i.saturating_sub(if extra > 0 { 1 } else { 0 });
                 self.grid_sel = file_idx;
                 self.pick_grid_selection(ctx);
             }
