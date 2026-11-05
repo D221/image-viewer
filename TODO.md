@@ -537,7 +537,6 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 |---|---|---|
 | `tests/unit.rs` | 4,794 | the unit suite, one file for everything that does not deserve its own target |
 | `src/app/ui.rs` | 2,234 | pane layout against the egui UI; functions extracted into helpers (done 2026-11-03) |
-| `tests/bench_browse.rs` | 2,127 | the cell-cache benchmarks |
 | `src/app/central.rs` | 1,489 | central render pass; functions extracted into helpers (done 2026-11-03) |
 
 **Done 2026-11-05.** Two more splits. `src/gallery/gallery.rs` (1,099 → 757)
@@ -556,6 +555,13 @@ alias band and the promoted pitch) and `resample_floor.rs` (648, the
 `MIN_FILTER_SCALE` floor), with the probes and the globals guard in
 `tests/common/resample_fixtures.rs` (503). 39 tests in, 39 out — 9 of them
 `#[ignore]`d printouts, which stayed printouts.
+`tests/bench_browse.rs` (2,127) became a **target directory**,
+`tests/bench_browse/main.rs` plus `harness.rs` (496), `baseline.rs` (403),
+`sweep.rs` (567), `meta.rs` (466) and `drop.rs` (165). A directory rather than
+five targets: the arms share one process, one fixture set and one command, so
+`cargo test --release --test bench_browse -- --ignored --nocapture` is still
+the whole benchmark. 6 `#[test]` arms in, 6 out (they gain a module prefix in
+the test list).
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
@@ -576,8 +582,9 @@ and `spreads.rs` has left the list. Files that come down under the target leave
 the list; that is what just happened to `keybindings.rs`,
 `manga_settings.rs`, `spread_wiring.rs`, `spreads.rs`, `multiframe.rs`
 (truncated from 1,036 to 437 lines by removing the TIFF and gallery-navigation
-sections), `gallery.rs`, `rotate_save.rs`, `resample.rs` and `thumb_cache.rs`
-(its shell-cache tests moved to `tests/thumb_shell_cache.rs`). What remains is the
+sections), `gallery.rs`, `rotate_save.rs`, `resample.rs`, `bench_browse.rs` and
+`thumb_cache.rs` (its shell-cache tests moved to `tests/thumb_shell_cache.rs`).
+What remains is the
 same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
 numbers above.

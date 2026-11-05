@@ -43,12 +43,8 @@ const TARGET: usize = 1000;
 /// `image_viewer::name` keeps working), and lower the number here to the file's
 /// new size. **To add to one without splitting it:** the new code goes in a
 /// module of its own instead.
-const OVER_TARGET: &[(&str, usize)] = &[
-    ("tests/unit.rs", 4_802),
-    ("src/app/central.rs", 1_493),
-    ("src/app/ui.rs", 2_322),
-    ("tests/bench_browse.rs", 2_177),
-];
+const OVER_TARGET: &[(&str, usize)] =
+    &[("tests/unit.rs", 4_802), ("src/app/central.rs", 1_493), ("src/app/ui.rs", 2_322)];
 
 /// The directories a source file can live in.
 const SOURCE_DIRS: &[&str] = &["src", "tests", "examples"];
