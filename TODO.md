@@ -535,14 +535,21 @@ What is still over the target, and each file's ceiling in `OVER_TARGET`:
 
 | file | lines | what is in it |
 |---|---|---|
-| `tests/unit.rs` | 4,752 | the unit suite, one file for everything that does not deserve its own target |
+| `tests/unit.rs` | 4,794 | the unit suite, one file for everything that does not deserve its own target |
 | `tests/resample.rs` | 2,537 | the linear-light prefilter suite, split out of `unit.rs` (2026-10-26); new on the list with its own size |
-| `src/app/ui.rs` | 2,261 | pane layout against the egui UI; functions extracted into helpers (done 2026-11-03) |
+| `src/app/ui.rs` | 2,234 | pane layout against the egui UI; functions extracted into helpers (done 2026-11-03) |
 | `tests/bench_browse.rs` | 2,127 | the cell-cache benchmarks |
-| `tests/rotate_save.rs` | 1,847 | |
-| `tests/flip_through.rs` | 1,572 | |
-| `src/app/central.rs` | 1,444 | central render pass; functions extracted into helpers (done 2026-11-03) |
-| `src/gallery/gallery.rs` | 1,099 | gallery model: paging, spreads, filtering, edits, archives |
+| `src/app/central.rs` | 1,489 | central render pass; functions extracted into helpers (done 2026-11-03) |
+
+**Done 2026-11-05.** Two more splits. `src/gallery/gallery.rs` (1,099 → 757)
+lost its shape-measuring half to `src/gallery/gallery/shape_cache.rs` (355):
+`learn_shapes` … `forget_page_count` plus the `shapes.json` sidecar. A child
+module rather than a sibling, because it reaches the private `shapes` /
+`shape_cache` fields and the descendant-module rule lets it.
+`tests/rotate_save.rs` (1,848) split by subject into `rotate_save.rs` (748,
+27 tests), `crop_save.rs` (713, 24 tests — the clipboard and crop bands) and
+`image_edits.rs` (244, 12 tests — the per-image edit record), with the shared
+fixtures in `tests/common/rotate_fixtures.rs` (182). 63 tests in, 63 out.
 
 The split shape is proven on this tree several times over — the preview store,
 then `lib.rs` into 33 modules, then `main.rs` into `app_*`, then the topic
@@ -562,8 +569,8 @@ none duplicated, no new warnings; every one of those files is under the target
 and `spreads.rs` has left the list. Files that come down under the target leave
 the list; that is what just happened to `keybindings.rs`,
 `manga_settings.rs`, `spread_wiring.rs`, `spreads.rs`, `multiframe.rs`
-(truncated from 1,036 to 437 lines by removing the TIFF
-and gallery-navigation sections) and `thumb_cache.rs` (its shell-cache
+(truncated from 1,036 to 437 lines by removing the TIFF and gallery-navigation
+sections), `gallery.rs`, `rotate_save.rs` and `thumb_cache.rs` (its shell-cache
 tests moved to `tests/thumb_shell_cache.rs`). What remains is the
 same move: split a test file by subject, or move a section of
 `src/app/ui.rs` or `src/app/central.rs` into its own module, and lower the
