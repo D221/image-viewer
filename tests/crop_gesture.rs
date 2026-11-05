@@ -112,8 +112,10 @@ fn a_click_without_movement_changes_nothing() {
 #[test]
 fn the_crop_gesture_is_latched_on_press_in_the_app() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let src = std::fs::read_to_string(root.join("src/app/central.rs")).expect("central.rs");
-    let body = strip_line_comments(fn_body(&src, "fn central(").expect("fn central"));
+    // The crop gesture moved into `central_crop` (its own module: central.rs passed the
+    // 1000-line target).
+    let src = std::fs::read_to_string(root.join("src/app/central/crop.rs")).expect("crop.rs");
+    let body = strip_line_comments(fn_body(&src, "fn central_crop(").expect("fn central_crop"));
     let (press_at, press_end) = block_after(&body, "if pressed {");
     let press = &body[press_at..=press_end];
     assert!(

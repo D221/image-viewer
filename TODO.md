@@ -529,16 +529,18 @@ split into topic modules and then reorganised into topic folders, all under the
 **Done 2026-11-03.** `src/app/ui.rs` and `src/app/central.rs` were functionally
 decomposed: each oversized function (`ui()` ~1,600 SLOC, `central()` ~786 SLOC)
 was split into cohesive helper methods under the 50 SLOC guideline, without
-splitting the files themselves. Raw lines remain over target but within their
-ceilings (`ui.rs` 2,261 of 2,322; `central.rs` 1,444 of 1,493).
-What is still over the target, and each file's ceiling in `OVER_TARGET`:
+splitting the files themselves. Raw lines remained over target but within their
+ceilings.
+**Done 2026-11-05.** `src/app/ui.rs` (2,234 → 731) and `src/app/central.rs`
+(1,489 → 865) were split into child modules, so both left the over-target list.
+`ui()` and `central()` are now thin dispatchers: `ui/` holds `status.rs` (37),
+`menu.rs` (344), `exif.rs` (189), `settings.rs` (997); `central/` holds
+`crop.rs` (176), `tiles.rs` (320), `zoom_input.rs` (256). Each panel or stage
+is its own `impl MyApp` block in its own file. The source-text guards that used
+to scan `fn ui(` / `fn central(` were updated to scan the new modules.
+All files are under the target and `OVER_TARGET` is now empty.
 
-| file | lines | what is in it |
-|---|---|---|
-| `src/app/ui.rs` | 2,234 | pane layout against the egui UI; functions extracted into helpers (done 2026-11-03) |
-| `src/app/central.rs` | 1,489 | central render pass; functions extracted into helpers (done 2026-11-03) |
-
-**Done 2026-11-05.** Two more splits. `src/gallery/gallery.rs` (1,099 → 757)
+The split shape is proven on this tree several times over — the preview store,
 lost its shape-measuring half to `src/gallery/gallery/shape_cache.rs` (355):
 `learn_shapes` … `forget_page_count` plus the `shapes.json` sidecar. A child
 module rather than a sibling, because it reaches the private `shapes` /

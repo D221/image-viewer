@@ -443,14 +443,19 @@ fn the_full_resolution_buffer_is_keyed_by_page_not_by_path() {
 
     let central = fn_body(&src, "fn central(");
     assert!(
-        central.contains("f.is(&shown)"),
-        "`central` no longer holds `f.is(&shown)`, so the tile loop cuts one page's \
-         pixels with another's `uv`.\nBody was:\n{central}"
-    );
-    assert!(
         !central.contains("f.path == shown.path"),
         "`central` is comparing the full buffer by path again, so a document past page 1 \
          draws page 0 over the page on screen.\nBody was:\n{central}"
+    );
+
+    // The `f.is(&shown)` keying moved into `central_tiles` (its own module: central.rs
+    // passed the 1000-line target). The tile loop must still key each page's buffer by
+    // that page's own key, not by path.
+    let tiles = fn_body(&src, "fn central_tiles(");
+    assert!(
+        tiles.contains("f.is(shown)"),
+        "`central_tiles` no longer holds `f.is(shown)`, so the tile loop cuts one page's \
+         pixels with another's `uv`.\nBody was:\n{tiles}"
     );
 
     let sync = fn_body(&src, "fn sync_shown(&mut self, ctx: &Context)");

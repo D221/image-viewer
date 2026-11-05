@@ -109,19 +109,21 @@ fn tile_math_positions_tiles_in_buffer_pixels_at_source_pitch() {
 #[test]
 fn the_tile_loop_positions_through_the_ratio_aware_math() {
     let src = main_src();
-    let central = fn_body(&src, "fn central(&mut self, ui: &mut egui::Ui)").expect("central");
+    // The tile loop moved into `central_tiles` (its own module: central.rs passed the
+    // 1000-line target). It must still use the ratio-aware library helpers.
+    let tiles = fn_body(&src, "fn central_tiles(").expect("central_tiles");
     assert!(
-        central.contains("image_viewer::tile_axis_range("),
+        tiles.contains("image_viewer::tile_axis_range("),
         "the tile range must come from tile_axis_range, which divides by the \
          buffer-to-source ratio"
     );
     assert!(
-        central.contains("image_viewer::tile_draw_rect("),
+        tiles.contains("image_viewer::tile_draw_rect("),
         "the tile rect must come from tile_draw_rect, which pitches the buffer \
          span back up to source pixels"
     );
     assert!(
-        !central.contains("(vis.min.x - paint.min.x) / scale)"),
+        !tiles.contains("(vis.min.x - paint.min.x) / scale)"),
         "the old inline range named source pixels for every buffer, which is \
          what squeezed a half-size copy over the image's own top-left"
     );

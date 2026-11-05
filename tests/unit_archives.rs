@@ -115,7 +115,7 @@ fn the_show_archives_toggle_is_wired() {
          listing of the session answers from a stale flag"
     );
 
-    let panel = fn_body(&src, "impl eframe::App for MyApp").expect("the app impl");
+    let panel = fn_body(&src, "fn ui_settings(").expect("the settings panel");
     assert!(panel.contains("&mut self.config.show_archives"), "the toggle must exist in Settings");
     let toggle = panel.find("&mut self.config.show_archives").expect("the checkbox");
     let setter = panel.find("set_show_archives(self.config.show_archives)").expect("the setter");

@@ -327,17 +327,15 @@ fn the_undo_buttons_sit_with_the_transforms_and_disable_when_empty() {
 /// the UI whenever the pane is hidden.
 #[test]
 fn the_rating_block_is_in_the_left_pane_and_outside_the_exif_gate() {
-    // `fn ui(` lives in `app/ui.rs`: the left pane (`pane.show`) and the EXIF
-    // gate (`wants_exif`) are both inside it, so their order inside this one
-    // function is the property. A rating is a 300-byte sidecar, not a whole-file
-    // read, so it must not be folded into the `wants_exif` gate - hiding the
-    // pane must not hide the rating.
+    // `fn ui_exif(` lives in `app/ui/exif.rs`: the rating heading, the EXIF
+    // heading, and the `wants_exif` gate that wraps only the EXIF read are all
+    // inside it, so their order inside this one function is the property.
     let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/ui.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/ui/exif.rs"),
     )
-    .expect("src/app/ui.rs");
-    // All three markers occur once in `app_ui.rs`, all inside `fn ui(`: the
-    // rating heading, the EXIF heading, and the `wants_exif` gate that wraps
+    .expect("src/app/ui/exif.rs");
+    // All three markers occur once in `app_ui/exif.rs`, all inside `fn ui_exif(`:
+    // the rating heading, the EXIF heading, and the `wants_exif` gate that wraps
     // only the EXIF read. The rating block must come before the gate - it is a
     // separate path and must not vanish when the pane is hidden.
     let rating = src.find(r#"ui.heading("Rating")"#).expect("the rating heading in the left pane");

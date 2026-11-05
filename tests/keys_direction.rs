@@ -332,21 +332,30 @@ fn every_navigation_input_in_the_binary_asks_the_direction_rule() {
          navigation key."
     );
     assert!(
-        ui.contains("nav_is_forward"),
-        "`ui` calls nav_is_forward itself, which means it is resolving a direction \
+        !ui.contains("nav_is_forward"),
+        "`ui` still calls nav_is_forward itself, which means it is resolving a direction \
          somewhere outside the table. `nav_direction` is the only place that should \
-         turn an input into a `bool`."
+         turn an input into a `bool`; the grid-arrow calls live in `ui_menu`."
+    );
+    // The grid-arrow `nav_is_forward` calls moved into `ui_menu` (its own module:
+    // ui.rs passed the 1000-line target). They still use the rule rather than a
+    // literal direction.
+    let menu = fn_body(&src, "fn ui_menu(");
+    assert!(
+        menu.contains("nav_is_forward"),
+        "`ui_menu` no longer calls nav_is_forward for the grid arrows, so a literal \
+         direction could be sneaking back in.\nBody was:\n{menu}"
     );
 
-    // The wheel is the fifth input, and it is resolved in `central` rather than
-    // through the table, because it is not a key press. Spelling it as a literal
-    // would be correct today and is exactly the branch that could drift away from
-    // the setting without looking wrong.
+    // The wheel is resolved in `central_zoom_input` rather than through the table,
+    // because it is not a key press. Spelling it as a literal would be correct today
+    // and is exactly the branch that could drift away from the setting without
+    // looking wrong.
     assert!(
-        fn_body(&src, "fn central(").contains("nav_is_forward(NavInput::WheelDown"),
-        "the wheel is not being asked about. It has no side to preserve, so it is the one \
-         input the rule answers the same way in both directions - spelling it as a literal \
-         would be correct today and is exactly the branch that could drift away from the \
+        fn_body(&src, "fn central_zoom_input(").contains("nav_is_forward(NavInput::WheelDown"),
+        "the wheel is not being asked about. It has no side to preserve, so it is the one \\
+         input the rule answers the same way in both directions - spelling it as a literal \\
+         would be correct today and is exactly the branch that could drift away from the \\
          setting without looking wrong."
     );
 }

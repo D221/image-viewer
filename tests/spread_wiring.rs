@@ -185,7 +185,6 @@ fn central_decides_and_threads_the_lone_spread_flag() {
     for (call, what) in [
         ("spread_fit(", "the fit: a lone spread drawn at half size in the middle of the window"),
         ("spread_rects(", "the rects: the reported defect itself"),
-        ("spread_centre(", "the zoom anchor: a wheel notch would creep the page under the cursor"),
         (
             "spread_pan_bounds(",
             "the pan clamp: the zoom's wanted offset would be silently truncated",
@@ -202,6 +201,18 @@ fn central_decides_and_threads_the_lone_spread_flag() {
              Arguments were:\n{args}"
         );
     }
+
+    // The zoom anchor moved into `central_zoom_input` (its own module: central.rs passed the
+    // 1000-line target). It must still thread the same flag.
+    let zoom = fn_body(&src, "fn central_zoom_input(");
+    let at = zoom
+        .find("spread_centre(")
+        .unwrap_or_else(|| panic!("`central_zoom_input` no longer calls `spread_centre(`, so the zoom anchor would creep the page under the cursor"));
+    let args = call_args(zoom, at);
+    assert!(
+        args.contains("lone_spread_fills_turn"),
+        "`central_zoom_input`'s `spread_centre(` no longer receives `lone_spread_fills_turn`.\nArguments were:\n{args}"
+    );
 }
 
 /// The **wiring** half of the decode-target rule: `schedule` must ask the library

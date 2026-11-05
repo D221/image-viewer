@@ -484,8 +484,9 @@ fn a_crop_gesture_records_once_on_press() {
     );
     // It must be on the press handler, which runs once per gesture. The arm is
     // entered every frame the button is held, so the record must also sit after
-    // the `primary_pressed()` test that makes it a press.
-    let press = fn_body(&src, "fn central(").expect("central");
+    // the `primary_pressed()` test that makes it a press. The crop gesture moved
+    // into `central_crop` (its own module: central.rs passed the target).
+    let press = fn_body(&src, "fn central_crop(").expect("central_crop");
     let pressed =
         press.find("primary_pressed()").expect("the crop press must test for the press frame");
     let record = press.find("self.history.record(").expect("the crop press must record");

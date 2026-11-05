@@ -203,19 +203,25 @@ fn the_zoom_measures_from_the_content_centre_at_both_scales() {
         body.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
 
     assert!(
-        code.contains("centre_at(scale)") && code.contains("centre_at(target_scale)"),
-        "the zoom must bracket the content point between the centre at the current\n\
-         scale and the centre at the target one. Reusing one of them is the old line\n\
-         again with a different centre, and it is exact only when the content's centre\n\
-         does not move with the zoom - true for one image, false for every turn.\n\
-         Body was:\n{body}"
-    );
-    assert!(
         !code.contains("anchor - panel.center()"),
         "the zoom is anchoring on the panel's centre again, which is displaced from the\n\
          content's on BOTH axes in a spread: the seam is on the panel centre, so a\n\
          turn of unequal pages is off by half the width difference, and being top\n\
          aligned it is off vertically by half the tallest page.\nBody was:\n{body}"
+    );
+
+    // The centre_at maths moved into `central_zoom_input` (its own module: central.rs
+    // passed the 1000-line target). It must still bracket the content point between the
+    // centre at the current scale and the centre at the target one.
+    let zoom = fn_body(&src, "fn central_zoom_input(");
+    let zcode =
+        zoom.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    assert!(
+        zcode.contains("centre_at(scale)") && zcode.contains("centre_at(target_scale)"),
+        "the zoom must bracket the content point between the centre at the current\n\
+         scale and the centre at the target one. Reusing one of them is the old line\n\
+         again with a different centre, and it is exact only when the content's centre\n\
+         does not move with the zoom - true for one image, false for every turn.\nBody was:\n{zoom}"
     );
 }
 
@@ -241,14 +247,17 @@ fn both_halves_of_a_turn_are_cut_from_their_own_full_resolution_buffers() {
     let src = main_src();
 
     let central = fn_body(&src, "fn central(");
+    // The tile loop moved into `central_tiles` (its own module: central.rs passed the
+    // 1000-line target). It must still range over the turn's pages.
+    let tiles = fn_body(&src, "fn central_tiles(");
     assert!(
-        central.contains("tile_pages")
-            && central.contains("page_rects[i]")
-            && central.contains("rects[i]"),
+        tiles.contains("tile_pages")
+            && tiles.contains("page_rects[i]")
+            && tiles.contains("rects[i]"),
         "the tile loop is not ranging over the pages of the turn any more. It has to cut\n\
          each page from that page's own buffer at that page's own rect, or a zoomed\n\
          spread is sharp on one half and soft on the other - with the expensive decode\n\
-         already paid for and sitting in memory.\nBody was:\n{central}"
+         already paid for and sitting in memory.\nBody was:\n{tiles}"
     );
 
     let full = fn_body(&src, "Msg::Full { key, result } => match result {");
