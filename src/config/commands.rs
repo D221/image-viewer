@@ -491,6 +491,7 @@ impl Config {
             window_size: None,
             window_pos: None,
             window_maximized: false,
+            fullscreen_mode: Default::default(),
             remember_view: false,
             show_panels: true,
             favourite_folders: Vec::new(),

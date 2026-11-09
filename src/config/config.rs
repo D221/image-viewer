@@ -350,6 +350,13 @@ pub struct Config {
     #[serde(default)]
     pub window_maximized: bool,
 
+    /// How F11 fullscreen is realised: `inset` (undecorated, pulled in one
+    /// pixel per edge — avoids the display re-sync that blanks some
+    /// GPU/driver/monitor combinations), `real` (`ViewportCommand::Fullscreen`),
+    /// `cover`, `resize`, or `safe` (decorated, maximized, panels hidden).
+    #[serde(default)]
+    pub fullscreen_mode: FsMode,
+
     /// **Remember the view per image**: an image you zoomed or panned comes
     /// back the way you left it — zoom **and** pan restored — while an image
     /// never touched keeps today's behaviour (zoom carried, pan reset), for

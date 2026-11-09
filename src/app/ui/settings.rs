@@ -105,7 +105,7 @@ impl MyApp {
                             })
                         });
                         match vp {
-                            Some((inner, outer, maximized, fullscreen)) => {
+                            Some((inner, outer, maximized, _fullscreen)) => {
                                 // The strip is measurable only while the
                                 // window is decorated, so a hide is the one
                                 // moment to remember it; the reverse toggle
@@ -117,12 +117,11 @@ impl MyApp {
                                     self.config.title_strip = strip;
                                 }
                                 self.config.save(&self.config_path);
-                                // Maximized and fullscreen windows are the
-                                // monitor's work area before, during and
-                                // after: WM_NCCALCSIZE clamps them, so moving
-                                // or re-sizing would only put a maximized
-                                // window in half measures. Leave those alone.
-                                if maximized || fullscreen {
+                                // `if maximized || fullscreen {` — maximized windows keep the OS
+                                // clamp; fullscreen does too, and a cover experiment holds the
+                                // monitor rect without `ViewportCommand`, so `is_fullscreen`
+                                // reads both the viewport flag and the cover flag.
+                                if maximized || self.is_fullscreen(ctx) {
                                     ctx.send_viewport_cmd(
                                         egui::ViewportCommand::Decorations(!hiding),
                                     );
@@ -158,6 +157,8 @@ impl MyApp {
                             None => ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!hiding)),
                         }
                     }
+
+                    self.ui_fullscreen_mode(ui);
                 });
 
                 egui::CollapsingHeader::new("Folders & files")

@@ -4,6 +4,9 @@
 pub mod system;
 pub use system::*;
 
+pub mod fullscreen;
+pub use fullscreen::*;
+
 pub mod fileassoc;
 pub use fileassoc::*;
 

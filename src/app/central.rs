@@ -157,7 +157,7 @@ impl MyApp {
         // survived navigation.
         let reset = self.fit_window_pending || self.fit_arrive_pending;
         self.fit_arrive_pending = false;
-        if ui.input(|i| i.viewport().fullscreen.unwrap_or(false)) {
+        if self.is_fullscreen(ui.ctx()) {
             return;
         }
         // Twin of `clamp_px` below: the content's source footprint,

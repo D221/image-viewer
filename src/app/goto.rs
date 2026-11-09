@@ -192,6 +192,7 @@ impl MyApp {
             show_left: true,
             show_right: true,
             panels_before_fullscreen: None,
+            covered: false,
             pan_key: None,
             views: image_viewer::ViewMemory::new(),
             fit_window_pending: false,

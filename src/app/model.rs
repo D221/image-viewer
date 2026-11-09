@@ -332,6 +332,11 @@ pub(crate) struct MyApp {
     /// config with whatever the field holds — a hardcoded "panels come back"
     /// on exit would silently rewrite the user's minimal state.
     pub(crate) panels_before_fullscreen: Option<bool>,
+    /// A cover experiment holds the window at monitor size. **The viewport
+    /// cannot report this one** — no fullscreen request was made, so
+    /// `viewport().fullscreen` stays false and this flag is the only record of
+    /// it. Every `viewport().fullscreen` read goes through `is_fullscreen`.
+    pub(crate) covered: bool,
     /// Cursor whose pan the view holds: see the reset in `goto`.
     pub(crate) pan_key: Option<ImgKey>,
     /// What each visited image's view was when the user left it, for the

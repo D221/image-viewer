@@ -9,6 +9,7 @@
 
 use crate::app::gallery_ops::UndoDeleteResult;
 use crate::*;
+use image_viewer::FsMode;
 
 mod exif;
 mod menu;
@@ -40,6 +41,49 @@ impl MyApp {
         let f11 = action_pressed(ctx, &kb, "fullscreen");
         let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         FrameInputs { typing, kb, f11, esc }
+    }
+
+    /// Whether the window is covering the whole screen: either a real fullscreen
+    /// request (`ViewportCommand::Fullscreen`, which the viewport reports) or a
+    /// cover experiment holding the monitor rect without one — the shell was
+    /// never told, so only this app knows.
+    pub(crate) fn is_fullscreen(&self, ctx: &egui::Context) -> bool {
+        ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)) || self.covered
+    }
+
+    /// The fullscreen-mode selector in Settings: `inset` (default, undecorated
+    /// pulled in one pixel per edge), `real` (the shipped
+    /// `ViewportCommand::Fullscreen`), `cover`, `resize`, or `safe`
+    /// (decorated, maximized — nothing ever blanks). Drawn as its own labeled
+    /// row inside "Graphics & window" rather than plopped in bare.
+    pub(crate) fn ui_fullscreen_mode(&mut self, ui: &mut egui::Ui) {
+        ui.label("Fullscreen mode").on_hover_text(
+            "How F11 fullscreen is realised. `Inset` (default) is undecorated \
+             but pulled in one pixel per edge, which avoids the display \
+             re-sync that blanks some GPU/driver/monitor combinations. \
+             `Safe` stays decorated so nothing ever blanks.",
+        );
+        ui.add_space(4.0);
+        egui::ComboBox::from_id_salt("fullscreen_mode")
+            .selected_text(self.config.fullscreen_mode.label())
+            .show_ui(ui, |ui| {
+                for mode in [
+                    image_viewer::FsMode::Inset,
+                    image_viewer::FsMode::Real,
+                    image_viewer::FsMode::Cover,
+                    image_viewer::FsMode::Resize,
+                    image_viewer::FsMode::Safe,
+                ] {
+                    if ui
+                        .selectable_label(self.config.fullscreen_mode == mode, mode.label())
+                        .clicked()
+                    {
+                        self.config.fullscreen_mode = mode;
+                        self.config.save(&self.config_path);
+                    }
+                }
+            });
+        ui.add_space(8.0);
     }
 }
 
@@ -177,14 +221,46 @@ impl eframe::App for MyApp {
         });
 
         if f11 {
-            let fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
-            self.suppress_resize_redecode = true;
-            // **Entered fullscreen hides the panels; leaving restores what the
-            // user had — not hard `true`.** The master is a persisted
-            // preference; entering stashes it, leaving hands it back. The stash
-            // also protects `on_exit`'s whole-config save: a hardcoded restore
-            // would rewrite the saved "off" after one fullscreen detour.
+            let fs = self.is_fullscreen(ctx);
+            match self.config.fullscreen_mode {
+                // Real: `ViewportCommand::Fullscreen` — egui-winit turns it into
+                // `Fullscreen::Borderless`, which winit's Windows backend marks
+                // with `ITaskbarList2::MarkFullscreenWindow`. That is the shell
+                // being told the window owns the display, and taking or giving
+                // that ownership back can blank the output for seconds on some
+                // GPU/driver/monitor combinations. Read once per press so the
+                // held-arrows wait-for-load mode sees one edge.
+                FsMode::Real => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!fs));
+                    self.suppress_resize_redecode = true;
+                }
+                // Safe: decorated, maximized, panels hidden — the fullscreen
+                // *feel* without an undecorated window. On GPU/drivers that
+                // re-sync the display output when a window goes undecorated and
+                // covers the whole output, this is the arm that stays clean:
+                // nothing blanks, the title bar and taskbar remain.
+                FsMode::Safe => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!fs));
+                    self.suppress_resize_redecode = true;
+                    self.covered = !fs;
+                }
+                // Cover/Inset/Resize: undecorated window at monitor size, no
+                // fullscreen request. The saved placement carries maximized
+                // state, so leaving restores the window exactly as it was.
+                mode => {
+                    if fs {
+                        image_viewer::uncover_monitor();
+                        self.covered = false;
+                    } else {
+                        self.covered = image_viewer::cover_monitor(mode);
+                    }
+                    self.suppress_resize_redecode = true;
+                }
+            }
+            // Panel handling is the same whichever mode is chosen: entering
+            // stashes the master, leaving restores it. One take() here, one
+            // take() on the Esc exit below — that's the whole count, so the
+            // source scan in unit_memory.rs sees two.
             if fs {
                 self.show_panels = self.panels_before_fullscreen.take().unwrap_or(true);
             } else {
@@ -193,7 +269,6 @@ impl eframe::App for MyApp {
             }
         }
         if esc {
-            // **The save-as panel is above everything, `typing` included.**
             //
             // Its path box holds focus when it opens, so `typing` is true while
             // the user is naming a file — and Esc landed in the search box's
@@ -244,9 +319,21 @@ impl eframe::App for MyApp {
                     self.notice = Some("No folder to go back to (archive opened directly)".into());
                 }
             } else {
-                let in_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                let in_fullscreen = self.is_fullscreen(ctx);
                 if in_fullscreen {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    match self.config.fullscreen_mode {
+                        FsMode::Real => {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                        }
+                        FsMode::Safe => {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                            self.covered = false;
+                        }
+                        _ => {
+                            image_viewer::uncover_monitor();
+                            self.covered = false;
+                        }
+                    }
                     // What the master stood at *before this fullscreen*, not
                     // hard `true` — same reason the `f11` exit restores the
                     // stash: the value is the user's persisted choice, and a
@@ -689,7 +776,7 @@ impl eframe::App for MyApp {
         let changed = self.config.window_size != new_size
             || self.config.window_pos != new_pos
             || self.config.window_maximized != new_maximized;
-        if changed && self.last_geometry_save.elapsed() > Duration::from_secs(1) {
+        if changed && !self.covered && self.last_geometry_save.elapsed() > Duration::from_secs(1) {
             self.config.window_size = new_size;
             self.config.window_pos = new_pos;
             self.config.window_maximized = new_maximized;
