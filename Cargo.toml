@@ -54,7 +54,7 @@ winreg = "0.56"
 # viewer cannot open for other reasons (no password UI), and each carries its
 # own subtree. A member using one fails extraction with a clear error instead
 # of dragging 30 crates along.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 sevenz-rust2 = "0.23"
 rar = "0.4"
 

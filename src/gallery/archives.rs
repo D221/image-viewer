@@ -330,7 +330,10 @@ pub fn extract_zip(archive: &Path, dest: &Path) -> Result<(usize, usize), String
             encrypted += 1;
             continue;
         }
-        let Some(safe) = archive_member_name(f.name()) else {
+        // zip 9 makes name() fallible and borrows from the entry, so the raw
+        // name is copied out before the entry is read.
+        let raw = f.name().map_err(|e| e.to_string())?.into_owned();
+        let Some(safe) = archive_member_name(&raw) else {
             continue;
         };
         if !claim_member_name(&mut seen, &safe) {
@@ -544,7 +547,8 @@ pub fn archive_image_count(archive: &Path) -> Option<usize> {
                     if entry.is_dir() {
                         continue;
                     }
-                    if let Some(safe) = archive_member_name(entry.name())
+                    if let Ok(raw) = entry.name()
+                        && let Some(safe) = archive_member_name(&raw)
                         && claim_member_name(&mut seen, &safe)
                     {
                         n += 1;
