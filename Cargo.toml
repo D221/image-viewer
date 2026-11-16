@@ -17,12 +17,12 @@ readme = "README.md"
 # `main.rs`), `default_fonts` is the font egui draws with, and `accesskit` is
 # the Windows screen-reader bridge. Dropping any of those three breaks the app
 # in a way a build cannot catch; dropping `wgpu` is what this list is for.
-eframe = { version = "0.36", default-features = false, features = [
+eframe = { version = "0.37", default-features = false, features = [
     "glow",
     "default_fonts",
     "accesskit",
 ] }
-egui = "0.36"
+egui = "0.37"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "ico", "tiff", "qoi", "rayon"] }
 # PNG stores its iCCP profile zlib-compressed. Already in the tree via `png`,
 # pure Rust (miniz_oxide), so this adds no native code.

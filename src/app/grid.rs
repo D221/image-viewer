@@ -275,7 +275,7 @@ impl MyApp {
         });
         // Measure every frame, decide only on selection change: the stored
         // offset and viewport are what the follow decision reads next frame.
-        self.grid_scroll = grid_out.state.offset.y;
+        self.grid_scroll = grid_out.state.clamped_offset().y;
         self.grid_view_h = grid_out.inner_rect.height();
 
         if let Some((i, path)) = clicked {
