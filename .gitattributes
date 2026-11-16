@@ -1,0 +1,7 @@
+# Keep every text file LF, in the repository and on checkout.
+#
+# The source-scanning tests match needles that contain "\n" (for example
+# tests/unit_edits.rs and tests/resample_settings.rs). A CRLF checkout turns
+# those needles into no-match and fails tests that have nothing to do with the
+# code. `eol=lf` overrides core.autocrlf on every platform.
+* text=auto eol=lf
