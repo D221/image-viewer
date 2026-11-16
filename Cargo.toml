@@ -62,7 +62,7 @@ rar = "0.4"
 # used through `resvg::tiny_skia` so the versions match what `resvg` expects.
 # SVG is vector, so it renders at any target size — there is no `full` tier and
 # no source-size decode: the preview is the decode.
-resvg = "0.49"
+resvg = "0.50"
 
 
 [target.'cfg(windows)'.dependencies]
