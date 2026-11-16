@@ -39,7 +39,7 @@ jobs:
           Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
 
       - name: Publish the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: image-viewer-*-windows-x64.zip
           generate_release_notes: true
