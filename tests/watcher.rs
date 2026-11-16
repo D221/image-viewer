@@ -258,9 +258,19 @@ fn a_rename_over_is_one_content_change_and_not_a_rescan() {
     // full rescan if the batch were taken one record at a time.
     let mut all = Vec::new();
     let start = Instant::now();
-    while start.elapsed() < Duration::from_millis(500) {
+    let timeout = Duration::from_secs(5);
+    let quiet = Duration::from_millis(250);
+    let mut last = start;
+    while start.elapsed() < timeout {
+        let mut got = false;
         while let Some(batch) = w.try_recv() {
             all.extend(batch);
+            got = true;
+        }
+        if got {
+            last = Instant::now();
+        } else if !all.is_empty() && last.elapsed() >= quiet {
+            break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }

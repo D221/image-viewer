@@ -42,6 +42,11 @@ jobs:
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Format
         run: cargo fmt --check
 
@@ -51,8 +56,10 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --locked
 
+      # nextest runs the 68 test binaries in parallel; libtest runs them one at a
+      # time. The repo has no doctests, so nextest covers everything cargo test did.
       - name: Test
-        run: cargo test --no-fail-fast --locked
+        run: cargo nextest run --all-targets --locked --no-fail-fast
 
       # The release binary is built by release.yml on tags. Checking the
       # release profile here catches type errors without paying for LTO and
