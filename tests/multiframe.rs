@@ -41,17 +41,17 @@ impl Rgba {
         [self.px[0], self.px[1], self.px[2]]
     }
 
-    fn to_rgba_image(self) -> image::RgbaImage {
+    fn into_rgba_image(self) -> image::RgbaImage {
         image::RgbaImage::from_raw(self.w, self.h, self.px)
             .expect("fixture dimensions are consistent with its pixel count")
     }
 
-    fn to_image(self) -> image::DynamicImage {
-        image::DynamicImage::ImageRgba8(self.to_rgba_image())
+    fn into_image(self) -> image::DynamicImage {
+        image::DynamicImage::ImageRgba8(self.into_rgba_image())
     }
 
     fn save(self, p: &Path) {
-        self.to_image().save(p).expect("save fixture");
+        self.into_image().save(p).expect("save fixture");
     }
 
     /// PNG scanlines: a filter byte of 0 (None) in front of each row.
@@ -207,7 +207,7 @@ fn a_truncated_gif_still_decodes_and_does_not_hang() {
                 .map(|i| {
                     let v = (i * 21) as u8;
                     Frame::from_parts(
-                        Rgba::solid(64, 48, [v, 255 - v, v / 2]).to_rgba_image(),
+                        Rgba::solid(64, 48, [v, 255 - v, v / 2]).into_rgba_image(),
                         0,
                         0,
                         Delay::from_numer_denom_ms(80, 1),
@@ -247,7 +247,7 @@ fn a_plain_png_is_not_an_animation() {
     let dir = tempfile::tempdir().unwrap();
     let mut bytes = Vec::new();
     Rgba::solid(32, 24, [9, 9, 9])
-        .to_image()
+        .into_image()
         .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
         .unwrap();
     let p = write(dir.path(), "still.png", &bytes);
@@ -264,7 +264,7 @@ fn a_plain_png_is_not_an_animation() {
 fn a_still_webp_is_recognised_as_webp_but_not_as_an_animation() {
     let dir = tempfile::tempdir().unwrap();
     let mut bytes = Vec::new();
-    let img = Rgba::solid(16, 16, [1, 2, 3]).to_image();
+    let img = Rgba::solid(16, 16, [1, 2, 3]).into_image();
     image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
         .encode(img.as_bytes(), 16, 16, image::ExtendedColorType::Rgba8)
         .expect("the image crate writes lossless still WebP");
@@ -404,7 +404,7 @@ fn an_animated_gif_still_works() {
         let mut enc = image::codecs::gif::GifEncoder::new(&mut bytes);
         let f = |rgb: [u8; 3]| {
             Frame::from_parts(
-                Rgba::solid(24, 24, rgb).to_rgba_image(),
+                Rgba::solid(24, 24, rgb).into_rgba_image(),
                 0,
                 0,
                 Delay::from_numer_denom_ms(80, 1),

@@ -11,6 +11,9 @@ impl MyApp {
     /// Returns `(pending, sharpened)`: `pending` when the per-frame tile budget
     /// ran out (a repaint is requested), `sharpened` when at least one tile was
     /// cut this frame (viewport tiles are marked ready).
+    // The render pass threads this many values through; a params struct would
+    // be a larger refactor than the function.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn central_tiles(
         &mut self,
         ctx: &egui::Context,
@@ -147,8 +150,8 @@ impl MyApp {
             Full,
             Page(ImgKey),
         }
-        let mut maps: Vec<(HashMap<(u32, u32), Tile>, TileMapOwner)> =
-            Vec::with_capacity(tile_pages.len());
+        type TileMap = (HashMap<(u32, u32), Tile>, TileMapOwner);
+        let mut maps: Vec<TileMap> = Vec::with_capacity(tile_pages.len());
         for (i, tp) in tile_pages.iter().enumerate() {
             if tp.is_none() {
                 continue;
@@ -205,15 +208,17 @@ impl MyApp {
                     if x1 > x0 && y1 > y0 {
                         for ty in (y0 / TILE)..=((y1 - 1) / TILE) {
                             for tx in (x0 / TILE)..=((x1 - 1) / TILE) {
-                                if !tiles.contains_key(&(tx, ty)) {
+                                if let std::collections::hash_map::Entry::Vacant(e) =
+                                    tiles.entry((tx, ty))
+                                {
                                     if budget == 0 {
                                         pending = true;
                                         continue;
                                     }
                                     budget -= 1;
-                                    let tex = make_tile(&ctx, &tp.data, tx, ty, tile_options);
+                                    let tex = make_tile(ctx, &tp.data, tx, ty, tile_options);
                                     perf::count(perf::C_TILES_CREATED, 1);
-                                    tiles.insert((tx, ty), Tile { tex, last_drawn: frame });
+                                    e.insert(Tile { tex, last_drawn: frame });
                                 }
                                 let tile = tiles.get_mut(&(tx, ty)).unwrap();
                                 tile.last_drawn = frame;
@@ -233,7 +238,7 @@ impl MyApp {
                                     Pos2::new(q[0], q[1]),
                                     Vec2::new(q[2], q[3]),
                                 );
-                                paint_tex(&painter, tile.tex.id(), r, uv, page_xform);
+                                paint_tex(painter, tile.tex.id(), r, uv, page_xform);
                             }
                         }
                     }

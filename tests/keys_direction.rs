@@ -472,9 +472,8 @@ fn the_settings_panel_offers_both_manga_settings_and_says_where_overrides_live()
     // of the panel's own text rather than counted across the file, because a
     // count-of-two would be satisfied by two saves in the renderer row.
     let panel = src.split("Panel::right(\"settings\")").nth(1).expect("the settings panel is gone");
-    assert_eq!(
+    assert!(
         panel.matches("self.config.save(&self.config_path)").count() >= 2,
-        true,
         "the manga checkboxes do not each save the config, so a preference set in the \
          panel is gone at exit."
     );

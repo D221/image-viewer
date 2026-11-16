@@ -316,7 +316,7 @@ pub(crate) fn human_bytes(n: u64) -> String {
 pub(crate) enum Msg {
     Preview {
         key: ImgKey,
-        result: Result<PreviewData, String>,
+        result: Box<Result<PreviewData, String>>,
     },
     Thumb {
         path: PathBuf,
@@ -390,7 +390,7 @@ pub(crate) fn new_loader(
 /// so the loader must not treat it as work left undone.
 pub(crate) fn fail_msg(job: &Job, err: String) -> (Msg, bool) {
     let msg = match job.kind {
-        Kind::Preview => Msg::Preview { key: job.key.clone(), result: Err(err) },
+        Kind::Preview => Msg::Preview { key: job.key.clone(), result: Box::new(Err(err)) },
         Kind::Full => Msg::Full { key: job.key.clone(), result: Err(err) },
         Kind::Thumb => Msg::Thumb { path: job.path().to_path_buf(), result: Err(err) },
         Kind::Exif => Msg::Exif { path: job.path().to_path_buf(), info: None },
@@ -410,7 +410,7 @@ pub(crate) fn run_job(job: &Job) -> (Msg, bool) {
     let page = job.key.page;
     let msg = match job.kind {
         Kind::Preview => Msg::Preview {
-            result: decode_preview(&path, job.target_dim, page),
+            result: Box::new(decode_preview(&path, job.target_dim, page)),
             key: job.key.clone(),
         },
         Kind::Thumb => Msg::Thumb {
@@ -515,96 +515,87 @@ pub(crate) fn extract_exif(path: &Path) -> Option<String> {
     }
     if let Ok(mut f) = std::fs::File::open(path) {
         let mut head = Vec::new();
-        if f.by_ref().take(262144).read_to_end(&mut head).is_ok() {
-            if let Some(c) = image_viewer::jpeg_comment(&head) {
-                if Some(&c) != exif_text.as_ref() {
-                    info.push(format!("Comment: {c}"));
-                }
-            }
+        if f.by_ref().take(262144).read_to_end(&mut head).is_ok()
+            && let Some(c) = image_viewer::jpeg_comment(&head)
+            && Some(&c) != exif_text.as_ref()
+        {
+            info.push(format!("Comment: {c}"));
         }
     }
 
     // Photo settings, joined on one line like a camera EXIF summary.
     let mut shot = Vec::new();
-    if let Some(entry) = exif.get(ExifTag::FNumber) {
-        if let Some(v) = entry.as_urational().and_then(|r| r.to_f64()) {
-            shot.push(format!("f/{v:.1}"));
-        }
+    if let Some(entry) = exif.get(ExifTag::FNumber)
+        && let Some(v) = entry.as_urational().and_then(|r| r.to_f64())
+    {
+        shot.push(format!("f/{v:.1}"));
     }
-    if let Some(entry) = exif.get(ExifTag::ExposureTime) {
-        if let Some(r) = entry.as_urational() {
-            let (n, d) = (r.numerator(), r.denominator());
-            let text = if d == 0 {
-                format!("{n} s")
-            } else if n >= d {
-                format!("{:.1} s", n as f64 / d as f64)
-            } else {
-                format!("1/{} s", (d as f64 / n.max(1) as f64).round() as u64)
-            };
-            shot.push(text);
-        }
+    if let Some(entry) = exif.get(ExifTag::ExposureTime)
+        && let Some(r) = entry.as_urational()
+    {
+        let (n, d) = (r.numerator(), r.denominator());
+        let text = if d == 0 {
+            format!("{n} s")
+        } else if n >= d {
+            format!("{:.1} s", n as f64 / d as f64)
+        } else {
+            format!("1/{} s", (d as f64 / n.max(1) as f64).round() as u64)
+        };
+        shot.push(text);
     }
-    if let Some(entry) = exif.get(ExifTag::ISOSpeedRatings) {
-        if let Some(iso) = entry
-            .as_u16()
-            .map(|iso| iso as u32)
-            .or_else(|| entry.as_u32().map(|iso| iso as u32))
-            .map(|iso| iso as u16)
-        {
-            shot.push(format!("ISO {iso}"));
-        }
+    if let Some(entry) = exif.get(ExifTag::ISOSpeedRatings)
+        && let Some(iso) =
+            entry.as_u16().map(|iso| iso as u32).or_else(|| entry.as_u32()).map(|iso| iso as u16)
+    {
+        shot.push(format!("ISO {iso}"));
     }
-    if let Some(entry) = exif.get(ExifTag::FocalLength) {
-        if let Some(v) = entry.as_urational().and_then(|r| r.to_f64()) {
-            shot.push(format!("{v:.0} mm"));
-        }
+    if let Some(entry) = exif.get(ExifTag::FocalLength)
+        && let Some(v) = entry.as_urational().and_then(|r| r.to_f64())
+    {
+        shot.push(format!("{v:.0} mm"));
     }
-    if let Some(entry) = exif.get(ExifTag::ExposureBiasValue) {
-        if let Some(v) = entry.as_irational().and_then(|r| r.to_f64()) {
-            if v != 0.0 {
-                shot.push(format!("{v:+.1} EV"));
-            }
-        }
+    if let Some(entry) = exif.get(ExifTag::ExposureBiasValue)
+        && let Some(v) = entry.as_irational().and_then(|r| r.to_f64())
+        && v != 0.0
+    {
+        shot.push(format!("{v:+.1} EV"));
     }
-    if let Some(entry) = exif.get(ExifTag::DigitalZoomRatio) {
-        if let Some(v) = entry.as_urational().and_then(|r| r.to_f64()) {
-            if v > 1.0 {
-                shot.push(format!("zoom x{v:.1}"));
-            }
-        }
+    if let Some(entry) = exif.get(ExifTag::DigitalZoomRatio)
+        && let Some(v) = entry.as_urational().and_then(|r| r.to_f64())
+        && v > 1.0
+    {
+        shot.push(format!("zoom x{v:.1}"));
     }
     if !shot.is_empty() {
         info.push(format!("Shot: {}", shot.join(" · ")));
     }
 
-    if let Some(entry) = exif.get(ExifTag::MeteringMode) {
-        if let Some(v) = entry.as_u16() {
-            if v > 0 {
-                info.push(format!("Metering: {}", metering_label(v)));
-            }
-        }
+    if let Some(entry) = exif.get(ExifTag::MeteringMode)
+        && let Some(v) = entry.as_u16()
+        && v > 0
+    {
+        info.push(format!("Metering: {}", metering_label(v)));
     }
-    if let Some(entry) = exif.get(ExifTag::Flash) {
-        if let Some(v) = entry.as_u16() {
-            info.push(format!("Flash: {}", flash_label(v)));
-        }
+    if let Some(entry) = exif.get(ExifTag::Flash)
+        && let Some(v) = entry.as_u16()
+    {
+        info.push(format!("Flash: {}", flash_label(v)));
     }
-    if let Some(entry) = exif.get(ExifTag::ColorSpace) {
-        if let Some(v) = entry.as_u16() {
-            info.push(format!("Color: {}", color_space_label(v)));
-        }
+    if let Some(entry) = exif.get(ExifTag::ColorSpace)
+        && let Some(v) = entry.as_u16()
+    {
+        info.push(format!("Color: {}", color_space_label(v)));
     }
-    if let Some(entry) = exif.get(ExifTag::Orientation) {
-        if let Some(v) = entry.as_u16() {
-            if v > 1 {
-                info.push(format!("Orientation: {}", orientation_label(v)));
-            }
-        }
+    if let Some(entry) = exif.get(ExifTag::Orientation)
+        && let Some(v) = entry.as_u16()
+        && v > 1
+    {
+        info.push(format!("Orientation: {}", orientation_label(v)));
     }
-    if let Some(entry) = exif.get(ExifTag::ImageWidth) {
-        if let Some(h_entry) = exif.get(ExifTag::ImageHeight) {
-            info.push(format!("Dimensions: {}x{} px", entry, h_entry));
-        }
+    if let Some(entry) = exif.get(ExifTag::ImageWidth)
+        && let Some(h_entry) = exif.get(ExifTag::ImageHeight)
+    {
+        info.push(format!("Dimensions: {}x{} px", entry, h_entry));
     }
 
     // GPS: decimal degrees + altitude, and a Google Maps link.

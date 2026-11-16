@@ -366,9 +366,9 @@ impl MyApp {
                 }
             };
             let Some(item) = items.iter().find(|i| {
-                i.name.to_str().map_or(false, |n| {
-                    Path::new(n).file_name() == Some(std::ffi::OsStr::new(&name))
-                })
+                i.name
+                    .to_str()
+                    .is_some_and(|n| Path::new(n).file_name() == Some(std::ffi::OsStr::new(&name)))
             }) else {
                 let _ = tx.send(UndoDeleteResult::NotFound { name, original: original.clone() });
                 return;
@@ -452,9 +452,7 @@ impl MyApp {
     /// Commit a rename that the user typed into `rename_input` and confirmed.
     /// Returns the new path on success so the UI can report it.
     pub(crate) fn rename_commit(&mut self, ctx: &Context, new_name: &str) -> Option<PathBuf> {
-        let Some(p) = self.gallery.current().map(|x| x.to_path_buf()) else {
-            return None;
-        };
+        let p = self.gallery.current().map(|x| x.to_path_buf())?;
         let i = self.gallery.index;
         let new_path = p.with_file_name(new_name);
         if new_path == p {
@@ -479,10 +477,10 @@ impl MyApp {
                     self.failed.insert((new_key.clone(), Kind::Full));
                 }
                 self.load_errors.remove(&old_key);
-                if let Some(c) = self.cur.as_mut() {
-                    if c.path == p {
-                        c.path = new_path.clone();
-                    }
+                if let Some(c) = self.cur.as_mut()
+                    && c.path == p
+                {
+                    c.path = new_path.clone();
                 }
                 self.reset_display();
                 self.goto(ctx);

@@ -29,7 +29,7 @@ fn untagged_jpeg(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let p = dir.join(name);
     std::fs::write(
         &p,
-        &[
+        [
             0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
             0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9,
         ],
@@ -92,7 +92,7 @@ fn wallpaper_target_uses_jpg_extension_when_the_source_has_none() {
     set_wide_gamut_conversion(true);
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("photo");
-    std::fs::write(&p, &[0xFF, 0xD8, 0xFF]).unwrap();
+    std::fs::write(&p, [0xFF, 0xD8, 0xFF]).unwrap();
     let target = wallpaper_target(&p, dir.path(), true);
     assert_eq!(
         target,

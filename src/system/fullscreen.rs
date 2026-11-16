@@ -45,11 +45,12 @@ use std::sync::Mutex;
 
 /// How F11 fullscreen is realised. See the module doc for the experiment each
 /// variant runs. Stored in `Config::fullscreen_mode` and serialized with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum FsMode {
     /// Undecorated window sized to the monitor minus one pixel per edge — true
     /// borderless fullscreen without the display re-sync that blanks some
     /// GPU/driver/monitor combinations. The default.
+    #[default]
     Inset,
     /// `ViewportCommand::Fullscreen` - the shipped behaviour.
     Real,
@@ -61,12 +62,6 @@ pub enum FsMode {
     /// undecorated window. Nothing blanks, but the title bar and taskbar
     /// remain.
     Safe,
-}
-
-impl Default for FsMode {
-    fn default() -> Self {
-        Self::Inset
-    }
 }
 
 impl FsMode {

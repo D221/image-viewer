@@ -1,6 +1,8 @@
 //! Image decoding: the preview/full pipeline, EXIF, embedded thumbnails,
 //! animations, and resampling.
 
+// The implementation is decode/decode.rs; the name is the convention.
+#[allow(clippy::module_inception)]
 pub mod decode;
 pub use decode::*;
 

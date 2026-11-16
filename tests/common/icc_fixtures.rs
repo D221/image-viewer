@@ -29,7 +29,7 @@ pub fn icc_profile(desc: Option<&str>, red: (i32, i32, i32), pad_to: usize) -> V
         desc_data.extend_from_slice(&0u32.to_be_bytes());
         desc_data.extend_from_slice(&(ascii.len() as u32).to_be_bytes());
         desc_data.extend_from_slice(&ascii);
-        while desc_data.len() % 4 != 0 {
+        while !desc_data.len().is_multiple_of(4) {
             desc_data.push(0);
         }
     }
@@ -89,7 +89,7 @@ pub fn icc_profile(desc: Option<&str>, red: (i32, i32, i32), pad_to: usize) -> V
     out.resize((table_len + 3) & !3, 0);
     for (_, d) in &tags {
         out.extend_from_slice(d);
-        while out.len() % 4 != 0 {
+        while !out.len().is_multiple_of(4) {
             out.push(0);
         }
     }

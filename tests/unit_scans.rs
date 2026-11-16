@@ -50,8 +50,7 @@ fn each_document_is_structurally_sound() {
             if in_fence || a.is_empty() || a != b {
                 continue;
             }
-            assert!(
-                false,
+            panic!(
                 "{name}: two identical adjacent lines - {a:?} - which is an edit that landed twice"
             );
         }
@@ -95,8 +94,7 @@ fn no_source_carries_a_duplicated_comment_line() {
         for (i, pair) in lines.windows(2).enumerate() {
             let (a, b) = (pair[0].trim(), pair[1].trim());
             if a.starts_with("//") && a == b {
-                assert!(
-                    false,
+                panic!(
                     "{name}: the comment {a:?} appears twice in a row (line {}) - \
                      an edit that landed at the wrong anchor",
                     i + 1

@@ -37,10 +37,10 @@ impl MyApp {
     /// is entered at most once per session per depth, and `archive_parent` has
     /// exactly one writer. The record is taken *after* `close_transients`,
     /// which is the call that would otherwise clear it.
-    pub(crate) fn open_archive(&mut self, ctx: &Context, archive: &PathBuf) {
+    pub(crate) fn open_archive(&mut self, ctx: &Context, archive: &Path) {
         self.close_transients();
         let from_folder = self.folder.clone();
-        let from_name = archive.clone();
+        let from_name = archive.to_path_buf();
         let temp = Self::zip_temp_for(archive);
         match extract_archive(archive, &temp) {
             Ok((count, skipped)) if count > 0 => {
@@ -50,7 +50,7 @@ impl MyApp {
                 if self.zip_archive.is_none() && from_folder != temp {
                     self.archive_parent = Some((from_folder, from_name));
                 }
-                self.zip_archive = Some(archive.clone());
+                self.zip_archive = Some(archive.to_path_buf());
                 self.zip_temp = Some(temp.clone());
                 self.folder = temp.clone();
                 self.gallery = Gallery::new(&temp);
@@ -65,12 +65,11 @@ impl MyApp {
                     let last = std::path::Path::new(last)
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned());
-                    if let Some(name) = last {
-                        if let Some(i) =
+                    if let Some(name) = last
+                        && let Some(i) =
                             self.gallery.files.iter().position(|f| file_name_of(f) == *name)
-                        {
-                            self.gallery.index = i;
-                        }
+                    {
+                        self.gallery.index = i;
                     }
                 }
                 self.reset_display();
@@ -98,7 +97,7 @@ impl MyApp {
                 // handled in its own arm.
                 self.notice = Some(format!(
                     "{n} — press Left or Esc to go back to {}",
-                    file_name_of(&archive)
+                    file_name_of(archive)
                 ));
             }
             Ok((_, skipped)) => {

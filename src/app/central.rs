@@ -215,8 +215,7 @@ impl MyApp {
             let available_y = work.1 - chrome_y;
             // Max scale that fits the image in the available space,
             // capped at 1.0 (never upscale).
-            let max_scale =
-                (available_x / natural.x).min(available_y / natural.y).min(1.0).max(0.01);
+            let max_scale = (available_x / natural.x).min(available_y / natural.y).clamp(0.01, 1.0);
             self.view.scale = max_scale / ppp;
             self.view.offset = Vec2::ZERO;
             ratio = max_scale;
@@ -263,9 +262,7 @@ impl MyApp {
         ctx: &egui::Context,
         shown: &ImgKey,
     ) -> Option<((u32, u32), egui::TextureId, f32, bool)> {
-        let Some(pv) = self.previews.get_mut(shown) else {
-            return None;
-        };
+        let pv = self.previews.get_mut(shown)?;
         // Stamped here, and this is where the **cursor** page's `used` clock
         // moves — the partner's is stamped where it is painted below, for the
         // same reason. `evict_previews` is an LRU on `used`, so a page on

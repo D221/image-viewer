@@ -163,7 +163,7 @@ pub fn make_jpeg_with_orientation(tag: u16) -> Vec<u8> {
     tiff.extend(0x0112u16.to_le_bytes()); // Orientation tag
     tiff.extend(3u16.to_le_bytes()); // type SHORT
     tiff.extend(1u32.to_le_bytes()); // count
-    tiff.extend((tag as u16).to_le_bytes()); // inline value
+    tiff.extend(tag.to_le_bytes()); // inline value
     tiff.extend(0u16.to_le_bytes()); // value padding
     tiff.extend(0u32.to_le_bytes()); // no IFD1
 

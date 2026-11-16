@@ -182,7 +182,7 @@ fn the_pixel_art_toggle_is_wired_to_the_content_uploads_and_invalidates_too() {
     assert_eq!(uses, 4, "every content upload must consult the toggle at upload time");
     assert!(
         main.contains("options: TextureOptions,")
-            && main.contains("make_tile(&ctx, &tp.data, tx, ty, tile_options);"),
+            && main.contains("make_tile(ctx, &tp.data, tx, ty, tile_options);"),
         "make_tile must take its sampling in from the caller, which is where \
          the config lives; the tile texture is a content texture too"
     );

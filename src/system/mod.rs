@@ -1,6 +1,8 @@
 //! System integration: single-instance guard, file associations, ratings,
 //! the generated icon, and latency counters.
 
+// The implementation is system/system.rs; the name is the convention.
+#[allow(clippy::module_inception)]
 pub mod system;
 pub use system::*;
 

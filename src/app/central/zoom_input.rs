@@ -12,6 +12,9 @@ impl MyApp {
     /// fit-width / fill toggles, double-click, the colour picker, and pointer
     /// dragging. Mutates `self.wheel_acc`, `self.fit_wrap_pending`,
     /// `self.fit_iters` and `self.lat` as side effects.
+    // The render pass threads this many values through; a params struct would
+    // be a larger refactor than the function.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn central_zoom_input(
         &mut self,
         ui: &mut egui::Ui,
@@ -73,10 +76,10 @@ impl MyApp {
             self.wheel_acc += scroll;
             if self.wheel_acc <= -THRESH_WHEEL {
                 self.wheel_acc = 0.0;
-                self.step(&ctx, down);
+                self.step(ctx, down);
             } else if self.wheel_acc >= THRESH_WHEEL {
                 self.wheel_acc = 0.0;
-                self.step(&ctx, !down);
+                self.step(ctx, !down);
             }
         }
         let mut factor = 1.0f32;
@@ -136,37 +139,33 @@ impl MyApp {
         // Colour picker: click on the picture to sample the pixel under the
         // cursor, copied to the clipboard. Reads from the full-res buffer;
         // reports when it isn't available (zoom to 1:1 first).
-        if self.color_picker_active && resp.clicked() {
-            if let Some(hover) = resp.hover_pos()
-                && let Some(key) = self.cur.as_ref()
-                && let Some(pv) = self.previews.get(key)
-            {
-                if let Some(full) = &pv.full {
-                    let center = panel.center();
-                    let sx =
-                        ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0).round() as i32;
-                    let sy =
-                        ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0).round() as i32;
-                    if (0..full.width as i32).contains(&sx) && (0..full.height as i32).contains(&sy)
-                    {
-                        let c =
-                            &full.rgba[((sy as usize * full.width as usize + sx as usize) * 4)..];
-                        self.notice = Some(format!(
-                            "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
-                            c[0], c[1], c[2], c[0], c[1], c[2], sx, sy
-                        ));
-                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                            let _ = cb.set_text(&format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
-                        }
-                    } else {
-                        self.notice = Some("Click outside the picture".into());
+        if self.color_picker_active
+            && resp.clicked()
+            && let Some(hover) = resp.hover_pos()
+            && let Some(key) = self.cur.as_ref()
+            && let Some(pv) = self.previews.get(key)
+        {
+            if let Some(full) = &pv.full {
+                let center = panel.center();
+                let sx = ((hover.x - center.x - offset.x) / scale + img_px.x / 2.0).round() as i32;
+                let sy = ((hover.y - center.y - offset.y) / scale + img_px.y / 2.0).round() as i32;
+                if (0..full.width as i32).contains(&sx) && (0..full.height as i32).contains(&sy) {
+                    let c = &full.rgba[((sy as usize * full.width as usize + sx as usize) * 4)..];
+                    self.notice = Some(format!(
+                        "#{:02X}{:02X}{:02X}  rgb({}, {}, {})  at {}x{}",
+                        c[0], c[1], c[2], c[0], c[1], c[2], sx, sy
+                    ));
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        let _ = cb.set_text(format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
                     }
                 } else {
-                    self.notice = Some(
-                        "Full-res buffer not available — view at 1:1 for pixel-accurate sampling"
-                            .into(),
-                    );
+                    self.notice = Some("Click outside the picture".into());
                 }
+            } else {
+                self.notice = Some(
+                    "Full-res buffer not available — view at 1:1 for pixel-accurate sampling"
+                        .into(),
+                );
             }
         }
         if key_fill && pages.is_empty() {
@@ -234,7 +233,7 @@ impl MyApp {
             let centre_at = |s: f32| {
                 let (cx, cy) = image_viewer::spread_centre(
                     panel4,
-                    &spread_dims,
+                    spread_dims,
                     s,
                     self.config.manga_rtl,
                     lone_spread_fills_turn,

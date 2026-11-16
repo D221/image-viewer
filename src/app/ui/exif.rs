@@ -72,10 +72,10 @@ impl MyApp {
                 // cached on the preview like `exif_tag`, so a re-shown image
                 // answers with no read of any kind, and it can appear while the
                 // EXIF block below is still loading.
-                if let Some(preview) = self.shown.as_ref().and_then(|k| self.previews.get(k)) {
-                    if let Some(line) = preview.colour.panel_line() {
-                        ui.label(line);
-                    }
+                if let Some(preview) = self.shown.as_ref().and_then(|k| self.previews.get(k))
+                    && let Some(line) = preview.colour.panel_line()
+                {
+                    ui.label(line);
                 }
                 // The panel is the only thing that shows this, so it is also the
                 // only thing that should ask for it. The gate is the *effective*
@@ -115,10 +115,10 @@ impl MyApp {
                     for line in info.lines() {
                         if let Some(url) = line.strip_prefix("Maps: ") {
                             // GPS link: clickable, opens the system browser.
-                            if ui.link("Open in Google Maps").clicked() {
-                                if let Err(e) = open::that_detached(url) {
-                                    self.error = Some(format!("Open link failed: {e}"));
-                                }
+                            if ui.link("Open in Google Maps").clicked()
+                                && let Err(e) = open::that_detached(url)
+                            {
+                                self.error = Some(format!("Open link failed: {e}"));
                             }
                         } else {
                             ui.label(line);
@@ -127,11 +127,11 @@ impl MyApp {
                 } else {
                     ui.label("No EXIF available.");
                 }
-                if let Some(p) = self.cur.as_ref() {
-                    if let Ok(md) = std::fs::metadata(&p.path) {
-                        ui.separator();
-                        ui.label(format!("Size: {:.1} MB", md.len() as f64 / (1024.0 * 1024.0)));
-                    }
+                if let Some(p) = self.cur.as_ref()
+                    && let Ok(md) = std::fs::metadata(&p.path)
+                {
+                    ui.separator();
+                    ui.label(format!("Size: {:.1} MB", md.len() as f64 / (1024.0 * 1024.0)));
                 }
                 // Exposure histogram: levels counted on the worker from the
                 // preview-size buffer and carried with the preview, so this

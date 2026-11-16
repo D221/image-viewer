@@ -257,9 +257,8 @@ fn the_min_filter_scale_is_a_no_op_where_the_prefilter_already_fires() {
         // `filter_scale == 2.0 == MIN_FILTER_SCALE`, so `max` cannot bind. That
         // boundary is the whole reason the floor is 2.0 and not "a bit more", so
         // it is asserted rather than skipped.
-        assert_eq!(
+        assert!(
             before.rgba == after.rgba,
-            true,
             "at R {r:.3} (target {target}, prefilter {}) the floor changed the \
              output, so it is not inert above PREFILTER_FACTOR. Every reduction \
              that works today goes through here and must not change",
@@ -494,7 +493,8 @@ fn print_min_filter_scale() {
     // Arms as `(name, resize)` so each column's images come from the *same*
     // arm. Selecting per-image by string comparison was the first version and it
     // is the shape of mistake that reports a number for the wrong arm.
-    let arms: Vec<(&str, Box<dyn Fn(&image_viewer::ImageData) -> image_viewer::ImageData>)> = vec![
+    type ResizeArm = Box<dyn Fn(&image_viewer::ImageData) -> image_viewer::ImageData>;
+    let arms: Vec<(&str, ResizeArm)> = vec![
         ("floor off", Box::new(|d| resize_floor(d, QHD_TARGET, 0.0))),
         ("floor 2.0", Box::new(|d| resize_shipped(d, QHD_TARGET))),
         ("floor 2.5", Box::new(|d| resize_floor(d, QHD_TARGET, 2.5))),
@@ -530,7 +530,8 @@ fn print_min_filter_scale() {
     println!("{:>8} {:>12} {:>12} {:>12}", "R", "floor off", "floor 2.0", "Smooth");
     for r in [1.1f64, 1.2, 1.333, 1.5, 1.778, 2.0, 2.5, 2.879, 4.0] {
         let target = ((QHD_W as f64 / r).round() as u32).max(2);
-        let arms: Vec<(&str, Box<dyn Fn() -> ()>)> = vec![
+        type BenchArm<'a> = Box<dyn Fn() + 'a>;
+        let arms: Vec<(&str, BenchArm)> = vec![
             (
                 "off",
                 Box::new(|| {
@@ -558,7 +559,7 @@ fn print_min_filter_scale() {
             arm();
         }
         let mut med = [0f32; 3];
-        for i in 0..arms.len() {
+        for (i, slot) in med.iter_mut().enumerate() {
             let mut v = Vec::new();
             for _ in 0..9 {
                 // One measurement per round, rotating which arm goes first, so
@@ -574,7 +575,7 @@ fn print_min_filter_scale() {
                 }
             }
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            med[i] = v[v.len() / 2];
+            *slot = v[v.len() / 2];
         }
         println!(
             "{r:>8.3} {:>12.1} {:>12.1} {:>12.1}   ({:.2}x floor, {:.2}x smooth)",
@@ -613,7 +614,7 @@ fn every_downscale_filter_survives_the_widened_prefilter() {
             (out.width as usize) * (out.height as usize) * 4,
             "{f:?}: buffer and dims disagree"
         );
-        assert!(out.rgba.chunks_exact(4).all(|p| p[3] == 255), "{f:?}: alpha");
+        assert!(out.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255), "{f:?}: alpha");
     }
 }
 

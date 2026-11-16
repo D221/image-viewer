@@ -566,10 +566,10 @@ fn tiling(ctx: &dyn PageCtx, lead_lone: u32) -> Vec<Vec<usize>> {
     let mut cur = PagePos { index: 0, page: 0 };
     for _ in 0..256 {
         let mut turn = vec![flat(cur)];
-        if turn_len(cur, lead_lone, ctx) == 2 {
-            if let Some(partner) = ctx.step_no_wrap(cur, 1) {
-                turn.push(flat(partner));
-            }
+        if turn_len(cur, lead_lone, ctx) == 2
+            && let Some(partner) = ctx.step_no_wrap(cur, 1)
+        {
+            turn.push(flat(partner));
         }
         out.push(turn);
         let Some(next) = next_anchor(cur, lead_lone, ctx) else {
@@ -602,7 +602,7 @@ fn an_override_beats_the_detector() {
     let dir = tempfile::tempdir().unwrap();
     let page = dir.path().join("page.png");
     write_png(&page, 800, 1200);
-    let mut gal = gallery_of(&[page.clone()], &[4]);
+    let mut gal = gallery_of(std::slice::from_ref(&page), &[4]);
     gal.set_loop_back(false);
     for p in 0..4u32 {
         gal.note_shapes(ImgKey { path: page.clone(), page: p }, (800, 1200));

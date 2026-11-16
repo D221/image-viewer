@@ -37,7 +37,7 @@ impl MyApp {
         let in_folder_nav = !in_archive && !self.folder_stack.is_empty();
         let extra = if in_archive || in_folder_nav { 1 } else { 0 };
         let total = self.gallery.files.len() + extra;
-        let total_rows = (total + cols - 1) / cols;
+        let total_rows = total.div_ceil(cols);
         let clock = self.clock;
         let sel = self.grid_sel;
         // (index, path) — path is None for the back/up cells, Some for file/folder cells.

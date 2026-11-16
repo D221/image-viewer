@@ -867,7 +867,7 @@ fn invalidate_path_drops_the_overrides_and_saves_them() {
 #[test]
 fn arriving_previews_re_plan_through_the_partner() {
     let src = main_src();
-    let arm = fn_body(&src, "Msg::Preview { key, result } => match result {");
+    let arm = fn_body(&src, "Msg::Preview { key, result } => match *result {");
 
     assert!(
         arm.contains("image_viewer::arrival_reschedules("),

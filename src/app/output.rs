@@ -67,7 +67,7 @@ impl MyApp {
             return;
         };
         let to = if to_exif {
-            let raw: Option<String> = nom_exif::read_exif(&p)
+            let raw: Option<String> = nom_exif::read_exif(p)
                 .ok()
                 .and_then(|ex| ex.get(nom_exif::ExifTag::DateTimeOriginal).map(|e| e.to_string()));
             match raw.and_then(|s| image_viewer::parse_exif_datetime(&s)) {
@@ -83,7 +83,7 @@ impl MyApp {
         } else {
             std::time::SystemTime::now()
         };
-        match image_viewer::touch_file_mtime(&p, to) {
+        match image_viewer::touch_file_mtime(p, to) {
             Ok(()) => {
                 self.notice = Some(format!(
                     "Touched {}",

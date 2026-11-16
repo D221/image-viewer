@@ -111,10 +111,10 @@ fn idle_warmup(dir: &std::path::Path, hold_ms: u64, runs: usize) {
 
     for i in 0..runs {
         // Arm A: start fast immediately (no idle warm-up).
-        cold.push(browse_idle(&dir, hold_ms, false));
+        cold.push(browse_idle(dir, hold_ms, false));
 
         // Arm B: idle at image 0 first, then fast navigation.
-        warm.push(browse_idle(&dir, hold_ms, true));
+        warm.push(browse_idle(dir, hold_ms, true));
 
         // Alternate which arm runs first so machine drift doesn't invent a win.
         if i % 2 == 1 {

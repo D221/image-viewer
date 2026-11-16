@@ -9,7 +9,7 @@
 
 use image_viewer::{ImgKey, Job, Kind, Loader, Plan, plan_jobs};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -132,8 +132,8 @@ impl Harness {
         }
     }
 
-    fn runs_of(&self, path: &PathBuf, kind: Kind) -> usize {
-        self.runs.get(&(path.clone(), kind)).copied().unwrap_or(0)
+    fn runs_of(&self, path: &Path, kind: Kind) -> usize {
+        self.runs.get(&(path.to_path_buf(), kind)).copied().unwrap_or(0)
     }
 }
 

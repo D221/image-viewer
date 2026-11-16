@@ -713,14 +713,12 @@ impl eframe::App for MyApp {
             }
         }
         // The `name` borrow ended with the block; now it is safe to touch self again.
-        if confirm {
-            if let Some(new_name) = self.rename_input.take() {
-                if new_name.is_empty() {
-                    self.rename_input = Some(new_name);
-                } else if self.rename_commit(ctx, &new_name).is_none() {
-                    // Failed: put the name back so the dialog stays open.
-                    self.rename_input = Some(new_name);
-                }
+        if confirm && let Some(new_name) = self.rename_input.take() {
+            if new_name.is_empty() {
+                self.rename_input = Some(new_name);
+            } else if self.rename_commit(ctx, &new_name).is_none() {
+                // Failed: put the name back so the dialog stays open.
+                self.rename_input = Some(new_name);
             }
         }
         if cancel {

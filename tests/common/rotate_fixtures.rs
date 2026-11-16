@@ -113,7 +113,7 @@ pub fn assert_same_pixels(got: &image_viewer::ImageData, want: &image::DynamicIm
     // transform changes whole quadrants, so a mean-error threshold separates
     // them cleanly.
     let mut worst: f64 = 0.0;
-    for (a, b) in got.rgba.chunks_exact(4).zip(want_rgba.as_raw().chunks_exact(4)) {
+    for (a, b) in got.rgba.as_chunks::<4>().0.iter().zip(want_rgba.as_raw().as_chunks::<4>().0) {
         for (x, y) in a.iter().zip(b.iter()) {
             worst = worst.max(f64::from(x.abs_diff(*y)));
         }

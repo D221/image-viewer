@@ -349,7 +349,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
     let handlers = src.matches("self.toggle_panels_master();").count();
     let toggles_inline = src.matches("self.show_panels = !self.show_panels;").count();
     assert_eq!(
-        toggles_inline, 1 as usize,
+        toggles_inline, 1_usize,
         "only the helper flips the master, inline flips found: {toggles_inline}"
     );
     assert!(
@@ -375,7 +375,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
 
     // And the fullscreen overlay pairs against the stash: one entering arm
     // that stashes, two leaving arms (F11 again, and Esc) that restore.
-    let f11 = block_after(&dispatch, "if f11 {").expect("the F11 block");
+    let f11 = block_after(dispatch, "if f11 {").expect("the F11 block");
     assert!(!f11.contains("config.save"), "the fullscreen dance must not write the config");
     assert!(
         f11.contains("panels_before_fullscreen = Some(self.show_panels)"),
@@ -387,7 +387,7 @@ fn the_panel_master_is_saved_and_fullscreen_only_borrows_it() {
     );
     let restores = dispatch.matches("panels_before_fullscreen.take().unwrap_or(true)").count();
     assert_eq!(
-        restores, 2 as usize,
+        restores, 2_usize,
         "the Esc exit restores too — one restore, one fullscreen with no way back"
     );
 }

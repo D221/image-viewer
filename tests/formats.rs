@@ -70,7 +70,7 @@ fn bmp_in_ico(w: u32, h: u32) -> Vec<u8> {
     for _ in 0..(w * h) {
         bmp.extend_from_slice(&[0, 0, 255, 255]); // BGRA, opaque blue
     }
-    let row_bytes = ((w + 31) / 32) * 4;
+    let row_bytes = w.div_ceil(32) * 4;
     bmp.resize(bmp.len() + (row_bytes * h) as usize, 0u8);
 
     let mut ico = Vec::new();
@@ -158,7 +158,7 @@ fn a_corrupt_gif_keeps_its_decode_error() {
     let tmp = tempfile::tempdir().unwrap();
     let p = tmp.path().join("broken.gif");
     let mut v = b"GIF89a".to_vec();
-    v.extend(std::iter::repeat(0xFF).take(256));
+    v.extend(std::iter::repeat_n(0xFF, 256));
     std::fs::write(&p, &v).unwrap();
     let err = image_viewer::load_image(&p, 4096).unwrap_err().to_string();
     assert!(

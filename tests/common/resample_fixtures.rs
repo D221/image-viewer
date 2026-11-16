@@ -469,7 +469,7 @@ pub fn probe_multi_pitch_screentone(
     let (sin30, cos30) = (std::f32::consts::PI / 180.0 * screen_angle).sin_cos();
     // A tiny deterministic LCG: `f32::sin` of an index is fine but this keeps the
     // dither reproducible across platforms without a dependency.
-    let mut seed = 0x2f6e_2b1u32;
+    let mut seed = 0x02f6_e2b1_u32;
     let mut next = || {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (seed >> 8) as f32 / (1u32 << 24) as f32

@@ -363,8 +363,8 @@ impl MyApp {
                             self.close_transients();
                             self.open_folder(ctx, fav.clone());
                         }
-                        if ui.button("✕").on_hover_text("Remove favourite").clicked() {
-                            if let Some(pos) = self
+                        if ui.button("✕").on_hover_text("Remove favourite").clicked()
+                            && let Some(pos) = self
                                 .config
                                 .favourite_folders
                                 .iter()
@@ -373,7 +373,6 @@ impl MyApp {
                                 self.config.favourite_folders.remove(pos);
                                 self.config.save(&self.config_path);
                             }
-                        }
                     }
                     if ui.button("Add current folder").clicked() {
                         let already = self

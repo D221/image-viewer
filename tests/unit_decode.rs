@@ -219,7 +219,7 @@ fn test_linear_resize_uniform_color() {
     assert_eq!((out.width, out.height), (8, 8));
     assert!(!out.rgba.is_empty());
     // All pixels stay (approximately) the original color.
-    for p in out.rgba.chunks_exact(4) {
+    for p in out.rgba.as_chunks::<4>().0 {
         assert!((p[0] as i32 - 200).abs() <= 2, "R drifted: {}", p[0]);
         assert!((p[1] as i32 - 100).abs() <= 2, "G drifted: {}", p[1]);
         assert!((p[2] as i32 - 50).abs() <= 2, "B drifted: {}", p[2]);
@@ -260,7 +260,7 @@ fn test_linear_resize_high_contrast_edge() {
     // Values stay in gamut and alpha is untouched. (What a 1px checkerboard
     // averages to is not a useful assertion: source aliasing dominates. The
     // ramp test below covers resampler correctness.)
-    for p in out.rgba.chunks_exact(4) {
+    for p in out.rgba.as_chunks::<4>().0 {
         assert_eq!(p[3], 255, "alpha must stay opaque");
     }
 }
@@ -283,7 +283,7 @@ fn test_linear_resize_preserves_a_monotonic_ramp() {
     for target in [32u32, 7, 3] {
         let out = with_linear_resample(true, || image_viewer::downscale_image(&data, target));
         for row in out.rgba.chunks_exact(out.width as usize * 4) {
-            for pair in row.chunks_exact(4).collect::<Vec<_>>().windows(2) {
+            for pair in row.as_chunks::<4>().0.iter().collect::<Vec<_>>().windows(2) {
                 // Allow a hair of tolerance: ringing at the ends is the filter
                 // working, not an inversion.
                 assert!(

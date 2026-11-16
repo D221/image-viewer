@@ -123,10 +123,10 @@ impl TestGallery {
     /// turn must not name a page twice, and across the wrap seam it would.
     pub fn turn_at(&self, a: PagePos, lead_lone: u32) -> Vec<PagePos> {
         let mut turn = vec![a];
-        if turn_len(a, lead_lone, self) == 2 {
-            if let Some(partner) = self.step_no_wrap(a, 1) {
-                turn.push(partner);
-            }
+        if turn_len(a, lead_lone, self) == 2
+            && let Some(partner) = self.step_no_wrap(a, 1)
+        {
+            turn.push(partner);
         }
         turn
     }

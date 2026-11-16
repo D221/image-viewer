@@ -20,10 +20,10 @@ impl MyApp {
     pub(crate) fn set_gallery_order(&mut self, files: Vec<PathBuf>) {
         let current = self.gallery.current().map(|p| p.to_path_buf());
         self.gallery.files = files;
-        if let Some(c) = current {
-            if let Some(i) = self.gallery.files.iter().position(|p| p == &c) {
-                self.gallery.index = i;
-            }
+        if let Some(c) = current
+            && let Some(i) = self.gallery.files.iter().position(|p| p == &c)
+        {
+            self.gallery.index = i;
         }
     }
 

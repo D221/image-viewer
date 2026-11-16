@@ -79,7 +79,7 @@ fn both_ridges_reach_the_bottom_of_the_frame() {
     assert!(img.get_pixel(128, bottom).0[3] > 8, "test setup: row {bottom} is outside the badge");
     let is = |x: u32, want: [u8; 3]| {
         let p = img.get_pixel(x, bottom).0;
-        &p[..3] == &want
+        p[..3] == want
     };
     let back = (0..256).any(|x| is(x, [0x6E, 0x88, 0xA6]));
     let front = (0..256).any(|x| is(x, [0x2E, 0x42, 0x57]));

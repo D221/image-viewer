@@ -112,11 +112,7 @@ impl MyApp {
                         Self::sorted_scan(&folder, config.sort, config.sort_descending, recursive)
                     }
                 },
-                _ => {
-                    let files =
-                        Self::sorted_scan(&folder, config.sort, config.sort_descending, recursive);
-                    files
-                }
+                _ => Self::sorted_scan(&folder, config.sort, config.sort_descending, recursive),
             };
             gallery.index = image_viewer::startup_index(
                 &files,
@@ -427,31 +423,31 @@ impl MyApp {
             // side by side. The fit modes are respected upstream of this
             // (their own arrival rules run after), so this only ever answers
             // where no mode already does.
-            if self.config.remember_view {
-                if let Some(out) = self.pan_key.clone() {
-                    self.views.remember(
-                        out,
-                        SavedView {
-                            fit: self.view.fit,
-                            scale: self.view.scale,
-                            offset: self.view.offset.into(),
-                        },
-                    );
-                }
+            if self.config.remember_view
+                && let Some(out) = self.pan_key.clone()
+            {
+                self.views.remember(
+                    out,
+                    SavedView {
+                        fit: self.view.fit,
+                        scale: self.view.scale,
+                        offset: self.view.offset.into(),
+                    },
+                );
             }
             self.pan_key = self.cur.clone();
             self.view.offset = Vec2::ZERO;
-            if self.config.remember_view {
-                if let Some(key) = self.cur.clone() {
-                    let arriving = image_viewer::arriving_view(
-                        self.views.restore(&key),
-                        self.view.fit,
-                        self.view.scale,
-                    );
-                    self.view.fit = arriving.fit;
-                    self.view.scale = arriving.scale;
-                    self.view.offset = arriving.offset.into();
-                }
+            if self.config.remember_view
+                && let Some(key) = self.cur.clone()
+            {
+                let arriving = image_viewer::arriving_view(
+                    self.views.restore(&key),
+                    self.view.fit,
+                    self.view.scale,
+                );
+                self.view.fit = arriving.fit;
+                self.view.scale = arriving.scale;
+                self.view.offset = arriving.offset.into();
             }
         }
         // Preloading hit rate: the new image already had a preview, so the
@@ -687,7 +683,7 @@ impl MyApp {
         // `archive_edge` above.
         if forward
             && self.zip_archive.is_none()
-            && self.gallery.current().map(|p| is_archive_path(p)).unwrap_or(false)
+            && self.gallery.current().map(is_archive_path).unwrap_or(false)
         {
             return self.enter_archive_if_present(ctx);
         }

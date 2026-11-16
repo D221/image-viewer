@@ -7,6 +7,9 @@ use crate::*;
 
 impl MyApp {
     /// Handle the crop gesture and draw the crop frame with its dim bands.
+    // The render pass threads this many values through; a params struct would
+    // be a larger refactor than the function.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn central_crop(
         &mut self,
         ui: &mut egui::Ui,

@@ -121,9 +121,7 @@ pub fn scan_folder(folder: &Path) -> Vec<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(folder) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_dir() {
-                files.push(p);
-            } else if p.is_file() && is_browsable(&p) {
+            if p.is_dir() || (p.is_file() && is_browsable(&p)) {
                 files.push(p);
             }
         }

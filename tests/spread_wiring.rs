@@ -84,7 +84,7 @@ fn block_after<'a>(src: &'a str, marker: &str) -> &'a str {
 }
 
 /// The text between a call's `(` and its matching `)`, starting from the call's own name.
-fn call_args<'a>(src: &'a str, at: usize) -> &'a str {
+fn call_args(src: &str, at: usize) -> &str {
     let open = src[at..].find('(').map(|i| at + i).expect("no `(` after the call name");
     let mut depth = 0i32;
     for (i, b) in src.as_bytes()[open..].iter().enumerate() {

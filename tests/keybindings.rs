@@ -170,7 +170,7 @@ fn code_only(src: &str) -> String {
 /// User overrides can move any of these (that is the feature), but the
 /// shipped default a fresh install gets is what this pins.
 fn bound_bare(letter: char) -> bool {
-    KEY_ACTIONS.iter().any(|(_, chord, _)| chord.len() == 1 && chord.chars().next() == Some(letter))
+    KEY_ACTIONS.iter().any(|(_, chord, _)| chord.len() == 1 && chord.starts_with(letter))
 }
 
 /// The bare letters this app allows, and what each one is allowed to do.

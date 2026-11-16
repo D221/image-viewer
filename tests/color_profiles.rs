@@ -358,14 +358,10 @@ fn test_the_conversion_matrix_maps_white_to_white_and_inverts() {
 
     // And it must be invertible, or "convert" is not a round trip.
     let round = image_viewer::mul_mat_ref(m, &image_viewer::srgb_to_p3_matrix());
-    for r in 0..3 {
-        for c in 0..3 {
+    for (r, row) in round.iter().enumerate() {
+        for (c, got) in row.iter().enumerate() {
             let want = if r == c { 1.0 } else { 0.0 };
-            assert!(
-                (round[r][c] - want).abs() < 1e-9,
-                "round trip at [{r}][{c}] is {}, want {want}",
-                round[r][c]
-            );
+            assert!((*got - want).abs() < 1e-9, "round trip at [{r}][{c}] is {got}, want {want}");
         }
     }
 }

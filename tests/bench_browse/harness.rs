@@ -58,7 +58,7 @@ pub fn fixture_dir_at(n: usize, w: u32, h: u32, quality: u8) -> PathBuf {
             for x in 0..w {
                 let g = ((x * 7 + y * 3) % 256) as u8;
                 let b = (((x / 16) as i32 + (y / 16) as i32 + (i as i32 * 5)) % 256) as u8;
-                img.put_pixel(x, y, image::Rgb([(g / 2 + 60) as u8, g, b]));
+                img.put_pixel(x, y, image::Rgb([(g / 2 + 60), g, b]));
             }
         }
         let mut out = std::io::Cursor::new(Vec::new());

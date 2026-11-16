@@ -12,32 +12,32 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// The per-cell cost on the real large scans in `test-images`, skipped if the
-/// directory is absent (it is gitignored, and a test that reads it passes on the
-/// machine that wrote it and dies with a bare `NotFound` on a fresh clone).
-///
-/// This is the number the fixture above deliberately does not try to reproduce: a
-/// synthetic gradient at 6 MP decodes in tens of milliseconds, where a 95 MP
-/// baseline scan takes 700-800 ms, because the cost is the entropy decode and that
-/// is a function of how much real detail is in the file. Skipped, not faked.
-/// =========================================================================
-/// Heuristic benchmark suite
-/// =========================================================================
-///
-/// Each heuristic in the app is a knob that trades off latency, throughput,
-/// memory, and wasted work. This suite sweeps each knob across its plausible
-/// range and reports the impact, so we know which knobs actually matter and
-/// which are decorative.
-///
-/// All arms are run on the same fixture set, interleaved per run, with warm-up
-/// first. The metrics that matter:
-///   * ttfp p50/p95 — time to first pixels, what the user feels
-///   * cache hit — fraction of steps landing on an already-decoded preview
-///   * wasted % — worker time on results nobody wanted by arrival time
-///   * decode s — total worker time spent decoding
-///   * peak MB — peak preview texture memory
-///   * wall s — total wall time
-/// =========================================================================
+// The per-cell cost on the real large scans in `test-images`, skipped if the
+// directory is absent (it is gitignored, and a test that reads it passes on the
+// machine that wrote it and dies with a bare `NotFound` on a fresh clone).
+//
+// This is the number the fixture above deliberately does not try to reproduce: a
+// synthetic gradient at 6 MP decodes in tens of milliseconds, where a 95 MP
+// baseline scan takes 700-800 ms, because the cost is the entropy decode and that
+// is a function of how much real detail is in the file. Skipped, not faked.
+// =========================================================================
+// Heuristic benchmark suite
+// =========================================================================
+//
+// Each heuristic in the app is a knob that trades off latency, throughput,
+// memory, and wasted work. This suite sweeps each knob across its plausible
+// range and reports the impact, so we know which knobs actually matter and
+// which are decorative.
+//
+// All arms are run on the same fixture set, interleaved per run, with warm-up
+// first. The metrics that matter:
+//   * ttfp p50/p95 — time to first pixels, what the user feels
+//   * cache hit — fraction of steps landing on an already-decoded preview
+//   * wasted % — worker time on results nobody wanted by arrival time
+//   * decode s — total worker time spent decoding
+//   * peak MB — peak preview texture memory
+//   * wall s — total wall time
+// =========================================================================
 
 /// Parameterized browse: same as `browse` but with explicit heuristic knobs
 /// instead of the compiled-in constants.
@@ -271,6 +271,7 @@ fn evict_parametric(
 
 /// Take delivery with configurable cache (same as `take_delivery` but inline
 /// for the parametric browse).
+#[allow(clippy::too_many_arguments)]
 fn take_delivery_parametric(
     s: &mut Session,
     rx: &std::sync::mpsc::Receiver<Msg>,
@@ -319,6 +320,7 @@ fn take_delivery_parametric(
 }
 
 /// Run one parametric browse config and print a row.
+#[allow(clippy::too_many_arguments)]
 fn browse_parametric_row(
     dir: &std::path::Path,
     hold_ms: u64,
@@ -525,12 +527,12 @@ fn heuristic_sweep() {
 
 pub fn full_dwell_sweep(dir: &std::path::Path, runs: usize) {
     let n: usize = std::env::var("IV_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
-    let files = files(&dir);
+    let files = files(dir);
     assert!(files.len() >= n, "fixture is short: {} of {n}", files.len());
 
     // Warm-up
     let _ =
-        browse_parametric(&dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
+        browse_parametric(dir, 60, RADIUS, PRELOAD_BUDGET_BYTES, PREVIEW_DIM, CAP, FULL_DWELL_MS);
 
     eprintln!(
         "\n  Full dwell sweep: {} pictures at {W}x{H}, {} images, median of {} runs",
@@ -556,7 +558,7 @@ pub fn full_dwell_sweep(dir: &std::path::Path, runs: usize) {
 
     for full_dwell_ms in [0u64, 60, 120, 250, 500, 1000] {
         browse_parametric_row(
-            &dir,
+            dir,
             30,
             RADIUS,
             PRELOAD_BUDGET_BYTES,

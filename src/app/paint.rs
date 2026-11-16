@@ -14,6 +14,9 @@ use crate::*;
 ///
 /// Free function (not a method) so `gallery_grid` can hand out split borrows
 /// and avoid cloning the whole file list every frame.
+// The render pass threads this many values through; a params struct would
+// be a larger refactor than the function.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn grid_cell(
     ui: &mut egui::Ui,
     path: &Path,
@@ -272,7 +275,7 @@ pub(crate) fn make_checker_texture(ctx: &Context) -> TextureHandle {
     let mut pixels = Vec::with_capacity(N * N);
     for y in 0..N {
         for x in 0..N {
-            let even = ((x / SQ) + (y / SQ)) % 2 == 0;
+            let even = ((x / SQ) + (y / SQ)).is_multiple_of(2);
             let g = if even { 82 } else { 118 };
             pixels.push(Color32::from_rgb(g, g, g));
         }
@@ -396,7 +399,10 @@ pub(crate) fn make_tile(
     for y in y0..y0 + h {
         let row = &data.rgba[y * stride + x0 * 4..y * stride + (x0 + w) * 4];
         pixels.extend(
-            row.chunks_exact(4).map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])),
+            row.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])),
         );
     }
     let img = ColorImage { size: [w, h], source_size: egui::vec2(w as f32, h as f32), pixels };

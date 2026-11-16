@@ -101,10 +101,10 @@ fn smooth_is_not_the_default_because_it_moves_energy_between_pitches() {
             continue;
         }
         let ratio = b / a;
-        if worst.map_or(true, |w| ratio > w.0) {
+        if worst.is_none_or(|w| ratio > w.0) {
             worst = Some((ratio, p, a, b));
         }
-        if best.map_or(true, |w| ratio < w.0) {
+        if best.is_none_or(|w| ratio < w.0) {
             best = Some((ratio, p, a, b));
         }
     }
@@ -249,7 +249,7 @@ fn a_flat_field_survives_the_prefilter_unchanged() {
     // `the_prefilter_does_not_darken_a_near_nyquist_tone`.
     for v in [0u8, 1, 64, 128, 200, 254, 255] {
         let mut rgba = vec![0u8; (PROBE_W as usize) * (PROBE_H as usize) * 4];
-        for p in rgba.chunks_exact_mut(4) {
+        for p in rgba.as_chunks_mut::<4>().0 {
             p.copy_from_slice(&[v, v, v, 255]);
         }
         let src = image_viewer::ImageData {

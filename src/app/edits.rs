@@ -273,11 +273,11 @@ impl MyApp {
         // crop mode with the button still held would otherwise carry a frame
         // from before the mode change into the new one.
         self.crop_drag = None;
-        if !self.crop_mode {
-            if let Some(p) = self.cur.clone() {
-                self.history.record(&p.path, self.edits.get(&p.path));
-                self.edits.clear_crop(&p.path);
-            }
+        if !self.crop_mode
+            && let Some(p) = self.cur.clone()
+        {
+            self.history.record(&p.path, self.edits.get(&p.path));
+            self.edits.clear_crop(&p.path);
         }
         ctx.request_repaint();
     }

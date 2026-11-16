@@ -69,14 +69,14 @@ fn leaving_an_archive_does_not_re_enter_it() {
     // Leaving arms no guard — it just builds the parent gallery with the
     // cursor on the archive. `goto` no longer enters, so no guard is needed.
     assert!(
-        leave.contains("just_left") == false,
+        !leave.contains("just_left"),
         "leave_archive no longer needs a one-shot because goto does not enter"
     );
 
     let goto = fn_body(&src, "fn goto(&mut self, ctx: &Context)").expect("goto");
     // Goto must not enter archives at all — the one-shot is gone because
     // the whole branch is gone.
-    assert!(goto.contains("just_left") == false, "goto must not contain the old one-shot");
+    assert!(!goto.contains("just_left"), "goto must not contain the old one-shot");
     // The body shows the position logic without any archive entry: it sets
     // `is_nav`, `lat.begin`, then `snap_to_turn_anchor` — no `open_archive`.
     // The absence of an archive branch *is* the test.
@@ -108,7 +108,7 @@ fn the_show_archives_toggle_is_wired() {
     );
     let flat = squash(&src);
     let before = flat.find("set_show_archives(config.show_archives)").expect("start-up call");
-    let scan = flat.find("letfiles=Self::sorted_scan(").expect("the start-up scan");
+    let scan = flat.find("letfiles=matchprefetched.take(){").expect("the start-up scan");
     assert!(
         before < scan,
         "the setting has to be set before the scan that reads it, or the first \
@@ -150,7 +150,7 @@ fn archives_are_entered_explicitly_and_never_decoded() {
         goto.contains("self.snap_to_turn_anchor()"),
         "goto runs the position setup without an archive branch"
     );
-    assert!(goto.contains("open_archive") == false, "goto must not call open_archive");
+    assert!(!goto.contains("open_archive"), "goto must not call open_archive");
 
     // Entry is in `step` (arrowing) and `pick_grid_selection` (grid).
     let step = fn_body(&src, "fn step(&mut self, ctx: &Context, forward: bool)").expect("step");

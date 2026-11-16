@@ -136,25 +136,25 @@ impl MyApp {
         // Read once here and nowhere else. The count is a header read on the UI
         // thread, which is why it is bounded to a header; putting it in the
         // per-frame path of every panel would be a way to make start-up slow.
-        if let Some(cur) = self.gallery.current() {
-            if is_archive_path(cur) {
-                match archive_image_count(cur) {
-                    // Spelling the key rather than drawing an arrow: egui's
-                    // default font subset has no `→` glyph and renders it as an
-                    // empty square, which reads as a missing character rather
-                    // than as a key.
-                    Some(n) => s.push_str(&format!(" - {n} images, press right to open")),
-                    None => s.push_str(" - unreadable container"),
-                }
+        if let Some(cur) = self.gallery.current()
+            && is_archive_path(cur)
+        {
+            match archive_image_count(cur) {
+                // Spelling the key rather than drawing an arrow: egui's
+                // default font subset has no `→` glyph and renders it as an
+                // empty square, which reads as a missing character rather
+                // than as a key.
+                Some(n) => s.push_str(&format!(" - {n} images, press right to open")),
+                None => s.push_str(" - unreadable container"),
             }
         }
         // "page 3/12" in the readout as well as the title, because the title bar is
         // not always visible and this is where the position already is.
         let pages = self.gallery.pages_in_current();
-        if pages > 1 {
-            if let Some(k) = &self.shown {
-                s += &format!(" - page {}/{}", k.page + 1, pages);
-            }
+        if pages > 1
+            && let Some(k) = &self.shown
+        {
+            s += &format!(" - page {}/{}", k.page + 1, pages);
         }
         if let Some((shown_key, pv)) =
             self.shown.as_ref().and_then(|k| self.previews.get(k).map(|pv| (k, pv)))
@@ -189,10 +189,10 @@ impl MyApp {
                         s += &format!(" - full {} ms", f.load_ms)
                     }
                     _ => {
-                        if let Some(sh) = &self.shown {
-                            if self.needs_full(sh) {
-                                s += " - full-res loading…";
-                            }
+                        if let Some(sh) = &self.shown
+                            && self.needs_full(sh)
+                        {
+                            s += " - full-res loading…";
                         }
                     }
                 }

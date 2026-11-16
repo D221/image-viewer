@@ -328,7 +328,7 @@ fn the_last_turn_is_the_same_with_looping_on_and_off_and_an_empty_gallery_has_no
         // The expected answer, read off the flat sequence: the anchor of the last turn
         // is the last page, or the page before it when that pair holds.
         let flat: usize = counts.iter().map(|c| *c as usize).sum();
-        let expected = if flat % 2 == 0 {
+        let expected = if flat.is_multiple_of(2) {
             flat_position(&unlooped, flat - 2)
         } else {
             flat_position(&unlooped, flat - 1)

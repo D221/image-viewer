@@ -163,7 +163,7 @@ fn print_prefilter_pins() {
     let dither = probe_dither(PROBE_W, PROBE_H);
     let flat = probe_resize(&{
         let mut rgba = vec![0u8; (PROBE_W as usize) * (PROBE_H as usize) * 4];
-        for p in rgba.chunks_exact_mut(4) {
+        for p in rgba.as_chunks_mut::<4>().0 {
             p.copy_from_slice(&[128, 128, 128, 255]);
         }
         image_viewer::ImageData {
@@ -788,7 +788,7 @@ fn smooth_costs_edge_sharpness_and_the_cost_is_bounded() {
 #[test]
 fn fast_is_exactly_the_pre_existing_kernel_width() {
     assert_eq!(image_viewer::FAST_STRENGTH, 1.0);
-    assert!(image_viewer::SMOOTH_STRENGTH > image_viewer::FAST_STRENGTH);
+    const _: () = assert!(image_viewer::SMOOTH_STRENGTH > image_viewer::FAST_STRENGTH);
 
     let _guard = FILTER_GLOBALS.lock().unwrap_or_else(|e| e.into_inner());
     let was = image_viewer::downscale_strength();

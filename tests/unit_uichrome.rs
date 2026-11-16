@@ -266,10 +266,7 @@ fn the_bottom_bar_menus_carry_the_buttons_actions() {
         let block_end = menus[i + 1..]
             .iter()
             .find_map(|next| {
-                let j = bar[start + 1..]
-                    .find(&format!("ui.menu_button(\"{next}"))
-                    .map(|j| start + 1 + j);
-                j
+                bar[start + 1..].find(&format!("ui.menu_button(\"{next}")).map(|j| start + 1 + j)
             })
             .unwrap_or_else(|| bar.find(r#"ui.label("keys")"#).unwrap_or(bar.len()));
         let block = &bar[start..block_end];

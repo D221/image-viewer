@@ -28,7 +28,7 @@ impl MyApp {
 
         for m in msgs {
             match m {
-                Msg::Preview { key, result } => match result {
+                Msg::Preview { key, result } => match *result {
                     Ok(p) => {
                         let name = key.path.file_name().unwrap_or_default().to_string_lossy();
                         let px = (p.image.size[0] as u32, p.image.size[1] as u32);
@@ -296,10 +296,10 @@ impl MyApp {
                         // file resolve to the same directory, so the second
                         // drop's answer can be handled first and this one's
                         // directory is the one on screen.
-                        if let Ok(c) = result {
-                            if Some(&c.file) != self.drop_copy.as_ref().map(|d| &d.file) {
-                                image_viewer::forget_drop_copy(&c);
-                            }
+                        if let Ok(c) = result
+                            && Some(&c.file) != self.drop_copy.as_ref().map(|d| &d.file)
+                        {
+                            image_viewer::forget_drop_copy(&c);
                         }
                         continue;
                     }
@@ -451,56 +451,51 @@ impl MyApp {
         // Adopt the full image that came with the preview's decode pass
         // (single-pass files), whether it just arrived or was preloaded
         // while the user was on a neighbouring image.
-        if let Some(pv) = self.previews.get(&cur) {
-            if let Some(data) = &pv.full {
-                if self.full.as_ref().map_or(true, |f| !f.is(&cur)) {
-                    let load_ms = data.load_time.as_millis() as u64;
-                    self.full = Some(FullImage {
-                        path: cur.path.clone(),
-                        page: cur.page,
-                        data: Arc::clone(data),
-                        tiles: HashMap::new(),
-                        load_ms,
-                        exif_tag: pv.exif_tag,
-                    });
-                }
-            }
+        if let Some(pv) = self.previews.get(&cur)
+            && let Some(data) = &pv.full
+            && self.full.as_ref().is_none_or(|f| !f.is(&cur))
+        {
+            let load_ms = data.load_time.as_millis() as u64;
+            self.full = Some(FullImage {
+                path: cur.path.clone(),
+                page: cur.page,
+                data: Arc::clone(data),
+                tiles: HashMap::new(),
+                load_ms,
+                exif_tag: pv.exif_tag,
+            });
         }
         // Adopt the animation that came with the preview's decode pass
         // (animated GIFs), including preloaded neighbours.
-        if let Some(pv) = self.previews.get(&cur) {
-            if let Some(anim) = &pv.anim {
-                if self.anim.as_ref().map_or(true, |a| a.path != cur.path) {
-                    let f0 = &anim.frames[0];
-                    let image = ColorImage::from_rgba_unmultiplied(
-                        [f0.width as usize, f0.height as usize],
-                        &f0.rgba,
-                    );
-                    let tex = ctx.load_texture(
-                        "anim",
-                        image,
-                        content_texture_options(self.config.pixel_art),
-                    );
-                    self.anim = Some(AnimView {
-                        path: cur.path.clone(),
-                        anim: Arc::clone(anim),
-                        tex,
-                        start: Instant::now(),
-                        last_index: usize::MAX,
-                        paused: None,
-                    });
-                }
-            }
+        if let Some(pv) = self.previews.get(&cur)
+            && let Some(anim) = &pv.anim
+            && self.anim.as_ref().is_none_or(|a| a.path != cur.path)
+        {
+            let f0 = &anim.frames[0];
+            let image = ColorImage::from_rgba_unmultiplied(
+                [f0.width as usize, f0.height as usize],
+                &f0.rgba,
+            );
+            let tex =
+                ctx.load_texture("anim", image, content_texture_options(self.config.pixel_art));
+            self.anim = Some(AnimView {
+                path: cur.path.clone(),
+                anim: Arc::clone(anim),
+                tex,
+                start: Instant::now(),
+                last_index: usize::MAX,
+                paused: None,
+            });
         }
         // `self.full` holds one page, and the picture on screen is `shown`. Dropping it
         // whenever those two name different pages is what keeps a document's tile
         // buffer from being page 0's while page 3 is on screen — `decode_page`
         // returns no full buffer for a page past the first, so without the page in
         // the comparison the two are the same file and the drop never fired.
-        if let Some(s) = &self.shown {
-            if self.full.as_ref().is_some_and(|f| !f.is(s)) {
-                self.full = None;
-            }
+        if let Some(s) = &self.shown
+            && self.full.as_ref().is_some_and(|f| !f.is(s))
+        {
+            self.full = None;
         }
     }
 
