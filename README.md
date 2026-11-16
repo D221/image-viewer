@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/app-icon-preview.png" alt="Image Viewer" width="120">
+<img src="assets/app-icon.png" alt="Image Viewer" width="120">
 
 # Image Viewer
 
@@ -17,6 +17,7 @@ are already in memory.
 ![Formats](https://img.shields.io/badge/formats-13%2B-blue?style=for-the-badge)
 ![Network](https://img.shields.io/badge/network-none-brightgreen?style=for-the-badge)
 ![UI thread](https://img.shields.io/badge/UI%20thread-never%20decodes-44cc11?style=for-the-badge)
+![AI-assisted](https://img.shields.io/badge/development-AI--assisted-7c3aed?style=for-the-badge)
 
 <p>
   <a href="#quick-start"><b>Quick start</b></a> &nbsp;·&nbsp;
@@ -848,6 +849,17 @@ The short version:
   image stays sharp, which briefly costs some CPU.
 
 </details>
+
+---
+
+<a name="ai-disclosure"></a>
+
+## 🤖 AI disclosure
+
+AI coding agents were used during development. Parts of the implementation,
+tests and documentation may be AI-generated or AI-assisted, and were reviewed
+by the author. The benchmarks and measurements quoted in this README were
+produced by running the code in this repository.
 
 ---
 

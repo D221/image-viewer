@@ -12,5 +12,5 @@ fn main() {
     for &s in &image_viewer::icon::SIZES {
         println!("  {s:>3}px  fills {:.1}% of the bitmap", image_viewer::icon::coverage(s) * 100.0);
     }
-    println!("wrote {}/app.ico and app-icon-preview.png", dir.display());
+    println!("wrote {}/app.ico, app-icon-preview.png and app-icon.png", dir.display());
 }

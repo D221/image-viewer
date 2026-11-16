@@ -206,5 +206,9 @@ pub fn write_assets(dir: &std::path::Path) -> std::io::Result<()> {
         x += s + pad;
     }
     let _ = sheet.save(dir.join("app-icon-preview.png"));
+    // A single, transparent 256 px icon for the README and web use. The contact
+    // sheet above is for eyeballing the artwork; a 120 px <img> pointed at it
+    // shows all seven sizes shrunk into one another.
+    let _ = render(256).save(dir.join("app-icon.png"));
     Ok(())
 }
