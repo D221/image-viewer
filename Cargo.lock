@@ -2191,7 +2191,7 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tiff",
  "trash",
  "turbojpeg",
