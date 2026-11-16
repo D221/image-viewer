@@ -84,7 +84,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 proptest = "1"
 tempfile = "3"
 # For the hand-built APNG fixture in tests/multiframe.rs: chunk CRCs and the
