@@ -1,37 +1,98 @@
+<div align="center">
+
+<img src="assets/app-icon-preview.png" alt="Image Viewer" width="120">
+
 # Image Viewer
 
-A fast desktop image viewer for Windows, written in Rust with
-[egui/eframe](https://github.com/emilk/egui). Built around one rule: **the UI
-thread never decodes anything** — every decode, thumbnail and full-resolution
-tile happens on a small worker pool, and the UI only ever paints textures that
+**A fast, native-feeling image viewer for Windows.**
+
+Every decode, thumbnail and full-resolution tile runs on a worker pool —
+the UI thread never decodes, so the window only ever paints pixels that
 are already in memory.
 
-```
-cargo run --release
-```
+![License](https://img.shields.io/badge/license-MIT-2f81f7?style=for-the-badge)
+![Platform](https://img.shields.io/badge/platform-Windows-0078d6?style=for-the-badge&logo=windows&logoColor=white)
+![Rust](https://img.shields.io/badge/rust-edition%202024-dea584?style=for-the-badge&logo=rust&logoColor=white)
+![Renderer](https://img.shields.io/badge/renderer-glow%20%28OpenGL%29-8bc34a?style=for-the-badge)
+![Formats](https://img.shields.io/badge/formats-13%2B-blue?style=for-the-badge)
+![Network](https://img.shields.io/badge/network-none-brightgreen?style=for-the-badge)
+![UI thread](https://img.shields.io/badge/UI%20thread-never%20decodes-44cc11?style=for-the-badge)
+
+<p>
+  <a href="#quick-start"><b>Quick start</b></a> &nbsp;·&nbsp;
+  <a href="#features"><b>Features</b></a> &nbsp;·&nbsp;
+  <a href="#shortcuts"><b>Shortcuts</b></a> &nbsp;·&nbsp;
+  <a href="#settings"><b>Settings</b></a> &nbsp;·&nbsp;
+  <a href="#build"><b>Build from source</b></a> &nbsp;·&nbsp;
+  <a href="#license"><b>License</b></a>
+</p>
+
+</div>
 
 ---
 
-## Features
+<a name="why"></a>
+
+## ✨ Why this one
+
+- **Instant next / previous.** One decode per image, neighbour preloading,
+  and full-resolution tiles that stream in behind a fast preview.
+- **Edits that never touch your files.** Turn, mirror and crop as much as
+  you like; nothing is written until you press `Ctrl+S`, and that writes a
+  *new* file beside the original.
+- **Genuinely lossless JPEG editing.** Turns and mirrors are applied to the
+  DCT coefficients — the compressed data is moved, not re-encoded.
+- **Comics and manga.** `.cbz` / `.zip` / `.7z` / `.rar` open like folders,
+  and manga mode pairs pages into turns with right-to-left support.
+- **Zero setup.** One exe, no account, no telemetry, no network calls, and
+  a per-user file association if you want one.
+
+---
+
+<a name="quick-start"></a>
+
+## 🚀 Quick start
+
+No installer. Build it once, then run it:
+
+```powershell
+cargo build --release
+target\release\image-viewer.exe C:\photos
+```
+
+> **No prebuilt binaries yet.** A release build needs the Rust toolchain and
+> the MSVC C++ build tools — see [Build from source](#build).
+
+Point it at a picture, a folder, or a comic:
+
+```
+image-viewer.exe C:\photos
+image-viewer.exe C:\comics\vol1.cbz
+```
+
+Drag a file, folder or archive onto the window to open it. To add the app to
+Windows' **Open with** list (per user, no admin rights):
+
+```
+image-viewer.exe --register
+```
+
+<p>
+  <a href="#build"><b>Build instructions &amp; requirements</b></a> &nbsp;·&nbsp;
+  <a href="#command-line"><b>All command-line flags</b></a> &nbsp;·&nbsp;
+  <a href="#caveats"><b>Known caveats</b></a>
+</p>
+
+---
+
+<a name="features"></a>
+
+## 🖼️ Features
 
 ### Formats
 
-Content-based detection by magic bytes, so misnamed files still open (a PNG
-saved as `.jpg` is fine).
-
-Not every format the `image` crate can decode is enabled, and the reasons are
-worth stating because they are not all "we forgot":
-
-| Skipped | Why |
-|---|---|
-| Targa (`.tga`) | **No magic bytes at all.** Detection here is by content, so a Targa is unidentifiable — it fails as `Unknown`. Supporting it would mean putting the file extension back into the decode path, which is the one thing this design avoids |
-| DDS | Decode-only in the crate, so no fixture can be generated with the crate that decodes it — untestable with it. Also a game-texture container |
-| OpenEXR, Radiance HDR | Linear-light floating point. Through an 8-bit sRGB surface with no tone mapping they come out washed out and blown out, which is *worse* than refusing: the file is fine and the viewer is wrong, and you cannot tell which |
-| PNM (`.pbm`/`.pgm`/`.ppm`/`.pam`), farbfeld | A bitmap-mask family and a format that mostly lives in Rust demos. They would pad the file-association list for no real use |
-| AVIF (via `image`) | Already handled, and better, by the `heic` crate, which also reads the container's `colr` box. A second, weaker decoder for a format already covered |
-
-The line is not "can the crate decode it" but "can we display it *correctly*, and
-can we still test it". QOI clears both.
+Detection is by **magic bytes, not extension** — a PNG saved as `.jpg` still
+opens correctly.
 
 | Format | Decoder |
 |---|---|
@@ -40,52 +101,56 @@ can we still test it". QOI clears both.
 | TIFF, BMP, ICO, QOI | `image` crate (multi-page TIFF past page 1 via the `tiff` crate) |
 | JPEG XL | `jxl-oxide` |
 | HEIC, HEIF, AVIF | `heic` |
+| SVG | `resvg`, rendered at the panel's target size |
 
 EXIF orientation is applied on load (JPEG only — the `heic` crate already
 applies HEIF container transforms, so applying the tag again would
 double-rotate).
 
+<details>
+<summary><b>Which formats are deliberately not supported, and why</b></summary>
+
+Not every format the `image` crate can decode is enabled, and the reasons are
+worth stating because they are not all "we forgot":
+
+| Skipped | Why |
+|---|---|
+| Targa (`.tga`) | **No magic bytes at all.** Detection here is by content, so a Targa is unidentifiable — it fails as `Unknown`. Supporting it would mean putting the file extension back into the decode path, which is the one thing this design avoids |
+| DDS | Decode-only in the crate, so a fixture cannot be generated with the crate that decodes it — untestable with it. Also a game-texture container |
+| OpenEXR, Radiance HDR | Linear-light floating point. Through an 8-bit sRGB surface with no tone mapping they come out washed out and blown out, which is *worse* than refusing: the file is fine and the viewer is wrong, and you cannot tell which |
+| PNM (`.pbm`/`.pgm`/`.ppm`/`.pam`), farbfeld | A bitmap-mask family and a format that mostly lives in Rust demos. They would pad the file-association list for no real use |
+| AVIF (via `image`) | Already handled, and better, by the `heic` crate, which also reads the container's `colr` box. A second, weaker decoder for a format already covered |
+
+The line is not "can the crate decode it" but "can we display it *correctly*,
+and can we still test it". QOI and SVG clear both.
+
+</details>
+
 ### Viewing
 
 - Fit-to-window on load, `F` to re-fit, `1` for exactly 1:1
-- Zoom with the wheel, pan by dragging. The status bar shows the zoom as a
+- Zoom with the wheel, pan by dragging; the status bar shows the zoom as a
   percentage of 1:1, so it means the same whatever the window is doing
 - Progressive refinement: a cheap preview first, then full-resolution
-  **1024px tiles** streamed in over it (up to 8 new tiles per frame) so
-  zooming in never blocks
+  **1024 px tiles** streamed in over it, so zooming in never blocks
 - Neighbour preloading in both directions
 - Animated playback with per-frame delays — GIF, APNG and animated WebP
-- **Multi-page TIFF**: `←` / `→` walk the pages of a document before moving to the
-  next file, and the position shows in the title bar and the status line
+- **Multi-page TIFF** — `←` / `→` walk the pages of a document before moving
+  to the next file, and the position shows in the title bar and status line
   (`page 3/12`). Stepping back from page 1 lands on the **last** page of the
-  previous file, so going backwards never costs two presses per document
+  previous file
 - Transparency checkerboard backdrop
-- **Rotate ⟲ / ⟳**, **Mirror H / V**, **Reset turn** — quarter turns and mirrors,
-  **per image**, re-fitting each time. Turning one photo does not turn the next,
-  and going back finds yours still turned — the behaviour every real viewer has.
-  Turn and mirror *compose* rather than living in separate counters, because they
-  do not commute: turning then mirroring is a diagonal mirror, which is neither
-  operation. Mirroring twice gets you back where you started. A view transform by
-  default: nothing is written to the file. **Save transformed…** (bottom bar's
-  Save menu, or `Ctrl+S`) writes a new file beside the original with the transform
-  baked in, losslessly (see below)
-
-**Undo (`Ctrl+Z`/`Ctrl+Shift+Z`)** covers the view transforms only - turn, mirror, reset-turn, crop and clear-crop. It is a per-image history (undo means "undo on this picture"), and it never writes to disk. Zoom, pan, settings changes and ratings are not undoable.
-- **Crop** (`C`) — drag on the image to frame a crop. The frame is drawn over the whole
-  picture rather than the picture being cut on screen, so turning and mirroring
-  still apply to the full frame, and the frame follows the image if you turn it
-  afterwards. It is snapped to the JPEG block grid (8 or 16 px) because that is
-  where a lossless crop can actually land — you get up to one block of *extra*
-  picture rather than up to one block cut off the edge you framed, and the frame
-  you see is the frame that gets saved. **Clear crop** removes it and keeps any
-  rotation, and so does leaving crop mode — press `C`, drag, press `C`, and you are
-  back where you were. While crop mode is on, dragging pans no longer
-- **Holding `Shift` frames a perfect 1:1 square**, whatever the drag was doing.
-  **Settings → Crop shape** picks a shape for every drag instead: 1:1, 16:9, 9:16,
-  4:3, 3:4, 3:2, 2:3, or **Same as image**, which follows the picture as displayed —
-  so a 3:2 photo you have turned on its side gets a 2:3 frame. The default is
-  Free, and an existing frame keeps whatever shape it has
-
+- **Rotate ⟲ / ⟳**, **Mirror H / V**, **Reset turn** — quarter turns and
+  mirrors, **per image**, re-fitting each time. Turn and mirror *compose*
+  rather than living in separate counters, because they do not commute.
+  Nothing is written to the file until you save
+- **Crop** (`C`) — drag on the image to frame a crop. The frame follows the
+  picture if you turn it afterwards, and is snapped to the JPEG block grid so
+  the lossless crop lands where it can. Hold `Shift` for a perfect 1:1
+  square, or pick a shape (1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, same as
+  image) in Settings → Crop shape
+- **Undo** (`Ctrl+Z` / `Ctrl+Shift+Z`) — per-image history for turns, mirrors
+  and crops; it never writes to disk
 - Folder watcher: new, deleted and re-saved files are picked up immediately
   (OS notifications; a folder that refuses a watch falls back to a 2 s check)
 
@@ -93,37 +158,34 @@ double-rotate).
 
 A scrollable thumbnail grid of everything in the current folder or archive.
 
-- Thumbnails decode lazily, only for cells that are actually visible, at the
-  lowest job priority — scrolling a 2000-image folder stays responsive
-- Where the camera wrote an **embedded EXIF thumbnail**, that is used instead of
-  decoding the file at all — measured **16–40× faster** on real JPEGs
-  (631 ms → 16 ms). The embedded copy is ~160 px, so cells are marginally softer
-  than a real decode, which is the trade every photo browser makes. Files whose
-  thumbnail rotation can't be determined from the aspect ratio just decode
-  normally, rather than risk showing sideways photos
+- Thumbnails decode lazily, only for cells that are actually visible
+- Where the camera wrote an **embedded EXIF thumbnail**, that is used instead
+  of decoding the file at all — **16–40× faster** on real JPEGs
 - **If you have already browsed the folder in Explorer, its cells come from
-  Explorer's own thumbnail cache** — 6–7 ms each against 595–709 ms to decode the
-  same photographs. The app only *reads* that cache: it never asks Windows to
-  make a thumbnail, so a folder Explorer has never seen simply falls back to
-  decoding (after a few quick misses, so the fallback costs nothing). A cached
-  cell that is too small for the cell is refused rather than stretched
-- **Arrows** move a selection (Left/Right by one cell, Up/Down by one row,
-  Home/End to the ends); **Enter** opens the highlighted image; a click opens
-  whatever you clicked
-- Browsing the grid does *not* change the image on screen, so arrowing through
-  a big folder costs no re-decodes
-- The selection scrolls itself into view only when it would otherwise be
-  off-screen
+  Explorer's own thumbnail cache** — 6–7 ms each against 595–709 ms to decode
+  the same photographs. The app only reads that cache; it never asks Windows
+  to make a thumbnail
+- **Arrows** move a selection, **Enter** opens the highlighted image, and a
+  click opens whatever you clicked. Browsing the grid does not change the
+  image on screen, so arrowing through a big folder costs no re-decodes
 - `Esc` closes the grid
 
 ### Filtering (`/`)
 
-Press `/` to focus a filter box and narrow the folder to matching file names — a
-case-insensitive substring match, and the folder is scanned flat, so there is no
-path component to match. `Esc` clears it. The filter applies to **the whole
-viewer, not just the grid** — next/previous walk only what is left, so a filtered
-folder is a gallery of its own. Single-key shortcuts stand down while you type,
-so `g` in the filter box types a `g` rather than opening the grid.
+Press `/` to focus a filter box and narrow the folder to matching file names —
+case-insensitive substring match. `Esc` clears it. The filter applies to **the
+whole viewer**, not just the grid: next/previous walk only what is left, so a
+filtered folder is a gallery of its own. Single-key shortcuts stand down while
+you type.
+
+The filter also understands ratings:
+
+| Query | Matches |
+|---|---|
+| `stars:4`, `stars:4+` | at least 4 stars |
+| `flagged` / `unflagged` | the pick flag |
+| `tag:holiday` | case-insensitive substring of the tag list |
+| anything else | file-name substring |
 
 The filter is deliberately **not** remembered between sessions. One that
 silently survived a restart would hide files with no obvious way back.
@@ -131,154 +193,58 @@ silently survived a restart would hide files with no obvious way back.
 ### Archives
 
 Opening a `.zip`, `.cbz`, `.7z` or `.rar` extracts the image entries to a temp
-folder and opens it as a normal gallery, so paging, zooming and the grid all work
-unchanged. The temp folder is reused while the archive is unchanged and
-cleaned up on exit, and on stepping out at either end. Comics are read-only:
-delete/move/copy are refused rather than silently writing into the zip.
+folder and opens it as a normal gallery, so paging, zooming and the grid all
+work unchanged. The temp folder is reused while the archive is unchanged and
+cleaned up on exit and when you step out at either end. Comics are read-only:
+delete / move / copy are refused rather than silently writing into the zip.
 
-Archives are also *listed* in a folder — see [Archives](#archives) below.
+Archives are also **listed in a folder** alongside images, in every sort mode
+and in the grid. Arrow onto one and it *opens* rather than decodes, and
+**both** ends step back out:
 
-### Triage
+- `←` at the archive's first page returns to the folder, cursor on the archive
+- `→` at its last page *continues* on to the next entry — usually the next
+  archive, so a shelf of volumes is one press per volume
 
-| Key | Action |
-|---|---|
-| `Del` | Move to the Recycle Bin (never a hard delete) |
-| — | Move / copy the current image to a chosen folder (buttons; no key, see below) |
-| `E` | Reveal the containing folder in your default file browser |
-| `W` | Set as desktop wallpaper |
-| `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears |
-| `R` | Rescan the folder / reshuffle the sort order |
+Members are flattened: nested folders do not become folders, non-images are
+skipped, and two members that would flatten to the same name are counted once.
 
-Move and Copy are buttons rather than keys because they write to the filesystem.
-`M` and `C` used to be bound to them; `C` is now Crop, which is a pure view
-transform until you explicitly save. The rule the app now follows is that a bare
-letter may only do something that cannot lose data — `Del` is the exception, and it
-goes to the Recycle Bin.
+<details>
+<summary><b>Archive format support and limits</b></summary>
 
-### Metadata
+- **7z and zip read fully. RAR5 reads only uncompressed members** — the Rust
+  RAR reader cannot decompress, so compressed pages are counted as unreadable
+  and skipped rather than shown as broken images. RAR4 is not supported and
+  says so.
+- Archives are extracted to `%TEMP%\image-viewer`, released on leaving and on
+  exit.
+- `Del` refuses on an archive. So does move/copy.
 
-Left panel shows camera make, model and lens, capture date, aperture,
-shutter speed, ISO, focal length, metering mode, flash, colour space and
-orientation. GPS-tagged images also show coordinates and altitude, with a
-clickable **Open in Google Maps** link.
+</details>
 
-It is read only while that panel is on screen. Reading it means reading the whole
-file (the colour profile lives in a segment that has to be found) and it happens
-on the same worker that decodes the picture, so with the panels hidden — F11, or
-`I` — the viewer stops asking for it entirely and gives the time back to the
-image. Leaving fullscreen starts the read again, so the panel is never empty
-when you can see it.
+### Editing & saving
 
-Below the file's own data, a **Histogram** section shows per-channel levels
-for the picture on screen plus black- and white-clipped pixel counts with
-percentages. The levels are counted on the decode worker from the preview
-buffer and carried with it, so the panel draws numbers rather than pixels.
+- **`Ctrl+S`** writes a new file beside the original — `photo.jpg` becomes
+  `photo_rotated.jpg`, `photo_cropped.jpg`, or `photo_copy.jpg` when nothing
+  changed. The original is never modified, so the action is reversible and
+  saving twice accumulates instead of compounding.
+- **`Ctrl+Shift+A`** opens *Save as*: choose the file path, format (`.jpg`,
+  `.png`, `.webp`, `.bmp`, `.tiff`), JPEG quality and a maximum long side. It
+  opens pre-filled with exactly what `Ctrl+S` would write.
+- **`Ctrl+C`** copies the picture exactly as you framed it — cropped, turned
+  and mirrored — onto the clipboard, with no re-compression.
+- **`Ctrl+Shift+S`** saves the same edit at display size.
+- PNG, BMP and TIFF are written losslessly; **WebP, GIF, HEIC and JXL are
+  refused** with a message rather than re-encoded, because that would be a
+  second generation of compression.
 
-### Ratings
+<details>
+<summary><b>How the lossless JPEG path works, and what it costs</b></summary>
 
-Each image carries three rating attributes: a star rating (0-5), a pick flag,
-and a tag list. They are stored in an XMP sidecar beside the file —
-`photo.jpg` keeps its rating in `photo.jpg.xmp` — so the image bytes are never
-touched and the write is atomic. The left pane shows `*` buttons for the stars
-and a Flag checkbox — clicking the lit star clears back to 0, since the row
-has no zero star to press; `+` / `-` nudge the stars and `B` flips the flag (tags are
-edited by other tools and only read here). Ratings are refused inside archives,
-which are read-only. Undo (`Ctrl+Z`) deliberately does not cover ratings: undo
-is per-image over turns, mirrors and crops, while a rating is a value with no
-wrong answer rather than an edit to take back.
-
-The filter box understands ratings as well as names: `stars:N` and `stars:N+`
-(both mean at least N), `flagged` / `unflagged`, and `tag:NAME` (case-insensitive
-substring of the tag list). Anything else stays a file-name substring match.
-
-### Interface
-
-- Browse Folder… / Browse File… dialogs, plus drag-and-drop of a file, folder
-  or archive
-- **A dropped file is copied** into `%TEMP%\image-viewer\drop\` before it is
-  opened, and the copy is deleted when you open something else or quit. This is
-  because a drag out of a zip is a *hand-off*: Explorer extracts the member to a
-  temp file, gives the viewer that path, and deletes it a moment later. Without
-  the copy the picture blanks about a second later, when the folder watcher
-  notices the file it was showing no longer exists. The status bar says where the
-  copy went. Nothing else is copied — a file opened from the command line or the
-  dialog is used where it is.
-- F11 for fullscreen (hides all chrome), `I` to toggle the panels
-- Sort by name (natural order, so `IMG_2` precedes `IMG_10`), date, size or
-  random
-- Remembers the last image you were on, per folder
-- Optional per-user file-type registration
-
-### Graphics backend
-
-The renderer is **glow** on OpenGL. There is no setting to pick a backend and
-nothing to probe, because glow has no backends to choose between.
-
-An earlier version used wgpu and offered DirectX 12, OpenGL or Vulkan. It was
-removed after being measured, not on principle:
-
-- **154 MB more memory at idle** — 321 MB against 84 MB for an empty eframe
-  window — and **269 ms more** to create a device, for the **same** 76.8 fps
-  (interleaved A/B, active console session).
-- Its Vulkan backend **access-violates** during adapter enumeration on this
-  machine (`0xC0000005`) even though `vulkaninfo` reports a healthy device, so
-  the choice had to be made in a child process that was allowed to crash.
-- eframe's default features also compiled the X11 and Wayland platform layers
-  and the web screen reader, none of which a Windows-only app runs.
-
-So `Cargo.toml` turns eframe's default features off and asks only for `glow`,
-and `main.rs` passes `eframe::Renderer::Glow`. The one way this can fail is a
-machine with no OpenGL 2.0 context — a **disconnected RDP session** is the usual
-cause, because Windows then hands out the 1.1 software renderer; the app prints
-`egui_glow requires opengl 2.0+` and exits rather than showing a window.
-
-### Saving as (`Ctrl+Shift+A`)
-
-`Ctrl+S` always picks the name and the size. `Ctrl+Shift+A` lets you choose
-them: a **file** path, a **format** (`.jpg`, `.png`, `.webp`, `.bmp`, `.tiff`),
-a **JPEG quality** and a **maximum long side**. It opens pre-filled with exactly
-what `Ctrl+S` would have written — the same `_rotated` / `_cropped` name, quality
-85, no resize — so opening the panel and pressing Save produces the same file
-`Ctrl+S` would have.
-
-- **The format follows the destination, not the source.** A PNG saved to
-  `out.jpg` is written as JPEG, because the alternative is a file whose
-  extension lies about its contents.
-- **Quality is JPEG's alone.** `image` has one lossy encoder; PNG, BMP and TIFF
-  are written losslessly and the panel says so rather than offering a slider that
-  does nothing. WebP is also lossless here for the same reason.
-- **A maximum long side never upscales.** A 256px image asked for 1000 stays
-  256px; there is no point inventing pixels nobody had. Blank means original size.
-- **Same refusals as `Ctrl+S`**: animations and pages of a multi-page document.
-- Saving over an existing file is not prevented — you named the destination, and
-  an existing file is not overwritten silently by a name you did not choose.
-
-### Saving a transform or crop (`Ctrl+S`)
-
-Turning, mirroring and cropping are view transforms by default, so nothing you do
-to an image touches the disk. `Ctrl+S` is the one action that writes, and it
-writes a **new file beside the original** — `photo.jpg` becomes `photo_rotated.jpg`
-(or `photo_cropped.jpg` if you cropped), with a `2`, `3`… if that exists. The
-original is never modified, so the action is reversible and saving twice
-accumulates instead of compounding.
-
-The saved file is the picture exactly as you see it: the camera's EXIF
-orientation, your turn and mirrors, and your crop, combined, baked into the
-pixels, with the orientation tag reset so nothing applies it a second time. The
-turn and the mirrors are composed into a single transform on the way in, so there
-is no case where the save has to work out "a turn and a flip" at the last moment.
-
-`Ctrl+C` gives you the same picture, on the clipboard, and it is the same edit
-rather than a lookalike: the rectangle you framed, cut out of the pixels already
-decoded, and turned. Nothing is re-compressed on the way — the clipboard takes
-pixels, so there is no encode step and no second generation of JPEG artefacts.
-Paste it into anything and it is the crop you drew, at full resolution.
-
-For JPEG this is genuinely lossless. Rather than decode and re-encode, the
-transform is applied to the **DCT coefficients** — the compressed data itself is
-moved, not recompressed. Measured on generated images at quality 90, and
-reported per transform because a mirror is not obviously cheaper than a turn and
-that is worth seeing rather than assuming:
+For JPEG the transform is applied to the **DCT coefficients** — the compressed
+data itself is moved, not recompressed. Measured on generated images at
+quality 90, reported per transform because a mirror is not obviously cheaper
+than a turn:
 
 | image | transform | lossless | decode + re-encode | size in → out |
 |---|---|---|---|---|
@@ -290,18 +256,17 @@ that is worth seeing rather than assuming:
 | 6000×4000 | mirrored left-right | 362 ms | 1041 ms | 1.00× |
 | 6000×4000 | transversed | 546 ms | 1041 ms | 1.00× |
 
-All seven transforms are in the same cost class, and about 2.4× faster than the
-obvious alternative, because it never fully decompresses.
-
-The size column is the point: a re-encode makes a fresh rate-distortion decision
-per block and comes out a different size, while a coefficient transform lands
-within a percent.
+All seven transforms are in the same cost class, and about 2.4× faster than
+the obvious alternative, because it never fully decompresses. The size column
+is the point: a re-encode makes a fresh rate-distortion decision per block and
+comes out a different size, while a coefficient transform lands within a
+percent.
 
 **A crop and a turn are two passes, not one**, and that is forced rather than
-chosen. TurboJPEG reads a crop region in the transform's *destination* space — the
-rectangle as it lands after the turn, not before it — and refuses the four
-axis-swapping operations outright. So the crop is taken first, with no rotation,
-and the turn is applied to the cropped result. Both passes rearrange
+chosen. TurboJPEG reads a crop region in the transform's *destination* space —
+the rectangle as it lands after the turn, not before it — and refuses the four
+axis-swapping operations outright. So the crop is taken first, with no
+rotation, and the turn is applied to the cropped result. Both passes rearrange
 coefficients and neither decompresses to pixels, so it is still one generation:
 
 | image | crop | crop + turn | turn only | size ratio |
@@ -310,17 +275,177 @@ coefficients and neither decompresses to pixels, so it is still one generation:
 | 4000×3000 | 103 ms | 170 ms | 323 ms | 0.99× |
 | 6000×4000 | 195 ms | 318 ms | 586 ms | 1.00× |
 
-The ratio is crop-plus-turn output over crop-only output: ~1.00 means the second
-pass moved coefficients and left the entropy-coded data alone. The 0.99× is a
-second Huffman rewrite, not a re-encode.
+The ratio is crop-plus-turn output over crop-only output: ~1.00 means the
+second pass moved coefficients and left the entropy-coded data alone.
 
-PNG, BMP and TIFF are also saved losslessly, by decoding and re-encoding into
-their own containers — those formats have no lossy step, so nothing is lost.
-**WebP, GIF, HEIC and JXL are refused** with a message rather than re-encoded:
-that would be a second generation of compression, and a button that says "save"
-should not quietly do that.
+**A rotated JPEG can lose up to one 16 px block off an edge.** Lossless
+transforms move whole 8×8 DCT blocks, so a width or height that is not a
+multiple of the MCU block size leaves partial blocks that cannot reach the new
+edge. Rather than leave a visible strip, the save discards them. This is a
+no-op when the dimensions already align, which is the common case.
 
+</details>
 
+### Ratings & metadata
+
+Each image carries three rating attributes: a **star rating (0–5)**, a **pick
+flag**, and a **tag list**. They live in an XMP sidecar beside the file —
+`photo.jpg` keeps its rating in `photo.jpg.xmp` — so the image bytes are never
+touched and the write is atomic.
+
+- The left pane shows `*` buttons and a Flag checkbox; clicking the lit star
+  clears back to 0
+- `+` / `-` nudge the stars, `B` flips the flag
+- Tags are edited by other tools and only read here
+- Ratings are refused inside archives, which are read-only
+- The filter box understands `stars:`, `flagged` and `tag:` (see above)
+
+<details>
+<summary><b>EXIF panel and histogram</b></summary>
+
+The left panel shows camera make, model and lens, capture date, aperture,
+shutter speed, ISO, focal length, metering mode, flash, colour space and
+orientation. GPS-tagged images also show coordinates and altitude, with a
+clickable **Open in Google Maps** link.
+
+Below the file's own data, a **Histogram** section shows per-channel levels
+for the picture on screen plus black- and white-clipped pixel counts with
+percentages. The levels are counted on the decode worker from the preview
+buffer, so the panel draws numbers rather than pixels.
+
+It is read only while that panel is on screen. With the panels hidden — F11,
+or `I` — the viewer stops asking for metadata entirely and gives the time back
+to the image.
+
+</details>
+
+### Manga mode (beta)
+
+`M` shows images as **turns** — one page, or two meeting at a seam — laid out
+the way a book is. A scan that is itself two printed pages takes a whole turn
+to itself, and everything after it is re-paired. `D` swaps which side a turn
+opens on and which way the arrows go; **it is on by default**.
+
+- The **seam is the middle of the picture**, with no gutter between pages, so
+  facing pages touch and a drawing that crosses the fold is unbroken
+- Both pages of a turn share **one scale**, so zooming and panning apply to
+  the turn and the halves cannot be zoomed apart
+- A lone **portrait** page (a cover) hangs off the seam on its own side; a lone
+  **spread** fills the window and is centred
+- `O` / `Shift+O` change how many pages open alone at the front; `X` overrides
+  what the app thinks the current page is
+- In manga mode `Home` / `End` go to the first and last **turn**
+
+<details>
+<summary><b>Manga mode: what it cannot do, and the two open beta issues</b></summary>
+
+> **Beta.** The pairing, the layout, the keys and full-resolution tiles on both
+> halves have been run and checked on real volumes. Two things are open, both
+> written up in `TODO.md` with their measurements:
+>
+> - **1440p-class images can still show moire.** Turning it down is a straight
+>   trade against sharpness, and no single setting is right for both
+>   photographs and grey screentone — a wider low-pass that helps one makes
+>   the other worse. The setting is in the panel (`Smooth`); `Fast` is the
+>   default.
+> - **Fullscreen (`F11`) has one unreproduced report** of moire appearing on
+>   every page and clearing when the mode is toggled.
+
+**Three things this cannot do, so you do not have to find out:**
+
+- **A single landscape page and a scan of two printed pages are geometrically
+  identical.** Both are about 1.414 wide, so no aspect-ratio detector can tell
+  them apart — every reader in this field has the same problem. What bounds it
+  here is the tolerance check: a landscape page will not pair with a portrait
+  one, so it takes a turn of its own instead of being squashed into a half.
+  `X` ends it: press it on the page and it shares.
+- **A folder of 3:2 photographs in manga mode is one photo per turn.** 3:2 is
+  1.5, above the 1.2 threshold, so every photograph is read as a two-page
+  scan. Manga mode is for pages; leave it off for photographs.
+- **The first visit to a cold book can shift the pairing once**, as each page's
+  dimensions arrive, and it corrects itself on the second visit.
+
+**Navigation keys move as one unit.** The arrows, `PgUp` / `PgDn` and both
+mouse side buttons are all resolved through one rule, so under right-to-left a
+rightward press is *backwards* and nothing can disagree with anything else.
+The wheel is the one exception and always moves forward.
+
+`O` and `Shift+O` are stored per folder in
+`%LOCALAPPDATA%\image-viewer\spreads.json` — a file this app owns, holding
+nothing but pairing decisions. **Deleting it clears every override** and goes
+back to the detected shapes.
+
+</details>
+
+### Interface
+
+- Browse Folder… / Browse File… dialogs, plus drag-and-drop of a file, folder
+  or archive
+- **A dropped file is copied** into `%TEMP%\image-viewer\drop\` before it is
+  opened, and the copy is deleted when you open something else or quit. This is
+  because a drag out of a zip is a *hand-off*: Explorer extracts the member to
+  a temp file, gives the viewer that path, and deletes it a moment later
+- F11 for fullscreen (hides all chrome), `I` to toggle the panels
+- Sort by name (natural order, so `IMG_2` precedes `IMG_10`), date, size or
+  random
+- Remembers the last image you were on, per folder
+- Slideshow with pace and shuffle
+- Optional per-user file-type registration
+- Portable mode: an empty `portable.txt` beside the exe keeps config, thumbs,
+  spreads and wallpaper there
+
+<details>
+<summary><b>Why the dropped-file copy exists</b></summary>
+
+Without the copy the picture blanks about a second later, when the folder
+watcher notices the file it was showing no longer exists. The status bar says
+where the copy went. Nothing else is copied — a file opened from the command
+line or the dialog is used where it is.
+
+</details>
+
+<details>
+<summary><b>User commands (beta)</b></summary>
+
+> **Beta.** `Ctrl+1`..`Ctrl+9` runs an external program against the picture on
+> screen, configured in Settings → User commands. `mspaint.exe` with args
+> `{file}` opens the current picture in Paint. Empty args passes the file; no
+> quotes needed (there is no shell — quotes would arrive as literal `"`
+> characters). Spawns are detached, never waited on, and rate-limited to one a
+> second; chords fire on physical presses only, so holding one cannot spawn a
+> storm.
+
+> **A hard freeze opening Paint was reported twice and is parked.** Spawning
+> itself is exonerated (a `cmd.exe` command runs exactly once, and the same
+> file double-clicked in Explorer opens fine), and every freeze came from a
+> build predating the repeat and cooldown guards — but it was never confirmed
+> fixed on a current build, so the feature stays beta until it is.
+
+</details>
+
+---
+
+<a name="shortcuts"></a>
+
+## ⌨️ Shortcuts
+
+The essentials:
+
+| Key | Action |
+|---|---|
+| `←` `→` | Previous / next image, or page / manga turn |
+| `G` | Gallery grid |
+| `F` / `1` | Fit to window / 100% |
+| `C` | Crop mode |
+| `Ctrl+S` | Save a new file with the edits baked in |
+| `Ctrl+C` | Copy as it appears |
+| `Del` | Move to the Recycle Bin |
+| `/` | Filter |
+| `M` | Manga mode |
+| `F11` | Fullscreen |
+
+<details>
+<summary><b>Every key and mouse action</b></summary>
 
 | Key | Action (shipped default — every row rebindable in Settings → Keys) |
 |---|---|
@@ -333,10 +458,10 @@ should not quietly do that.
 | `Shift+F` | Fill window (crop overflow, single image only) |
 | `1` | Zoom preset 1 (100% by default; each of `1`–`4` configurable in Settings) |
 | `2`-`4` | Zoom presets 2-4 (2x, 4x, 8x by default; one-shot jumps) |
-| `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor). On fits now, arrivals refit, zooms re-hug |
+| `T` | Fit window to image as a mode: always 100%, window hugs (clamped to monitor) |
 | `,` / `.` | Step the animation one frame back / forward (pauses it, wraps) |
 | `K` | Pause / resume the animation |
-| `Space` | Toggle 100% (actual size) ↔ fit, like `F` (JPEGView's Space key) — in the grid: move the selection right |
+| `Space` | Toggle 100% (actual size) ↔ fit, like `F` — in the grid: move the selection right |
 | `I` | Toggle the side and bottom panels |
 | `L` / `P` | Toggle the left (EXIF) / right (settings) pane alone |
 | `/` | Focus the filter box |
@@ -354,9 +479,8 @@ should not quietly do that.
 | `Ctrl+C` | Copy the image to the clipboard, cropped and turned as it appears (refused on page 2+ of a document) |
 | `Ctrl+Shift+C` | Copy the current file's path as text |
 | `Ctrl+S` | Save a new file beside the current one, crop and transform baked in losslessly (refused on page 2+ of a document). Named for what it is: `*_rotated`, `*_cropped`, or `*_copy` when nothing changed |
-| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** - undo means undo on the picture you are looking at, not walk back through earlier ones. The Undo/Redo entries in the bottom bar's Transform menu disable themselves when there is nothing to undo |
-| `Ctrl+Shift+A` | Save as — a panel to pick the file, format, JPEG quality and a maximum long side. Opens pre-filled with exactly what `Ctrl+S` would write, so pressing Save without touching anything gives the same file |
-
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo the last turn, mirror or crop. **Per image** — undo means undo on the picture you are looking at |
+| `Ctrl+Shift+A` | Save as — pick the file, format, JPEG quality and a maximum long side |
 | `Ctrl+Shift+S` | Same edit at display size (`*_screen.jpg`; JPEG is re-encoded, PNG/BMP/TIFF stay lossless) |
 | `Ctrl+1`..`Ctrl+9` | Run a user command against the current file (Settings → User commands; `{file}` `{dir}` `{name}` expand) |
 | `Ctrl+P` | Print the file on screen through its registered handler (crops/turns not applied) |
@@ -368,130 +492,16 @@ should not quietly do that.
 | Mouse side buttons | Same as `←` / `→` (still hardcoded — mouse is not rebindable yet) |
 | Drag & drop | Open a file, folder or archive. A dropped **file** is copied to `%TEMP%` first, so it survives the source disappearing |
 
-### User commands (beta)
-
-> **Beta.** `Ctrl+1`..`Ctrl+9` runs an external program against the picture on
-> screen, configured in Settings → User commands. `mspaint.exe` with args
-> `{file}` opens the current picture in Paint. Empty args passes the file;
-> no quotes needed (there is no shell — quotes would arrive as literal `"`
-> characters). Spawns are detached, never waited on, and rate-limited to one
-> a second; chords fire on physical presses only, so holding one cannot
-> spawn a storm. One thing is open, written up in `TODO.md` §7:
->
-> - **A hard freeze opening Paint was reported twice and is parked.**
->   Spawning itself is exonerated (a `cmd.exe` command runs exactly once, and
->   the same file double-clicked in Explorer opens fine), and every freeze
->   came from a build predating the repeat and cooldown guards — but it was
->   never confirmed fixed on a current build, so the feature stays beta
->   until it is.
-
-### Manga mode (beta)
-
-> **Beta.** The pairing, the layout, the keys and full-resolution tiles on both
-> halves have been run and checked on real volumes. Two things are open, both
-> written up in `TODO.md` with their measurements:
->
-> - **1440p-class images can still show moire.** Turning it down is a straight
->   trade against sharpness, and no single setting is right for both photographs
->   and grey screentone — a wider low-pass that helps one makes the other worse,
->   because it moves energy between dot pitches rather than simply removing it.
->   The setting is in the panel (`Smooth`); `Fast` is the default. `TODO.md` has
->   the numbers.
-> - **Fullscreen (`F11`) has one unreproduced report** of moire appearing on
->   every page and clearing when the mode is toggled. It may be the same
->   threshold effect as the line above; `TODO.md` records what has been ruled out.
-
-`M` shows images as **turns** — one page, or two meeting at a seam — laid out the
-way a book is: a scan that is itself two printed pages takes a whole turn to itself,
-and everything after it is re-paired. `D` swaps which side a turn opens on and which
-way the arrows go; **it is on by default**, because someone who has asked for a manga
-reader has asked for the one thing that makes it one. Both are in the settings panel
-too, under the same names.
-
-The **seam is the middle of the picture** and there is **no gutter** between the two
-pages, so facing pages touch and a drawing that crosses the fold is unbroken.
-
-A lone page depends on what it is. A lone **portrait** page - a cover, which
-genuinely is one page wide - is not centred: it hangs off the seam on its own
-side, at no more than half the window's width. A lone **spread** is the other
-case, because it is not a page but the whole spread: it takes the full width of
-the window and is centred across the seam, in both reading directions.
-
-A lone **portrait** page and a page **whose partner has not arrived yet look the
-same**: one slot is laid out in half the window, and the far half is empty either
-way. That is deliberate - a half-width page in an empty half is the cover, and
-centring it instead would stop it sharing the seam every other turn's pages meet
-on - but it means a blank half is not by itself a sign of a problem. Wait a
-moment: the partner is in the decode queue and will appear on its own. If it does
-not, the pairing is what changed, and the notice line will say so. A lone
-**spread** is not in this class at all: it fills the width, so it never leaves a
-half empty.
-
-**Every navigation key moves as one unit.** The arrows, `PgUp` / `PgDn` and
-both mouse side buttons are all resolved through one rule, so under right-to-left a
-rightward press is *backwards* and nothing can disagree with anything else. The wheel
-is the one exception and always moves forward: it has no side to preserve.
-
-`O` and `Shift+O` change how many pages open alone at the front — the cover, and
-usually one page of front matter. `X` overrides what the app thinks the current page
-is, which is the escape hatch for a scan whose proportions lie about it; press it
-again to undo. Both are stored per folder in
-`%LOCALAPPDATA%\image-viewer\spreads.json` — a file this app owns, holding nothing
-but pairing decisions. **Deleting it clears every override** and goes back to the
-detected shapes.
-
-In manga mode `Home` and `End` go to the first and last **turn** rather than the first
-and last file, which matters for a folder of documents. The grid (`G`) is unchanged —
-one cell per file — and opening a cell lands on the turn at that file's first page.
-
-Both pages of a turn share **one scale**, so zooming and panning apply to the turn and
-the halves cannot be zoomed apart. A page you have turned keeps its own rotation
-inside the turn, and full-resolution tiles are cut for each page separately, so a
-zoomed spread is sharp on both sides.
-
-#### Three things this cannot do, so you do not have to find out
-
-- **A single landscape page and a scan of two printed pages are geometrically
-  identical.** Both are about 1.414 wide, so no aspect-ratio detector can tell them
-  apart — every reader in this field has the same problem. What bounds it here is the
-  tolerance check: a landscape page will not pair with a portrait one, so it takes a
-  turn of its own instead of being squashed into a half. `X` ends it: press it on the
-  page and it shares.
-- **A folder of 3:2 photographs in manga mode is one photo per turn.** 3:2 is 1.5,
-  above the 1.2 threshold, so every photograph is read as a two-page scan. Manga mode
-  is for pages; leave it off for photographs.
-- **The first visit to a cold book can shift the pairing once**, as each page's
-  dimensions arrive, and it corrects itself on the second visit. This cannot be
-  avoided: deciding whether a page pairs means knowing how wide it is, and that answer
-  comes from reading the file. A spread that settles once, at the front of a book
-  nobody has read yet, is the cold-start cost of the feature rather than a defect.
-
-**In the grid, the navigation keys drive a selection instead.** `←` `→` `↑` `↓`
-move by cell and by row, `PgUp` / `PgDn` move a viewport at a time, `Home` /
-`End` jump to the ends, and `Enter` opens what is highlighted. Walking the grid
-does not change the image on screen, so arrowing through a large folder costs no
-re-decodes, and the selection stops at the ends rather than wrapping.
-
-**Move and Copy have no keyboard shortcut**, deliberately. Both write to the
-filesystem, and a bare letter is one stray keystroke away from doing that. `C` used
-to be Copy and is now Crop, which touches nothing on disk until `Ctrl+S` — the
-single-key budget goes to actions that cannot lose data. `M` was Move and is now
-manga mode, which is the same kind of trade: a letter worth having for something that
-cannot lose a picture. `Del` keeps its key because it is the one people reach for
-while culling, and it goes to the Recycle Bin rather than deleting. If Move and Copy
-are wanted back on the keyboard, a modifier is the shape to add rather than a bare
-letter.
-
-**A UTF-8 BOM in `config.json` is ignored** rather than read as an empty file. Some
-editors and PowerShell's `Set-Content -Encoding utf8` write one, `serde_json` rejects
-it, and the alternative is that every setting silently reverts to its default with
-no error. The same applies to `spreads.json`, where it would be worse: the store is a
-read-modify-write, so a BOM that made it unreadable would turn the next `O` or `X`
-into a delete of every other folder's pairing decisions.
+</details>
 
 ---
 
-## Settings
+<a name="settings"></a>
+
+## ⚙️ Settings
+
+<details>
+<summary><b>All settings, defaults and what they do</b></summary>
 
 Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 
@@ -501,172 +511,58 @@ Stored as JSON in `%APPDATA%\image-viewer\config.json`:
 | Linear-light downsampling | on | Resample in linear light instead of gamma space — noticeably cleaner on line art |
 | Downscale filter | Hermite | Hermite / Catrom / Lanczos3, applied live |
 | Smooth | off | Low-passes a downscaled page harder than the minimum, which hides a dot grid on some pages and costs edge sharpness. **Off by default** — it depends on the page. See the note below |
-| Pixel art | off | Magnified drawing samples nearest, so a sprite zoomed past 100% stays squares of its own pixels instead of smearing. Zoomed out, the averaging filter still runs (fit a photo and it is unchanged), so the minification never drops pixel rows. Applies to the picture, its zoom tiles and animation frames — grid cells stay as they are. Flipping it re-requests the previews |
+| Pixel art | off | Magnified drawing samples nearest, so a sprite zoomed past 100% stays squares of its own pixels instead of smearing. Zoomed out, the averaging filter still runs. Applies to the picture, its zoom tiles and animation frames — grid cells stay as they are |
 | Convert Display P3 to sRGB | off | See the wide-gamut note below. Off by default because it changes how photos look |
-| Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB. See the note below |
-| Cache previews of large pictures on disk | on | Keep the picture itself in `%LOCALAPPDATA%\image-viewer\previews`, capped at 512 MB, so showing a large scan again does not decode it again. See the note below |
+| Cache grid thumbnails on disk | on | Keep decoded grid cells in `%LOCALAPPDATA%\image-viewer\thumbs`, capped at 256 MB |
+| Cache previews of large pictures on disk | on | Keep the picture itself in `%LOCALAPPDATA%\image-viewer\previews`, capped at 512 MB |
 | Grid cell size | 150 pt | Side of one gallery-grid thumbnail (64–400 pt). Applies live, no re-decode |
 | Wait for image when holding arrows | off | Hold-to-browse that never outruns the decoder, so no image is skipped |
 | Mouse wheel flips images | off | Wheel pages instead of zooming (`Ctrl`+wheel still zooms) |
-| Loop back at folder ends | on | Wrapping past the last image returns to the first. On by default so older configs keep their existing behaviour |
-| Manga mode | off | Show images as turns of one or two pages rather than one at a time. `M`. See the note below |
+| Loop back at folder ends | on | Wrapping past the last image returns to the first |
+| Manga mode | off | Show images as turns of one or two pages rather than one at a time. `M` |
 | Right-to-left pages | **on** | A turn opens on the right, so `←` reads forwards. `D`. On by default because it is only read while manga mode is |
 | Sort mode | Name | Name (natural order) / Date / Size / Random |
 | Descending sort | off | Reverse the sort order (Z→A, oldest/smallest first) |
-| Slideshow | off, every 3 s | Start/stop button plus pace (1-60 s) and a Shuffle checkbox. Advances until toggled off, or stops at the end with looping off. Shuffle reshuffles every show and restores the folder order on stop |
+| Slideshow | off, every 3 s | Start/stop button plus pace (1-60 s) and a Shuffle checkbox. Advances until toggled off, or stops at the end with looping off |
 | Animation speed | 1× (file timing) | GIF/WebP/APNG playback multiplier, 0.1–8×, live |
 | Esc closes the app | on | Esc in crop mode drops the frame first; with this off Esc never quits |
 | Worker threads | 0 (auto) | Decode pool size. 0 picks 2-4 from your CPU; 1-8 overrides. Applies on restart |
 | Zoom keys 1-4 | 1× toggles 1:1 mode, 2×-8× one-shot jumps (all configurable) |
 | Fit view | off | Sticky fit-to-window (`F`); mutually exclusive with `T`. Photos open at 100% with everything off |
-| Remember zoom and pan per image | off | An image you zoomed or panned comes back the way you left it while you browse; others keep the zoom carried over. Per page of a document, and the memory is session-only — it is gone when the app closes |
-| Show panels | on | Side panels (`I` to hide/show, `L`/`P` per pane). **Remembered between launches**: hide once with `I` and every launch opens chrome-free, JPEGView's minimal state. A fullscreen detour does not touch it — leaving fullscreen restores what you had |
+| Remember zoom and pan per image | off | An image you zoomed or panned comes back the way you left it while you browse; per page of a document, session-only |
+| Show panels | on | Side panels (`I` to hide/show, `L`/`P` per pane). Remembered between launches |
 | Allow only one window | on | A second launch exits instead of opening another window. Applies on restart |
-| Show archives | on | Lists `.zip`/`.cbz`/`.7z`/`.rar` in a folder beside the images. Off hides them from every scan and the grid |
+| Show archives | on | Lists `.zip`/`.cbz`/`.7z`/`.rar` in a folder beside the images |
 | Include subfolders | off | One gallery over the whole tree (sorts apply globally); the watcher covers it too |
-
-## Archives
-
-`.zip`, `.cbz`, `.7z` and `.rar` files are **listed in a folder** alongside images,
-in every sort mode and in the grid, with no setting to turn on. Arrow onto one and
-it *opens* rather than decodes, and **both** ends of an archive step back out into
-the folder:
-
-- `←` at the archive's first page returns to the folder, cursor on the archive.
-- `→` at its last page *continues* — on to the next entry in the folder, which is
-  usually the next archive and so opens it. A shelf of volumes is one press per
-  volume rather than an unreachable list. With looping off, an archive that is the
-  folder's last entry stays put rather than dropping you in with nowhere to land.
-
-Both ends are deliberate. `→` at an archive's last page would otherwise be the
-ordinary end-of-list wrap, which inside an archive wraps to that archive's *own*
-first page — so you cycle through one volume forever and never reach the second.
-
-- The status line reads `vol1.cbz - 42 images, press right to open`, and the grid
-  cell shows the member count. Both come from a header read, not a decode.
-- `Del` refuses on an archive. So does move/copy.
-
-To pick and choose without turning them off, the filter box matches on file name:
-`cbz` shows only the `.cbz` files, `7z` only the `.7z`, `zip` matches `.zip` and
-`.cbz` together. "Show archives" in Settings makes that permanent.
-- Members are flattened: nested folders do not become folders, non-images are
-  skipped, and two members that would flatten to the same file name are counted
-  once.
-- **7z and zip read fully. RAR5 reads only uncompressed members** — the Rust RAR
-  reader cannot decompress, so compressed pages are counted as unreadable and
-  skipped rather than shown as broken images. RAR4 is not supported and says so.
-  Archives are extracted to `%TEMP%\image-viewer`, released on leaving and on exit.
 | Always on top | off | Keep the window above all others (applies live, kept on restart) |
-| Hide title bar | off | No title bar or borders; the window's picture stays in place through the toggle and only the chrome arrives or leaves (move with Win+arrows; applies live, kept on restart) |
+| Hide title bar | off | No title bar or borders; the window's picture stays in place through the toggle (move with Win+arrows; applies live, kept on restart) |
 | Keys | defaults | Click any chord, press replacement keys. Bare letters stay bare, chords stay exact, navigation keeps its direction rule, taken chords show red `also:` markers instead of refusing. `Esc` and mouse buttons are not rebindable |
-| User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args (empty args just passes `{file}`); spawned detached, never waited on, rate-limited to one a second |
+| User commands | none | External programs run with Ctrl+1..9 against the current file. `{file}` `{dir}` `{name}` expand in program and args; spawned detached, never waited on, rate-limited to one a second |
 
 The downscale filter, **Smooth** and sort mode re-decode immediately; the
-linear-light toggle applies to newly decoded images (see the known caveat below).
+linear-light toggle applies to newly decoded images.
 
 **Smooth is off by default because it depends on the page, not because it does
-not work.** It does work, and on some pages it works well — but a wider low-pass
-does not simply remove detail, it *moves* it. On a grey tone carrying a dot
-grid, widening kills the grid's own beat and at the same time strengthens a
-longer-period beat that was nearly invisible, so one grid can disappear and
-another appear. Measured on six 2223x3109 pages at the manga half-panel target:
-better on two, unchanged on one, and worse on three, where the report was a black
-dot pattern in grey screentone that was not there before.
+not work.** On a grey tone carrying a dot grid, widening kills the grid's own
+beat and at the same time strengthens a longer-period beat that was nearly
+invisible. Measured on six 2223x3109 pages at the manga half-panel target:
+better on two, unchanged on one, and worse on three. What you get on `main` is
+already better on every page, and that comes from the linear-light kernel
+prefilter rather than from this toggle. Turn `Smooth` on for a page whose grid
+is a single even dot pattern; leave it off for screened pages or the crispest
+line art. Edges are noticeably softer with it on — about 1.7x wider on a hard
+edge.
 
-What you get on `main` is already better than before on every page, and that
-comes from the linear-light kernel prefilter rather than from this toggle. Turn
-`Smooth` on for a page whose grid is a single even dot pattern and it will clean
-up noticeably; leave it off if your pages are screened at several angles or you
-want the crispest line art. Edges are noticeably softer with it on — about 1.7x
-wider on a hard edge.
-
-### Moiré on 1440p photos, and what this build does about it
-
-Screened or finely-halftoned content can show a moiré lattice after being
-downscaled, because detail finer than the output can represent has to be removed
-before it lands, and a resampler that removes too little folds it into a pattern
-of its own. Two things in this build handle it.
-
-The kernel never runs narrower than the pipeline's own minimum
-(`MIN_FILTER_SCALE`, not a setting), which is what a downscaled photo needs at
-any size. Before it existed the low-pass width **jumped** at one point in the
-pipeline: above it, a two-stage resize landed on a wide enough kernel; below it,
-a single pass narrowed to whatever the reduction was — **1.333x** for a
-2560x1440 photo on a 1920-long panel. Every 1440p photo was below that point, so
-every 1440p photo was under-filtered. Measured on a 100-code test pattern at
-that size, the over-filter band (detail too fine to represent) drops from **51 to
-19 codes** and **41 to 11**, while detail the output *can* represent barely moves
-(58 → 37 at four source pixels, 99 → 97 at twenty-four).
-
-Images are also resized for the rectangle they are drawn in, so a photo is
-resampled once, at the size it will be displayed.
-
-**What is still there.** This reduces the lattice substantially; it does not
-remove it. Roughly a third of the original amplitude remains, and the remaining
-part is content sitting exactly at the output's limit, which no resampler can keep
-and not alias at the same time. `Smooth` cuts it further and costs edge sharpness,
-so it remains a per-image choice rather than a default.
-
-**And one case this cannot fix.** When the window is wider than the photo's own
-aspect ratio, the photo is drawn smaller than the texture prepared for it, and the
-**graphics card** does that last bit of shrinking — by a small amount on an
-ordinary window and by the whole factor on an ultrawide one. That step cannot be
-low-passed here, because the renderer draws with a linear sampler and no mipmaps.
-If a photo moirés badly *only* when the window is very wide, that is what you are
-looking at; making the window narrower or narrower-aspect will clear it.
-
-### Why the grid thumbnail cache exists
-
-A grid cell is a 150-point picture of the whole image, and for most files that
-means decoding the whole file: a 95 MP scan takes **700-900 ms** here, and there
-is no cheaper way to get the whole picture out of a JPEG — every pixel needs every
-DCT coefficient, so the decode is the floor for any conformant decoder. DCT scaling
-to 1/8 saves memory, not time.
-
-What *is* cheap is decoding it a second time, so cells are cached on disk. The
-first visit to a folder is as slow as it always was; every visit after it is a
-small file read, about **1 ms** against 67 ms for the same cell without a cache.
-
-Each entry is checked against the file's modification time and length on every
-read, so a file edited on disk is re-decoded even if nothing remembered to
-invalidate it, and entries are trimmed oldest-first once the cache reaches its cap.
-Turning the setting off stops it being written at all; nothing else changes.
-
-There is a second cache in the picture, one this app does not own: Windows'
-own thumbnail cache, which Explorer fills as you browse. A cell may come from
-there, and it is only ever *read* — the app never asks Windows to make a
-thumbnail, so asking can never make the cold case slower. Cells from that cache
-are never written into this app's own cache, because an entry there has to be the
-decode it claims to be.
-
-### Why the preview cache exists
-
-Decoding a large scan is the floor of this viewer: a 28 MB JPEG takes **690 ms**
-here before the first pixels, and no amount of cleverness moves that — every
-pixel needs every DCT coefficient, so the entropy decode is the floor for any
-conformant decoder. That is fine the first time. It is not fine for a revisit,
-a slideshow, or flipping back through a chapter, where the same file is decoded
-again for nothing.
-
-So the previews of large pictures are kept on disk, and showing one again costs
-**22-50 ms** instead of 690 — measured, release build, real photographs. Two
-things worth knowing:
-
-- **Only large pictures are kept.** A small picture is decoded in one pass that
-  produces the picture *and* the full-resolution version together, so keeping
-  the picture alone would mean decoding the file twice — slower than not
-  caching at all. Large pictures are decoded in two steps anyway, so the kept
-  copy is exactly what the decoder produced.
-- **Turning it off frees the space.** The setting is a promise about the disk,
-  not only about the writing: switching it off deletes what it wrote. The next
-  visit to those pictures decodes them again, which is what "off" means.
-
-The cells' cache and this one are different caches on purpose: a grid cell is
-256 px and 13-80 KB, a preview is the size of the window and 1.8-3.2 MB.
+</details>
 
 ---
 
-## Command line
+<a name="command-line"></a>
+
+## 🔧 Command line
+
+<details>
+<summary><b>Flags and environment variables</b></summary>
 
 ```
 image-viewer.exe [file | folder | archive.zip | archive.cbz | archive.7z | archive.rar]
@@ -699,62 +595,133 @@ reads every file whole, so it takes a few seconds on a folder of a thousand
 images.
 
 `--register` writes a per-user (HKCU) ProgID and `OpenWithProgids` entries for
-the nine extensions the app decodes (jpg, jpeg, png, webp, gif, jxl, avif,
-heic, heif). It deliberately does **not** claim the default-handler role —
-Windows requires the user to confirm that themselves.
+the extensions the app decodes. It deliberately does **not** claim the
+default-handler role — Windows requires the user to confirm that themselves.
 
 Registration includes a `DefaultIcon` pointing at the icon embedded in the exe,
 which is what makes Explorer show a picture rather than the generic application
-icon for these types. It deliberately does **not** register a
-`ShellEx\ThumbnailHandler`: the Windows Imaging Component already supplies real
-photo thumbnails, and claiming that key would displace WIC and replace actual
-thumbnails with an icon. Explorer caches icons per user, so if nothing appears to
-change, run `ie4uinit.exe -show` (or restart Explorer).
-
-### Environment variables
+icon. It deliberately does **not** register a `ShellEx\ThumbnailHandler`: the
+Windows Imaging Component already supplies real photo thumbnails, and claiming
+that key would displace WIC. Explorer caches icons per user, so if nothing
+appears to change, run `ie4uinit.exe -show`.
 
 | Variable | Effect |
 |---|---|
 | `PERF=1` | Turn on the latency report without passing `--perf` a folder |
 | `PERF_PHASE=1` | Per-phase timing inside the linear-light resampler (development) |
 
-The renderer is **glow** on OpenGL, with no backend setting (see
-[Graphics backend](#graphics-backend)).
+</details>
 
 ---
 
-## How it stays fast
+<a name="internals"></a>
+
+## 🧠 How it stays fast
+
+<details>
+<summary><b>Architecture, caches, image-quality notes and measurement</b></summary>
+
+### The pipeline
 
 - **One decode per image.** The file is read and decoded once; the on-screen
   preview is derived from that decode instead of re-reading the file, and the
   full-resolution pixels ride along in the cache for free.
 - **Large JPEGs get a DCT-scaled preview** (turbojpeg scales in the DCT
-  domain), so opening a 40 MP photo doesn't mean decoding 40 MP twice. The
+  domain), so opening a 40 MP photo does not mean decoding 40 MP twice. The
   full decode starts only after you have actually looked at it for 120 ms.
-- **Big images are resampled in two steps.** A first pass reduces the source to at
-  most twice the display size, and only that reduced buffer is converted to linear
-  light and filtered — measured at **790 ms → 219 ms** for a 40 MP source. That
-  first pass filters in linear light with the same kernel as the second, because a
-  plain average aliases *more* than the filter it feeds: at the 2.9× reduction of
-  a scanned page a box average left 21–29 codes of a near-Nyquist tone as 1–2 px
-  sparkle, where the kernel leaves 2–11.
+- **Big images are resampled in two steps.** A first pass reduces the source to
+  at most twice the display size, and only that reduced buffer is converted to
+  linear light and filtered — measured at **790 ms → 219 ms** for a 40 MP
+  source. That first pass filters in linear light with the same kernel as the
+  second, because a plain average aliases *more* than the filter it feeds.
 - **Neighbours are preloaded.** A fixed window of 3 images either side of the
   current one, with "next" prioritised slightly over "previous".
 - **Previews are sized to your display**, not a fixed cap, so the texture is
   exactly as sharp as the screen can show.
 - **Decoding never blocks the UI.** A 2–4 thread worker pool with priorities:
   the image you are looking at first, its neighbours next, grid thumbnails
-  last. Thumbnail requests re-arm every frame, so they survive the queue being
-  rebuilt while you navigate. A job that has started always runs to
-  completion — nothing is abandoned halfway.
+  last. A job that has started always runs to completion.
 - **Nothing gets stranded.** The queue keeps the set of paths the viewer wants,
   so a job superseded while in flight is re-queued rather than dropped.
   Cancelling in-flight decodes looks faster and is not: dropping them was the
-  cause of images that silently never loaded, because the event that would have
-  asked for them again had already gone by. `tests/flip_through.rs` pins this.
+  cause of images that silently never loaded.
 - **Bounded memory.** Preview cache capped at 16 textures, tile cache at 64
   (≈256 MB), thumbnails LRU-capped at 512, animations at 240 frames /
   256 MB.
+
+### Why the caches exist
+
+**Grid thumbnails.** A grid cell is a 150-point picture of the whole image, and
+for most files that means decoding the whole file: a 95 MP scan takes
+**700-900 ms** here, and there is no cheaper way to get the whole picture out
+of a JPEG. What *is* cheap is decoding it a second time, so cells are cached on
+disk. The first visit to a folder is as slow as it always was; every visit
+after it is a small file read, about **1 ms** against 67 ms for the same cell
+without a cache. Each entry is checked against the file's modification time and
+length on every read, so a file edited on disk is re-decoded even if nothing
+remembered to invalidate it.
+
+**Previews.** Decoding a large scan is the floor of this viewer: a 28 MB JPEG
+takes **690 ms** here before the first pixels. That is fine the first time. It
+is not fine for a revisit, a slideshow, or flipping back through a chapter.
+Showing one again costs **22-50 ms** instead of 690 — measured, release build,
+real photographs. Only large pictures are kept: a small picture is decoded in
+one pass that produces the picture *and* the full-resolution version together.
+Turning the setting off deletes what it wrote.
+
+The cells' cache and this one are different caches on purpose: a grid cell is
+256 px and 13-80 KB, a preview is the size of the window and 1.8-3.2 MB.
+
+### Moire on 1440p photos
+
+Screened or finely-halftoned content can show a moire lattice after being
+downscaled. Two things in this build handle it.
+
+The kernel never runs narrower than the pipeline's own minimum
+(`MIN_FILTER_SCALE`, not a setting), which is what a downscaled photo needs at
+any size. Before it existed the low-pass width **jumped** at one point in the
+pipeline: above it, a two-stage resize landed on a wide enough kernel; below
+it, a single pass narrowed to whatever the reduction was — **1.333x** for a
+2560x1440 photo on a 1920-long panel. Every 1440p photo was below that point,
+so every 1440p photo was under-filtered. Measured on a 100-code test pattern at
+that size, the over-filter band drops from **51 to 19 codes** and **41 to 11**,
+while detail the output *can* represent barely moves.
+
+Images are also resized for the rectangle they are drawn in, so a photo is
+resampled once, at the size it will be displayed.
+
+**What is still there.** This reduces the lattice substantially; it does not
+remove it. Roughly a third of the original amplitude remains, and the remaining
+part is content sitting exactly at the output's limit, which no resampler can
+keep and not alias at the same time.
+
+**And one case this cannot fix.** When the window is wider than the photo's own
+aspect ratio, the photo is drawn smaller than the texture prepared for it, and
+the **graphics card** does that last bit of shrinking. That step cannot be
+low-passed here, because the renderer draws with a linear sampler and no
+mipmaps. If a photo moirés badly *only* when the window is very wide, that is
+what you are looking at.
+
+### Graphics backend
+
+The renderer is **glow** on OpenGL. There is no setting to pick a backend and
+nothing to probe, because glow has no backends to choose between.
+
+An earlier version used wgpu and offered DirectX 12, OpenGL or Vulkan. It was
+removed after being measured, not on principle:
+
+- **154 MB more memory at idle** — 321 MB against 84 MB for an empty eframe
+  window — and **269 ms more** to create a device, for the **same** 76.8 fps
+  (interleaved A/B, active console session).
+- Its Vulkan backend **access-violates** during adapter enumeration on this
+  machine (`0xC0000005`) even though `vulkaninfo` reports a healthy device.
+- eframe's default features also compiled the X11 and Wayland platform layers
+  and the web screen reader, none of which a Windows-only app runs.
+
+The one way this can fail is a machine with no OpenGL 2.0 context — a
+**disconnected RDP session** is the usual cause, because Windows then hands out
+the 1.1 software renderer; the app prints `egui_glow requires opengl 2.0+` and
+exits rather than showing a window.
 
 ### Measuring it
 
@@ -766,26 +733,28 @@ image-viewer.exe --perf <folder>     # latency report on exit
 ```
 
 It records time from intent to useful pixels — startup, selection, next/prev,
-zoom, pan, gallery open, folder scan, resize — at p50/p95/p99, plus counters for
-blank frames, dropped jobs, GPU uploads, decode panics and stalls. A release
-build has no console, so the report is written to
+zoom, pan, gallery open, folder scan, resize — at p50/p95/p99, plus counters
+for blank frames, dropped jobs, GPU uploads, decode panics and stalls. A
+release build has no console, so the report is written to
 `%TEMP%\image-viewer-perf.txt`.
 
-It measures the *app*. For the *pipeline* there is a benchmark that drives the
-loader directly with no GUI at all:
+For the pipeline there is a benchmark that drives the loader directly with no
+GUI at all:
 
 ```
 cargo test --release --test bench_browse -- --ignored --nocapture
 ```
 
-It flips through a generated folder at several press rates and prints
-time-to-first-pixels, wasted decode share, peak MB and cache-hit rate, so any
-change to the queue, the preloading window or the cache policy has a number to
-move. `IV_BENCH_N` sets the image count, `IV_BENCH_RUNS` the repetitions.
+</details>
 
 ---
 
-## Building and testing
+<a name="build"></a>
+
+## 🏗️ Building &amp; testing
+
+<details>
+<summary><b>Requirements, build commands and test suites</b></summary>
 
 ```
 cargo build --release      # the exe users run
@@ -800,74 +769,96 @@ cargo test --release --test bench_startup -- --ignored --nocapture   # start-up 
 cargo test --release --test pathological -- --ignored --nocapture   # 40/60 MP timings
 ```
 
-Requires the MSVC toolchain and CMake (turbojpeg builds libjpeg-turbo from
-source).
+Requires the **MSVC toolchain** and **CMake** (turbojpeg builds libjpeg-turbo
+from source).
 
 The benchmarks are `#[ignore]`d `cargo test` targets, not `cargo bench`:
 `tests/bench.rs` and `tests/bench_variants.rs` do use criterion, but they sit
 in `tests/` as ordinary test targets with the default harness, so `cargo bench`
-reports "running 0 tests" and prints nothing. Until they are moved to `benches/`
-with `harness = false`, the four commands above are the benchmarks that produce
-numbers.
+reports "running 0 tests" and prints nothing. Until they are moved to
+`benches/` with `harness = false`, the commands above are the benchmarks that
+produce numbers.
 
 Every suite is **fixture-free** — each builds the images it needs in a temp
 directory — so a fresh clone passes with no setup at all. `test-images/` is
-gitignored, and the only things that read it are the two criterion targets, which
-want a real large photo and print a message rather than failing, and
+gitignored, and the only things that read it are the two criterion targets,
+which want a real large photo and print a message rather than failing, and
 `tests/unit.rs::test_gps_decode`, which skips if `geo.jpg` is absent.
 
 `cargo test` stops at the first failing target, so pass `--no-fail-fast` when
-you want the whole picture. The `pathological` suite generates its own 40/60 MP
-images and is `#[ignore]`d because it takes seconds.
+you want the whole picture.
+
+</details>
 
 ---
 
-## Known caveats
+<a name="caveats"></a>
+
+## ⚠️ Known caveats
+
+The short version:
+
+- **Wide-gamut photos are not converted by default.** Display P3 is detected
+  and shown as-is; turn on *Convert Display P3 to sRGB* in Settings if you want
+  the conversion.
+- **Multi-page TIFF has three deliberate limits.** Some page colour models are
+  refused rather than approximated, `Ctrl+S` only works on page 1, and the grid
+  shows one cell per file.
+- **Transforms last for the session.** Nothing is written until you save, and
+  turn/mirror/crop state is not persisted across restarts.
+
+<details>
+<summary><b>Full list, including the less obvious ones</b></summary>
 
 - **Multi-page TIFF: three deliberate limits.** Pages work — arrow keys page
-  through a document and the title bar and status line show which one — and CMYK
-  pages convert correctly. But: pages in **YCbCr, Lab, palette, CMYK+alpha or
-  multiband** are **refused with an error** rather than converted approximately,
-  because a wrong page colour is silent; **`Ctrl+S` is refused** on any page but
-  the first, since "save what I see" is a statement about a file and the lossless
-  path rewrites the whole document; and **the grid shows one cell per file**
-  (page 1), because a document is one thing to browse.
-- **ICO needs an RGBA PNG entry or a BMP entry.** Windows writes the large sizes
-  as RGBA PNGs and the small ones as BMP, both of which decode. A PNG-compressed
-  entry that is *not* RGBA is rejected, which is a limitation of the underlying
-  decoder rather than a choice here.
+  through a document and the title bar and status line show which one — and
+  CMYK pages convert correctly. But: pages in **YCbCr, Lab, palette, CMYK+alpha
+  or multiband** are **refused with an error** rather than converted
+  approximately, because a wrong page colour is silent; **`Ctrl+S` is refused**
+  on any page but the first; and **the grid shows one cell per file** (page 1).
+- **ICO needs an RGBA PNG entry or a BMP entry.** Windows writes the large
+  sizes as RGBA PNGs and the small ones as BMP, both of which decode. A
+  PNG-compressed entry that is *not* RGBA is rejected, which is a limitation of
+  the underlying decoder rather than a choice here.
 - **Wide-gamut photos are not converted by default.** The colour space is
   *detected* in all cases and shown in the metadata panel, but the pipeline is
-  8-bit sRGB end to end, so a Display P3 photo is displayed without conversion and
-  reads duller than it should. **Convert Display P3 photos to sRGB** in Settings
-  turns the conversion on; it is off by default because it is a visible change to
-  your pictures, it is a *downgrade* on a wide-gamut display, and colours outside
-  sRGB are clipped to fit, which is lossy. Detection covers JPEG, PNG and — through
-  the container's `colr` box — HEIC and AVIF; what is **not** read is a HEIF that
-  states its colour with `nclx` parameters instead of a profile, and JXL, whose
-  colour lives inside the codestream. Both report "not inspected" rather than
-  guessing. `--icc-scan <folder>` reports the tally for a whole library.
-  `TODO.md` records what is and isn't verified about the conversion.
+  8-bit sRGB end to end, so a Display P3 photo is displayed without conversion
+  and reads duller than it should. **Convert Display P3 photos to sRGB** in
+  Settings turns the conversion on; it is off by default because it is a
+  visible change to your pictures, it is a *downgrade* on a wide-gamut display,
+  and colours outside sRGB are clipped to fit, which is lossy. Detection covers
+  JPEG, PNG and — through the container's `colr` box — HEIC and AVIF; what is
+  **not** read is a HEIF that states its colour with `nclx` parameters instead
+  of a profile, and JXL, whose colour lives inside the codestream.
 - Toggling **linear-light downsampling** does not re-decode images that are
   already in the preview cache — the filter dropdown does. Restart or move to
   another image for the change to show everywhere.
 - The **preview cache keeps a few images either side of the current one**, so
   jumping far away discards the old previews; scrolling back re-decodes.
 - **Turning, mirroring and cropping do not touch the file.** Nothing is written
-  until **Save transformed…** / `Ctrl+S`, and that writes a new file rather than
-  modifying the original. Transforms are per image and last for the session only;
-  they are not persisted across restarts.
+  until **Save transformed…** / `Ctrl+S`, and that writes a new file rather
+  than modifying the original.
 - **The clipboard carries the edit; the wallpaper does not.** `Ctrl+C` puts the
-  picture *as you framed it* on the clipboard — cropped, turned and mirrored —
-  because that is the picture you were looking at and pasting it somewhere else
-  should paste that one. **Set wallpaper** still copies the original file, so the
-  desktop shows the photograph as the camera stored it.
-- **A rotated JPEG can lose up to one 16 px block off an edge.** Lossless
-  transforms move whole 8×8 DCT blocks, so a width or height that is not a
-  multiple of the MCU block size leaves partial blocks that cannot reach the new
-  edge. Rather than leave a visible strip, the save discards them. This is a
-  no-op when the dimensions already align, which is the common case.
+  picture *as you framed it* on the clipboard. **Set wallpaper** still copies
+  the original file, so the desktop shows the photograph as the camera stored
+  it.
 - **Comics (`.cbz`/`.zip`) are read-only** — triage actions are refused, and
   wallpaper support copies the member out to `%APPDATA%` first.
 - Preview texture size follows the window: resizing larger re-decodes so the
   image stays sharp, which briefly costs some CPU.
+
+</details>
+
+---
+
+<a name="license"></a>
+
+## 📄 License
+
+Released under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+<sub>Built with Rust and <a href="https://github.com/emilk/egui">egui/eframe</a> · glow (OpenGL) · no network, no telemetry.</sub>
+</div>
