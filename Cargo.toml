@@ -90,7 +90,7 @@ tempfile = "3"
 # For the hand-built APNG fixture in tests/multiframe.rs: chunk CRCs and the
 # zlib stream inside IDAT/fdAT. Both already in the tree via the `png` feature.
 crc32fast = "1"
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"
 
 [build-dependencies]
 winresource = "0.1.31"
