@@ -48,7 +48,7 @@ heic = { version = "0.1.6", features = ["av1", "parallel"] }
 tiff = "0.11"
 arboard = "3"
 wallpaper = "3"
-winreg = "0.52"
+winreg = "0.56"
 # Archives (`.cbz`/`.zip`) are stored or deflated in the real world; the
 # exotic codecs (bzip2, lzma, zstd, AES) would only matter for archives this
 # viewer cannot open for other reasons (no password UI), and each carries its
