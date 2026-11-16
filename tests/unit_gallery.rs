@@ -205,7 +205,7 @@ fn the_grid_follows_through_measured_offsets_not_a_pinned_row() {
         "the old pin-to-top arithmetic must be gone, not just bypassed"
     );
     assert!(
-        grid.contains("self.grid_scroll = grid_out.state.offset.y"),
+        grid.contains("self.grid_scroll = grid_out.state.clamped_offset().y"),
         "the frame must write the measured offset back, or the next decision \
          runs on a stale folder's scroll"
     );
