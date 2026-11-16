@@ -18,6 +18,7 @@ are already in memory.
 ![Network](https://img.shields.io/badge/network-none-brightgreen?style=for-the-badge)
 ![UI thread](https://img.shields.io/badge/UI%20thread-never%20decodes-44cc11?style=for-the-badge)
 ![AI-assisted](https://img.shields.io/badge/development-AI--assisted-7c3aed?style=for-the-badge)
+![CI](https://img.shields.io/github/actions/workflow/status/D221/image-viewer/ci.yml?branch=main&style=for-the-badge&label=CI)
 
 <p>
   <a href="#quick-start"><b>Quick start</b></a> &nbsp;·&nbsp;

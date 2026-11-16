@@ -1,0 +1,60 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Monday 03:30 UTC. Timings from a shared runner are only useful for
+    # comparing one commit with another, never as absolute numbers.
+    - cron: "30 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Release benchmarks
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      # bench_startup is deliberately not here: it needs a real photo folder in
+      # IV_BENCH_FOLDER, which a runner does not have.
+      - name: Browse
+        shell: pwsh
+        run: |
+          cargo test --release --test bench_browse -- --ignored --nocapture --test-threads=1 *>&1 | Tee-Object -FilePath bench-browse.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Resize
+        shell: pwsh
+        run: |
+          cargo test --release --test bench_resize -- --ignored --nocapture --test-threads=1 *>&1 | Tee-Object -FilePath bench-resize.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Rotate and save
+        shell: pwsh
+        run: |
+          cargo test --release --test bench_rotate_save -- --ignored --nocapture --test-threads=1 *>&1 | Tee-Object -FilePath bench-rotate-save.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Pathological sizes
+        shell: pwsh
+        run: |
+          cargo test --release --test pathological -- --ignored --nocapture --test-threads=1 *>&1 | Tee-Object -FilePath pathological.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: "*.txt"

@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME
+          $name = "image-viewer-$version-windows-x64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "target/release/image-viewer.exe" $name
+          Copy-Item "README.md" $name
+          Copy-Item "LICENSE" $name
+          Compress-Archive -Path "$name/*" -DestinationPath "$name.zip"
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: image-viewer-*-windows-x64.zip
+          generate_release_notes: true
