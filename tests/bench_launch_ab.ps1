@@ -12,7 +12,7 @@
 # Run:  powershell -File tests/bench_launch_ab.ps1 -Runs 7
 
 param(
-    [string]$Folder = "C:\Users\user\Downloads\phone_backup\Download\Ttg",
+    [string]$Folder = $env:IV_BENCH_FOLDER,
     [int]$Runs = 7,
     # NB: not `$A`/`$B`. PowerShell variable names are case-insensitive, so a loop
     # variable `$a` silently overwrote the parameter and the second iteration tried
@@ -24,6 +24,10 @@ param(
     [string]$LabelA = "old (3 folder walks)",
     [string]$LabelB = "new (1 folder walk)"
 )
+
+if (-not $Folder -or -not (Test-Path -LiteralPath $Folder)) {
+    throw "Pass -Folder <dir>, or set `$env:IV_BENCH_FOLDER to a folder of images."
+}
 
 $ErrorActionPreference = "Stop"
 $report = "$env:TEMP\image-viewer-perf.txt"

@@ -43,3 +43,6 @@ test-images/
 # from these are extracted into AGENTS.md and TODO.md; the files themselves are
 # per-task scratch. One slipped in before this rule existed (downscale-strength.md).
 .superpowers/
+
+# Browser-automation scratch (Playwright MCP page snapshots)
+.playwright-mcp/

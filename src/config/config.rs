@@ -73,7 +73,7 @@ pub struct Config {
     /// setting instead of becoming the default: a page that wants it can have it.
     ///
     /// **What the improvement on every file actually came from:** the earlier,
-    /// unconditional kernel prefilter (`cb0394c`), not this field. `Fast` is
+    /// unconditional kernel prefilter (`d3cff99e`), not this field. `Fast` is
     /// already better than `master` everywhere, so nothing here is load-bearing
     /// for the common case.
     ///

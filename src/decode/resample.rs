@@ -251,7 +251,7 @@ pub fn downscale_image(data: &ImageData, max_dim: u32) -> ImageData {
         // then poisoned in `failed` for the rest of the session.
         //
         // It only showed up once previews were sized to the display area
-        // (11d778c) instead of a fixed 4096: a small target rounds much harder,
+        // (a7a2175e) instead of a fixed 4096: a small target rounds much harder,
         // so the aspect-ratio clamp started shaving pixels off. That is also why
         // it looked machine- and window-dependent, and why only the gamma-space
         // path failed — `linear_resize` writes its own exact buffer.

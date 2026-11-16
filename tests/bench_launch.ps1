@@ -16,11 +16,15 @@
 # Run:  powershell -File tests/bench_launch.ps1 -Runs 5
 
 param(
-    [string]$Folder = "C:\Users\user\Downloads\phone_backup\Download\Ttg",
+    [string]$Folder = $env:IV_BENCH_FOLDER,
     [int]$Runs = 5,
     [string]$Ours = "$PSScriptRoot\..\target\release\image-viewer.exe",
     [string]$Theirs = "C:\Program Files\JPEGView\JPEGView.exe"
 )
+
+if (-not $Folder -or -not (Test-Path -LiteralPath $Folder)) {
+    throw "Pass -Folder <dir>, or set `$env:IV_BENCH_FOLDER to a folder of images."
+}
 
 $ErrorActionPreference = "Stop"
 

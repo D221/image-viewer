@@ -2,6 +2,10 @@
 name = "image-viewer"
 version = "0.1.0"
 edition = "2024"
+description = "A fast Windows desktop image viewer: the UI thread never decodes"
+license = "MIT"
+repository = "https://github.com/D221/image-viewer"
+readme = "README.md"
 
 [dependencies]
 # **`default-features = false`, deliberately.** eframe's defaults pull in

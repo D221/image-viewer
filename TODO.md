@@ -56,8 +56,8 @@ preview and ~145 ms for a 24 MP full decode.
 ### Known, verified
 
 - **229 wide gamut, 111 sRGB-profiled, 661 sRGB-untagged, 0 unknown, 0
-  unreadable, 0 not inspected** — re-measured 2026-10-19 over the same 1001
-  images in `phone_backup\Download\Ttg`. Against the previous tally the only
+  unreadable, 0 not inspected** - re-measured 2026-10-19 over the same
+  1001-image personal library (outside this repository). Against the previous tally the only
   movement is the **20 files that were `not inspected` (13 WebP + 7 GIF) are
   now `sRGB (untagged)`**, which is exactly what §2's landed convention
   predicted (641 + 20 = 661); the wide-gamut and profiled counts are
@@ -207,7 +207,7 @@ What did **not** work, recorded so nobody re-derives it:
   progressive JPEG after its first DC-only scan and decoding that is **3.3x**
   (24.2 MP: 148 ms against 474 ms, reading 429 KB of 3.1 MB) — but **every large
   file in this library is baseline**: 0 of the 5 big scans in `test-images` and 0 of
-  the 5 big photographs in `phone_backup\Download\Ttg`. It also has a correctness
+  the 5 big photographs in that library. It also has a correctness
   trap: a first scan with `Ns=1` is not interleaved, so truncating there yields one
   component's DC and a plausible wrong picture. Not built.
 - **The transient full-size allocation is still there.** `dynamic_to_image_data`
@@ -413,15 +413,15 @@ request — do not ask them to re-test; the one experiment below can wait.
 ### Unverified, and it is the whole ball game
 
 - **Whether any freeze was ever observed on a fixed build.** Every freeze
-  report came from `39d7cf3`-dirty binaries, and that dirty tree evolved
+  report came from `90206ac3`-dirty binaries, and that dirty tree evolved
   through the session: the UserCmd UI (with the `key_pressed` chord, no
   cooldown) landed well before the repeat filter and the cooldown did. A
   binary built in between has the UI and neither fix — and freezes exactly
-  as reported. The reporter never confirmed running `790f8c5` (clean tree,
+  as reported. The reporter never confirmed running `f268c892` (clean tree,
   Build line without `-dirty`, "Empty args just passes `{file}`." hint
   present). So the remaining freeze, if it reproduces there, is a *different*
   bug from the repeat storm, and there is currently no evidence either way.
-- If it does reproduce on `790f8c5` with a tap (not a hold), the difference
+- If it does reproduce on `f268c892` with a tap (not a hold), the difference
   between the working `cmd` case and the freezing `mspaint` case is only the
   target program plus the file argument — suspects then are the file itself
   (size/format: check before anything else), where it lives (a hanging

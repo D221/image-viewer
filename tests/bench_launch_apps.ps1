@@ -38,7 +38,7 @@
 
 param(
     [string]$Image = "",
-    [string]$Folder = "C:\Users\user\Downloads\phone_backup\Download\Ttg",
+    [string]$Folder = $env:IV_BENCH_FOLDER,
     [int]$Rounds = 7,
     [int]$GapMs = 3000,
     [switch]$VerboseConfig,
@@ -46,6 +46,10 @@ param(
     [string]$Oculante = "$PSScriptRoot\..\test-images\oculante\oculante.exe",
     [string]$Only = ""
 )
+
+if (-not $Folder -or -not (Test-Path -LiteralPath $Folder)) {
+    throw "Pass -Folder <dir>, or set `$env:IV_BENCH_FOLDER to a folder of images."
+}
 
 $ErrorActionPreference = "Stop"
 

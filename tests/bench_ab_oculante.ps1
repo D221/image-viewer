@@ -14,7 +14,7 @@
 
 param(
     [string]$Image = "",
-    [string]$Folder = "C:\Users\user\Downloads\phone_backup\Download\Ttg",
+    [string]$Folder = $env:IV_BENCH_FOLDER,
     [int]$Rounds = 10,
     [int]$GapMs = 2000,
     # Set once, before the run - NOT per launch. Rewriting the config between
@@ -24,6 +24,10 @@ param(
     [string]$Ours = "$PSScriptRoot\..\target\release\image-viewer.exe",
     [string]$Oculante = "$PSScriptRoot\..\test-images\oculante\oculante.exe"
 )
+
+if (-not $Folder -or -not (Test-Path -LiteralPath $Folder)) {
+    throw "Pass -Folder <dir>, or set `$env:IV_BENCH_FOLDER to a folder of images."
+}
 
 $ErrorActionPreference = "Stop"
 if (-not $Image) {

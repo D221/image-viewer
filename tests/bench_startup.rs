@@ -20,7 +20,7 @@ use std::time::Instant;
 fn folder() -> PathBuf {
     std::env::var("IV_BENCH_FOLDER")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("C:/Users/user/Downloads/phone_backup/Download/Ttg"))
+        .expect("set IV_BENCH_FOLDER to a folder of images")
 }
 
 /// Median of `n` runs, because a single sample of anything touching a filesystem

@@ -309,7 +309,7 @@ fn test_downscale_output_buffer_matches_its_dimensions() {
     // image smaller than the one we asked for (980x552 -> asked 300x168, got
     // 298x168), and we were reporting our requested size next to its buffer.
     //
-    // It became visible when previews were sized to the display area (11d778c)
+    // It became visible when previews were sized to the display area (a7a2175e)
     // rather than a fixed 4096: small targets round much harder, so the clamp
     // started actually shaving pixels. Hence "works on my machine / not on
     // his / works again after I resized the window".
