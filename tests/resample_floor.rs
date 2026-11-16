@@ -164,7 +164,7 @@ fn the_min_filter_scale_rejects_the_foldover_band_a_1440p_source_carries() {
 ///
 /// So the property worth protecting is **not** "an armed floor rejects the foldover
 /// band" - that is an opt-in arm, and the two tests above cover it. It is that
-/// **someone who does not ask for a floor gets the pre-`7b40f168` pipeline byte for
+/// **someone who does not ask for a floor gets the pre-`35ad27e9` pipeline byte for
 /// byte.** That is the state a user verified as better than `master` on every
 /// file, and the only one safe to ship while the real-content question is open.
 ///
@@ -191,7 +191,7 @@ fn the_shipped_resize_is_byte_identical_to_no_floor_at_all() {
             shipped.rgba == off.rgba,
             "the shipped resize still differs from an explicit 0.0 floor at \
              {w}x{h} -> {target}; first differing byte at index {:?}. The shipped \
-             pipeline must be byte-identical to the pre-7b40f168 path.",
+             pipeline must be byte-identical to the pre-35ad27e9 path.",
             shipped.rgba.iter().zip(off.rgba.iter()).position(|(a, b)| a != b)
         );
     }

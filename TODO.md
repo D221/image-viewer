@@ -413,15 +413,15 @@ request — do not ask them to re-test; the one experiment below can wait.
 ### Unverified, and it is the whole ball game
 
 - **Whether any freeze was ever observed on a fixed build.** Every freeze
-  report came from `90206ac3`-dirty binaries, and that dirty tree evolved
+  report came from `73f0aeca`-dirty binaries, and that dirty tree evolved
   through the session: the UserCmd UI (with the `key_pressed` chord, no
   cooldown) landed well before the repeat filter and the cooldown did. A
   binary built in between has the UI and neither fix — and freezes exactly
-  as reported. The reporter never confirmed running `f268c892` (clean tree,
+  as reported. The reporter never confirmed running `78730ce2` (clean tree,
   Build line without `-dirty`, "Empty args just passes `{file}`." hint
   present). So the remaining freeze, if it reproduces there, is a *different*
   bug from the repeat storm, and there is currently no evidence either way.
-- If it does reproduce on `f268c892` with a tap (not a hold), the difference
+- If it does reproduce on `78730ce2` with a tap (not a hold), the difference
   between the working `cmd` case and the freezing `mspaint` case is only the
   target program plus the file argument — suspects then are the file itself
   (size/format: check before anything else), where it lives (a hanging
