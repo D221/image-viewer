@@ -13,11 +13,22 @@ concurrency:
 permissions:
   contents: read
 
+# CI-only build settings. Local dev keeps debug info and incremental builds;
+# these exist because the debug target dir was ~17 GB and the cache save alone
+# cost 7-8 minutes.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   check:
+    # The name is the required status check in the "Protect main" ruleset.
+    # Keep it stable even though the last step is now a type-check rather than
+    # a full release build.
     name: fmt, clippy, test, build
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
 
     steps:
       - name: Check out
@@ -34,20 +45,17 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      # Warnings are reported but not fatal: the crate has pre-existing style
-      # lints (module inception in src/app/ui.rs and friends) that are
-      # deliberate, not regressions.
+      # Warnings are reported but not fatal: the crate has deliberate
+      # module-inception and wide-parameter-list allows. The lints that were
+      # fixable were fixed; this step keeps new ones visible.
       - name: Clippy
         run: cargo clippy --all-targets --locked
 
       - name: Test
         run: cargo test --no-fail-fast --locked
 
-      - name: Build the release binary
-        run: cargo build --release --locked
-
-      - name: Upload the binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-viewer-windows-x64
-          path: target/release/image-viewer.exe
+      # The release binary is built by release.yml on tags. Checking the
+      # release profile here catches type errors without paying for LTO and
+      # codegen-units=1 on every push.
+      - name: Type-check the release profile
+        run: cargo check --release --locked
