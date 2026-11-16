@@ -131,8 +131,7 @@ Shipped from this survey: **undo** (`Ctrl+Z`/`Ctrl+Shift+Z`, view
 transforms only), **ratings/tags** (XMP sidecars, 0-5 stars + flag + keywords,
 with `stars:`/`flagged`/`tag:` in the filter box), **grid cell size** (setting,
 150pt default) and **slideshow shuffle** (reshuffled every show, folder order
-restored on stop). Both specced in
-`docs/superpowers/specs/2026-10-09-undo-and-ratings-design.md`.
+restored on stop).
 
 - **Histogram / exposure readout.** Shipped: per-channel levels plus
   black/white clipped counts in the left pane, counted on the decode

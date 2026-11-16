@@ -220,8 +220,7 @@ pub fn plan_drop_copy(src: &Path) -> Result<DropCopyPlan, String> {
 /// moment later. So the source of *that* drop is transient **by construction**,
 /// and an app that opens one in place is holding a path to a file with an expiry
 /// date on it. [`is_transient_drop`] is the test for which drops those are. What
-/// that cost, measured (`tests/drops.rs` and the trace in
-/// `.superpowers/sdd/2026-10-02-manga-spread-mode/dropped-temp-file-vanishes.md`):
+/// that cost, measured (`tests/drops.rs`):
 /// on the app's own 2 s poll the vanished file was a *changed* file, so
 /// `invalidate_path` dropped the texture, `rescan` removed it from the gallery and
 /// the re-requested decode failed into a `failed` entry that is permanent for the
