@@ -445,6 +445,20 @@ pub(crate) struct MyApp {
     pub(crate) checker: Option<TextureHandle>, // transparency backdrop
     pub(crate) display_dim: Option<(u32, u32)>, // central panel size in physical px
     pub(crate) suppress_resize_redecode: bool, // panel toggle must not re-decode
+    /// The window's chrome — `inner_rect` minus the central panel — measured
+    /// last frame, in points. A *window drag* moves both by the same amount,
+    /// so this only changes when the chrome itself does: a panel, the title
+    /// bar, or fullscreen. See `panel_geometry` and
+    /// [`image_viewer::chrome_moved`].
+    pub(crate) last_chrome: Option<(f32, f32)>,
+    /// Did the chrome change this frame? Set every frame in `panel_geometry`,
+    /// so it is true only on the transition and never carried into a later
+    /// (unrelated) resize.
+    pub(crate) chrome_changed: bool,
+    /// `(shown key, fit scale)` from the last painted frame. A chrome change
+    /// scales the view by the ratio these two fit scales moved by; the key
+    /// keeps an image change from being mistaken for a chrome change.
+    pub(crate) last_fit: Option<(ImgKey, f32)>,
     /// Resize coalescing: issues one sharper decode per settled size instead of
     /// one per frame, and never blanks the picture. See `ResizeTracker`.
     pub(crate) resize: image_viewer::ResizeTracker,

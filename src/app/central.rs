@@ -29,6 +29,20 @@ impl MyApp {
     ) -> (egui::Rect, f32, (u32, u32)) {
         let panel = ui.available_rect_before_wrap();
         let ppp = ctx.pixels_per_point();
+        // **Chrome is the room the window spends on everything but the
+        // picture** — panes, the title strip, the menu and status bars. A
+        // window drag grows the inner rect and the panel together, so this
+        // difference does not move; a panel toggle moves the panel alone. That
+        // is the whole test for "the chrome changed, not the window", and it
+        // needs no flag from the toggle: the key, the menu row, the pane keys
+        // and the fullscreen arm all land here the same way.
+        let chrome = ui.input(|i| i.viewport().inner_rect.map(|r| r.size() - panel.size()));
+        let chrome = chrome.map(|c| (c.x, c.y));
+        self.chrome_changed =
+            chrome.is_some_and(|now| image_viewer::chrome_moved(self.last_chrome, now));
+        if let Some(now) = chrome {
+            self.last_chrome = Some(now);
+        }
         // Track the display area in physical pixels; previews are decoded to
         // match it. If the window grew, below-target textures are dropped so
         // schedule() re-decodes them at the new, larger target.
@@ -520,6 +534,33 @@ impl MyApp {
             if tw > 0.0 { (panel.width() / tw).clamp(1e-4, 8.0) } else { 1.0 }
         };
         let max_scale = MAX_SCALE.max(fit_scale).max(fit_width_scale);
+        // **A chrome change gives the picture more or less room, not a new
+        // size.** Keep the picture's fraction of that room, so `I`, `L`/`P`,
+        // a title-bar toggle or fullscreen does not strand a fitted page
+        // small in the middle of a wider panel — and does not reset a zoomed
+        // view to fit either. Scale by the ratio the fit scale moved; the pan
+        // follows by the same ratio so the same content point stays in the
+        // same relative place.
+        //
+        // A window drag never reaches here: `chrome_changed` is
+        // inner-minus-panel, which a drag moves by the same amount on both
+        // sides. Fit-width's room is the width, so its ratio is the one to
+        // keep while that mode is on.
+        let room_fit = if self.config.fit_width_mode { fit_width_scale } else { fit_scale };
+        if self.chrome_changed
+            && let Some((key, prev_fit)) = &self.last_fit
+            && key == &shown
+        {
+            let rescaled = image_viewer::rescale_for_chrome(
+                self.view.scale,
+                (self.view.offset.x, self.view.offset.y),
+                *prev_fit,
+                room_fit,
+            );
+            self.view.scale = rescaled.scale;
+            self.view.offset = Vec2::new(rescaled.offset.0, rescaled.offset.1);
+        }
+        self.last_fit = Some((shown.clone(), room_fit));
         self.handle_fit_window(
             ui,
             &ctx,

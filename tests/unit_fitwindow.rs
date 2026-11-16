@@ -531,3 +531,75 @@ fn arriving_resets_the_pan_but_stays_do_not() {
         "goto must zero the pan when the cursor changed"
     );
 }
+
+/// A chrome change scales the picture by the ratio the room changed by: a
+/// fitted view stays fitted, a zoomed one stays the same multiple of fit, and
+/// the pan keeps the same content point in the same relative place.
+#[test]
+fn a_chrome_change_keeps_the_views_fraction_of_the_room() {
+    let fitted = image_viewer::rescale_for_chrome(0.25, (0.0, 0.0), 0.25, 0.5);
+    assert_eq!(fitted.scale, 0.5, "twice the room is twice the fitted picture");
+    assert_eq!(fitted.offset, (0.0, 0.0));
+
+    let zoomed = image_viewer::rescale_for_chrome(0.5, (20.0, -10.0), 0.25, 0.5);
+    assert_eq!(zoomed.scale, 1.0, "twice fit stays twice fit, not reset to fit");
+    assert_eq!(zoomed.offset, (40.0, -20.0), "the pan moves by the picture's own ratio");
+
+    let shrunk = image_viewer::rescale_for_chrome(1.0, (30.0, 0.0), 0.5, 0.25);
+    assert_eq!(shrunk.scale, 0.5, "taking room away shrinks the picture by the same ratio");
+    assert_eq!(shrunk.offset, (15.0, 0.0));
+
+    // Degenerate input leaves the view exactly as it was: a zero panel or a
+    // lost measurement must never produce NaN or a zero scale.
+    for (scale, prev, new) in
+        [(f32::NAN, 0.5, 1.0), (1.0, 0.0, 1.0), (1.0, 0.5, 0.0), (1.0, f32::INFINITY, 1.0)]
+    {
+        let v = image_viewer::rescale_for_chrome(scale, (1.0, 2.0), prev, new);
+        assert_eq!(v.scale.to_bits(), scale.to_bits(), "input {scale}/{prev}/{new}");
+        assert_eq!(v.offset, (1.0, 2.0), "input {scale}/{prev}/{new}");
+    }
+}
+
+/// `chrome_moved` measures the window's chrome, not its size: a real pane is
+/// a change, sub-point layout jitter is not, and the first measurement is
+/// never a change (there is nothing to have changed from).
+#[test]
+fn only_a_real_chrome_move_counts_as_a_change() {
+    // Window drags move the inner rect and the panel together: no move here.
+    assert!(!image_viewer::chrome_moved(Some((100.0, 80.0)), (100.0, 80.0)));
+    // Sub-point jitter is layout noise, not a toggle.
+    assert!(!image_viewer::chrome_moved(Some((100.0, 80.0)), (100.4, 80.4)));
+    // A pane is hundreds of points; even a status bar is tens.
+    assert!(image_viewer::chrome_moved(Some((100.0, 80.0)), (280.0, 80.0)));
+    assert!(image_viewer::chrome_moved(Some((100.0, 80.0)), (100.0, 104.0)));
+    // Sign does not matter: a pane on either side or a bar at the bottom.
+    assert!(image_viewer::chrome_moved(Some((100.0, 80.0)), (20.0, 80.0)));
+    // First measurement of a session.
+    assert!(!image_viewer::chrome_moved(None, (100.0, 80.0)));
+}
+
+/// The rescale is wired where the room is actually known: chrome is measured
+/// in `panel_geometry`, and the scale is applied **after** this frame's fit
+/// scale and **before** the zoom input reads the view. Presence alone would
+/// pass with the call moved above `fit_scale`, where it would scale by last
+/// frame's room — the value-at-the-wrong-time shape this tree keeps paying for.
+#[test]
+fn the_chrome_rescale_sits_between_the_fit_scale_and_the_zoom_input() {
+    let src = main_src();
+    let geometry = fn_body(&src, "fn panel_geometry(").expect("panel_geometry must exist");
+    assert!(geometry.contains("inner_rect"), "chrome is the window's inner rect minus the panel");
+    assert!(geometry.contains("panel.size()"), "the panel is the rect being subtracted");
+    assert!(geometry.contains("chrome_changed"), "the change must be recorded for central");
+    assert!(geometry.contains("chrome_moved("), "the threshold rule lives in the library");
+
+    let central =
+        squash(fn_body(&src, "pub(crate) fn central(&mut self").expect("central must exist"));
+    let fit = central.find("letfit_scale=").expect("central must compute this frame's fit scale");
+    let rescale =
+        central.find("rescale_for_chrome(").expect("central must rescale on a chrome change");
+    let zoom = central.find("central_zoom_input(").expect("central must read the zoom input");
+    assert!(fit < rescale, "the ratio must come from *this* frame's fit scale, not the old room");
+    assert!(rescale < zoom, "the zoom input must read the rescaled view, not the pre-chrome one");
+    assert!(central.contains("self.chrome_changed&&"), "only the transition scales the view");
+    assert!(central.contains("last_fit=Some("), "the next frame needs the scale it was fitted at");
+}
