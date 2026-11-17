@@ -14,6 +14,7 @@ use image_viewer::FsMode;
 mod exif;
 mod menu;
 mod settings;
+mod settings_keys;
 mod status;
 
 // Per-frame input reads, extracted from `ui()` so each dispatch site reads

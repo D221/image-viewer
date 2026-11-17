@@ -38,6 +38,36 @@ fn fit_window_pins_chrome_places_late_and_shows_state() {
     );
 }
 
+/// The settings pane is pinned to a fixed width in fit-window mode, so no row
+/// in it may be a plain `ui.horizontal`: a row wider than the pin grows the
+/// panel's content rect past it, egui clamps the size but re-anchors the rect
+/// at the *grown* right edge, and the pane is then drawn shifted off the
+/// window with the central panel covering its left end. That was the
+/// fit-window "only the right side of Settings is drawn" bug. Wrapped rows stop
+/// at the pane edge at any width, and the command row sizes its text edit so
+/// the trailing remove button still fits.
+#[test]
+fn settings_rows_wrap_inside_the_pinned_pane() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/ui");
+    let code = |name: &str| {
+        let text = std::fs::read_to_string(dir.join(name)).expect("settings pane source");
+        // Comments quote the very call being ruled out.
+        text.lines().map(strip_line_comment).collect::<Vec<_>>().join("\n")
+    };
+    for name in ["settings.rs", "settings_keys.rs"] {
+        assert!(
+            !code(name).contains("ui.horizontal("),
+            "{name}: a row in the pinned settings pane is a plain `horizontal`; a row wider than \
+             the pin shifts the whole pane off the window - use `horizontal_wrapped`"
+        );
+    }
+    assert!(
+        code("settings.rs").contains("edit_width(ui)"),
+        "the command name row must size its text edit, or the trailing remove button is pushed \
+         past the pinned pane's edge"
+    );
+}
+
 /// Animation stepping and window chrome must be **wired**: `,`/`.`/`K` reach
 /// the frame methods, `1`–`4` reach the presets, and both window flags reach
 /// the viewport builder. `main.rs` is unreachable from every test, so these

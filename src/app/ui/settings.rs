@@ -1,5 +1,16 @@
 //! `settings` panel, extracted from `MyApp::ui` when `src/app/ui.rs` passed the
 //! 1000-line target.
+//!
+//! Rows here are `horizontal_wrapped`, never plain `horizontal`. The pane is
+//! pinned to 300 in fit-window mode, and a row that does not fit grows the
+//! panel's content rect past that pin; egui clamps the *size* but re-anchors
+//! the rect at the grown right edge, so the pane is reported shifted by the
+//! overflow — drawn off the window, with the central panel painting over its
+//! left end. That was the fit-window "only the right side of Settings is
+//! drawn" bug (the Back/Forward row needs ~401 pt against the 300 pt pin).
+//! Wrapping ends the rows at the pane edge at any width, in and out of the
+//! mode. A text edit sharing its row with a button is sized by [`edit_width`]
+//! for the same reason.
 
 use crate::*;
 
@@ -20,6 +31,7 @@ impl MyApp {
             }
             pane.show(ui, |ui| {
                 ui.heading("Settings");
+                // Rows wrap — see the module note above the impl.
                 // Scrollable so expanded sections don't run off the bottom of
                 // short windows; no frame so it doesn't look like a "window
                 // inside window" — each section is its own collapsible group.
@@ -36,7 +48,7 @@ impl MyApp {
                     {
                         self.config.save(&self.config_path);
                     }
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Worker threads (0 = auto):")
                             .on_hover_text("0 picks 2-4 from your CPU. Applies on restart.");
                         if ui
@@ -263,7 +275,7 @@ impl MyApp {
                         self.config.save(&self.config_path);
                     }
                     let mut new_sort = self.config.sort;
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Sort:");
                         egui::ComboBox::from_id_salt("sort_mode")
                             .selected_text(format!("{new_sort:?}"))
@@ -304,7 +316,7 @@ impl MyApp {
                     // ---- back/forward history ----
                     ui.separator();
                     ui.label("Back/forward history");
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let back_enabled = !self.history_back.is_empty();
                         let fwd_enabled = !self.history_forward.is_empty();
                         if ui
@@ -418,7 +430,7 @@ impl MyApp {
                     // The same surface as the thumbnail cache — what a grid cell
                     // looks like. Applies live — the grid reads
                     // the value every frame, so no invalidation or re-decode.
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Grid cell size:");
                         if ui
                             .add(
@@ -433,7 +445,7 @@ impl MyApp {
                         ui.label("pt");
                     });
                     let mut new_filter = self.config.downscale_filter;
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Filter:");
                         egui::ComboBox::from_id_salt("ds_filter")
                             .selected_text(format!("{:?}", self.config.downscale_filter))
@@ -548,7 +560,7 @@ impl MyApp {
                     // Fixed zoom ratios on `1`–`4`, as source-pixel multiples
                     // (`1` is 100%). `zoom_preset` clamps on read, so anything
                     // typed here stays sane.
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Zoom keys 1-4:");
                         let mut changed = false;
                         for (n, z) in self.config.zoom_presets.iter_mut().enumerate() {
@@ -591,7 +603,7 @@ impl MyApp {
                     }
                     // A property of the *gesture*, not of the app: it changes what
                     // a drag does, and nothing about it applies until somebody drags.
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Crop shape:")
                             .on_hover_text(
                                 "Frames a new crop to this shape; Shift forces a square for \
@@ -616,7 +628,7 @@ impl MyApp {
                     // Slideshow: one picture per interval until toggled off, or
                     // until the end with looping off. The pace persists; running
                     // does not survive a restart.
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let label = if !self.slideshow {
                             "Start slideshow"
                         } else if self.slideshow_paused {
@@ -656,7 +668,7 @@ impl MyApp {
                     // Animation playback speed, next to the slideshow for the
                     // same reason it sits there: both are time-based playback,
                     // and both apply live with no re-decode.
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("Animation speed (1 = file timing):");
                         if ui
                             .add(
@@ -672,158 +684,7 @@ impl MyApp {
                 });
 
                 // ---- keys ---------------------------------------------------
-                //
-                // Every action rebindable: click a chord, press keys. Meanings
-                // never change (navigation still asks `nav_is_forward`), only
-                // the chords. While one waits, the dispatch stands down so the
-                // capture press cannot act — deleting a photo by rebinding
-                // Delete is exactly the accident this gate exists to prevent.
-                // Capture: fresh (non-repeat) key presses become the chord.
-                // Bare Escape cancels (so Escape is not bindable — it already
-                // owns the typing/grid/fullscreen/quit chain, which is
-                // structural rather than a binding).
-                if let Some(action) = self.capturing.clone() {
-                    // Fresh non-modifier presses only: the modifier keys
-                    // themselves also arrive as Key events, and committing the
-                    // first event would turn "hold Ctrl, press G" into
-                    // "Ctrl+?" — the capture waits for the real key, whose
-                    // event already carries the held modifiers.
-                    let pressed: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
-                        i.events
-                            .iter()
-                            .filter_map(|e| match e {
-                                egui::Event::Key {
-                                    key,
-                                    pressed: true,
-                                    repeat: false,
-                                    modifiers,
-                                    ..
-                                } if !is_modifier_key(*key) => Some((*key, *modifiers)),
-                                _ => None,
-                            })
-                            .collect()
-                    });
-                    if pressed.iter().any(|(k, m)| {
-                        *k == egui::Key::Escape && !m.any()
-                    }) {
-                        self.capturing = None;
-                    } else if let Some((key, mods)) = pressed.first() {
-                        let mut raw = String::new();
-                        if mods.ctrl {
-                            raw.push_str("Ctrl+");
-                        }
-                        if mods.shift {
-                            raw.push_str("Shift+");
-                        }
-                        if mods.alt {
-                            raw.push_str("Alt+");
-                        }
-                        raw.push_str(key_name(*key));
-                        match image_viewer::canonical_chord(&raw) {
-                            Some(chord)
-                                if image_viewer::split_chord(&chord)
-                                    .is_some_and(|(_, _, _, name)| {
-                                        parse_key_full(&name).is_some()
-                                    }) =>
-                            {
-                                // Duplicates are allowed and shown, not
-                                // refused: blocking second-guesses the reader
-                                // (chords can be intentional — one key stepping
-                                // two views is sometimes exactly the point),
-                                // while a silent double-fire is the failure
-                                // mode. So the commit always lands, the notice
-                                // names the sharers, and every row below marks
-                                // its own conflicts in red.
-                                if chord == image_viewer::default_binding(&action) {
-                                    self.config.keybindings.remove(&action);
-                                } else {
-                                    self.config.keybindings.insert(action.clone(), chord.clone());
-                                }
-                                set_nav_overrides(&self.config.keybindings);
-                                self.config.save(&self.config_path);
-                                let sharers: Vec<&str> = image_viewer::KEY_ACTIONS
-                                    .iter()
-                                    .filter(|(id, _, _)| {
-                                        *id != action
-                                            && image_viewer::resolve_binding(&self.config.keybindings, id)
-                                                == chord
-                                    })
-                                    .map(|(_, _, label)| *label)
-                                    .collect();
-                                self.notice = Some(if sharers.is_empty() {
-                                    format!("{label} is now {chord}", label = action_label(&action))
-                                } else {
-                                    format!(
-                                        "{label} is now {chord} (also: {sharers})",
-                                        label = action_label(&action),
-                                        sharers = sharers.join(", ")
-                                    )
-                                });
-                                self.capturing = None;
-                            }
-                            _ => {
-                                self.notice = Some(format!(
-                                    "{raw} is not a bindable key"
-                                ));
-                                self.capturing = None;
-                            }
-                        }
-                    }
-                }
-                ui.collapsing("Keys", |ui| {
-                    if ui.button("Reset keys").clicked() {
-                        self.config.keybindings.clear();
-                        set_nav_overrides(&self.config.keybindings);
-                        self.config.save(&self.config_path);
-                        self.notice = Some("Keys reset to defaults".into());
-                    }
-                    egui::ScrollArea::vertical()
-                        .id_salt("key_list")
-                        .max_height(300.0)
-                        .show(ui, |ui| {
-                            for (id, _, label) in image_viewer::KEY_ACTIONS {
-                                ui.horizontal(|ui| {
-                                    ui.label(*label);
-                                    let current = image_viewer::resolve_binding(&self.config.keybindings, id);
-                                    let text = if self.capturing.as_deref() == Some(*id) {
-                                        "press keys… (Esc cancels)".to_owned()
-                                    } else if current.is_empty() {
-                                        // The one blank shipped row (`next_alt`):
-                                        // deliberately unbound, so say so rather
-                                        // than drawing a button with no name.
-                                        "(unbound)".to_owned()
-                                    } else {
-                                        current.clone()
-                                    };
-                                    if ui.button(text).clicked() {
-                                        self.capturing = Some((*id).to_owned());
-                                    }
-                                    // Conflict marker: every other action on this
-                                    // exact chord, in red. Duplicates fire
-                                    // together — this row is where that reads as
-                                    // intentional rather than mysterious.
-                                    let others: Vec<&str> = image_viewer::KEY_ACTIONS
-                                        .iter()
-                                        .filter(|(other, _, _)| {
-                                            *other != *id
-                                                && image_viewer::resolve_binding(
-                                                    &self.config.keybindings,
-                                                    other,
-                                                ) == current
-                                        })
-                                        .map(|(_, _, other_label)| *other_label)
-                                        .collect();
-                                    if !others.is_empty() {
-                                        ui.colored_label(
-                                            ui.visuals().warn_fg_color,
-                                            format!("also: {}", others.join(", ")),
-                                        );
-                                    }
-                                });
-                            }
-                        });
-                    ui.small("Esc quits the app chain and is not bindable; Ctrl+C keeps its platform meaning alongside any alternative you set.");
-                });
+                self.ui_settings_keys(ui, ctx);
 
                 ui.collapsing("User commands", |ui| {
                     // ---- user commands ------------------------------------------
@@ -834,29 +695,33 @@ impl MyApp {
                     // `mspaint.exe "{file}"` opens the picture on screen in Paint.
                     // Spawned detached — the viewer never waits — so this is an
                     // "open with", not scripting with results.
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label("User commands (Ctrl+1..9):");
                         ui.colored_label(ui.visuals().warn_fg_color, "(beta)");
                     });
                     let mut cmds_changed = false;
                     let mut remove_at: Option<usize> = None;
                     for (n, cmd) in self.config.user_commands.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(format!("{}:", n + 1));
-                            if ui.text_edit_singleline(&mut cmd.name).changed() {
+                            let w = edit_width(ui);
+                            if ui
+                                .add(egui::TextEdit::singleline(&mut cmd.name).desired_width(w))
+                                .changed()
+                            {
                                 cmds_changed = true;
                             }
                             if ui.small_button("x").clicked() {
                                 remove_at = Some(n);
                             }
                         });
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label("program");
                             if ui.text_edit_singleline(&mut cmd.program).changed() {
                                 cmds_changed = true;
                             }
                         });
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label("args");
                             let mut joined = cmd.args.join(" ");
                             if ui.text_edit_singleline(&mut joined).changed() {
@@ -911,7 +776,7 @@ impl MyApp {
                     let mut mode_changed = false;
                     let manga_label = action_button_text(&self.config, "Double page mode", "manga");
                     let rtl_label = action_button_text(&self.config, "Right-to-left pages", "rtl");
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         mode_changed = ui
                             .checkbox(&mut self.config.manga_mode, manga_label)
                             .changed();
@@ -994,4 +859,15 @@ impl MyApp {
         }
         (resort, refilter)
     }
+}
+
+/// Width for a text edit that shares its row with a trailing button.
+///
+/// A `TextEdit` defaults to the whole remaining row, which pushes the "x"
+/// past the pane's edge — and an over-wide row shifts the whole pinned pane
+/// (see the module note above the impl). Reserve the button and the spacing
+/// before it; in a wrapping row `available_width` is the whole row, so the
+/// width still left on this line comes from `available_rect_before_wrap`.
+fn edit_width(ui: &egui::Ui) -> f32 {
+    (ui.available_rect_before_wrap().width() - 32.0).max(0.0)
 }
