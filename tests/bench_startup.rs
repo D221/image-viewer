@@ -8,8 +8,8 @@
 //! `#[ignore]`d like the other benches: it reads a real folder on disk.
 //!
 //! Run:
-//!   cargo test --release --test bench_startup -- --ignored --nocapture
-//!   IV_BENCH_FOLDER=<folder> cargo test --release --test bench_startup -- --ignored --nocapture
+//!   cargo nextest run --release --test bench_startup --run-ignored ignored --no-capture
+//!   IV_BENCH_FOLDER=<folder> cargo nextest run --release --test bench_startup --run-ignored ignored --no-capture
 
 use image_viewer::{Config, Gallery, SortMode, scan_folder_sorted};
 use std::path::PathBuf;

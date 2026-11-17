@@ -125,9 +125,10 @@ fn masked_grad(d: &image_viewer::ImageData, mask: &[bool]) -> f32 {
     if n == 0.0 { 0.0 } else { (sum / n) as f32 }
 }
 
-/// Print the numbers every probe above is pinned against. `cargo test --test unit
-/// -- --ignored --nocapture print_prefilter_pins`. Kept in the file so a filter
-/// change can be re-pinned from a printout rather than from a bisect.
+/// Print the numbers every probe above is pinned against. `cargo nextest run
+/// --test unit --run-ignored ignored --no-capture print_prefilter_pins`. Kept in
+/// the file so a filter change can be re-pinned from a printout rather than from
+/// a bisect.
 #[test]
 #[ignore]
 fn print_prefilter_pins() {
@@ -206,9 +207,9 @@ fn load_real_page(dir: &std::path::Path, name: &str) -> Option<image_viewer::Ima
 /// compared against cannot be at different strengths.
 const SWEEP_STRENGTHS: &[f32] = &[1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 
-/// The synthetic square-lattice sweep. `cargo test --test unit -- --ignored
-/// --nocapture print_square_lattice_sweep`. Cheap (a ~1.1 MP source), so it is
-/// the one to re-run when re-pinning.
+/// The synthetic square-lattice sweep. `cargo nextest run --test unit
+/// --run-ignored ignored --no-capture print_square_lattice_sweep`. Cheap (a
+/// ~1.1 MP source), so it is the one to re-run when re-pinning.
 #[test]
 #[ignore]
 fn print_square_lattice_sweep() {
@@ -289,7 +290,7 @@ fn print_real_page_strength_sweep() {
 /// Write the **same crop** of a real page at each strength, scaled 2x nearest,
 /// so the artefact and the cost can be looked at rather than only measured.
 ///
-/// `cargo test --test unit --release -- --ignored --nocapture
+/// `cargo nextest run --test unit --release --run-ignored ignored --no-capture
 /// export_strength_crops`. Writes into `target/strength-probe/`. This is the one
 /// piece of evidence a number cannot give, and it is why the strength was chosen
 /// by eye as well as by table - a 71% wider step edge is either obviously softer

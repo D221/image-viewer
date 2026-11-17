@@ -459,8 +459,9 @@ fn the_floor_is_not_smooth_renamed_at_1440p() {
     );
 }
 
-/// Print the numbers the section above is pinned against. `cargo test --test unit
-/// --release -- --ignored --nocapture print_min_filter_scale`. Kept for the same
+/// Print the numbers the section above is pinned against. `cargo nextest run
+/// --test unit --release --run-ignored ignored --no-capture
+/// print_min_filter_scale`. Kept for the same
 /// reason `print_prefilter_pins` is: a kernel change should be re-pinnable from
 /// a printout rather than from a bisect.
 #[test]

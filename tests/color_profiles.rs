@@ -416,7 +416,7 @@ fn test_the_conversion_leaves_neutrals_alone_and_moves_mid_tones() {
     assert_eq!(&px[20..24], &before[20..24], "the shared blue primary must be untouched");
 }
 
-/// `set_wide_gamut_conversion` is a process-wide global and `cargo test` runs
+/// `set_wide_gamut_conversion` is a process-wide global and `cargo nextest` runs
 /// these concurrently, so anything asserting on a specific state takes this lock
 /// and puts the old value back. Same trap, same fix as `FILTER_GLOBALS` in
 /// `tests/unit.rs`.

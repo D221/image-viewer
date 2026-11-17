@@ -3,7 +3,7 @@
 //! Run explicitly, since generating and decoding 40 MP images is slow:
 //!
 //! ```text
-//! cargo test --release --test pathological -- --ignored --nocapture
+//! cargo nextest run --release --test pathological --run-ignored ignored --no-capture
 //! ```
 //!
 //! These are measurements, not assertions: they print a table and only fail on

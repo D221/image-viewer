@@ -1,14 +1,14 @@
 # AGENTS.md
 
-Windows-only Rust desktop app: egui/eframe 0.36 on glow (OpenGL). One crate, no workspace, no CI. One rule shapes everything: **the UI thread never decodes** — every decode, thumbnail and tile runs on a worker pool; the UI only paints textures already in memory.
+Windows-only Rust desktop app: egui/eframe 0.37 on glow (OpenGL). One crate, no workspace, CI in GitHub Actions. One rule shapes everything: **the UI thread never decodes** — every decode, thumbnail and tile runs on a worker pool; the UI only paints textures already in memory.
 
 ## Commands
 
-- `cargo test --no-fail-fast` — the whole suite. Plain `cargo test` stops at the first failing target.
+- `cargo nextest run --no-fail-fast` — the whole suite, test binaries in parallel. Plain `cargo nextest run` stops at the first failing test. Nextest does not run doctests; this crate has none.
 - `cargo fmt` — the tree is rustfmt-clean under `rustfmt.toml`; `cargo fmt --check` shows what it would change. Run it before committing.
-- `cargo test --test <file>` — one test file; `cargo test <test_name>` — one test.
+- `cargo nextest run --test <file>` — one test file; `cargo nextest run <test_name>` — one test.
 - `cargo bench` runs nothing. The benchmarks are `#[ignore]`d test targets:
-  `cargo test --release --test bench_browse -- --ignored --nocapture`
+  `cargo nextest run --release --test bench_browse --run-ignored ignored --no-capture`
   (same shape for `bench_resize`, `bench_rotate_save`, `bench_startup`, `pathological`).
 - `cargo run` — the GUI. Flags: `--register` / `--unregister` (HKCU, no admin), `--icc-scan <folder>`, `--perf <folder>` (latency report; release has no console, output goes to `%TEMP%\image-viewer-perf.txt`). `PERF=1` samples without a folder.
 - `cargo run --release --example make_icon` regenerates `assets/app.ico`.

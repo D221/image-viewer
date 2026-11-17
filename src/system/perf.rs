@@ -359,7 +359,7 @@ pub fn write_report(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     /// `ENABLED`, `METRIC` and `COUNTERS` are process-wide statics, and
-    /// `cargo test` runs these two tests concurrently. Both flip `set_enabled`,
+    /// `cargo nextest` runs these two tests concurrently. Both flip `set_enabled`,
     /// so without this they race: one disables sampling while the other is
     /// mid-loop, its `record` calls become no-ops, and it fails intermittently
     /// (observed ~40% of runs).

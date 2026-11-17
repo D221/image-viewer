@@ -305,7 +305,7 @@ mod tests {
         assert!(resolves, "unrecognised DefaultIcon {value:?} ({source})");
     }
 
-    /// The whole reason this code exists. Run under `cargo test --bin
+    /// The whole reason this code exists. Run under `cargo nextest run --bin
     /// image-viewer`; `build.rs` embeds the icon, so this binary has one and the
     /// registered value must point at it rather than at the fallback.
     #[test]

@@ -559,7 +559,7 @@ alias band and the promoted pitch) and `resample_floor.rs` (648, the
 `tests/bench_browse/main.rs` plus `harness.rs` (496), `baseline.rs` (403),
 `sweep.rs` (567), `meta.rs` (466) and `drop.rs` (165). A directory rather than
 five targets: the arms share one process, one fixture set and one command, so
-`cargo test --release --test bench_browse -- --ignored --nocapture` is still
+`cargo nextest run --release --test bench_browse --run-ignored ignored --no-capture` is still
 the whole benchmark. 6 `#[test]` arms in, 6 out (they gain a module prefix in
 the test list).
 `tests/unit.rs` (4,794) split by subject into twelve targets:

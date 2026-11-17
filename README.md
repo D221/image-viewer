@@ -744,7 +744,7 @@ For the pipeline there is a benchmark that drives the loader directly with no
 GUI at all:
 
 ```
-cargo test --release --test bench_browse -- --ignored --nocapture
+cargo nextest run --release --test bench_browse --run-ignored ignored --no-capture
 ```
 
 </details>
@@ -760,21 +760,21 @@ cargo test --release --test bench_browse -- --ignored --nocapture
 
 ```
 cargo build --release      # the exe users run
-cargo test                 # every suite
-cargo test --no-fail-fast  # ... without stopping at the first failing target
-cargo test --test unit     # one suite; cargo test <name> for one test
+cargo nextest run          # every suite, binaries in parallel
+cargo nextest run --no-fail-fast  # ... without stopping at the first failure
+cargo nextest run --test unit     # one suite; cargo nextest run <name> for one test
 
-cargo test --release --test bench_browse -- --ignored --nocapture   # browsing benchmark
-cargo test --release --test bench_resize -- --ignored --nocapture    # decodes per window drag
-cargo test --release --test bench_rotate_save -- --ignored --nocapture  # lossless save, size ratio
-cargo test --release --test bench_startup -- --ignored --nocapture   # start-up per candidate
-cargo test --release --test pathological -- --ignored --nocapture   # 40/60 MP timings
+cargo nextest run --release --test bench_browse --run-ignored ignored --no-capture   # browsing benchmark
+cargo nextest run --release --test bench_resize --run-ignored ignored --no-capture    # decodes per window drag
+cargo nextest run --release --test bench_rotate_save --run-ignored ignored --no-capture  # lossless save, size ratio
+cargo nextest run --release --test bench_startup --run-ignored ignored --no-capture   # start-up per candidate
+cargo nextest run --release --test pathological --run-ignored ignored --no-capture   # 40/60 MP timings
 ```
 
 Requires the **MSVC toolchain** and **CMake** (turbojpeg builds libjpeg-turbo
 from source).
 
-The benchmarks are `#[ignore]`d `cargo test` targets, not `cargo bench`:
+The benchmarks are `#[ignore]`d test targets, not `cargo bench`:
 `tests/bench.rs` and `tests/bench_variants.rs` do use criterion, but they sit
 in `tests/` as ordinary test targets with the default harness, so `cargo bench`
 reports "running 0 tests" and prints nothing. Until they are moved to
@@ -787,8 +787,9 @@ gitignored, and the only things that read it are the two criterion targets,
 which want a real large photo and print a message rather than failing, and
 `tests/unit.rs::test_gps_decode`, which skips if `geo.jpg` is absent.
 
-`cargo test` stops at the first failing target, so pass `--no-fail-fast` when
-you want the whole picture.
+`cargo nextest run` stops at the first failing test, so pass `--no-fail-fast`
+when you want the whole picture. Nextest does not run doctests; this crate has
+none.
 
 </details>
 

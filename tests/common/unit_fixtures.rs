@@ -14,7 +14,7 @@
 use image_viewer::{GRID_CELL, GRID_LABEL_H, grid_row_h};
 
 /// `set_linear_resample` / `set_downscale_filter` are process-wide globals, and
-/// `cargo test` runs the tests in a file concurrently. Anything that asserts
+/// `cargo nextest` runs the tests in a file concurrently. Anything that asserts
 /// on a *specific* filter path has to take this lock and put the globals back,
 /// or it silently tests whichever path another test last selected.
 pub static FILTER_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());

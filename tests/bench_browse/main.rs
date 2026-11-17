@@ -22,7 +22,7 @@
 //! explicitly:
 //!
 //! ```sh
-//! cargo test --release --test bench_browse -- --ignored --nocapture
+//! cargo nextest run --release --test bench_browse --run-ignored ignored --no-capture
 //! ```
 //!
 //! Images are generated once into a temp dir and reused, so runs are comparable
