@@ -758,6 +758,9 @@ cargo nextest run --release --test bench_browse --run-ignored ignored --no-captu
 <details>
 <summary><b>Requirements, build commands and test suites</b></summary>
 
+The test runner is [nextest](https://nexte.st); install it once with
+`cargo install cargo-nextest --locked`.
+
 ```
 cargo build --release      # the exe users run
 cargo nextest run          # every suite, binaries in parallel

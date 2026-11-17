@@ -4,6 +4,7 @@ Windows-only Rust desktop app: egui/eframe 0.37 on glow (OpenGL). One crate, no 
 
 ## Commands
 
+- The test runner is [nextest](https://nexte.st); install it once with `cargo install cargo-nextest --locked` (or drop `cargo-nextest.exe` into `%USERPROFILE%\.cargo\bin`).
 - `cargo nextest run --no-fail-fast` — the whole suite, test binaries in parallel. Plain `cargo nextest run` stops at the first failing test. Nextest does not run doctests; this crate has none.
 - `cargo fmt` — the tree is rustfmt-clean under `rustfmt.toml`; `cargo fmt --check` shows what it would change. Run it before committing.
 - `cargo nextest run --test <file>` — one test file; `cargo nextest run <test_name>` — one test.
